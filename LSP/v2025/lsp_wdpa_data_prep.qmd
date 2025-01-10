@@ -1,0 +1,476 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: console
+---
+
+# Summary
+
+From Halpern et al. 2012 supplemental info:
+
+> The 'Lasting Special Places' sub-goal focuses instead on those geographic locations that hold particular value for aesthetic, spiritual, cultural, recreational or existence reasons. This sub-goal is particularly hard to quantify. Ideally one would survey every community around the world to determine the top list of special places, and then assess how those locations are faring relative to a desired state (e.g., protected or well managed). The reality is that such lists do not exist. Instead, we assume areas that are protected represent these special places (i.e. the effort to protect them suggests they are important places).
+
+> Clearly this is an imperfect assumption but in many cases it will be true. Using lists of protected areas as the catalogue of special places then creates the problem of determining a reference condition. We do not know how many special places have yet to be protected, and so we end up having all identified special places also being protected. To solve this problem we make two important assumptions. First, we assume that all countries have roughly the same percentage of their coastal waters and coastline that qualify as lasting special places. In other words, they all have the same reference target (as a percentage of the total area). Second, we assume that the target reference level is 30% of area protected.
+
+The model for this goal considers the inland coastal zone (up to 1 km inland) independently from, and equally weighted with, the offshore coastal zone (up to 3 nm offshore). The status for this goal is calculated as:
+
+$$X_{LSP} = \frac{\left(\frac{Area_{P}}{Area_{P_{ref}}} + \frac{Area_{MPA}}{Area_{MPA_{ref}}}\right)}{2}$$
+
+where:
+
+-   $Area_{P}$ = Protected area for inland 1 km buffer
+-   ${Area_{P_{ref}}}$ = Reference value for inland protected area
+-   $Area_{MPA}$ = Marine protected area for offshore 3 nm buffer
+-   ${Area_{MPA_{ref}}}$ = Reference value for marine protected area within offshore 3 nm buffer
+-   $Ref$ = 30% of total area within buffer zone is protected
+
+------------------------------------------------------------------------
+
+# Updates
+
+Data was redownloaded from WDPA on January 10, 2025, as WDPA updated on January 1st.
+
+------------------------------------------------------------------------
+
+# Data Source
+
+**Reference**: UNEP-WCMC and IUCN (2025), Protected Planet: The World Database on Protected Areas (WDPA) [Online], January 2025, Cambridge, UK: UNEP-WCMC and IUCN. Available at: www.protectedplanet.net.
+
+**Downloaded**: January 10, 2025
+
+**Description**: Shapefile of World Database on Protected Areas
+
+**Time range**: 1800 - 2024; some protected areas do not have an associated "status year" and are reported as year 0.
+
+**Format**: Shapefile
+
+**File location**: `Mazu:/home/shares/ohi/OHI_GOC/_raw_data/wdpa_mpa/d2025/WDPA_Jan2025_Public_shp`
+
+------------------------------------------------------------------------
+
+# Setup
+
+```{r}
+library(raster)
+library(terra)
+library(readr)
+library(magrittr)
+library(mregions2)
+library(mapview)
+library(sf)
+library(tidyverse)
+library(lwgeom)
+library(here)
+library(leaflet.extras2)
+library(fasterize)
+library(tictoc)
+
+# ---- sources! ----
+# source(here("workflow", "R", "common.R")) # file creates objects to process data
+## set the mazu and neptune data_edit share based on operating system
+dir_M             <- c('Windows' = '//mazu.nceas.ucsb.edu/ohi',
+                       'Darwin'  = '/Volumes/ohi',    ### connect (cmd-K) to smb://mazu/ohi
+                       'Linux'   = '/home/shares/ohi')[[ Sys.info()[['sysname']] ]]
+
+# ---- set year and file path info ----
+current_year <- 2025 # Update this in the future!!
+version_year <- paste0("v",current_year)
+data_dir_version_year <- paste0("d", current_year)
+
+# ---- data directories ----
+
+# raw data directory (on Mazu)
+raw_data_dir <- here::here(dir_M, "OHI_GOC", "_raw_data")
+
+# WDPA raw data directory
+wdpa_dir <- here(raw_data_dir, "wdpa_mpa", data_dir_version_year)
+
+# output data dir for intermediate data products
+int_dir <- here(wdpa_dir, "int")
+# dir.create(int_dir) # to create the path on Mazu if it has not already been done
+
+# final output dir
+output_dir <- here("LSP", version_year, "output")
+
+# spatial data for GoC
+goc_spatial <- here("spatial")
+
+# set colors
+# cols = rev(colorRampPalette(brewer.pal(9, 'Spectral'))(255)) # rainbow color scheme
+
+# this CRS might be better for visualization, explore.
+gulf_crs <- "+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs"
+
+# other CRS options (but they are Mercator):
+# UTM Zone 12N (Northern Gulf)
+utm_12N <- "+proj=utm +zone=12 +datum=WGS84 +units=m +no_defs"
+
+# UTM Zone 13N (Southern Gulf)
+utm_13N <- "+proj=utm +zone=13 +datum=WGS84 +units=m +no_defs"
+```
+
+# Methods
+
+## Downloading Data
+
+Directions to download data:
+
+1: Link to specific website: <https://www.protectedplanet.net/en/thematic-areas/wdpa?tab=WDPA>
+
+2: Select the download button in the top right hand corner.
+
+3: Download and unzip the file
+
+4: There will be additional zip files within the zip file you download. Once unzipped, these are the three files you will use throughout the LSP dataprep.
+
+**Explanation of filtering**
+
+The WDPA-MPA dataset comes as a shapefile or geodatabase in WGS84 coordinate reference system.
+
+-   For OHI we have chosen to count only protected areas with defined legal protection, so we apply a filter on the STATUS attribute that selects only STATUS == "Designated".
+    -   According to the WDPA Manual: STATUS as "Designated" means: "Is recognized or dedicated through legal means. Implies specific binding commitment to conservation in the long term. Applicable to government and non-government sources."
+    -   Other values for STATUS include "Proposed", "Adopted", "Inscribed", or "Not Reported" and "Established".
+        -   "Adopted" and "Inscribed" are World Heritage or Barcelona Convention sites; while these may seem important, they are generally protected by other means (as overlapping "Designated" polygons) in addition to these values.
+-   In 2015, the USA started including polygons that represent marine management plans, in addition to more strictly defined protected areas. This info is contained in the "MANG_PLAN" field.
+    -   These programmatic management plans variously protect species, habitats, and (??) and can be MPA or non-MPA.
+    -   For OHI we have chosen to count only MPA programmatic management plans, omitting Non-MPA programmatic management plans.
+
+
+## Filter WDPA Shapefile
+
+Read in the polygons from the WDPA dataset; filter as needed.
+
+```{r read in data}
+# create path objects for the 3 different zip files downloaded from source
+shp_raw_0 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp','WDPA_Jan2025_Public_shp_0', 'WDPA_Jan2025_Public_shp-polygons')
+shp_raw_1 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp','WDPA_Jan2025_Public_shp_1', 'WDPA_Jan2025_Public_shp-polygons')
+shp_raw_2 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp','WDPA_Jan2025_Public_shp_2', 'WDPA_Jan2025_Public_shp-polygons')
+
+# read shape files in as sf objects
+wdpa_poly_0 <- st_read(dsn = dirname(shp_raw_0), 
+                       layer = basename(shp_raw_0),
+                       stringsAsFactors = FALSE) # MULTIPOLYGON in CRS WGS84
+
+  
+wdpa_poly_1 <- st_read(dsn = dirname(shp_raw_1),
+                       layer = basename(shp_raw_1),
+                       stringsAsFactors = FALSE) # MULTIPOLYGON in CRS WGS84
+
+  
+wdpa_poly_2 <- st_read(dsn = dirname(shp_raw_2), 
+                       layer = basename(shp_raw_2),
+                       stringsAsFactors = FALSE) # MULTIPOLYGON in CRS WGS84
+```
+```{r organize and clean}
+# tidy up the WDPA data and ensure there are only legally designated protected areas present, by specifying "Designated" for its status
+
+# function to apply to all three polygons using lapply
+tidy_wdpa_data <- function(wdpa_poly_object) {
+  
+  DF <- wdpa_poly_object %>%
+    setNames(tolower(names(.))) %>%
+    select(wdpaid, name, orig_name, desig, desig_eng, desig_type, iucn_cat, 
+           marine, no_take, no_tk_area, status, status_yr, 
+           mang_auth, mang_plan, verif, sub_loc, parent_iso, iso3) %>% 
+    mutate(status_yr = as.integer(status_yr)) %>%
+    filter(status == 'Designated', # only legal protected areas are of interest
+           !str_detect(tolower(mang_plan), 'non-mpa program'),
+           iso3 %in% "MEX") # only have protected areas in mexico
+  
+  return(DF)
+  
+}
+
+# put all shape files into a list
+wdpa_list <- list(wdpa_poly_0, wdpa_poly_1, wdpa_poly_2)
+
+tic()
+wdpa_list_tidy <- lapply(wdpa_list, tidy_wdpa_data) # apply the function to the list of polygons
+toc() # v2025: 0.967 sec elapsed
+
+# check to see if it worked, we should have 19 columns and fewer observations
+test <- wdpa_list_tidy[[1]] # looks good!
+
+# remove test for memory
+# rm(test)
+```
+
+```{r write sf objects to server}
+
+# now we need to unlist the polygons, and write them to the appropriate folder on mazu
+wdpa_poly_fix_0 <- wdpa_list_tidy[[1]]  
+wdpa_poly_fix_1 <- wdpa_list_tidy[[2]]  
+wdpa_poly_fix_2 <- wdpa_list_tidy[[3]]
+
+# created filepaths for the files, make sure their names align with the correct dates
+shp_reorder_0 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp', 'shps', 'WDPA_Jan2025_shp_ordered_0') 
+shp_reorder_1 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp', 'shps', 'WDPA_Jan2025_shp_ordered_1') 
+shp_reorder_2 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp', 'shps', 'WDPA_Jan2025_shp_ordered_2') 
+
+
+  
+# write the shapefile to the raw_data Mazu folder, warnings suppressed, append = FALSE so it replaces the layer if it already exists.
+tic()
+suppressWarnings(st_write(wdpa_poly_fix_0,
+                          dsn = (shp_reorder_0), 
+                          layer = basename(shp_reorder_0),
+                          driver = 'ESRI Shapefile',
+                          append = FALSE))
+  
+suppressWarnings(st_write(wdpa_poly_fix_1,
+                          dsn = (shp_reorder_1), 
+                          layer = basename(shp_reorder_1),
+                          driver = 'ESRI Shapefile'))
+  
+suppressWarnings(st_write(wdpa_poly_fix_2,
+                          dsn = (shp_reorder_2), 
+                          layer = basename(shp_reorder_2),
+                          driver = 'ESRI Shapefile'))
+toc() # 0.426 sec elapsed, very quick for only MEX!
+  
+#clean up memory
+# rm('wdpa_poly_list', "wdpa_list", "wdpa_poly_0", "wdpa_poly_1", "wdpa_poly_2", "wdpa_poly_fix_0", "wdpa_poly_fix_1", "wdpa_poly_fix_2") 
+# gc()
+```
+## Transform to GoC CRS
+
+Transform the ordered polygons into the gulf CRS.
+
+```{r transform_poly}
+# file paths for untransformed shape files we just wrote to Mazu
+shp_reorder_0 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp', 'shps', 'WDPA_Jan2025_shp_ordered_0') 
+shp_reorder_1 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp', 'shps', 'WDPA_Jan2025_shp_ordered_1') 
+shp_reorder_2 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp', 'shps', 'WDPA_Jan2025_shp_ordered_2') 
+
+# read in those shape files as sf objects to ensure they were written correctly and to use below
+wdpa_poly_0 <- st_read(dsn = shp_reorder_0, 
+                      #    layer = basename(shp_reorder_0),
+                          stringsAsFactors = FALSE)
+
+wdpa_poly_1 <- st_read(dsn = shp_reorder_1, 
+                          layer = basename(shp_reorder_1),
+                          stringsAsFactors = FALSE)
+
+wdpa_poly_2 <- st_read(dsn = shp_reorder_2, 
+                          layer = basename(shp_reorder_2),
+                          stringsAsFactors = FALSE)
+
+# take a quick look and ensure it all looks good
+# mapview(wdpa_poly_2)
+# mapview(wdpa_poly_1)
+# mapview(wdpa_poly_0)
+
+# put the sf objects in a list
+wdpa_list <- list(wdpa_poly_0, wdpa_poly_1, wdpa_poly_2) 
+
+# transform the CRS!!
+# create function to run over list and change the CRS to gulf_CRS (albers equal area)
+# other options could be the UTM Zone 12N (for the northern Gulf) or 13N (for the southern Gulf)
+change_crs <- function(wdpa_poly_object) {
+
+  message('Spatial transforming WDPA polygons to Albers Equal Area')
+
+  DF <- st_transform(wdpa_poly_object, 
+        crs = "+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+  
+return(DF)
+  
+}  
+
+# run function over list of sf objects
+wdpa_poly_trans_list <- lapply(wdpa_list, change_crs)
+
+# unlist and check
+wdpa_poly_fix_0 <- wdpa_poly_trans_list[[1]]
+wdpa_poly_fix_1 <- wdpa_poly_trans_list[[2]]  
+wdpa_poly_fix_2 <- wdpa_poly_trans_list[[3]]  
+# st_crs(wdpa_poly_fix_0) # check that the CRS is changed
+
+# file paths for saving transformed polygons
+shp_xformed_0 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp', 'shps', 'WDPA_Jan2025_shp_xformed_0') 
+shp_xformed_1 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp', 'shps', 'WDPA_Jan2025_shp_xformed_1') 
+shp_xformed_2 <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp', 'shps', 'WDPA_Jan2025_shp_xformed_2') 
+
+# write the transformed files to Mazu for safekeeping
+tic()
+st_write(wdpa_poly_fix_0,
+         dsn = (shp_xformed_0),
+         layer = basename(shp_xformed_0),
+         driver = 'ESRI Shapefile',
+         update = TRUE)
+
+st_write(wdpa_poly_fix_1,
+         dsn = (shp_xformed_1),
+         layer = basename(shp_xformed_1),
+         driver = 'ESRI Shapefile',
+         update = TRUE)
+
+st_write(wdpa_poly_fix_2,
+         dsn = (shp_xformed_2),
+         layer = basename(shp_xformed_2),
+         driver = 'ESRI Shapefile',
+         update = TRUE)
+toc() # v2025: 0.686 sec elapsed
+```
+
+## Clip to GoC Ecoregion Boundary
+
+```{r}
+eco_hr_latlon <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_latlon.shp"))
+# mapview(eco_hr_latlon)
+
+eco_hr_eqarea <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_eqarea.shp"))
+mapview(eco_hr_eqarea)
+
+# check CRS of ecoregion boundary
+st_crs(eco_hr_eqarea) # NAD83 / Conus Albers, needs to be transformed
+
+# transform to gulf_CRS
+eco_hr_albers <- st_transform(eco_hr_eqarea, crs = "+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+st_crs(eco_hr_albers) # double check it worked well
+mapview(eco_hr_albers) # looks good!
+
+# ---- read back in the transformed wdpa polygons --------
+# read in those shape files as sf objects to ensure they were written correctly and to use below
+wdpa_poly_fix_0 <- st_read(dsn = shp_xformed_0, 
+                          layer = basename(shp_xformed_0),
+                          stringsAsFactors = FALSE)
+
+wdpa_poly_fix_1 <- st_read(dsn = shp_xformed_1, 
+                          layer = basename(shp_xformed_1),
+                          stringsAsFactors = FALSE)
+
+wdpa_poly_fix_2 <- st_read(dsn = shp_xformed_2, 
+                          layer = basename(shp_xformed_2),
+                          stringsAsFactors = FALSE)
+
+# ----- clip the WDPA data to the ecoregion boundary -----
+wdpa_poly_fix_list <- list(wdpa_poly_fix_0, wdpa_poly_fix_1, wdpa_poly_fix_2)
+
+clip_func <- function(wdpa_poly_object){
+  
+  message('Clipping WDPA polygons to GoC Ecoregion Boundaries')
+
+  DF <- st_intersection(wdpa_poly_object, eco_hr_albers)
+  
+  return(DF)
+  
+}
+
+# apply to the list of albers wdpa polygons
+wdpa_clipped_list <- lapply(wdpa_poly_fix_list, clip_func) # v2025: Warning: attribute variables are assumed to be spatially constant throughout all geometries
+
+# unlist the polygons
+wdpa_poly_clip_0 <- wdpa_clipped_list[[1]]
+wdpa_poly_clip_1 <- wdpa_clipped_list[[2]]  
+wdpa_poly_clip_2 <- wdpa_clipped_list[[3]]  
+
+# check the crs and view of each unlisted polygon
+st_crs(wdpa_poly_clip_0)
+st_crs(wdpa_poly_clip_1)
+st_crs(wdpa_poly_clip_2)
+
+mapview(wdpa_poly_clip_0)
+mapview(wdpa_poly_clip_1)
+mapview(wdpa_poly_clip_2) # yay, everything looks good! 
+
+# bind all clipped polygons together. It should have 74 obs for 20 variables
+wdpa_poly_all <- bind_rows(wdpa_clipped_list)
+
+# check that it worked
+mapview(wdpa_poly_all)
+st_crs(wdpa_poly_all)  # verify CRS is still correct
+
+# save clipped and bound polygons to mazu
+shp_clipped_all <- here::here(wdpa_dir, 'WDPA_Jan2025_Public_shp', 'shps', 'WDPA_Jan2025_shp_clipped_all') 
+
+# write the transformed files to Mazu for safekeeping
+tic()
+st_write(wdpa_poly_all,
+         dsn = (shp_clipped_all),
+         layer = basename(shp_clipped_all),
+         driver = 'ESRI Shapefile',
+         update = TRUE)
+toc() # v2025: 0.215 sec elapsed
+```
+
+### Visualize all protected regions in the GoC!
+
+```{r spatial vis}
+# using leaflet
+# goc_leaflet <- leaflet(wdpa_poly_all) %>%
+#   addTiles() %>%  # Add base map
+#   addPolygons(
+#     fillColor = ~colorNumeric("viridis", marine)(marine),
+#     weight = 1,
+#     opacity = 1,
+#     color = "white",
+#     dashArray = "3",
+#     fillOpacity = 0.7,
+#     popup = ~paste("Name:", name, "<br>",
+#                    "IUCN Category:", iucn_cat)
+#   ) %>%
+#   addLegend(position = "bottomright")
+# goc_leaflet
+
+# using tmap
+library(tmap)
+tmap_mode("view")  # For interactive mode
+goc_tmap <- tm_shape(wdpa_poly_all) +
+  tm_polygons("status_yr", 
+              palette = "viridis",
+              title = "Marine Protected Areas") +
+  tm_layout(main.title = "Gulf of California Protected Areas",
+            legend.outside = TRUE)
+goc_tmap
+
+# using ggplot
+goc_ggplot_map <- ggplot() +
+  geom_sf(data = wdpa_poly_all, 
+          aes(fill = status_yr), 
+          alpha = 0.7) +
+  scale_fill_viridis_c() +
+  theme_minimal() +
+  labs(title = "Gulf of California Protected Areas",
+       fill = "Age of protected area") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+goc_ggplot_map
+
+# using mapview but adding to it
+# goc_mapview_fancy <- mapview(wdpa_poly_all,
+#                              zcol = "iucn_cat",  # color by IUCN category
+#                              layer.name = "Protected Areas",
+#                              map.types = c("OpenStreetMap", "Esri.WorldImagery"),
+#                              label = popupTable(wdpa_poly_all, 
+#                                                 zcol = c("name", "marine", "iucn_cat")), # not working
+#                              alpha.regions = 0.6)
+# goc_mapview_fancy
+```
+
+## Rasterize shapefiles
+
+
+
+
+
+
+
+
+
+
