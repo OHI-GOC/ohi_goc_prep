@@ -106,6 +106,7 @@ library(foreach)
 library(doParallel)
 library(ncdf4)
 library(plotly)
+library(fs) # for file path handling
 
 # ---- sources! ----
 # source(here("workflow", "R", "common.R")) # file creates objects to process data
@@ -146,13 +147,15 @@ gulf_crs <- "+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +u
 # ---------- ecoregion border -----------
 goc_ecoregion_border_shp <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_eqarea.shp")) # polygon, proj crs: NAD83 / Conus Albers
 ```
+
+
 # Download the data
 
 ```{r}
 # use wget2 to download all data
 base_url <- "https://dap.ceda.ac.uk/neodc/eocis/data/global_and_regional/sea_surface_temperature/CDR_v3/Analysis/L4/v3.0.1"
 start_year <- 2022
-end_year <- 2023
+end_year <- 2024
 
 # set up parallel processing for faster download
 cl <- 10
@@ -205,11 +208,15 @@ total_downloaded # 730, great! That is for 2 years.  I will work with the first 
 
 
 
-# Read in Data
+# Processing Data
+
+## Exploration
+
+Looking at a singular NetCDF file to understand the number of layers
 
 ```{r}
 # read in NetCDF file downloaded from CEDA
-sst_raw <- terra::rast(here(ceda_dir, "19800101120000-ESACCI-L4_GHRSST-SSTdepth-OSTIA-GLOB_CDR3.0-v02.0-fv01.0.nc")) # S4 class SpatRaster
+sst_raw <- terra::rast(here(ceda_dir, "1980", "19800101120000-ESACCI-L4_GHRSST-SSTdepth-OSTIA-GLOB_CDR3.0-v02.0-fv01.0.nc")) # S4 class SpatRaster
 crs(sst_raw) # not in Albers Eq Area EPSG:5070, will need to be reprojected
 plot(sst_raw) # right now all 4 variables are present, each as a separate layer.  However, I want to have it so that there should be a yearly layer for the sea surface temperature. 
 
@@ -223,17 +230,83 @@ sst_yearly <- terra::split(sst_layer, "years") # now it is a list of 1
 sst_list <- as.list(sst_yearly)
 
 num_layers <- terra::nlyr(sst_layer)
-print(num_layers) # v2024: 156 layers, which makes sense because the data goes from 2010 - 2022 monthly
+print(num_layers) # just 1, as expected, since we extracted SST
 
-sst_2023 <- sst_list$X2023
+
+# how to isolate the analysed SST in one line
+analysed_sst <- terra::rast(here(ceda_dir, "1980", "19800101120000-ESACCI-L4_GHRSST-SSTdepth-OSTIA-GLOB_CDR3.0-v02.0-fv01.0.nc"))[["analysed_sst"]]
 ```
+
+## Historical Baseline data (as of now, 1980 - 1990)
+
+Methods for processing:
+
+- Make a list of all files for each year
+- Select only the "analysed_sst" variable
+- Reproject each daily raster to the same CRS as GoC_polygon_ecoregion_eqarea.shp polygon (NAD83 albers eq area)
+- Crop and mask to ensure only SST within the GoC ecoregion boundary is being processed
+- Take the mean of all layers for the year to determine the yearly average (in a single layer raster)
+- Do this for all years, then combine the single layer rasters into one multilayer SpatRaster, for easy visualization of all years
 
 
 ```{r}
-crs(goc_ecoregion_border_shp)
+process_year <- function(year, goc_ecoregion_border_shp) {
+  
+  # make a list of all NetCDF files for each year
+  files <- fs::dir_ls( # use the `fs` package because it allows us to list files in a more intuitive way
+    path = here::here(ceda_dir, as.character(year)),
+    glob = "*.nc"
+  )
+  
+  # read all files into a list, selecting only the "analysed_sst" variable
+  daily_rasters <- lapply(files, function(f) { # for each iteration, the current file path is passed as the argument `f` to the anonymous function! so it will do this for each daily raster within each year
+    
+    r <- terra::rast(f)[["analysed_sst"]] # read in each individual .nc file for the year, isolate the analysed_sst layer
+    
+    # reproject the daily raster to match the ecoregion boundary's CRS
+    r <- terra::project(r, crs(goc_ecoregion_border_shp)) # NAD93, albers eq area
+    
+    # clip the daily raster to the GoC ecoregion boundary (using crop() and mask(), see <https://r.geocompx.org/raster-vector> for further explanation)
+    r <- terra::crop(r, goc_ecoregion_border_shp) # makes the maximum extent of the daily raster limited to the goc ecoregion boundary polygon
+    r <- terra::mask(r, goc_ecoregion_border_shp) # replaces all values outside of the area to NA
+    
+    return(r) # return the reprojected and clipped daily raster
+    
+  })
+  
+  # convert all daily rasters for the year to a multilayer SpatRaster
+  sst_stack <- terra::rast(daily_rasters) # just reading in a list will make it a multilayer SpatRaster, where each raster in the list becomes a layer
+  
+  # calculate the average SST for the year
+  yearly_avg <- app(sst_stack, fun = mean, na.rm = TRUE) # terra::app applies a function to all layers
+  
+  return(yearly_avg) # returns a single layer raster where each pixel is the average of the SST over all days in the year
+}
+
+# bringing this from Setup for ease
+goc_ecoregion_border_shp <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_eqarea.shp")) # polygon, proj crs: NAD83 / Conus Albers
+
+# defining which years to evaluate and process
+start_year <- 1980
+end_year <- 1990
+
+# use the function
+yearly_averages <- lapply(start_year:end_year, function(year) process_year(year, goc_ecoregion_border_shp))
+
+# bring all yearly averages into a single multilayer raster
+final_raster <- rast(yearly_averages)
+
+# save it to output_dir
+writeRaster(final_raster, filename = here(output_dir, "yearly_sst_averages_goc.tif"), overwrite = TRUE)
+
 ```
 
 
+## Current GoC data ( for now, 2014 - 2021)
+
+```{r}
+
+```
 
 
 
