@@ -292,7 +292,7 @@ hist_int_dir <- here(int_dir, "historical_int")
 daily_int_dir <- here(hist_int_dir, "daily_int")
 
 # enable terra parallelization
-terraOptions(threads = 50, progress = 3, todisk = TRUE, memfrac = 0.5)
+terraOptions(threads = 60, progress = 3, todisk = TRUE, memfrac = 0.5)
 
 process_sst_daily <- function(year, goc_ecoregion_border_shp) {
   
@@ -307,17 +307,19 @@ process_sst_daily <- function(year, goc_ecoregion_border_shp) {
     
     r <- terra::rast(f)[["analysed_sst"]] # read in each individual .nc file for the year, isolate the analysed_sst layer
     
+    r <- terra::crop(r, goc_ecoregion_border_sst_proj, mask = TRUE) # makes the maximum extent of the daily raster limited to the goc ecoregion boundary polygon
+    
     # reproject the daily raster to match the ecoregion boundary's CRS
     r <- terra::project(r, target_crs) # NAD93, albers eq area
     
     # clip the daily raster to the GoC ecoregion boundary (using crop() and mask(), see <https://r.geocompx.org/raster-vector> for further explanation)
-    r <- terra::crop(r, goc_ecoregion_border_shp, mask = TRUE) # makes the maximum extent of the daily raster limited to the goc ecoregion boundary polygon
-    # r <- terra::mask(r, goc_ecoregion_border_shp) # replaces all values outside of the area to NA
+    
+    r <- terra::mask(r, goc_ecoregion_border_shp) # replaces all values outside of the NAD83 ecoregion boundary area to NA
     
     # save the daily raster after it has been processed for better progress tracking
     date <- format(as.Date(terra::time(r)), "%Y_%m_%d")
-    # out_file <- file.path(daily_int_dir, paste0("daily_proj_crop_sst_", date, ".tif"))
-    # terra::writeRaster(r, filename = out_file, overwrite = TRUE)
+    daily_out_file <- file.path(daily_int_dir, paste0("daily_proj_crop_sst_", date, ".tif"))
+    terra::writeRaster(r, filename = daily_out_file, overwrite = TRUE)
     cat(sprintf("Finished processing %s daily raster\n", date))
     return(r) # return the reprojected and clipped daily raster
     
@@ -329,11 +331,15 @@ process_sst_daily <- function(year, goc_ecoregion_border_shp) {
   # calculate the average SST for the year
   yearly_avg <- app(sst_stack, fun = mean, na.rm = TRUE) # terra::app applies a function to all layers
   
-  return(file.path(hist_int_dir, paste0("hist_sst_avg_", year, ".tif"))) # returns a single layer raster where each pixel is the average of the SST over all days in the year, saves in Mazu
+  # save the processed yearly raster
+  out_file <- here(hist_int_dir, paste0("hist_sst_yearly_avg_", year, ".tif"))
+  terra::writeRaster(yearly_avg, filename = out_file, overwrite = TRUE)
+  
+  return(yearly_avg) # returns a single layer raster where each pixel is the average of the SST over all days in the year, saves in Mazu
 }
 
 # set up parallel processing using `doParallel`
-cl <- 50
+cl <- 60
 registerDoParallel(cl)
 
 # use the function with foreach for faster processing time!
@@ -343,7 +349,7 @@ hist_yearly_averages <- foreach(year = hist_start_year:hist_end_year) %dopar% {
   process_sst_daily(year, goc_ecoregion_border_shp)
   
 }
-toc()
+toc() # for 1980, it took 860.973 sec elapsed
 
 # bring all yearly averages into a single multilayer raster
 hist_final_raster <- terra::rast(hist_yearly_averages)
@@ -351,6 +357,13 @@ hist_final_raster <- terra::rast(hist_yearly_averages)
 # save it to int_dir in mazu: "/home/shares/ohi/OHI_GOC/_raw_data/CEDA_CDRv3.0/d2025/int"
 writeRaster(hist_final_raster, filename = here(int_dir, "historical_yearly_sst_averages_goc_eq_area_1980_1990.tif"), overwrite = TRUE)
 ```
+Plot the yearly average to understand it better
+
+```{r}
+year_avg_1980 <- st_read(here(hist_int_dir, "hist_sst_yearly_avg_1980.tif"))
+plot(hist_final_raster)
+```
+
 
 
 ## Current GoC data ( for now, 2014 - 2021)
