@@ -154,8 +154,8 @@ goc_ecoregion_border_shp <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_eqa
 ```{r}
 # use wget2 to download all data
 base_url <- "https://dap.ceda.ac.uk/neodc/eocis/data/global_and_regional/sea_surface_temperature/CDR_v3/Analysis/L4/v3.0.1"
-start_year <- 2022
-end_year <- 2024
+start_year <- 2023
+end_year <- 2023
 
 # set up parallel processing for faster download
 cl <- 10
@@ -278,8 +278,8 @@ Methods for processing:
 
 ```{r}
 # defining which years to evaluate and process
-hist_start_year <- 1980
-hist_end_year <- 1980
+hist_start_year <- 1987
+hist_end_year <- 1990
 
 # bringing this from Setup for ease
 goc_ecoregion_border_shp <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_eqarea.shp")) # polygon, proj crs: NAD83 / Conus Albers
@@ -294,7 +294,7 @@ daily_int_dir <- here(hist_int_dir, "daily_int")
 # enable terra parallelization
 terraOptions(threads = 60, progress = 3, todisk = TRUE, memfrac = 0.5)
 
-process_sst_daily <- function(year, goc_ecoregion_border_shp) {
+process_sst_daily <- function(year, goc_ecoregion_border_sst_proj, goc_ecoregion_border_shp) {
   
   # make a list of all NetCDF files for each year
   files <- fs::dir_ls( # use the `fs` package because it allows us to list files in a more intuitive way
@@ -307,7 +307,7 @@ process_sst_daily <- function(year, goc_ecoregion_border_shp) {
     
     r <- terra::rast(f)[["analysed_sst"]] # read in each individual .nc file for the year, isolate the analysed_sst layer
     
-    r <- terra::crop(r, goc_ecoregion_border_sst_proj, mask = TRUE) # makes the maximum extent of the daily raster limited to the goc ecoregion boundary polygon
+    r <- terra::crop(r, goc_ecoregion_border_sst_proj, overwrite = TRUE) # makes the maximum extent of the daily raster limited to the goc ecoregion boundary polygon
     
     # reproject the daily raster to match the ecoregion boundary's CRS
     r <- terra::project(r, target_crs) # NAD93, albers eq area
@@ -321,6 +321,7 @@ process_sst_daily <- function(year, goc_ecoregion_border_shp) {
     daily_out_file <- file.path(daily_int_dir, paste0("daily_proj_crop_sst_", date, ".tif"))
     terra::writeRaster(r, filename = daily_out_file, overwrite = TRUE)
     cat(sprintf("Finished processing %s daily raster\n", date))
+    
     return(r) # return the reprojected and clipped daily raster
     
   })
@@ -346,21 +347,43 @@ registerDoParallel(cl)
 tic()
 hist_yearly_averages <- foreach(year = hist_start_year:hist_end_year) %dopar% {
   
-  process_sst_daily(year, goc_ecoregion_border_shp)
+  process_sst_daily(year, goc_ecoregion_border_sst_proj, goc_ecoregion_border_shp)
   
 }
 toc() # for 1980, it took 860.973 sec elapsed
-
-# bring all yearly averages into a single multilayer raster
-hist_final_raster <- terra::rast(hist_yearly_averages)
-
-# save it to int_dir in mazu: "/home/shares/ohi/OHI_GOC/_raw_data/CEDA_CDRv3.0/d2025/int"
-writeRaster(hist_final_raster, filename = here(int_dir, "historical_yearly_sst_averages_goc_eq_area_1980_1990.tif"), overwrite = TRUE)
 ```
-Plot the yearly average to understand it better
+
+
+Bring all the daily rasters that have been reprojected and cropped/masked into a multilayer SpatRaster
 
 ```{r}
-year_avg_1980 <- st_read(here(hist_int_dir, "hist_sst_yearly_avg_1980.tif"))
+# bring all yearly averages into a single multilayer raster
+hist_yearly_sst_list <- fs::dir_ls( # use the `fs` package because it allows us to list files in a more intuitive way
+    path = here::here(hist_int_dir),
+    glob = "*.tif"
+  )
+
+hist_yearly_averages <- terra::rast(hist_yearly_sst_list)
+plot(hist_yearly_averages)
+
+# save it to int_dir in mazu: "/home/shares/ohi/OHI_GOC/_raw_data/CEDA_CDRv3.0/d2025/int"
+# writeRaster(hist_yearly_averages, filename = here(int_dir, "historical_yearly_sst_averages_goc_eq_area_1980_1990.tif"), overwrite = TRUE)
+```
+
+Make an animation of average SST from 1980 to 1990:
+
+```{r}
+hist_animation <- terra::animate(hist_yearly_averages, pause=0.25, maxcell=50000, n=1)
+```
+
+
+Plot the yearly average to verify
+
+```{r}
+test_sst <- terra::rast(here(daily_int_dir, "daily_proj_crop_sst_1982_05_23.tif"))
+plot(test_sst)
+
+year_avg_1980 <- st_read(here(hist_int_dir, "hist_sst_yearly_avg_1981.tif"))
 plot(hist_final_raster)
 ```
 
