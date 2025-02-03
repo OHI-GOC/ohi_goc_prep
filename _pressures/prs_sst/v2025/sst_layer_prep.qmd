@@ -337,6 +337,8 @@ plot(analyzed_sst_mask_last)
 
 ## Historical Baseline data (as of now, 1980 - 1990)
 
+### Process yearly average
+
 Original methods for processing:
 
 - Make a list of all files for each year
@@ -708,6 +710,66 @@ Animation that did not work:
 ```
 
 
+### Process weekly averages
+
+```{r}
+# defining which years to evaluate and process
+hist_start_year <- 1991
+hist_end_year <- 2000
+
+# directory for daily rasters to be saved in mazu
+hist_weekly_int_dir <- here::here(int_dir, "hist_weekly_int") 
+# dir.create(hist_weekly_int_dir, showWarnings = FALSE, recursive = TRUE)
+
+# define the target crs for all downloaded rasters
+# target_crs <- st_crs(goc_ecoregion_border_shp)$wkt
+
+# enable terra parallelization
+terraOptions(threads = 60, progress = 3, todisk = TRUE, memfrac = 0.5)
+
+# --------------------- process in to weekly rasters -------------
+hist_process_sst_weekly <- function(year) {
+  
+  # make a list of all daily .tif files for historical data
+  files <- fs::dir_ls( 
+    path = here::here(hist_daily_int_dir),
+    glob = "*.tif"
+  )
+  
+  # read in the list as a multilayer SpatRaster with each layer as a day
+  daily_rasters <- terra::rast(files)
+  
+  # add time information to the raster stack (assuming filenames contain dates in YYYY_MM_DD format)
+  dates <- as.Date(sub(".*_(\\d{4}_\\d{2}_\\d{2}).tif", "\\1", basename(files)), "%Y_%m_%d")
+  time(daily_rasters) <- dates
+  
+  # aggregate daily rasters into weekly averages using terra::tapp()
+  weekly_avg <- tapp(daily_rasters, index = "week", fun = mean, na.rm = TRUE)
+  
+  # save each weekly raster as a separate file
+  for (i in seq_len(nlyr(weekly_avg))) {
+    week_start_date <- format(as.Date(names(weekly_avg)[i]), "%Y_%m_%d")
+    output_file <- file.path(hist_weekly_int_dir, paste0("weekly_avg_sst_", week_start_date, ".tif"))
+    terra::writeRaster(weekly_avg[[i]], filename = output_file, overwrite = TRUE)
+    cat(sprintf("Saved weekly raster: %s\n", output_file))
+  }
+  
+  return(weekly_avg) # Return the weekly average raster stack for further analysis if needed
+}
+
+# set up parallel processing using `doParallel`
+cl <- 60
+registerDoParallel(cl)
+
+# use the function with foreach for faster processing time!
+tic()
+hist_yearly_averages <- foreach(year = hist_start_year:hist_end_year) %dopar% {
+  
+  hist_process_sst_weekly(year)
+  
+}
+toc() 
+```
 
 
 ## Current SST GoC data (2014 - 2023)
