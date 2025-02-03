@@ -27,12 +27,12 @@ current_years <- seq(2014, 2023)
 # defining the user interface (how viewers interact with the app)
 ui <- fluidPage(
   theme = bs_theme(bootswatch = "flatly"),
-  titlePanel("Sea Surface Temperature Yearly Averages"),
+  titlePanel(" "),
   
   # show the maps first at the top of the app
   fluidRow(
-    column(6, leafletOutput("map_hist", height = "500px")),
-    column(6, leafletOutput("map_curr", height = "500px"))
+    column(6, leafletOutput("map_hist", height = "450px")),
+    column(6, leafletOutput("map_curr", height = "450px"))
   ),
   
   # have each slider for the year below the map
