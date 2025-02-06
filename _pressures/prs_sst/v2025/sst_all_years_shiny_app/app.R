@@ -12,8 +12,8 @@ library(here)
 #                           token='303AD3AC5CCE039111B28E08270C58A4',
 #                           secret='YDs6QWccnNavLMEmuE6w1aL7wEsB41MiKP3Bgwg8')
 # 
-# shiny_dir <- here::here("_pressures","prs_sst","v2025","sst_yearly_comparison_shiny_app")
-# rsconnect::deployApp(here::here(shiny_dir))
+# all_shiny_dir <- here::here("_pressures","prs_sst","v2025","sst_all_years_shiny_app")
+# rsconnect::deployApp(here::here(all_shiny_dir))
 
 
 # load in yearly average multilayer rasters
