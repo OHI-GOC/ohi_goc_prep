@@ -17,10 +17,10 @@ library(here)
 
 
 # load in yearly average multilayer rasters
-comparison_raster <- terra::rast("data/comparison_current_hist_baseline_celsius_goc_eq_area_2001_2023.tif")  # comparison SST raster (2001 - 2023)
+all_years_raster <- terra::rast("data/all_yearly_sst_averages_celsius_goc_eq_area_1980_2023.tif")  # comparison SST raster (2001 - 2023)
 
 # for sliders:
-comparison_years <- seq(2001, 2023)
+all_years <- seq(1980, 2023)
 
 # defining the user interface (how viewers interact with the app)
 ui <- fluidPage(
@@ -30,14 +30,14 @@ ui <- fluidPage(
   # have each slider for the year below the map
   fluidRow(
     column(12, 
-           leafletOutput("map_comp", height = "450px"),
+           leafletOutput("map_all", height = "450px"),
            div(
              style = "padding-top: 20px;",  # spacing between map and slider
-             sliderInput("years_comp", 
-                         "Select a year for its change in SST compared to the historical baseline",
-                         min = min(comparison_years), 
-                         max = max(comparison_years),
-                         value = min(comparison_years), 
+             sliderInput("years_all", 
+                         "Select a year for its average SST",
+                         min = min(all_years), 
+                         max = max(all_years),
+                         value = min(all_years), 
                          step = 1,
                          animate = animationOptions(interval = 1000), 
                          sep = "",
@@ -52,18 +52,18 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   
   # for comparison SST map
-  output$map_comp <- renderLeaflet({
-    selected_layer <- which(comparison_years == input$years_comp)
+  output$map_all <- renderLeaflet({
+    selected_layer <- which(all_years == input$years_all)
     leaflet() %>%
       addTiles() %>%
       addRasterImage(
-        comparison_raster[[selected_layer]],
+        all_years_raster[[selected_layer]],
         opacity = 0.8,
-        colors = colorNumeric(inferno(256), values(comparison_raster, na.rm = TRUE), na.color = "transparent")
+        colors = colorNumeric(mako(256), values(all_years_raster, na.rm = TRUE), na.color = "transparent")
       ) %>%
       addLegend(
-        pal = colorNumeric(rev(inferno(256)), values(comparison_raster, na.rm = TRUE), na.color = "transparent"),
-        values = values(comparison_raster, na.rm = TRUE),
+        pal = colorNumeric(rev(mako(256)), values(all_years_raster, na.rm = TRUE), na.color = "transparent"),
+        values = values(all_years_raster, na.rm = TRUE),
         title = "SST (C)",
         position = "bottomright",
         labFormat = labelFormat(transform = function(x) sort(x, decreasing = TRUE)) # reverse the label order so it goes positive --> negative change rather than the opposite
@@ -71,13 +71,13 @@ server <- function(input, output, session) {
   })
   
   observe({
-    selected_layer <- which(comparison_years == input$years_comp)
-    leafletProxy("map_comp") %>%
+    selected_layer <- which(all_years == input$years_all)
+    leafletProxy("map_all") %>%
       clearImages() %>% # clear previous layers before adding new ones
       addRasterImage(
-        comparison_raster[[selected_layer]],
+        all_years_raster[[selected_layer]],
         opacity = 0.8,
-        colors = colorNumeric(inferno(256), values(comparison_raster, na.rm = TRUE), na.color = "transparent")
+        colors = colorNumeric(mako(256), values(all_years_raster, na.rm = TRUE), na.color = "transparent")
       )
   })
   
