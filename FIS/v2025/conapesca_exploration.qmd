@@ -208,12 +208,17 @@ fish_wild_goc_summary <- fish_wild_goc %>%
   group_by(nombre_principal, ejercicio_fiscal) %>% 
   summarize(
     agg_live_weight = sum(peso_vivo_kilogramos),
-    agg_revenue = sum(valor_pesos)
+    agg_revenue = sum(valor_pesos), 
+    .groups = "drop"
   )
 
 # check that all the stocks are there
 length(unique(fish_wild_goc_summary$nombre_principal)) # 60, yay!
+```
 
+Live weight:
+
+```{r}
 # plot live weight interactively using plot_ly
 live_weight_plotly <- fish_wild_goc_summary %>%
   plot_ly(x = ~ejercicio_fiscal, y = ~agg_live_weight, color = ~nombre_principal, 
@@ -226,6 +231,26 @@ live_weight_plotly
 # save plot
 # htmlwidgets::saveWidget(live_weight_plotly, file = "output/live_weight_2006_2022_plot.html")
 
+# filter to remove large groups (sarine, calamar, almeja, macarela)
+fish_wild_goc_no_outliers <- fish_wild_goc_summary %>% 
+  filter(!nombre_principal %in% c("SARDINA", "CALAMAR", "ALMEJA", "MACARELA"))
+
+# plot live weight interactively using plot_ly
+live_weight_plotly_no_outliers <- fish_wild_goc_no_outliers %>%
+  plot_ly(x = ~ejercicio_fiscal, y = ~agg_live_weight, color = ~nombre_principal, 
+          type = "scatter", mode = "lines") %>%
+  layout(title = "Aggregate Live Weight of Stock Caught in GoC 2006 - 2022",
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Live Weight (kg)"))
+live_weight_plotly_no_outliers
+
+# save plot
+htmlwidgets::saveWidget(live_weight_plotly_no_outliers, file = "output/live_weight_no_outliers_2006_2022_plot.html")
+```
+
+Revenue:
+
+```{r}
 # plot revenue interactively using plot_ly
 revenue_plotly <- fish_wild_goc_summary %>%
   plot_ly(x = ~ejercicio_fiscal, y = ~agg_revenue, color = ~nombre_principal, 
@@ -239,3 +264,249 @@ revenue_plotly
 # htmlwidgets::saveWidget(revenue_plotly, file = "output/revenue_plotly_2006_2022_plot.html")
 ```
 
+
+Total catch/revenue:
+
+```{r}
+# summarize the kg and revenue across all fishery offices in the GoC for each year
+total_fish_wild_goc_summary <- fish_wild_goc %>% 
+  group_by(ejercicio_fiscal) %>% 
+  summarize(
+    agg_live_weight = sum(peso_vivo_kilogramos),
+    agg_revenue = sum(valor_pesos)
+  )
+
+# plot live weight interactively using plot_ly
+total_live_weight_plotly <- total_fish_wild_goc_summary %>%
+  plot_ly(x = ~ejercicio_fiscal, y = ~agg_live_weight, 
+          type = "scatter", mode = "lines") %>%
+  layout(title = "Total Catch in GoC 2006 - 2022",
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Live Weight (kg)"))
+total_live_weight_plotly
+
+# save plot
+# htmlwidgets::saveWidget(total_live_weight_plotly, file = "output/total_live_weight_2006_2022_plot.html")
+
+# plot revenue interactively using plot_ly
+total_revenue_plotly <- total_fish_wild_goc_summary %>%
+  plot_ly(x = ~ejercicio_fiscal, y = ~agg_revenue, 
+          type = "scatter", mode = "lines") %>%
+  layout(title = "Total Fishing Revenue in GoC 2006 - 2022",
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Revenue (pesos)"))
+total_revenue_plotly
+
+# save plot
+# htmlwidgets::saveWidget(total_revenue_plotly, file = "output/total_revenue_2006_2022_plot.html")
+```
+
+### With Drop down feature
+
+Using this as a reference: <https://community.plotly.com/t/need-help-on-using-dropdown-to-filter/6596/2>
+
+```{r}
+# plot live weight interactively using plot_ly
+drop_live_weight_plotly <- fish_wild_goc_summary %>%
+  plot_ly(
+    x =  ~ ejercicio_fiscal,
+    y =  ~ agg_live_weight,
+    type = "scatter",
+    mode = "lines",
+    # set hover text for better readability
+    text =  ~ paste(
+      "Species:",
+      nombre_principal,
+      "<br>Year:",
+      ejercicio_fiscal,
+      "<br>Live Weight:",
+      agg_live_weight
+    ),
+    hoverinfo = "text",
+    # Apply the filter transform
+    transforms = list(
+      list(
+        type = 'filter',
+        target =  ~ nombre_principal,
+        operation = '=',
+        value = unique(fish_wild_goc_summary$nombre_principal)[1] # Initial value.
+      )
+    )
+  ) %>%
+  layout(
+    title = "Aggregate Live Weight of Stock Caught in GoC 2006 - 2022",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Live Weight (kg)"),
+    # Update menus is where the interactive filter buttons will be.
+    updatemenus = list(
+      list(
+        type = 'dropdown',
+        active = 0, # Set default to the first value.
+        buttons = lapply(
+          unique(fish_wild_goc_summary$nombre_principal), # For all unique species.
+          function(species) {
+            list(
+              method = "restyle",
+              args = list(
+                "transforms[0].value", # Change the value in the 1st transform filter.
+                species # Change the filter value to the species name.
+              ),
+              label = species # The name of the species on the button.
+            )
+          }
+        )
+      )
+    )
+  )
+
+drop_live_weight_plotly
+```
+
+### Adding habitat data
+
+From a self-constructed csv using all the different groups (nombre_principal) and determining whether the group is primarily marine, euryhaline, or freshwater.
+
+```{r}
+# read in csv
+habitat_raw <- read_csv(here::here(raw_data_dir, "CONAPESCA", data_dir_version_year, "id_marine_freshwater_fishery_offices.csv")) %>% 
+  janitor::clean_names()
+```
+```{r}
+# integrate with the CONAPESCA fishery offices production data
+habitat_fish_wild_goc_summary <- fish_wild_goc_summary %>%
+  left_join(habitat_raw %>% select(nombre_principal, habitat), by = "nombre_principal") %>% # only bringing in whether it is marine etc for viz purposes
+  # Convert habitat to factor, handling NAs explicitly
+  mutate(habitat = factor(habitat, levels = c("Marine", "Freshwater", "Euryhaline", "Varies", NA)))
+
+habitats_considered_marine <- c("Marine", "Euryhaline")
+
+# create ID for marine/euryhaline or not, only consider those two, not freshwater or NA
+habitat_fish_wild_goc_clean <- habitat_fish_wild_goc_summary %>% 
+  mutate(marine = ifelse(habitat %in% habitats_considered_marine, 1, 0))
+
+# filter only to marine = 1
+habitat_marine_species_summary <- habitat_fish_wild_goc_clean %>% 
+  filter(marine == 1)
+```
+
+Create interactive drop down with ONLY marine:
+
+1) Live weight
+
+```{r}
+# plot live weight interactively using plot_ly
+marine_live_weight_plotly <- habitat_marine_species_summary %>%
+  plot_ly(
+    x =  ~ ejercicio_fiscal,
+    y =  ~ agg_live_weight,
+    type = "scatter",
+    mode = "lines",
+    # set hover text for better readability
+    text =  ~ paste(
+      "Species:",
+      nombre_principal,
+      "<br>Year:",
+      ejercicio_fiscal,
+      "<br>Live Weight:",
+      agg_live_weight
+    ),
+    hoverinfo = "text",
+    # Apply the filter transform
+    transforms = list(
+      list(
+        type = 'filter',
+        target =  ~ nombre_principal,
+        operation = '=',
+        value = unique(habitat_marine_species_summary$nombre_principal)[1] # Initial value.
+      )
+    ),
+    line = list(color = "deepskyblue4") # changing color
+  ) %>%
+  layout(
+    title = "Aggregate Live Weight of Stock Caught in GoC 2006 - 2022",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Live Weight (kg)"),
+    # Update menus is where the interactive filter buttons will be.
+    updatemenus = list(
+      list(
+        type = 'dropdown',
+        active = 0, # Set default to the first value.
+        buttons = lapply(
+          unique(habitat_marine_species_summary$nombre_principal), # For all unique species.
+          function(species) {
+            list(
+              method = "restyle",
+              args = list(
+                "transforms[0].value", # Change the value in the 1st transform filter.
+                species # Change the filter value to the species name.
+              ),
+              label = species # The name of the species on the button.
+            )
+          }
+        )
+      )
+    )
+  )
+
+marine_live_weight_plotly
+```
+
+2) Revenue
+
+```{r}
+# plot live weight interactively using plot_ly
+marine_revenue_plotly <- habitat_marine_species_summary %>%
+  plot_ly(
+    x =  ~ ejercicio_fiscal,
+    y =  ~ agg_revenue,
+    type = "scatter",
+    mode = "lines",
+    # set hover text for better readability
+    text =  ~ paste(
+      "Species:",
+      nombre_principal,
+      "<br>Year:",
+      ejercicio_fiscal,
+      "<br>Live Weight:",
+      agg_live_weight
+    ),
+    hoverinfo = "text",
+    # Apply the filter transform
+    transforms = list(
+      list(
+        type = 'filter',
+        target =  ~ nombre_principal,
+        operation = '=',
+        value = unique(habitat_marine_species_summary$nombre_principal)[1] # Initial value.
+      )
+    ),
+    line = list(color = "darkgreen") # changing color
+  ) %>%
+  layout(
+    title = "Aggregate Revenue of Stock Caught in GoC 2006 - 2022",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Revenue (pesos)"),
+    # Update menus is where the interactive filter buttons will be.
+    updatemenus = list(
+      list(
+        type = 'dropdown',
+        active = 0, # Set default to the first value.
+        buttons = lapply(
+          unique(habitat_marine_species_summary$nombre_principal), # For all unique species.
+          function(species) {
+            list(
+              method = "restyle",
+              args = list(
+                "transforms[0].value", # Change the value in the 1st transform filter.
+                species # Change the filter value to the species name.
+              ),
+              label = species # The name of the species on the button.
+            )
+          }
+        )
+      )
+    )
+  )
+
+marine_revenue_plotly
+```
