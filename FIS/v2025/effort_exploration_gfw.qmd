@@ -71,15 +71,26 @@ GitHub repository for Tracking the global footprint of fisheries: https://github
 # Setup 
 
 ```{r}
-library(tidyverse)
+library(raster)
+library(terra)
+library(readr)
 library(magrittr)
+library(mregions2)
+library(mapview)
+library(sf)
+library(tidyverse)
+library(lwgeom)
 library(here)
+library(leaflet.extras2)
+library(fasterize)
 library(tictoc)
 library(kableExtra)
 library(plotly)
 library(viridis)
 library(readr)
 library(purrr)
+library(doParallel)
+
 
 # for Global Fishing Watch API (using package gfwr)
 # install.packages("gfwr", repos = c("https://globalfishingwatch.r-universe.dev", "https://cran.r-project.org"))
@@ -106,11 +117,147 @@ data_dir_version_year <- paste0("d", current_year)
 # raw data directory (on Mazu)
 raw_data_dir <- here::here(dir_M, "OHI_GOC", "_raw_data")
 
+# global_fishing_watch intermediate dir
+int_dir <- here::here(dir_M, "OHI_GOC", "_raw_data", "global_fishing_watch", data_dir_version_year, "int")
+
 # final output dir
 output_dir <- here("FIS", version_year, "output")
+
+# spatial data for GoC
+goc_spatial <- here("spatial")
+
+# this CRS might be better for visualization, explore.
+gulf_crs <- st_crs("+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+```
+
+## GoC Ecoregion shapefile
+
+```{r}
+eco_hr_eqarea <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_eqarea.shp"))
+mapview(eco_hr_eqarea)
+
+# check CRS of ecoregion boundary
+st_crs(eco_hr_eqarea) # NAD83 / Conus Albers, needs to be transformed
+
+# transform to gulf_CRS
+eco_hr_albers <- st_transform(eco_hr_eqarea, crs = "+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+st_crs(eco_hr_albers) # double check it worked well
+mapview(eco_hr_albers) # looks good!
+
+# to make computation faster
+eco_hr_nad83 <- st_transform(eco_hr_albers, 3310)
+st_crs(eco_hr_nad83)
 ```
 
 
+
+
+# Download GFW data
+
+```{r}
+# download yearly fishing effort data for 2012 - 2021
+years <- 2016:2021
+
+# use a loop to make it all easier! parallelize too to make it much faster
+
+# set up parallel processing for faster download
+cl <- 20
+registerDoParallel(cl) # creates a set of copies of R running in parallel and communicating over sockets
+
+download_all_years_gfw <- function(year){
+  
+  raw_gfw <- gfwr::get_raster( # the name does not specify correctly.  There is no function for downloading a raster, it is a data frame.
+    spatial_resolution = 'HIGH',
+    temporal_resolution = 'YEARLY',
+    group_by = 'FLAGANDGEARTYPE',
+    start_date = paste0(year, '-01-01'),
+    end_date = paste0(year, '-12-31'),
+    region = eco_hr_albers,
+    region_source = 'USER_SHAPEFILE',
+    key = key
+  )
+  
+  # convert the tabular data to sf object
+  gfw_sf <- st_as_sf(raw_gfw, coords = c("Lon", "Lat"), crs = 4326) # the raw data (Lon, Lat) from gfwr::get_raster() is probably in WGS84 coordinates which is why it has to be transformed to the gulf_crs separately!  The `get_raster` function is not working as it should.  It does not limit data to the extent of eco_hr_albers, and instead provides the global data.
+  
+  # ensure the crs match
+  gfw_sf_transformed <- st_transform(gfw_sf, gulf_crs)
+  eco_hr_albers <- st_transform(eco_hr_albers, gulf_crs)
+  
+  # crop the effort data to the GoC ecoregion
+  gfw_cropped <- st_intersection(gfw_sf_transformed, eco_hr_albers)
+  
+  return(write_csv(gfw_cropped, here::here(int_dir, paste0("gfw_data_", year, ".csv"))))
+}
+
+# run the function to download
+lapply(years, download_all_years_gfw)
+
+```
+
+
+
+```{r}
+# download yearly data for 2012 - 2021
+raw_gfw_2012 <- gfwr::get_raster( # the name does not specify correctly.  There is no function for downloading a raster, it is a data frame.
+  spatial_resolution = 'HIGH',
+  temporal_resolution = 'YEARLY',
+  group_by = 'FLAGANDGEARTYPE',
+  start_date = '2012-01-01',
+  end_date = '2012-12-31',
+  region = eco_hr_albers,
+  region_source = 'USER_SHAPEFILE',
+  key = key
+)
+
+# convert the tabular data to sf object
+gfw_sf_2012 <- st_as_sf(raw_gfw_2012, coords = c("Lon", "Lat"), crs = 4326) # the raw data (Lon, Lat) from gfwr::get_raster() is probably in WGS84 coordinates which is why it has to be transformed to the gulf_crs separately!  The `get_raster` function is not working as it should.  It does not limit data to the extent of eco_hr_albers, and instead provides the global data.
+
+# ensure the crs match
+gfw_sf_transformed_2012 <- st_transform(gfw_sf_2012, gulf_crs)
+eco_hr_albers <- st_transform(eco_hr_albers, gulf_crs)
+
+# crop the effort data to the GoC ecoregion
+gfw_cropped_2012 <- st_intersection(gfw_sf_transformed_2012, eco_hr_albers)
+
+# plot to ensure they overlay
+ggplot() +
+  geom_sf(data = eco_hr_albers, fill = "lightblue", color = "black") +
+  geom_sf(data = gfw_cropped_2012) +
+  theme_minimal() +
+  labs(title = "Fishing Effort Overlaid on GoC Ecoregion for 2012")
+
+```
+```{r}
+# for 2016
+raw_gfw_2015 <- gfwr::get_raster( # the name does not specify correctly.  There is no function for downloading a raster, it is a data frame.
+  spatial_resolution = 'HIGH',
+  temporal_resolution = 'YEARLY',
+  group_by = 'FLAGANDGEARTYPE',
+  start_date = '2015-01-01',
+  end_date = '2015-12-31',
+  region = eco_hr_albers,
+  region_source = 'USER_SHAPEFILE',
+  key = key
+)
+
+# convert the tabular data to sf object
+gfw_sf_2015 <- st_as_sf(raw_gfw_2015, coords = c("Lon", "Lat"), crs = 4326) # the raw data (Lon, Lat) from gfwr::get_raster() is probably in WGS84 coordinates which is why it has to be transformed to the gulf_crs separately!  The `get_raster` function is not working as it should.  It does not limit data to the extent of eco_hr_albers, and instead provides the global data.
+
+# ensure the crs match
+gfw_sf_transformed_2015 <- st_transform(gfw_sf_2015, gulf_crs)
+eco_hr_albers <- st_transform(eco_hr_albers, gulf_crs)
+
+# crop the effort data to the GoC ecoregion
+gfw_cropped_2015 <- st_intersection(gfw_sf_transformed_2015, eco_hr_albers)
+
+# plot to ensure they overlay
+ggplot() +
+  geom_sf(data = eco_hr_albers, fill = "lightblue", color = "black") +
+  geom_sf(data = gfw_cropped_2015) +
+  theme_minimal() +
+  labs(title = "Fishing Effort Overlaid on GoC Ecoregion for 2015")
+```
 
 
 
