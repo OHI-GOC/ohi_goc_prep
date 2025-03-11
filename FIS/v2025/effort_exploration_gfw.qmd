@@ -152,6 +152,9 @@ raw_data_dir <- here::here(dir_M, "OHI_GOC", "_raw_data")
 # global_fishing_watch intermediate dir
 int_dir <- here::here(dir_M, "OHI_GOC", "_raw_data", "global_fishing_watch", data_dir_version_year, "int")
 
+# FIS intermediate dir
+fis_int_dir <-  here::here(dir_M, "OHI_GOC", "goal_prep", "fis", "v2025", "int")
+
 # final output dir
 output_dir <- here("FIS", version_year, "output")
 
@@ -304,6 +307,8 @@ all_filepaths <- unlist(lapply(years, all_years_list_func)) # length of 3288 is 
 toc() # v2025: 0.378 sec elapsed
 ```
 
+## Yearly files from daily files
+
 Similar code, but taking the next step to combine all daily files by year: 
 
 ```{r}
@@ -335,84 +340,130 @@ combine_yearly_data <- function(year) {
   # save the combined yearly data to mazu as a single .csv file
   fwrite(yearly_data, sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_fleet_data/yearly_combined_%d.csv", year))
   
-  return(yearly_data) # Optional: Return the combined data for further use
+  return(yearly_data)
 }
 
 # use lapply to apply the function to all years.  May take a while, especially after 2016 since there are more AIS tracked vessels
 lapply(years, combine_yearly_data)
 
+# check_yearly_test_2018 <- read_csv("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_fleet_data/yearly_combined_2018.csv")
 ```
-
+## Summarize by cell and gear type
 
 ```{r}
-# function for processing files within `all_filepaths`
-process_fishing_data <- function(filepath) {
-  
-  # take out only the file name from the path
-  saveName <- basename(filepath)
-  
-  # read in the raw file
-  raw_data <- fread(filepath) # fread() is faster than read_csv()
-  
-  # summarize fishing hours by latitude, longitude, and gear type
-  summarized_data <- raw_data %>%
-    group_by(lat = cell_ll_lat, lon = cell_ll_lon, gear = geartype) %>%
-    summarize(total_fishing_hours = sum(fishing_hours), .groups = "drop") %>%
-    as.data.table() # convert back to data.table
-  
-  # save summarized data to mazu
-  fwrite(summarized_data,
-         sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/summary_%s", saveName)) # fwrite is optimized for large datasets, handles millions of rows efficiently... uses package `data.table` vs `readr` for write_csv. Also it automatically writes as a .csv with a "," delim
-  
-}
+# summarizing files within `all_filepaths`
+yearly_combined_filepath <- here(fis_int_dir, "yearly_fleet_data")
 
-# apply the function to all files in parallel
-cl <- makeCluster(20) 
-registerDoParallel(cl)
+# list yearly files
+all_years_files <- list.files(path = yearly_combined_filepath, pattern = "*.csv", full.names = TRUE)
 
-# process all daily files in parallel
-foreach(filepath = all_filepaths, .packages = c("data.table", "dplyr")) %dopar% {
-  process_fishing_data(filepath)
-}
+# read in the raw file
+tic()
+all_years_data <- rbindlist(lapply(all_years_files, fread), fill = TRUE) # fread() is faster than read_csv()
+toc()
+# v2025: 689.004 sec elapsed
 
-# stop cluster after processing is finished
-stopCluster(cl)
+# summarize fishing hours by latitude, longitude, and gear type
+tic()
+summarized_data <- all_years_data %>%
+  group_by(lat = cell_ll_lat, lon = cell_ll_lon, gear = geartype) %>%
+  summarize(total_fishing_hours = sum(fishing_hours), .groups = "drop") %>%
+  as.data.table() # convert back to data.table
+toc()
+
+# save summarized data to mazu
+fwrite(summarized_data,
+       sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/summary_%s", saveName)) # fwrite is optimized for large datasets, handles millions of rows efficiently... uses package `data.table` vs `readr` for write_csv. Also it automatically writes as a .csv with a "," delim
+
 ```
-
-For summarizing by year: 
 ```{r}
-# function for processing files within `all_filepaths`
-process_fishing_data <- function(filepath) {
+# process and summarize fishing data for a single year
+process_yearly_fishing_data <- function(year, yearly_combined_filepath, output_dir) {
   
-  # get all file paths for each year
-  filepaths <- all_years_list_func(year)
+  # list all file paths for the given year
+  filepaths <- list.files(path = yearly_combined_filepath, pattern = paste0(year, ".*\\.csv$"), full.names = TRUE)
   
-  # read and combine all files for a year
+  #rRead and combine all files for the year
   yearly_data <- rbindlist(lapply(filepaths, fread), fill = TRUE)
   
   # summarize fishing hours by latitude, longitude, and gear type
   summarized_data <- yearly_data %>%
     group_by(lat = cell_ll_lat, lon = cell_ll_lon, gear = geartype) %>%
-    summarize(total_fishing_hours = sum(fishing_hours), .groups = "drop") %>%
-    as.data.table() # convert back to data.table
+    summarize(total_fishing_hours = sum(fishing_hours, na.rm = TRUE), .groups = "drop") %>%
+    as.data.table()
   
-  # save summarized data to mazu
-  fwrite(summarized_data,
-         sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summaries/yearly_summary_%d", year)) # fwrite is optimized for large datasets, handles millions of rows efficiently... uses package `data.table` vs `readr` for write_csv. Also its default writes the file as a .csv with a "," delim
+  # output file path
+  output_file <- file.path(output_dir, sprintf("yearly_summary_%d.csv", year))
   
+  # save summarized data as a csv
+  fwrite(summarized_data, output_file)
+  
+  message(sprintf("Year %d processed and saved to %s", year, output_file))
 }
 
-# apply the function to all files in parallel
-cl <- makeCluster(20) 
-registerDoParallel(cl)
-
-# process all daily files in parallel
-foreach(filepath = all_filepaths, .packages = c("data.table", "dplyr")) %dopar% {
-  process_fishing_data(filepath)
+# process all years in parallel
+process_all_years <- function(years, yearly_combined_filepath, output_dir) {
+ 
+  cl <- makeCluster(20)
+  registerDoParallel(cl)
+  
+  # process each year in parallel
+  foreach(year = years, .packages = c("data.table", "dplyr")) %dopar% {
+    process_yearly_fishing_data(year, yearly_combined_filepath, output_dir)
+  }
+  
+  # stop the cluster when done
+  stopCluster(cl)
 }
 
-# stop cluster after processing is finished
-stopCluster(cl)
+
+yearly_combined_filepath <- here(fis_int_dir, "yearly_fleet_data")
+output_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summaries"
+
+# define the range of years to process
+years_to_process <- seq(2000, 2020)
+
+# process all years in parallel
+process_all_years(years_to_process, yearly_combined_filepath, output_dir)
+```
+
+
+
+
+For summarizing by year: 
+```{r}
+# # function for processing files within `all_filepaths`
+# process_fishing_data <- function(filepath) {
+#   
+#   # get all file paths for each year
+#   filepaths <- all_years_list_func(year)
+#   
+#   # read and combine all files for a year
+#   yearly_data <- rbindlist(lapply(filepaths, fread), fill = TRUE)
+#   
+#   # summarize fishing hours by latitude, longitude, and gear type
+#   summarized_data <- yearly_data %>%
+#     group_by(lat = cell_ll_lat, lon = cell_ll_lon, gear = geartype) %>%
+#     summarize(total_fishing_hours = sum(fishing_hours), .groups = "drop") %>%
+#     as.data.table() # convert back to data.table
+#   
+#   # save summarized data to mazu
+#   fwrite(summarized_data,
+#          sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summaries/yearly_summary_%d", year)) # fwrite is optimized for large datasets, handles millions of rows efficiently... uses package `data.table` vs `readr` for write_csv. Also its default writes the file as a .csv with a "," delim
+#   
+# }
+# 
+# # apply the function to all files in parallel
+# cl <- makeCluster(20) 
+# registerDoParallel(cl)
+# 
+# # process all daily files in parallel
+# foreach(filepath = all_filepaths, .packages = c("data.table", "dplyr")) %dopar% {
+#   process_fishing_data(filepath)
+# }
+# 
+# # stop cluster after processing is finished
+# stopCluster(cl)
 ```
 
 
@@ -426,7 +477,7 @@ registerDoParallel(cl) # creates a set of copies of R running in parallel and co
 # read in all .csv files at once into a single data.table
 library(data.table)
 tic()
-all_data <- foreach(filepath = all_filepaths, .combine = list, .packages = "data.table") %dopar% {
+all_data <- foreach(filepath = yearly_combined, .combine = list, .packages = "data.table") %dopar% {
   fread(filepath) # read each .csv file into a data table
 }
 toc() # v2025: 537.057 sec elapsed
