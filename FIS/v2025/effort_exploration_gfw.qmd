@@ -471,6 +471,101 @@ for (year in years) {
 }
 ```
 
+## Limit to GoC Ecoregion
+
+```{r}
+# read in ecoregion shapefiles in 
+eco_hr_latlon <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_latlon.shp"))
+# mapview(eco_hr_latlon)
+
+eco_hr_eqarea <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_eqarea.shp"))
+mapview(eco_hr_eqarea)
+
+# check CRS of ecoregion boundary
+st_crs(eco_hr_eqarea) # NAD83 / Conus Albers, needs to be transformed
+
+# transform to gulf_CRS
+eco_hr_albers <- st_transform(eco_hr_eqarea, crs = "+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+st_crs(eco_hr_albers) # double check it worked well
+mapview(eco_hr_albers) # looks good!
+```
+
+Convert yearly cell lat/longs into spatial geometry.
+
+```{r}
+# cl <- makeCluster(10) # CANNOT parallelize!!! Spatial objects (sf objects specifically) can be problematic in parallel loops. The sf package relies on external libraries (like GEOS, GDAL, and PROJ), and these libraries might not be thread-safe, especially if the versions you are using are not built with thread-safety in mind. When multiple cores try to access or modify these objects simultaneously, it can lead to errors, crashes, or unpredictable behavior......... I experienced this first hand.  Took 2 hours.  I should have figured that it would not work if my prints did not start right away....
+# registerDoParallel(cl)
+
+
+years <- 2014:2019
+
+# double check the crs
+eco_hr_albers <- st_transform(eco_hr_albers, gulf_crs)
+
+# files within the yearly_fleet_data
+yearly_summary_dir <- here(fis_int_dir, "yearly_summary_cell_gear")
+yearly_summary_sf_dir <- here(fis_int_dir, "yearly_summary_cell_gear_sf")
+
+st_as_sf_yearly_function <- function(year){
+  
+  print(paste("Starting year", year))
+  
+  # read in the yearly file for each year
+  yearly_gfw_st <- read_csv(here::here(yearly_summary_dir, sprintf("yearly_summary_%s.csv", year)))
+  print(paste("Read yearly data for", year))
+  
+  
+  # convert the tabular data to sf object
+  yearly_gfw_sf <- st_as_sf(yearly_gfw_st, coords = c("lon", "lat"), crs = 4326) # the raw data (Lon, Lat) from gfwr::get_raster() is probably in WGS84 coordinates which is why it has to be transformed to the gulf_crs separately!  The `get_raster` function is not working as it should.  It does not limit data to the extent of eco_hr_albers, and instead provides the global data.
+  print(paste("Converted to sf object for", year))
+  
+  # ensure the crs match
+  gfw_sf_transformed <- st_transform(yearly_gfw_sf, gulf_crs) # defined in the setup chunk
+  print(paste("Transformed CRS for", year))
+  
+  # crop the effort data to the GoC ecoregion
+  yearly_gfw_cropped <- st_intersection(gfw_sf_transformed, eco_hr_albers)
+  print(paste("Cropped for", year))
+  
+  # save in a spatial format using st_write
+  st_write(yearly_gfw_cropped, here::here(yearly_summary_sf_dir, sprintf("yearly_summary_sf_%s.shp", year)))
+  print(paste("Wrote shapefile for", year))
+  
+  return(NULL) # do not need anything to return...
+  
+}
+
+# stopCluster(cl)
+
+# run the function to download
+lapply(years, st_as_sf_yearly_function)
+
+# inspect
+# gfw_cropped_2019 <- read_csv(here::here(fis_int_dir, "yearly_summary_cell_gear_sf", "yearly_summary_sf_2019.csv"))
+# gfw_cropped_2019_sf <- st_as_sf(gfw_cropped_2019, coords = geometry)
+```
+
+```{r}
+# read in the yearly file for each year
+yearly_gfw_st <- read_csv(here::here(yearly_summary_dir, "yearly_summary_2019.csv"))
+
+# convert the tabular data to sf object
+yearly_gfw_sf <- st_as_sf(yearly_gfw_st, coords = c("lon", "lat"), crs = 4326) # the raw data (Lon, Lat) from gfwr::get_raster() is probably in WGS84 coordinates which is why it has to be transformed to the gulf_crs separately!  The `get_raster` function is not working as it should.  It does not limit data to the extent of eco_hr_albers, and instead provides the global data.
+
+# ensure the crs match
+gfw_sf_transformed <- st_transform(yearly_gfw_sf, gulf_crs) # defined in the setup chunk
+eco_hr_albers <- st_transform(eco_hr_albers, gulf_crs)
+
+# crop the effort data to the GoC ecoregion
+yearly_gfw_cropped <- st_intersection(gfw_sf_transformed, eco_hr_albers)
+
+st_write(yearly_gfw_cropped, here::here(fis_int_dir, "yearly_summary_cell_gear_sf", "yearly_summary_sf_2019.tif"))
+```
+
+
+
+
+## Food Systems Code
 
 
 Now combine the daily csv files.
@@ -489,8 +584,7 @@ write_csv(fish_effort_annual, "/home/shares/food-systems/Food_footprint/all_food
 
 ```
 
-
-## Determine proportion of fisheries with unidentified geartypes
+### Determine proportion of fisheries with unidentified geartypes
 ```{r}
 
 fishing_effort <- read_csv("/home/shares/food-systems/Food_footprint/all_food_systems/dataprep/fisheries/marine/disturbance/global_fishing_watch/FishingWatch_annual_effort_2017.csv")
