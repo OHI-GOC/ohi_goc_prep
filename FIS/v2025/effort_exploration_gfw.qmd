@@ -122,6 +122,9 @@ library(purrr)
 library(doParallel)
 library(httr2) # to handle timeouts (error HTTP 524 NA)
 library(data.table)
+library(leaflet)
+library(leaflet.extras)
+library(RColorBrewer)
 
 
 # for Global Fishing Watch API (using package gfwr)
@@ -546,21 +549,22 @@ lapply(years, st_as_sf_yearly_function)
 ```
 
 ```{r}
-# read in the yearly file for each year
-yearly_gfw_st <- read_csv(here::here(yearly_summary_dir, "yearly_summary_2019.csv"))
-
-# convert the tabular data to sf object
-yearly_gfw_sf <- st_as_sf(yearly_gfw_st, coords = c("lon", "lat"), crs = 4326) # the raw data (Lon, Lat) from gfwr::get_raster() is probably in WGS84 coordinates which is why it has to be transformed to the gulf_crs separately!  The `get_raster` function is not working as it should.  It does not limit data to the extent of eco_hr_albers, and instead provides the global data.
-
-# ensure the crs match
-gfw_sf_transformed <- st_transform(yearly_gfw_sf, gulf_crs) # defined in the setup chunk
-eco_hr_albers <- st_transform(eco_hr_albers, gulf_crs)
-
-# crop the effort data to the GoC ecoregion
-yearly_gfw_cropped <- st_intersection(gfw_sf_transformed, eco_hr_albers)
-
-st_write(yearly_gfw_cropped, here::here(fis_int_dir, "yearly_summary_cell_gear_sf", "yearly_summary_sf_2019.tif"))
+# # read in the yearly file for each year
+# yearly_gfw_st <- read_csv(here::here(yearly_summary_dir, "yearly_summary_2019.csv"))
+# 
+# # convert the tabular data to sf object
+# yearly_gfw_sf <- st_as_sf(yearly_gfw_st, coords = c("lon", "lat"), crs = 4326) # the raw data (Lon, Lat) from gfwr::get_raster() is probably in WGS84 coordinates which is why it has to be transformed to the gulf_crs separately!  The `get_raster` function is not working as it should.  It does not limit data to the extent of eco_hr_albers, and instead provides the global data.
+# 
+# # ensure the crs match
+# gfw_sf_transformed <- st_transform(yearly_gfw_sf, gulf_crs) # defined in the setup chunk
+# eco_hr_albers <- st_transform(eco_hr_albers, gulf_crs)
+# 
+# # crop the effort data to the GoC ecoregion
+# yearly_gfw_cropped <- st_intersection(gfw_sf_transformed, eco_hr_albers)
+# 
+# st_write(yearly_gfw_cropped, here::here(fis_int_dir, "yearly_summary_cell_gear_sf", "yearly_summary_sf_2019.tif"))
 ```
+
 
 
 
@@ -684,6 +688,99 @@ writeRaster(destructive_map_raster, "/home/shares/food-systems/Food_footprint/al
 
 
 ```
+
+
+### Maps of fishing effort by gear
+
+```{r}
+fishing_effort <- st_read("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_cell_gear_sf/yearly_summary_sf_2020.shp")
+
+# explore the .shp to ensure we understand the attributes before plotting
+colnames(fishing_effort)
+str(fishing_effort)
+fishing_effort[1:5,]
+mapview(fishing_effort)
+
+# DID NOT LOOK GOOD...
+# ggplot() +
+#   # borders("world", fill = "gray95", color = "gray70") +
+#   # plot points with size based on count
+#   geom_sf(data = fishing_effort_count, 
+#           aes(size = point_count, color = point_count),
+#           alpha = 0.7) +
+#   # Use a better color scale
+#   scale_color_viridis_c(option = "plasma", name = "Fishing\nEffort") +
+#   scale_size_continuous(name = "Point\nDensity", range = c(1, 8)) +
+#   # Improve theme elements
+#   theme_minimal() +
+#   labs(title = "Fishing Effort Distribution (2020)",
+#        subtitle = "Circle size indicates concentration of fishing activity") +
+#   theme(
+#     plot.title = element_text(face = "bold"),
+#     legend.position = "right"
+#   )
+
+# Assuming fishing_effort is already loaded and is in a projected coordinate system
+# First, check the current coordinate system
+st_crs(fishing_effort)
+
+# Transform to WGS84 (EPSG:4326) which is what leaflet expects
+fishing_effort_wgs84 <- st_transform(fishing_effort, 4326)
+
+# Now create your count summary with the transformed data
+colnames(fishing_effort_wgs84)
+
+# Then create your summary with the effort variable
+fishing_effort_summary <- fishing_effort_wgs84 %>%
+  group_by(geometry, gear) %>% 
+  summarize(
+    point_count = n(),
+    total_effort = sum(ttl_fs_)  # Replace 'effort' with your actual column name
+  )
+
+# Create a color palette for the different gear types
+# Get unique gear types
+gear_types <- unique(fishing_effort_summary$gear)
+# Create a qualitative palette with enough colors
+gear_pal <- colorFactor(
+  palette = colorRampPalette(brewer.pal(8, "Set1"))(length(gear_types)),
+  domain = gear_types
+)
+
+# Create interactive map
+leaflet(fishing_effort_summary) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    radius = ~sqrt(total_effort) * 3,  # Size based on fishing effort
+    color = ~gear_pal(gear),           # Color based on gear type
+    fillOpacity = 0.7,
+    stroke = TRUE,
+    weight = 1,
+    popup = ~paste(
+      "Gear Type: ", gear, "<br>",
+      "Fishing Effort: ", round(total_effort, 2), "<br>",
+      "Points: ", point_count
+    )
+  ) %>%
+  # Add legend for gear types
+  addLegend(
+    position = "bottomright",
+    pal = gear_pal,
+    values = ~gear,
+    title = "Gear Type"
+  ) %>%
+  # Add legend for effort (optional, makes a second legend)
+  addLegend(
+    position = "bottomleft",
+    colors = viridisLite::viridis(5),
+    labels = quantile(fishing_effort_summary$total_effort, probs = seq(0, 1, 0.25)) %>% round(1), # shows fishing effort values at 0% (minimum value), 25% (first quartile), 50% (median), 75% (third quartile), 100% (maximum value).  shows the data distribution... most are 0 fishing effort.  That is fishy to me (pun intended).
+    title = "Fishing Effort<br>(Circle Size)",
+    opacity = 0.7
+  ) %>%
+  # Set the view to focus on the Gulf of California
+  setView(lng = -112, lat = 28, zoom = 6)
+```
+
 
 
 
