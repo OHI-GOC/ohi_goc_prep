@@ -9,9 +9,9 @@ library(bslib)
 ## for hosting the app
 # install.packages('rsconnect')
 # library(rsconnect)
-# rsconnect::setAccountInfo(name='qcz3wo-sophia-lecuona',
-#                           token='303AD3AC5CCE039111B28E08270C58A4',
-#                           secret='YDs6QWccnNavLMEmuE6w1aL7wEsB41MiKP3Bgwg8')
+# rsconnect::setAccountInfo(name='sophiamanos713',
+#                           token='903C42E9825CCC51A5ED64DBCAFB8117',
+#                           secret='I6s1bOSQgNOmtvmixHPCClehLi+romHnx0hMSIYi')
 # shiny_dir <- here::here("FIS","v2025","fishing_effort_yearly_shiny")
 # rsconnect::deployApp(here::here(shiny_dir))
 
@@ -42,16 +42,19 @@ ui <- fluidPage(
   )
 )
 
-# Server logic
+# server portion
 server <- function(input, output, session) {
   
-  # Get all unique gear types across all years at app initialization
+  # unique gear types across all years
   all_gear_types <- reactive({
-    # This will collect all unique gear types across all years
+    
+    # collect all unique gear types across all years
     all_types <- c()
     
+    #### added to catch errors in reading the files
     for (year in available_years) {
-      # Try to load data for each year
+      
+      # load data for each year
       tryCatch({
         file_path <- sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_cell_gear_sf/yearly_summary_sf_%d.shp", year)
         
@@ -65,18 +68,17 @@ server <- function(input, output, session) {
           all_types <- c(all_types, unique(year_data$gear))
         }
       }, error = function(e) {
-        # Just continue if there's an error
+        # continue even if there's an error
       })
     }
     
     return(unique(all_types))
   })
   
-  # Create a consistent color palette based on all gear types
+  # consistent color palette based on all gear types
   gear_pal <- reactive({
     gear_types <- all_gear_types()
     
-    # Create a fixed color palette for all gear types
     colorFactor(
       palette = c("#009E73", "#E69F00", "#56B4E9", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#999999"), # colorblind friendly
       domain = gear_types
@@ -87,9 +89,10 @@ server <- function(input, output, session) {
     )
   })
   
-  # Test direct reading of 2020 data on startup - use observeEvent instead of observe with once=TRUE
+  # testing the direct reading of 2020 data on startup - use observeEvent instead of observe with once=TRUE (done because of errors reading in files previously)
   observeEvent(1, {
-    # This will run once when the app starts
+    
+    # this will run once when the app starts
     test_year <- 2020
     test_path <- sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_cell_gear_sf/yearly_summary_sf_%d.shp", test_year)
     
@@ -105,7 +108,7 @@ server <- function(input, output, session) {
     } else {
       message("File does not exist: ", test_path)
       
-      # Try the alternate path from your original code
+      # trying the alternate path from the OG code
       alt_path <- sprintf("yearly_summary_sf_%d.shp", test_year)
       if (file.exists(alt_path)) {
         message("File exists at alternate path: ", alt_path)
@@ -121,13 +124,13 @@ server <- function(input, output, session) {
     }
   }, once = TRUE)
   
-  # Function to load data for a specific year - greatly simplified
+  # load data for each year
   load_yearly_data <- function(year) {
     tryCatch({
-      # Create the file path using the provided year parameter
+      
       file_path <- sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_cell_gear_sf/yearly_summary_sf_%d.shp", year)
       
-      # Check if file exists at primary path
+      # check again that the file exists...
       if (file.exists(file_path)) {
         message(paste("Attempting to load:", file_path))
       } else {
@@ -140,13 +143,13 @@ server <- function(input, output, session) {
         message(paste("Attempting to load from alternate path:", file_path))
       }
       
-      # Simply try to read the shapefile directly
+      # read the shapefile directly
       fishing_data <- st_read(file_path, quiet = TRUE)
       
-      # Display columns found
+      # show columns found to ensure effort is ttl_fs_ for all years
       message("Columns found: ", paste(colnames(fishing_data), collapse = ", "))
       
-      # Basic error checking on columns
+      # error checking on columns
       if (!"ttl_fs_" %in% colnames(fishing_data)) {
         message("Missing required column 'ttl_fs_'")
         return(NULL)
@@ -157,10 +160,10 @@ server <- function(input, output, session) {
         return(NULL)
       }
       
-      # Transform to WGS84 - simplify this step
+      # transform to WGS84 for leaflet
       fishing_data <- st_transform(fishing_data, 4326)
       
-      # Create summary
+      # summarize by gear and geometric lat/long
       fishing_summary <- fishing_data %>%
         group_by(geometry, gear) %>% 
         summarize(
@@ -178,26 +181,28 @@ server <- function(input, output, session) {
     })
   }
   
-  # Create base map only once
+  # make the base map
   output$map <- renderLeaflet({
-    # Start with a base map
+   
+     # start with a base map
     leaflet() %>%
       addTiles() %>%
-      # Set the view to focus on the Gulf of California
+      # set the view to the GoC
       setView(lng = -110, lat = 27, zoom = 5.5)
+    
   })
   
-  # Update map when year changes
+  # UPDATE the map when year changes
   observe({
-    # Get the selected year from the input slider
+    
+    # obtain the selected year from the input slider
     selected_year <- input$selected_year
     
-    # Load data for selected year
+    # load the data for "selected year"
     fishing_data <- load_yearly_data(selected_year)
     
-    # Check if data loaded successfully
+    # double check if data loaded successfully...
     if (is.null(fishing_data) || nrow(fishing_data) == 0) {
-      # Show message on map if no data
       leafletProxy("map") %>%
         clearMarkers() %>%
         clearControls() %>%
@@ -208,10 +213,10 @@ server <- function(input, output, session) {
       return()
     }
     
-    # consistent color palette for all years and gears
+    # using that consistent color palette for all years and gears
     palette <- gear_pal()
     
-    # circle size scaling
+    ##### ------- circle size scaling ---------
     max_effort <- max(fishing_data$total_effort, na.rm = TRUE)
     min_effort <- min(fishing_data$total_effort, na.rm = TRUE)
     if (is.na(max_effort) || max_effort == 0) max_effort <- 1
@@ -219,12 +224,12 @@ server <- function(input, output, session) {
     min_radius <- 2
     max_radius <- 15
     
-    # Calculate representative values for the legend:
+    # calculate representative values for the legend:
     high_value <- max_effort
     medium_value <- (max_effort + min_effort) / 2
     low_value <- min_effort
     
-    # Calculate corresponding sizes for legend circles:
+    # calculate corresponding sizes for legend circles:
     high_radius <- max_radius
     medium_radius <- min_radius + sqrt(medium_value/max_effort) * (max_radius - min_radius)
     low_radius <- min_radius
@@ -234,7 +239,7 @@ server <- function(input, output, session) {
       clearMarkers() %>%
       clearControls() %>%
       addCircleMarkers(
-        radius = ~pmin(max_radius, min_radius + sqrt(total_effort/max_effort) * (max_radius - min_radius)),
+        radius = ~pmin(max_radius, min_radius + sqrt(total_effort/max_effort) * (max_radius - min_radius)), # done to ensure they accurately represent the amount of points with the size.  May need to reevaluate this
         color = ~palette(gear),
         fillOpacity = 0.7,
         stroke = TRUE,
@@ -252,7 +257,8 @@ server <- function(input, output, session) {
         title = paste("Gear Type"),
         opacity = 0.7
       ) %>%
-      # Add custom HTML circle size legend
+      
+      # -------- custom HTML circle size legend (not perfect, low is still a bit off center but this is the best I could get it) --------
       addControl(
         html = HTML(
           paste0(
@@ -295,5 +301,5 @@ server <- function(input, output, session) {
   })
 }
 
-# Run the app
+# run the app!
 shinyApp(ui, server)
