@@ -1,19 +1,12 @@
 library(shiny)
+library(shinyWidgets)
+library(bslib)
+library(dplyr)
 library(leaflet)
 library(sf)
-library(dplyr)
 library(viridisLite)
 library(RColorBrewer)
 library(bslib)
-
-## for hosting the app
-# install.packages('rsconnect')
-# library(rsconnect)
-# rsconnect::setAccountInfo(name='sophiamanos713',
-#                           token='903C42E9825CCC51A5ED64DBCAFB8117',
-#                           secret='I6s1bOSQgNOmtvmixHPCClehLi+romHnx0hMSIYi')
-# shiny_dir <- here::here("FIS","v2025","fishing_effort_yearly_shiny")
-# rsconnect::deployApp(here::here(shiny_dir))
 
 # define the years for the sliders
 available_years <- 2012:2020
@@ -50,26 +43,18 @@ server <- function(input, output, session) {
     
     # collect all unique gear types across all years
     all_types <- c()
+  
     
     #### added to catch errors in reading the files
     for (year in available_years) {
       
       # load data for each year
-      tryCatch({
-        file_path <- sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_cell_gear_sf/yearly_summary_sf_%d.shp", year)
-        
-        if (!file.exists(file_path)) {
-          file_path <- sprintf("yearly_summary_sf_%d.shp", year)
-          if (!file.exists(file_path)) next
-        }
-        
-        year_data <- st_read(file_path, quiet = TRUE)
-        if ("gear" %in% colnames(year_data)) {
-          all_types <- c(all_types, unique(year_data$gear))
-        }
-      }, error = function(e) {
-        # continue even if there's an error
-      })
+      file_path <- file.path("www", "data", sprintf("yearly_summary_sf_%d.shp", year))
+      
+      year_data <- st_read(file_path)
+      
+      all_types <- c(all_types, unique(year_data$gear))
+      
     }
     
     return(unique(all_types))
@@ -77,6 +62,7 @@ server <- function(input, output, session) {
   
   # consistent color palette based on all gear types
   gear_pal <- reactive({
+    
     gear_types <- all_gear_types()
     
     colorFactor(
@@ -89,76 +75,76 @@ server <- function(input, output, session) {
     )
   })
   
-  # testing the direct reading of 2020 data on startup - use observeEvent instead of observe with once=TRUE (done because of errors reading in files previously)
-  observeEvent(1, {
-    
-    # this will run once when the app starts
-    test_year <- 2020
-    test_path <- sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_cell_gear_sf/yearly_summary_sf_%d.shp", test_year)
-    
-    message("Testing direct read of 2020 data on startup")
-    if (file.exists(test_path)) {
-      message("File exists: ", test_path)
-      tryCatch({
-        test_data <- st_read(test_path, quiet = TRUE)
-        message("Successfully read 2020 data with columns: ", paste(colnames(test_data), collapse = ", "))
-      }, error = function(e) {
-        message("Error reading 2020 data: ", e$message)
-      })
-    } else {
-      message("File does not exist: ", test_path)
-      
-      # trying the alternate path from the OG code
-      alt_path <- sprintf("yearly_summary_sf_%d.shp", test_year)
-      if (file.exists(alt_path)) {
-        message("File exists at alternate path: ", alt_path)
-        tryCatch({
-          test_data <- st_read(alt_path, quiet = TRUE)
-          message("Successfully read 2020 data from alternate path with columns: ", paste(colnames(test_data), collapse = ", "))
-        }, error = function(e) {
-          message("Error reading 2020 data from alternate path: ", e$message)
-        })
-      } else {
-        message("File does not exist at alternate path either: ", alt_path)
-      }
-    }
-  }, once = TRUE)
+  # # testing the direct reading of 2020 data on startup - use observeEvent instead of observe with once=TRUE (done because of errors reading in files previously)
+  # observeEvent(1, {
+  #   
+  #   # this will run once when the app starts
+  #   test_year <- 2020
+  #   test_path <- sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_cell_gear_sf/yearly_summary_sf_%d.shp", test_year)
+  #   
+  #   message("Testing direct read of 2020 data on startup")
+  #   if (file.exists(test_path)) {
+  #     message("File exists: ", test_path)
+  #     tryCatch({
+  #       test_data <- st_read(test_path, quiet = TRUE)
+  #       message("Successfully read 2020 data with columns: ", paste(colnames(test_data), collapse = ", "))
+  #     }, error = function(e) {
+  #       message("Error reading 2020 data: ", e$message)
+  #     })
+  #   } else {
+  #     message("File does not exist: ", test_path)
+  #     
+  #     # trying the alternate path from the OG code
+  #     alt_path <- sprintf("yearly_summary_sf_%d.shp", test_year)
+  #     if (file.exists(alt_path)) {
+  #       message("File exists at alternate path: ", alt_path)
+  #       tryCatch({
+  #         test_data <- st_read(alt_path, quiet = TRUE)
+  #         message("Successfully read 2020 data from alternate path with columns: ", paste(colnames(test_data), collapse = ", "))
+  #       }, error = function(e) {
+  #         message("Error reading 2020 data from alternate path: ", e$message)
+  #       })
+  #     } else {
+  #       message("File does not exist at alternate path either: ", alt_path)
+  #     }
+  #   }
+  # }, once = TRUE)
   
   # load data for each year
   load_yearly_data <- function(year) {
-    tryCatch({
+    # tryCatch({
       
-      file_path <- sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_cell_gear_sf/yearly_summary_sf_%d.shp", year)
+    file_path <- file.path("www","data", sprintf("yearly_summary_sf_%d.shp", year))
       
-      # check again that the file exists...
-      if (file.exists(file_path)) {
-        message(paste("Attempting to load:", file_path))
-      } else {
-        # Try alternate path
-        file_path <- sprintf("yearly_summary_sf_%d.shp", year)
-        if (!file.exists(file_path)) {
-          message(paste("File not found for year", year))
-          return(NULL)
-        }
-        message(paste("Attempting to load from alternate path:", file_path))
-      }
+      # # check again that the file exists...
+      # if (file.exists(file_path)) {
+      #   message(paste("Attempting to load:", file_path))
+      # } else {
+      #   # Try alternate path
+      #   file_path <- sprintf("yearly_summary_sf_%d.shp", year)
+      #   if (!file.exists(file_path)) {
+      #     message(paste("File not found for year", year))
+      #     return(NULL)
+      #   }
+      #   message(paste("Attempting to load from alternate path:", file_path))
+      # }
       
       # read the shapefile directly
-      fishing_data <- st_read(file_path, quiet = TRUE)
+      fishing_data <- st_read(file_path)
       
       # show columns found to ensure effort is ttl_fs_ for all years
       message("Columns found: ", paste(colnames(fishing_data), collapse = ", "))
       
-      # error checking on columns
-      if (!"ttl_fs_" %in% colnames(fishing_data)) {
-        message("Missing required column 'ttl_fs_'")
-        return(NULL)
-      }
-      
-      if (!"gear" %in% colnames(fishing_data)) {
-        message("Missing required column 'gear'")
-        return(NULL)
-      }
+      # # error checking on columns
+      # if (!"ttl_fs_" %in% colnames(fishing_data)) {
+      #   message("Missing required column 'ttl_fs_'")
+      #   return(NULL)
+      # }
+      # 
+      # if (!"gear" %in% colnames(fishing_data)) {
+      #   message("Missing required column 'gear'")
+      #   return(NULL)
+      # }
       
       # transform to WGS84 for leaflet
       fishing_data <- st_transform(fishing_data, 4326)
@@ -172,13 +158,13 @@ server <- function(input, output, session) {
           .groups = "drop"
         )
       
-      message(paste("Successfully loaded data for year", year, "with", nrow(fishing_summary), "records"))
+      # message(paste("Successfully loaded data for year", year, "with", nrow(fishing_summary), "records"))
       return(fishing_summary)
       
-    }, error = function(e) {
-      message(paste("Error loading data for year", year, ":", e$message))
-      return(NULL)
-    })
+    # }, error = function(e) {
+    #   message(paste("Error loading data for year", year, ":", e$message))
+    #   return(NULL)
+    # })
   }
   
   # make the base map
@@ -202,16 +188,16 @@ server <- function(input, output, session) {
     fishing_data <- load_yearly_data(selected_year)
     
     # double check if data loaded successfully...
-    if (is.null(fishing_data) || nrow(fishing_data) == 0) {
-      leafletProxy("map") %>%
-        clearMarkers() %>%
-        clearControls() %>%
-        addControl(
-          html = paste("<strong>No data available for year", selected_year, "</strong><br>Please check console for debug info."),
-          position = "topright"
-        )
-      return()
-    }
+    # if (is.null(fishing_data) || nrow(fishing_data) == 0) {
+    #   leafletProxy("map") %>%
+    #     clearMarkers() %>%
+    #     clearControls() %>%
+    #     addControl(
+    #       html = paste("<strong>No data available for year", selected_year, "</strong><br>Please check console for debug info."),
+    #       position = "topright"
+    #     )
+    #   return()
+    # }
     
     # using that consistent color palette for all years and gears
     palette <- gear_pal()
@@ -246,7 +232,7 @@ server <- function(input, output, session) {
         weight = 1,
         popup = ~paste(
           "Gear Type: ", gear, "<br>",
-          "Fishing Effort: ", round(total_effort, 2), "<br>",
+          "Fishing Effort: ", round(total_effort, 3), "<br>",
           "Points: ", point_count
         )
       ) %>%
