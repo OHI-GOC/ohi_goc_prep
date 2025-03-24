@@ -18,7 +18,7 @@ ui <- fluidPage(
   
   fluidRow(
     column(12, 
-           leafletOutput("map", height = "700px"),
+           leafletOutput("map", height = "600px"),
            div(
              style = "padding-top: 20px;",  # spacing between map and slider
              sliderInput("selected_year", 
@@ -174,7 +174,7 @@ server <- function(input, output, session) {
     leaflet() %>%
       addTiles() %>%
       # set the view to the GoC
-      setView(lng = -110, lat = 27, zoom = 5.5)
+      setView(lng = -110, lat = 27, zoom = 5.5) # 5.4 is too small
     
   })
   
