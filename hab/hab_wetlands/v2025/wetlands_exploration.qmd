@@ -1,0 +1,272 @@
+---
+title: 'OHI GoC 2025: Wetlands (RAMSAR) GoC'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: console
+---
+
+# Summary
+
+## The List of Wetlands of International Importance (the Ramsar List)
+
+Date Published: 3 April 2025
+
+*Background to the Ramsar List, pasted from the document itself:*
+
+The Ramsar List was established in response to Article 2.1 of the Convention on Wetlands (Ramsar, Iran, 1971), which reads: “Each Contracting Party shall designate suitable wetlands within its territory for inclusion in a List of Wetlands of International Importance, hereinafter referred to as ‘the List’ which is maintained by the bureau \[secretariat of the Convention\] established under Article 8.”
+
+Wetlands included in the List acquire a new status at the national level and are recognized by the international community as being of significant value not only for the country, or the countries, in which they are located, but for humanity as a whole.
+
+The Convention establishes that “wetlands should be selected for the List on account of their international significance in terms of ecology, botany, zoology, limnology or hydrology.” Over the years, the Conference of the Contracting Parties has adopted more specific criteria interpreting the Convention text, as well as an Information Sheet on Ramsar Wetlands and a Classification system of wetland type.
+
+All issues pertaining to the Ramsar List were encapsulated in Resolution VII.11 adopted by the Conference of the Parties in May 1999 and entitled Strategic Framework and guidelines for the future development of the List of Wetlands of International Importance, which has been frequently updated.
+
+Everything in the Strategic Framework is founded upon this “Vision for the Ramsar List”: “To develop and maintain an international network of wetlands which are important for the conservation of global biological diversity and for sustaining human life through the ecological and hydrological functions they perform.” Full data submitted by the Parties for each of their Ramsar Sites, with one-paragraph descriptions of each site, are entered in the Ramsar Sites Information Service (rsis.ramsar.org).
+
+**Coordinates**
+
+"Geographical coordinates provided in this List are merely notional “centre points” for quick reference and are not intended to be legal specifications; for Sites with complex shapes or multiple parts, the centre points may not even lie within the Sites’ boundaries. For detailed information on Ramsar Site boundaries, consult the Ramsar Information Sheets submitted by the Parties (Ramsar Sites Information Service)."
+
+**Abbreviations**
+
+[MR:]{.underline} Sites included in the Montreux Record, “a record of Ramsar Sites where changes in ecological character have occurred, are occurring or are likely to occur” maintained by the Secretariat in consultation with the Contracting Party concerned (Recommendation 4.8).
+
+[TRS:]{.underline} Transboundary Ramsar Site, where “an ecologically coherent wetland extends across national borders and the Ramsar Site authorities on both or all sides of the border have formally agreed to collaborate in its management, and have notified the Secretariat of this intent”.
+
+# Setup
+
+```{r}
+library(ohicore)
+library(tidyverse)
+library(stringr)
+library(WDI)
+library(here)
+library(janitor)
+library(plotly)
+library(readxl)
+library(naniar)
+library(countrycode)
+library(pdftools)
+library(tictoc)
+library(ggplot2)
+
+
+# ---- sources! ----
+# source(here("workflow", "R", "common.R")) # file creates objects to process data
+## set the mazu and neptune data_edit share based on operating system
+dir_M             <- c('Windows' = '//mazu.nceas.ucsb.edu/ohi',
+                       'Darwin'  = '/Volumes/ohi',    ### connect (cmd-K) to smb://mazu/ohi
+                       'Linux'   = '/home/shares/ohi')[[ Sys.info()[['sysname']] ]]
+
+# ---- set year and file path info ----
+current_year <- 2025 # Update this in the future!!
+version_year <- paste0("v",current_year)
+data_dir_version_year <- paste0("d", current_year)
+
+# ---- data directories ----
+
+# raw data directory (on Mazu)
+raw_data_dir <- here::here(dir_M, "OHI_GOC", "_raw_data")
+
+# for Ramsar List raw data dir
+ramsar_raw_dir <- here::here(dir_M, "OHI_GOC", "_raw_data", "ramsar_list", data_dir_version_year)
+
+# for coastline characteristics intermediates
+int_dir <- here::here("hab", "hab_wetlands", version_year, "int")
+
+# final output dir
+output_dir <- here("hab", "hab_wetlands", version_year, "output")
+
+# spatial data for GoC
+goc_spatial <- here("spatial")
+
+# this CRS might be better for visualization, explore.
+gulf_crs <- st_crs("+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+```
+
+# PDF Cleaning
+
+```{r}
+# bring in the ramsar list pdf! download it to your computer, and place it in Mazu
+ramsar_file <- "ramsar_wetlands_sitelist_2025.pdf" # the file name
+ramsar_raw <- pdf_text(here::here(ramsar_raw_dir, ramsar_file)) # using the package `pdftools`, read in using pdf_text()
+
+ramsar_table <- ramsar_raw[32:35] %>% # page number of the pdf that has the data we want (aka the Mexico list)
+  as.data.frame() # make the page as a data frame.  Be warned, the data is all there! You just can't see it yet.
+
+columns = c("site","date_of_designation","region_province_state","area","coordinates") # mirror the pdf and create clean column names
+
+ramsar_list <- ramsar_table %>% 
+  separate_rows('.', sep = "\n") %>%  # separate the rows: \n separates by moving down to the next line without returning to the beginning of the line
+  rename(main_column = ".") %>% # rename the only column as main_column instead of just the period
+  slice(61:253) %>% # choose the rows that have mexico's listed sites in them
+  separate_wider_position(
+    main_column, # the issue here is that there is not a common delimiter, and the three columns blur together. So, we can use `separate_wider_position()`, which allows you to instead define column breaks by the number of characters, which includes spaces
+    widths = c(site = 44, date_of_designation = 17, region_province_state = 20, area = 10, coordinates = 15), # these numbers were found through trial and error, but are always at least the length of the longest character string
+    names_sep = NULL, # default, to avoid renaming the column names
+    names_repair = "check_unique", #the default), no name repair, but checks they are unique
+    too_many = "debug", # will add additional columns to the output to help you locate and resolve the underlying problem
+    too_few = "debug", # adds additional columns to the output to help you locate and resolve the underlying problem... these will not remain in final code
+    cols_remove = FALSE # always FALSE if too_few or too_many are set to "debug"
+  ) 
+  select(site, date_of_designation, region_province_state,  area, coordinates) # to get rid of debugging columns and rankings
+
+```
+ 
+NOTE: it is clear from the `separate_wider_position` that each page has a slightly different spacing based on columns.  So, they will have to be cleaned separately and binded together.  Instead of keeping page 32, which only has the title "Mexico", we can start on page 33.
+
+**Page one (pg 33)**
+
+```{r}
+ramsar_table_pg1 <- ramsar_raw[[33]] %>% # page number of the pdf that has the data we want (aka the Mexico list)
+  as.data.frame() # make the page as a data frame.  Be warned, the data is all there! You just can't see it yet.
+
+columns = c("site","date_of_designation","region_province_state","area","coordinates") # mirror the pdf and create clean column names
+
+ramsar_list_pg1 <- ramsar_table_pg1 %>% 
+  separate_rows('.', sep = "\n") %>%  # separate the rows: \n separates by moving down to the next line without returning to the beginning of the line
+  rename(main_column = ".") %>% # rename the only column as main_column instead of just the period
+  slice(4:71) %>% # choose the rows that have listed sites
+  separate_wider_position(
+    main_column, # the issue here is that there is not a common delimiter, and the three columns blur together. So, we can use `separate_wider_position()`, which allows you to instead define column breaks by the number of characters, which includes spaces
+    widths = c(site = 48, date_of_designation = 14, region_province_state = 24, area = 16, coordinates = 20), # these numbers were found through trial and error, but are always at least the length of the longest character string
+    names_sep = NULL, # default, to avoid renaming the column names
+    names_repair = "check_unique", #the default), no name repair, but checks they are unique
+    too_many = "debug", # will add additional columns to the output to help you locate and resolve the underlying problem
+    too_few = "debug", # adds additional columns to the output to help you locate and resolve the underlying problem... these will not remain in final code
+    cols_remove = FALSE # always FALSE if too_few or too_many are set to "debug"
+  ) %>% 
+  select(site, date_of_designation, region_province_state, area, coordinates) # to get rid of debugging columns and rankings
+  
+ramsar_list_pg1_clean <- ramsar_list_pg1 %>% 
+  mutate(
+    site = str_trim(site, side = "both"), # remove the whitespace before and after the string
+    date_of_designation = str_trim(date_of_designation, side = "both"),
+    region_province_state = str_trim(region_province_state, side = "both"),
+    area = str_trim(area, side = "both"),
+    coordinates = str_trim(coordinates, side = "both")
+  ) %>% 
+  mutate(site = str_trunc(site, width = 200, ellipsis = "")) %>%  # for adjusting the width of the column so it can hold the full name
+  mutate(
+    is_na_row = rowSums(is.na(select(., -site))) == (ncol(.) - 1), # identify rows where all columns except 'site' are NA
+    site = if_else(
+      lead(is_na_row, default = FALSE), # for the *previous* row of each NA row, paste the NA row's site name (bc it was an overflow from the previous row's site name)
+      paste(site, lead(site), sep = " "),  # merge with next (NA) row
+      site
+    )
+  ) %>%
+  filter(!is_na_row) %>% # remove the NA rows and the identifier column
+  select(-is_na_row)
+```
+
+**Page two (pg 34)**
+
+```{r}
+
+```
+
+**Page three (pg 35)**
+
+```{r}
+
+```
+
+**BIND**
+
+```{r}
+
+```
+
+
+# TTDI reference for pdf cleaning
+
+```{r}
+# bring in TTDI pdf! Download it to your computer, place it in Mazu
+ttdi_file <- "WEF_Travel_and_Tourism_Development_Index_2024.pdf" # the file name
+ttdi_raw <- pdf_text(here::here(raw_data_dir, "WEF-Economics", data_dir_version_year, ttdi_file)) # using the package `pdftools`, read in using pdf_text()
+
+sr_scores_table <- ttdi_raw[[11]] %>% # page number of the pdf that has the data we want (aka the sustainability scores)
+  as.data.frame() # make the page as a data frame.  Be warned, the data is all there! You just can't see it yet.
+
+columns = c("rank","economy","score","rank_change","score_change","diff_avg","rank_2","economy_2","score_2","rank_change_2","score_change_2","diff_avg_2", "rank_3","economy_3","score_3","rank_change_3","score_change_3","diff_avg_3") # mirror the pdf and create clean column names
+
+sr_scores <- sr_scores_table %>% 
+  separate_rows('.', sep = "\n") %>%  # separate the rows: \n separates by moving down to the next line without returning to the beginning of the line
+  rename(main_column = ".") %>% # rename the only column as main_column instead of just the period
+  slice(16:55) %>% # choose the rows that have the table in them (disregard the page title etc)
+  separate_wider_position(
+    main_column, # the issue here is that there is not a common delimiter, and the three columns blur together. So, we can use `separate_wider_position()`, which allows you to instead define column breaks by the number of characters, which includes spaces
+    widths = c(rank = 2, economy = 24, score = 4, rank_change = 3, score_change = 5, diff_avg = 19,
+               rank_2 = 7, economy_2 = 24, score_2 = 5, rank_change_2 = 3, score_change_2 = 7, diff_avg_2 = 19,
+               rank_3 = 9, economy_3 = 26, score_3 = 8, rank_change_3 = 1, score_change_3 = 1, diff_avg_3 = 1), # these numbers were found through trial and error, but are always at least the length of the longest character string
+    names_sep = NULL, # default, to avoid renaming the column names
+    names_repair = "check_unique", #the default), no name repair, but checks they are unique
+    too_many = "debug", # will add additional columns to the output to help you locate and resolve the underlying problem
+    too_few = "debug", # adds additional columns to the output to help you locate and resolve the underlying problem... these will not remain in final code
+    cols_remove = FALSE # always FALSE if too_few or too_many are set to "debug"
+  ) %>% 
+  select(rank, economy, score,  rank_2, economy_2, score_2, rank_3, economy_3, score_3) %>% # to get rid of debugging columns and rankings
+  mutate(
+    economy = str_trim(economy, side = "both"), # remove the whitespace before and after the string
+    rank_2 = str_trim(rank_2, side = "both"),
+    economy_3 = str_trim(economy_3, side = "both"),
+    rank_3 = str_trim(rank_3, side = "both"),
+    score_3 = str_trim(score_3, side = "both"),
+    economy_3 = str_replace(economy_3, pattern = "Trinidad and Tobago 3.5", replacement = "Trinidad and Tobago"), # this line specifically had issues with spacing, and no matter what it always had bleeding from the score.  Therefore, the economy name and score were fixed using str_replace.
+    score_3 = str_replace(score_3, pattern = "2 -5", replacement = "3.52") 
+    )
+
+# now, we have a dataframe that contains three columns we would like to make into one. let's subset and create three dfs that each have the same name (they couldnt have the same name beforehand because they were in the same df), then rbind them together to have one df of all regions and their scores.
+sr_scores_sub1 <- sr_scores %>% 
+  select(rank, economy, score)
+
+sr_scores_sub2 <- sr_scores %>% 
+  select(rank_2, economy_2, score_2) %>% 
+  rename(
+    rank = rank_2,
+    economy = economy_2,
+    score = score_2
+  )
+
+sr_scores_sub3 <- sr_scores %>% 
+  select(rank_3, economy_3, score_3) %>% 
+    rename(
+    rank = rank_3,
+    economy = economy_3,
+    score = score_3
+  )
+
+# rbind them together and clean up -- we do not need the column "rank", it was just preserved until now as an easy way to ensure a clean bind
+sr_scores_clean <- rbind(sr_scores_sub1, sr_scores_sub2, sr_scores_sub3) %>% 
+  select(-rank) %>% # remove rank
+  filter(!is.na(score)) %>%  # remove NA, leaves 119 regions, good
+  mutate(
+    S_score = as.numeric(score)) # ensure it is numeric 
+
+
+# run name_2_gn so each economy receives an OHI rgn name and id  
+ttdi_rgn <- name_2_rgn(df_in = sr_scores_clean, 
+                       fld_name = 'economy',
+                       keep_fld_name = TRUE) %>% # v2024: no duplicates! looks good
+  select(rgn_id, rgn_name, S_score)
+
+### Save TTDI data file
+# write_csv(ttdi_rgn, here(int_dir,"wef_ttdi.csv")) # save to int folder
+```
+
+
