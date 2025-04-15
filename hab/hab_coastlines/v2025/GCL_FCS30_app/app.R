@@ -80,7 +80,7 @@ server <- function(input, output, session) {
       fitBounds(st_bbox(data)[[1]], st_bbox(data)[[2]], st_bbox(data)[[3]], st_bbox(data)[[4]]) %>%
       addPolylines(
         color = ~pal(class),
-        weight = 6,
+        weight = 1,
         opacity = 0.7,
         popup = ~paste(
           "<b>Class:</b>", class, "<br>",

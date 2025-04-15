@@ -1,0 +1,160 @@
+---
+title: 'OHI GoC 2025: Marine habitat distributions in the Gulf of California'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: console
+---
+
+# Summary
+
+# Setup
+
+```{r}
+library(ohicore)
+library(tidyverse)
+library(stringr)
+library(WDI)
+library(here)
+library(janitor)
+library(plotly)
+library(readxl)
+library(naniar)
+library(countrycode)
+library(pdftools)
+library(tictoc)
+library(ggplot2)
+library(leaflet)
+library(sf)
+library(viridis)
+library(dplyr)
+
+
+# ---- sources! ----
+# source(here("workflow", "R", "common.R")) # file creates objects to process data
+## set the mazu and neptune data_edit share based on operating system
+dir_M             <- c('Windows' = '//mazu.nceas.ucsb.edu/ohi',
+                       'Darwin'  = '/Volumes/ohi',    ### connect (cmd-K) to smb://mazu/ohi
+                       'Linux'   = '/home/shares/ohi')[[ Sys.info()[['sysname']] ]]
+
+# ---- set year and file path info ----
+current_year <- 2025 # Update this in the future!!
+version_year <- paste0("v",current_year)
+data_dir_version_year <- paste0("d", current_year)
+
+# ---- data directories ----
+
+# raw data directory (on Mazu)
+raw_data_dir <- here::here(dir_M, "OHI_GOC", "_raw_data")
+
+# for dataMares raw data dir
+dataMares_raw_dir <- here::here(dir_M, "OHI_GOC", "_raw_data", "dataMares")
+
+# for coastline characteristics intermediates
+int_dir <- here::here("hab", "hab_wetlands", version_year, "int")
+
+# final output dir
+output_dir <- here("hab", "hab_wetlands", version_year, "output")
+
+# spatial data for GoC
+goc_spatial <- here("spatial")
+
+# this CRS might be better for visualization, explore.
+gulf_crs <- st_crs("+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+```
+
+
+# Explore
+
+```{r}
+# read in the raw data downloaded from the UCSD site through dataMares
+hab_extent_500km2_raw1 <- read_xlsx(here::here(dataMares_raw_dir, "hab_extent_500km2","bb6009652h_1.xlsx"), sheet = 1) # coordinates of habitat
+hab_extent_500km2_raw2 <- read_xlsx(here::here(dataMares_raw_dir, "hab_extent_500km2","bb6009652h_1.xlsx"), sheet = 2) # area and type of habitat
+hab_extent_500km2_raw3 <- read_xlsx(here::here(dataMares_raw_dir, "hab_extent_500km2","bb6009652h_1.xlsx"), sheet = 3) # habitat description
+
+# join the first two sheets together by "id_reg"
+hab_extent_500km2_coord <- full_join(hab_extent_500km2_raw1, hab_extent_500km2_raw2, by = "id_reg") %>% 
+  janitor::clean_names() %>% 
+  rename(area_ha = area)
+
+hab_extent_500km2_sf <- st_as_sf(hab_extent_500km2_coord, coords = c("x", "y"), crs = 4326)
+# mapview(hab_extent_500km2_sf)
+head(hab_extent_500km2_sf) # looks correct
+st_crs(hab_extent_500km2_sf) # good, WGS 84 for now
+```
+# Visualizing the habitat distribution of GoC
+
+Using an interactive leaflet map.
+ 
+```{r}
+unique_habitats <- unique(hab_extent_500km2_sf$habitat) # [1] "Rocky reef"  "Mangroves"   "Sargassum"   "Coral reefs" [5] "Seamounts"  
+pal <- colorFactor( # make a color palette based on the 5 habitat types in the GoC
+  palette = viridis(length(unique_habitats), option = "D"), # [1] "#440154FF" "#3B528BFF" "#21908CFF" "#5DC863FF" [5] "#FDE725FF"
+  domain = unique_habitats
+)
+
+# baselayer leaflet map
+habitat_map <- leaflet() %>%
+  addProviderTiles("Esri.OceanBasemap", group = "Ocean Basemap") %>%
+  addProviderTiles("CartoDB.Positron", group = "Light Map") %>%
+  addProviderTiles("Esri.WorldImagery", group = "Satellite")
+
+# add a layer for each habitat using a loop, later add layer controls
+for (hab in unique_habitats) {
+  hab_subset <- hab_extent_500km2_sf[hab_extent_500km2_sf$habitat == hab, ]
+  habitat_map <- habitat_map %>%
+    addCircleMarkers(
+      data = hab_subset, 
+      color = "white", # color of the border of each circle marker
+      fillColor = pal(hab), # filled based on the color in the data for each circle marker
+      weight = 1, # width of the border color
+      radius = ~sqrt(area_ha)/5, # need to use the square root of that the area for the radius of the circle (bc of pi*r^2). Divided by 10 as a scaling factor for easier visualization (otherwise the circles are too big)
+      fillOpacity = 0.8,
+      stroke = TRUE,
+      popup = ~paste(
+        "<strong>ID:</strong>", id_reg, "<br>",
+        "<strong>Habitat:</strong>", habitat, "<br>",
+        "<strong>Area (ha):</strong>", round(area_ha, 2)
+      ),
+      group = hab
+    )
+}
+
+habitat_map <- habitat_map %>%
+  addLayersControl(
+    baseGroups = c("Light Map", "Ocean Basemap", "Satellite"), # so the viewer can select whichever basemap is best for them
+    overlayGroups = unique_habitats, # there is a group for each habitat
+    options = layersControlOptions(collapsed = FALSE) # show it clearly 
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = hab_extent_500km2_sf$habitat,
+    title = "Habitat Types",
+    opacity = 0.7
+  )
+
+habitat_map
+```
+
+
+
+
+
+
+
+
