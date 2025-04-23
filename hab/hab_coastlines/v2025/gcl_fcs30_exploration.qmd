@@ -1,0 +1,310 @@
+---
+title: 'OHI GoC 2025: Coastline Classification'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: console
+---
+
+# Summary
+
+## GCL_FCS30: a global coastline dataset with 30-m resolution and a fine classification system from 2010 to 2020
+
+The GCL_FCS30 dataset provides a high-resolution global coastline classification system with six distinct categories, developed using advanced remote sensing techniques and machine learning. This dataset spans 2010, 2015, and 2020, offering continuous 30-meter resolution vectors that capture both natural and human-modified coastal features.
+
+Downloaded: April 3, 2025.
+
+### Dataset Classification Codes
+
+The six coastline categories are as follows:\
+- **0: Artificial coastlines** – Human-built structures like seawalls, ports, piers, and reclaimed land.\
+- **1: Biogenic coastlines** – Mangroves, salt marshes, coral reefs, and other biologically formed features.\
+- **2: Sandy coastlines** – Beaches, dunes, and other sand-dominated shores.\
+- **3: Muddy coastlines** – Sediment-rich zones like tidal flats and mudflats.\
+- **4: Rocky coastlines** – Cliffs, bedrock platforms, and other rock-dominated shores.\
+- **5: Estuary coastlines** – Transitional zones where rivers meet the sea, including deltas and brackish wetlands.
+
+### Methodology Overview
+
+**Coastline Extraction Process**:\
+1.
+**MNDWI Calculation**: Enhanced water/land separation using Modified Normalized Difference Water Index ($$ \text{MNDWI} = \frac{\text{Green} - \text{SWIR1}}{\text{Green} + \text{SWIR1}} $$).\
+2.
+**OTSU Adaptive Thresholding**: Automated sea-land segmentation via maximum between-class variance optimization.\
+3.
+**Canny Edge Detection**: Precise coastline vectorization from raster data.
+
+**Classification Approach**:\
+- A **hybrid transect classifier** combining:\
+- **Random Forest algorithm** trained on multi-source geophysical data (e.g., elevation, mangrove maps, land cover).\
+- **Stable training samples** derived from cross-validated global datasets.\
+- Validation achieved **\>85% overall accuracy** using 964 stratified reference points verified by expert consensus.
+
+See [Zuo et al. 2025](https://www.nature.com/articles/s41597-025-04430-0#Sec1) for more details.
+
+### Citation
+
+Zuo, J., Zhang, L., Xiao, J. et al. GCL_FCS30: a global coastline dataset with 30-m resolution and a fine classification system from 2010 to 2020. Sci Data 12, 129 (2025). https://doi.org/10.1038/s41597-025-04430-0
+
+```{r}
+library(raster)
+library(terra)
+library(readr)
+library(magrittr)
+library(mregions2)
+library(mapview)
+library(sf)
+library(tidyverse)
+library(here)
+library(leaflet.extras2)
+library(fasterize)
+library(tictoc)
+library(kableExtra)
+library(plotly)
+library(viridis)
+library(readr)
+library(purrr)
+library(doParallel)
+library(data.table)
+library(leaflet)
+library(leaflet.extras)
+library(RColorBrewer)
+
+# ---- sources! ----
+# source(here("workflow", "R", "common.R")) # file creates objects to process data
+## set the mazu and neptune data_edit share based on operating system
+dir_M             <- c('Windows' = '//mazu.nceas.ucsb.edu/ohi',
+                       'Darwin'  = '/Volumes/ohi',    ### connect (cmd-K) to smb://mazu/ohi
+                       'Linux'   = '/home/shares/ohi')[[ Sys.info()[['sysname']] ]]
+
+# ---- set year and file path info ----
+current_year <- 2025 # Update this in the future!!
+version_year <- paste0("v",current_year)
+data_dir_version_year <- paste0("d", current_year)
+
+# ---- data directories ----
+
+# raw data directory (on Mazu)
+raw_data_dir <- here::here(dir_M, "OHI_GOC", "_raw_data")
+
+# for GCL_FCS30 raw data dir
+gcl_raw_dir <- here::here(dir_M, "OHI_GOC", "_raw_data", "GCL_FCS30", data_dir_version_year)
+
+# for coastline characteristics intermediates
+int_dir <- here::here("hab", "hab_coastlines", version_year, "int")
+
+# final output dir
+output_dir <- here("hab", "hab_coastlines", version_year, "output")
+
+# spatial data for GoC
+goc_spatial <- here("spatial")
+
+# this CRS might be better for visualization, explore.
+gulf_crs <- st_crs("+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+```
+
+# Data exploration
+
+```{r}
+# read in the shapefile for 2020, examine data
+gcl_raw_2020 <- st_read(here(gcl_raw_dir, "GCL2020.shp"))
+
+mapview(gcl_raw_2020)
+head(gcl_raw_2020)
+unique(gcl_raw_2020$class) # yes, so 0 - 5 are present
+
+st_crs(gcl_raw_2020) # WGS84
+```
+## Limit to GoC Ecoregion
+
+```{r}
+# read in ecoregion shapefiles in 
+eco_hr_latlon <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_latlon.shp"))
+# mapview(eco_hr_latlon)
+head(eco_hr_latlon)
+
+eco_hr_eqarea <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_eqarea.shp"))
+mapview(eco_hr_eqarea)
+
+# check CRS of ecoregion boundary
+st_crs(eco_hr_latlon) # WGS84, can be used to crop global data
+
+# transform to gulf_CRS
+# eco_hr_albers <- st_transform(eco_hr_eqarea, crs = "+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+# st_crs(eco_hr_albers) # double check it worked well
+# mapview(eco_hr_albers) # looks good!
+```
+
+```{r}
+# crop the global data to the gulf ecoregion boundary
+gcl_wgs84 <- st_transform(gcl_raw_2020, crs = 4326) # ensure it is wgs84
+eco_hr_wgs84 <- st_transform(eco_hr_latlon, crs = 4326) # ensure it is wgs84
+
+gcl_2020_cropped <- st_intersection(gcl_wgs84, eco_hr_latlon)
+head(gcl_2020_cropped) # attributes are conserved
+
+mapview(gcl_2020_cropped)
+
+write_sf(gcl_2020_cropped, here::here("hab", "hab_coastlines", "v2025","GCL_FCS30_app","www", "gcl_2020_cropped.shp"))
+write_sf(gcl_2020_cropped, here::here(int_dir, "gcl_2020_cropped.shp"))
+write_sf(gcl_2020_cropped, here::here(dir_M, "OHI_GOC/_raw_data/GCL_FCS30/d2025/int/gcl_2020_cropped.shp"))
+```
+# Visualize interactively
+
+```{r}
+gcl_2020_cropped <- read_sf(here::here(int_dir, "gcl_2020_cropped.shp"))
+
+library(leaflet)
+library(sf)
+
+viridis_colors <- viridis::viridis(6)
+
+# match colors to class meanings for clarity
+color_mapping <- c(
+  "0" = viridis_colors[1],  # artificial
+  "1" = viridis_colors[2],  # biogenic
+  "2" = viridis_colors[3],  # sandy
+  "3" = viridis_colors[4],  # muddy
+  "4" = viridis_colors[5],  # rocky
+  "5" = viridis_colors[6]   # estuary
+)
+
+# use color palette function
+pal <- colorFactor(
+  palette = color_mapping,
+  domain = gcl_2020_cropped$class
+)
+
+# class descriptions for popup
+class_descriptions <- c(
+  "0" = "Artificial: Human-built structures",
+  "1" = "Biogenic: Mangroves, marshes, reefs",
+  "2" = "Sandy: Beaches, dunes",
+  "3" = "Muddy: Tidal flats, mudflats",
+  "4" = "Rocky: Cliffs, bedrock",
+  "5" = "Estuary: River-sea transition zones"
+)
+
+leaflet(gcl_2020_cropped) %>%
+  addProviderTiles("CartoDB.Positron", group = "Light Map") %>%
+  addProviderTiles("Esri.OceanBasemap", group = "Ocean Basemap") %>%
+  addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+  addTiles() %>%
+  setView(lng = -112, lat = 28, zoom = 6) %>% 
+  addPolylines(
+    color = ~pal(class),
+    weight = 6,
+    opacity = 0.7,
+    popup = ~paste(
+      "<b>Class:</b>", class, "<br>",
+      "<b>Description:</b>", class_descriptions[as.character(class)] # map values to descriptions
+    ),
+    layerId = ~class  # unique layer IDs based on class
+  ) %>%
+  addLayersControl(
+    baseGroups = c("Light Map", "Ocean Basemap", "Satellite"), # so the viewer can select whichever basemap is best for them
+    overlayGroups = unique(gcl_2020_cropped$class), # there is a group for each habitat
+    options = layersControlOptions(collapsed = FALSE) # show it clearly 
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = ~class,
+    title = "Coastline Type",
+    opacity = 1,
+    labFormat = labelFormat(
+      transform = function(value) {
+        class_descriptions[as.character(value)] # display description
+      }
+    )
+  )
+
+```
+
+```{r}
+leaflet(gcl_2020_cropped) %>%
+  addProviderTiles("CartoDB.Positron", group = "Light Map") %>% # add the base layers first
+  addProviderTiles("Esri.OceanBasemap", group = "Ocean Basemap") %>%
+  addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+  
+  # now add the habitat layers - one group per class!! That way they can be controlled in the map by the viewer
+  addPolylines(
+    data = gcl_2020_cropped[gcl_2020_cropped$class == "0", ], # 0
+    color = ~pal(class),
+    weight = 6,
+    opacity = 0.7,
+    popup = ~paste("<b>Class:</b>", class, "<br>",
+                  "<b>Description:</b>", class_descriptions[as.character(class)]),
+    group = "Artificial"
+  ) %>%
+  addPolylines(
+    data = gcl_2020_cropped[gcl_2020_cropped$class == "1", ], # 1
+    color = ~pal(class),
+    weight = 6,
+    opacity = 0.7,
+    popup = ~paste("<b>Class:</b>", class, "<br>",
+                  "<b>Description:</b>", class_descriptions[as.character(class)]),
+    group = "Biogenic"
+  ) %>%
+  addPolylines(
+    data = gcl_2020_cropped[gcl_2020_cropped$class == "2", ], # 2
+    color = ~pal(class),
+    weight = 6,
+    opacity = 0.7,
+    popup = ~paste("<b>Class:</b>", class, "<br>",
+                  "<b>Description:</b>", class_descriptions[as.character(class)]),
+    group = "Sandy"
+  ) %>%
+  addPolylines(
+    data = gcl_2020_cropped[gcl_2020_cropped$class == "3", ], # 3
+    color = ~pal(class),
+    weight = 6,
+    opacity = 0.7,
+    popup = ~paste("<b>Class:</b>", class, "<br>",
+                  "<b>Description:</b>", class_descriptions[as.character(class)]),
+    group = "Muddy"
+  ) %>%
+  addPolylines(
+    data = gcl_2020_cropped[gcl_2020_cropped$class == "4", ], # 4 
+    color = ~pal(class),
+    weight = 6,
+    opacity = 0.7,
+    popup = ~paste("<b>Class:</b>", class, "<br>",
+                  "<b>Description:</b>", class_descriptions[as.character(class)]),
+    group = "Rocky"
+  ) %>%
+  addPolylines(
+    data = gcl_2020_cropped[gcl_2020_cropped$class == "5", ], # 6
+    color = ~pal(class),
+    weight = 6,
+    opacity = 0.7,
+    popup = ~paste("<b>Class:</b>", class, "<br>",
+                  "<b>Description:</b>", class_descriptions[as.character(class)]),
+    group = "Estuary"
+  ) %>%
+
+  # group layer control
+  addLayersControl(
+    baseGroups = c("Light Map", "Ocean Basemap", "Satellite"),
+    overlayGroups = c("Artificial", "Biogenic", "Sandy", "Muddy","Rocky","Estuary"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+
+```
+
+
+
+

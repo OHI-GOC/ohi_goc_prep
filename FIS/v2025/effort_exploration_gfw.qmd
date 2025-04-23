@@ -1,5 +1,5 @@
 ---
-title: 'OHI GoC 2024: Catch Per Unit Effort GoC'
+title: 'OHI GoC 2025: Catch Per Unit Effort GoC'
 author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
 format:
   html:
@@ -29,6 +29,36 @@ Data is based on fishing detections of \>114,000 unique AIS devices on fishing v
 Fishing vessels are identified via a neural network classifier, vessel registry databases, and manual review by GFW and regional experts.
 Data are binned into grid cells 0.01 (or 0.1) degrees on a side and measured in units of hours.
 The time is calculated by assigning an amount of time to each AIS detection (which is the time to the previous position), and then summing all positions in each grid cell.
+
+Data download: <https://globalfishingwatch.org/data-download/datasets/public-fishing-effort>
+May 18 2021, MRF
+Description: Fleet daily v2
+Resolution: daily, 100th degree
+Date Downloaded: March 4, 2025
+
+Geartypes, defined by <https://github.com/OHI-Science/global_food_pressures/blob/main/fisheries/marine/disturbance/STEP2a_GFWdata_prep.Rmd>:
+- fishing: a combination of vessels of unknown fishing gear
+ - drifting_longlines: drifting longlines
+ - seiners: vessels using seine nets, including potential purse seine vessels
+   targeting tuna and other species, as well as danish and other seines
+     - purse_seines: purse seines, both pelagic and demersal
+        - tuna_purse_seines: large purse seines primarily fishing for tuna.
+        - other_purse_seines: purse seiners fishing for mackerel, anchovies, etc, often smaller and operating nearer the coast than tuna purse seines.
+    - other_seines: danish seines and other seiners not using purse seines.
+ - trawlers: trawlers, all types
+ - pole_and_line: vessel from which people fish with pole and line.
+ - trollers: vessel that tows multiple fishing lines.
+ - fixed_gear: a category that includes potential set longlines, set gillnets,  and pots and traps
+     - pots_and_traps: vessel that deploys pots (small, portable traps) or traps to
+       catch fish
+     - set_longlines: vessel that fishes by setting longlines anchored to the
+       seafloor. These lines have shorter hooked, typically baited, lines hanging
+       from them
+     - set_gillnets: vessel that fishes by setting gillnets anchored to the seafloor.
+ - dredge_fishing: vessel that tows a dredge the scrapes up edible bottom
+   dwellers such as scallops or oysters.
+ - squid_jigger: squid jiggers, mostly large industrial pelagic operating vessels
+
 
 **Current version**
 
@@ -91,6 +121,10 @@ library(readr)
 library(purrr)
 library(doParallel)
 library(httr2) # to handle timeouts (error HTTP 524 NA)
+library(data.table)
+library(leaflet)
+library(leaflet.extras)
+library(RColorBrewer)
 
 
 # for Global Fishing Watch API (using package gfwr)
@@ -121,6 +155,9 @@ raw_data_dir <- here::here(dir_M, "OHI_GOC", "_raw_data")
 # global_fishing_watch intermediate dir
 int_dir <- here::here(dir_M, "OHI_GOC", "_raw_data", "global_fishing_watch", data_dir_version_year, "int")
 
+# FIS intermediate dir
+fis_int_dir <-  here::here(dir_M, "OHI_GOC", "goal_prep", "fis", "v2025", "int")
+
 # final output dir
 output_dir <- here("FIS", version_year, "output")
 
@@ -149,7 +186,7 @@ eco_hr_albers <- st_transform(eco_hr_eqarea, crs = "+proj=aea +lat_1=23 +lat_2=3
 
 
 
-# Download GFW data
+# Automated Download GFW data
 
 ```{r}
 # download yearly fishing effort data for 2012 - 2021
@@ -243,6 +280,568 @@ ggplot() +
   labs(title = "Fishing Effort Overlaid on GoC Ecoregion for 2019")
 
 ```
+
+# Manual Download of GRW effort data
+
+If the API from the package `gfwr` is presenting an HTTP 524 or 429 error, which is a timeout/server-side error, download the data manually from <https://globalfishingwatch.org/data-download/datasets/public-fishing-effort>.
+
+Processing the daily effort data into annual effort data was originally written within fisheries/marine/disturbance/STEP2a_GFWdata_prep.Rmd, and is modified here to fit the needs of the GoC project.
+
+## Filepath for daily files
+
+```{r}
+# create filepath for all daily CSVs for 2012:2020
+all_years_list_func <- function(year){
+  
+  gfw_filepath <- "/home/shares/ohi/OHI_GOC/_raw_data/global_fishing_watch/d2025/global_fishing_watch_manual_data_fleet_v2/" # set baseline filepath for all folders of all years in mazu
+  
+  folder_path <- paste0(gfw_filepath, "fleet-daily-csvs-100-v2-", year) # dynamically replace the year
+  
+  filepaths <- list.files(folder_path, pattern = ".csv", full = TRUE) # full filepath for the .csvs for that year
+  
+  return(filepaths) # give the list of file paths, which later needs to be combined into one list for all .csvs to be processed at once
+  
+}
+
+# define the range of years
+years <- 2012:2020
+
+# lapply to generate file paths for all years and combine them into one list
+tic()
+all_filepaths <- unlist(lapply(years, all_years_list_func)) # length of 3288 is great! 9 years * 365, + 3 days for leap years in 2012, 2016, and 2020.
+toc() # v2025: 0.378 sec elapsed
+```
+
+NOT NECESSARY: code for summarizing each daily file by cell and gear, if needed:
+```{r}
+# function for processing files within `all_filepaths`
+process_fishing_data <- function(filepath) {
+
+  # get all file paths for each year
+  filepaths <- all_years_list_func(year)
+
+  # read and combine all files for a year
+  yearly_data <- rbindlist(lapply(filepaths, fread), fill = TRUE)
+
+  # summarize fishing hours by latitude, longitude, and gear type
+  summarized_data <- yearly_data %>%
+    group_by(lat = cell_ll_lat, lon = cell_ll_lon, gear = geartype) %>%
+    summarize(total_fishing_hours = sum(fishing_hours), .groups = "drop") %>%
+    as.data.table() # convert back to data.table
+
+  # save summarized data to mazu
+  fwrite(summarized_data,
+         sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/daily_summary_cell_gear/yearly_summaries/yearly_summary_%d", year)) # fwrite is optimized for large datasets, handles millions of rows efficiently... uses package `data.table` vs `readr` for write_csv. Also its default writes the file as a .csv with a "," delim
+
+}
+
+# apply the function to all files in parallel
+cl <- makeCluster(20)
+registerDoParallel(cl)
+
+# process all daily files in parallel
+foreach(filepath = all_filepaths, .packages = c("data.table", "dplyr")) %dopar% {
+  process_fishing_data(filepath)
+}
+
+# stop cluster after processing is finished
+stopCluster(cl)
+```
+
+## Yearly files from daily files
+
+Similar code, but taking the next step to combine all daily files by year: 
+
+```{r}
+# create filepath for all daily CSVs for 2012:2020
+all_years_list_func <- function(year){
+  
+  gfw_filepath <- "/home/shares/ohi/OHI_GOC/_raw_data/global_fishing_watch/d2025/global_fishing_watch_manual_data_fleet_v2/" # set baseline filepath for all folders of all years in mazu
+  
+  folder_path <- paste0(gfw_filepath, "fleet-daily-csvs-100-v2-", year) # dynamically replace the year
+  
+  filepaths <- list.files(folder_path, pattern = ".csv", full = TRUE) # full filepath for the .csvs for that year
+  
+  return(filepaths) # give the list of file paths, which later needs to be combined into one list for all .csvs to be processed at once
+  
+}
+
+# define the range of years (again in case you only want to run this chunk)
+years <- 2012:2020
+
+# function to combine all daily files for a given year into one data frame
+combine_yearly_data <- function(year) {
+  
+  # compile all file paths for the given year
+  filepaths <- all_years_list_func(year)
+  
+  # read and combine all daily files for the year into one data.frame
+  yearly_data <- rbindlist(lapply(filepaths, fread), fill = TRUE) # combines all daily files. fread is faster and better for larger datasets than read_csv
+  
+  # save the combined yearly data to mazu as a single .csv file
+  fwrite(yearly_data, sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_fleet_data/yearly_combined_%d.csv", year))
+  
+  return(yearly_data)
+}
+
+# use lapply to apply the function to all years.  May take a while, especially after 2016 since there are more AIS tracked vessels
+lapply(years, combine_yearly_data)
+
+# check_yearly_test_2018 <- read_csv("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_fleet_data/yearly_combined_2018.csv")
+```
+## Summarize by cell and gear type
+
+```{r}
+# files within the yearly_fleet_data
+yearly_combined_filepath <- here(fis_int_dir, "yearly_fleet_data")
+
+# list yearly files
+all_years_files <- list.files(path = yearly_combined_filepath, pattern = "*.csv", full.names = TRUE)
+
+# read in the raw file
+tic()
+all_years_data <- rbindlist(lapply(all_years_files, fread), fill = TRUE) # fread() is faster than read_csv()
+toc()
+# v2025: 689.004 sec elapsed
+
+# summarize fishing hours by latitude, longitude, and gear type
+tic()
+summarized_data <- all_years_data %>%
+  group_by(lat = cell_ll_lat, lon = cell_ll_lon, gear = geartype) %>%
+  summarize(total_fishing_hours = sum(fishing_hours), .groups = "drop") %>%
+  as.data.table() # convert back to data.table
+toc()
+
+# save summarized data to mazu
+fwrite(summarized_data,
+       sprintf("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/summary_%s", saveName)) # fwrite is optimized for large datasets, handles millions of rows efficiently... uses package `data.table` vs `readr` for write_csv. Also it automatically writes as a .csv with a "," delim
+
+```
+
+
+```{r}
+# process and summarize fishing data for a single year
+process_yearly_fishing_data <- function(year) {
+  
+  # file path for each given year
+  filepaths <- paste0(yearly_combined_filepath, "/yearly_combined_", year, ".csv") # dynamically replace the year, full filepath for the .csv for that year
+  
+  # read the year's data in
+  yearly_combined <- read_csv(filepaths) # read in the .csv for that year
+  
+  # summarize fishing hours by latitude, longitude, and gear type
+  summarized_data <- yearly_combined %>%
+    group_by(lat = cell_ll_lat, lon = cell_ll_lon, gear = geartype) %>%
+    summarize(total_fishing_hours = sum(fishing_hours, na.rm = TRUE), .groups = "drop") 
+  
+  # output file path
+  output_file <- here::here(fis_int_dir, "yearly_summary_cell_gear", sprintf("yearly_summary_%d.csv", year))
+  
+  # save summarized data as a csv
+  write_csv(summarized_data, output_file)
+  
+  message(sprintf("Year %d processed and saved to %s", year, output_file)) # as a check to see where it is within the process
+  
+}
+
+# # process all years in parallel
+# process_all_in_parallel <- function(years, yearly_combined_filepath, fis_int_dir) {
+#  
+#   cl <- makeCluster(20)
+#   registerDoParallel(cl)
+#   
+#   # process each year in parallel
+#   foreach(year = years, .packages = c("data.table", "tidyverse","readr","dplyr","here"), .export = c("process_yearly_fishing_data")) %dopar% {
+#     process_yearly_fishing_data(year, yearly_combined_filepath, fis_int_dir)
+#   }
+#   
+#   # stop the cluster when done
+#   stopCluster(cl)
+# }
+
+# =============== use functions to get yearly summarized data ================
+
+# files within the yearly_fleet_data
+fis_int_dir <- here::here(dir_M, "OHI_GOC", "goal_prep", "fis", "v2025", "int")
+yearly_combined_filepath <- here(fis_int_dir, "yearly_fleet_data")
+
+# define the range of years to process
+years <- 2012:2020
+
+# loop through each year and process data
+for (year in years) {
+  process_yearly_fishing_data(year)
+}
+```
+
+## Limit to GoC Ecoregion
+
+```{r}
+# read in ecoregion shapefiles in 
+eco_hr_latlon <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_latlon.shp"))
+# mapview(eco_hr_latlon)
+
+eco_hr_eqarea <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_eqarea.shp"))
+mapview(eco_hr_eqarea)
+
+# check CRS of ecoregion boundary
+st_crs(eco_hr_eqarea) # NAD83 / Conus Albers, needs to be transformed
+
+# transform to gulf_CRS
+eco_hr_albers <- st_transform(eco_hr_eqarea, crs = "+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+st_crs(eco_hr_albers) # double check it worked well
+mapview(eco_hr_albers) # looks good!
+```
+
+Convert yearly cell lat/longs into spatial geometry.
+
+```{r}
+# cl <- makeCluster(10) # CANNOT parallelize!!! Spatial objects (sf objects specifically) can be problematic in parallel loops. The sf package relies on external libraries (like GEOS, GDAL, and PROJ), and these libraries might not be thread-safe, especially if the versions you are using are not built with thread-safety in mind. When multiple cores try to access or modify these objects simultaneously, it can lead to errors, crashes, or unpredictable behavior......... I experienced this first hand.  Took 2 hours.  I should have figured that it would not work if my prints did not start right away....
+# registerDoParallel(cl)
+
+
+years <- 2014:2019
+
+# double check the crs
+eco_hr_albers <- st_transform(eco_hr_albers, gulf_crs)
+
+# files within the yearly_fleet_data
+yearly_summary_dir <- here(fis_int_dir, "yearly_summary_cell_gear")
+yearly_summary_sf_dir <- here(fis_int_dir, "yearly_summary_cell_gear_sf")
+
+st_as_sf_yearly_function <- function(year){
+  
+  print(paste("Starting year", year))
+  
+  # read in the yearly file for each year
+  yearly_gfw_st <- read_csv(here::here(yearly_summary_dir, sprintf("yearly_summary_%s.csv", year)))
+  print(paste("Read yearly data for", year))
+  
+  
+  # convert the tabular data to sf object
+  yearly_gfw_sf <- st_as_sf(yearly_gfw_st, coords = c("lon", "lat"), crs = 4326) # the raw data (Lon, Lat) from gfwr::get_raster() is probably in WGS84 coordinates which is why it has to be transformed to the gulf_crs separately!  The `get_raster` function is not working as it should.  It does not limit data to the extent of eco_hr_albers, and instead provides the global data.
+  print(paste("Converted to sf object for", year))
+  
+  # ensure the crs match
+  gfw_sf_transformed <- st_transform(yearly_gfw_sf, gulf_crs) # defined in the setup chunk
+  print(paste("Transformed CRS for", year))
+  
+  # crop the effort data to the GoC ecoregion
+  yearly_gfw_cropped <- st_intersection(gfw_sf_transformed, eco_hr_albers)
+  print(paste("Cropped for", year))
+  
+  # save in a spatial format using st_write
+  st_write(yearly_gfw_cropped, here::here(yearly_summary_sf_dir, sprintf("yearly_summary_sf_%s.shp", year)))
+  print(paste("Wrote shapefile for", year))
+  
+  return(NULL) # do not need anything to return...
+  
+}
+
+# stopCluster(cl)
+
+# run the function to download
+lapply(years, st_as_sf_yearly_function)
+
+# inspect
+# gfw_cropped_2019 <- read_csv(here::here(fis_int_dir, "yearly_summary_cell_gear_sf", "yearly_summary_sf_2019.csv"))
+# gfw_cropped_2019_sf <- st_as_sf(gfw_cropped_2019, coords = geometry)
+```
+
+```{r}
+# # read in the yearly file for each year
+# yearly_gfw_st <- read_csv(here::here(yearly_summary_dir, "yearly_summary_2019.csv"))
+# 
+# # convert the tabular data to sf object
+# yearly_gfw_sf <- st_as_sf(yearly_gfw_st, coords = c("lon", "lat"), crs = 4326) # the raw data (Lon, Lat) from gfwr::get_raster() is probably in WGS84 coordinates which is why it has to be transformed to the gulf_crs separately!  The `get_raster` function is not working as it should.  It does not limit data to the extent of eco_hr_albers, and instead provides the global data.
+# 
+# # ensure the crs match
+# gfw_sf_transformed <- st_transform(yearly_gfw_sf, gulf_crs) # defined in the setup chunk
+# eco_hr_albers <- st_transform(eco_hr_albers, gulf_crs)
+# 
+# # crop the effort data to the GoC ecoregion
+# yearly_gfw_cropped <- st_intersection(gfw_sf_transformed, eco_hr_albers)
+# 
+# st_write(yearly_gfw_cropped, here::here(fis_int_dir, "yearly_summary_cell_gear_sf", "yearly_summary_sf_2019.tif"))
+```
+
+## Make a table of yearly summarized fishing effort by geartype
+
+Most used gear type over all years of data:
+```{r}
+# first, lets see the most used gear type over all years of data:
+
+gfw_filepath <- "/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_cell_gear" # set baseline filepath for all folders of all years in mazu
+
+summary_files <- list.files(gfw_filepath, pattern = ".csv", full = TRUE) # list of the .csvs in that folder
+  
+all_years_summary_files <- summary_files %>%
+  map_df(read_csv) # loveeee map!! makes it so easy to bind the .csvs together
+
+# summarize all fishing effort in the GoC over 2012-2020 by gear type
+all_years_summary_geartype <- all_years_summary_files %>%
+  group_by(gear) %>%
+  summarize(agg_fishing_hours = sum(total_fishing_hours), .groups = "drop")
+
+# Save the combined data
+write_csv(all_years_summary_geartype, "/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/all_years_summary_geartype.csv")
+```
+
+Most used gear type by year:
+
+```{r}
+gfw_filepath <- "/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_cell_gear" # set baseline filepath for all folders of all years in mazu
+
+summary_files <- list.files(gfw_filepath, pattern = ".csv", full = TRUE, recursive = TRUE)
+
+# make a column to indicate which year the data was associated to
+yearly_summary_files_binded <- map_df(summary_files, function(file) {
+  
+  # use the year in the directory structure
+  year <- str_extract(basename(file), "\\d{4}") # extracts 4 digits in a row, which in this case correspond to the year
+  
+  read_csv(file) %>%
+    mutate(year = year)
+})
+
+# colnames(yearly_summary_files_binded)
+# [1] "lat"                 "lon"                
+# [3] "gear"                "total_fishing_hours"
+# [5] "year"   ## GREAT!
+
+# summarize for most used gear type by year
+yearly_summary_geartype <- yearly_summary_files_binded %>%
+  group_by(year, gear) %>%
+  summarize(agg_fishing_hours = sum(total_fishing_hours), .groups = "drop") %>%
+  arrange(year, desc(agg_fishing_hours))
+
+# find top gear type per year
+top_gear_by_year <- yearly_summary_geartype %>%
+  group_by(year) %>%
+  slice_max(order_by = agg_fishing_hours, n = 1) %>%
+  ungroup()
+
+# save to mazu
+write_csv(yearly_summary_geartype, "/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_geartype.csv")
+write_csv(top_gear_by_year, "/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/top_gear_by_year.csv")
+```
+
+
+
+## Food Systems Code
+
+
+Now combine the daily csv files.
+```{r}
+
+fish_effort_df <- list.files("/home/shares/food-systems/Food_footprint/all_food_systems/dataprep/fisheries/marine/disturbance/effort_summarized_by_cell_gear/", pattern = "summary", full=TRUE) %>%
+  lapply(data.table::fread) %>%
+  bind_rows
+
+fish_effort_annual <- fish_effort_df %>%
+  group_by(cell_ll_lat, cell_ll_lon, geartype) %>%
+   summarize(fishing_hours = sum(fishing_hours)) %>%
+    data.frame()
+
+write_csv(fish_effort_annual, "/home/shares/food-systems/Food_footprint/all_food_systems/dataprep/fisheries/marine/disturbance/global_fishing_watch/FishingWatch_annual_effort_2017.csv")
+
+```
+
+### Determine proportion of fisheries with unidentified geartypes
+```{r}
+
+fishing_effort <- read_csv("/home/shares/food-systems/Food_footprint/all_food_systems/dataprep/fisheries/marine/disturbance/global_fishing_watch/FishingWatch_annual_effort_2017.csv")
+
+## quick peak
+totals <- fishing_effort %>%
+  group_by(geartype) %>%
+  summarize(fishing_hours = sum(fishing_hours))
+totals$fishing_hours[totals$geartype == "fishing"]/sum(totals$fishing_hours)
+
+#Map all fishing effort
+total_map <- fishing_effort %>%
+  group_by(cell_ll_lat, cell_ll_lon) %>%
+  summarize(fishing_hours = sum(fishing_hours))
+
+
+total_map$lat <- total_map$cell_ll_lat
+total_map$lon <- total_map$cell_ll_lon
+total_map <- total_map[,c("lon", "lat","fishing_hours")]
+coordinates(total_map) <- ~lon+lat
+proj4string(total_map) = CRS("+init=epsg:4326")
+total_map_raster <- rasterFromXYZ(total_map, crs = "+init=epsg:4326")
+proj4string(total_map_raster) = CRS("+init=epsg:4326")
+plot(log(total_map_raster + 1))
+
+#Map only unknowns
+unk_map <- fishing_effort %>%
+  filter(geartype %in% c("fishing")) %>%
+  group_by(cell_ll_lat, cell_ll_lon) %>%
+  summarize(fishing_hours = sum(fishing_hours, na.rm=TRUE))
+
+
+unk_map$lat <- unk_map$cell_ll_lat
+unk_map$lon <- unk_map$cell_ll_lon
+unk_map <- unk_map[,c("lon", "lat","fishing_hours")]
+coordinates(unk_map) <- ~lon+lat
+proj4string(unk_map)=CRS("+init=epsg:4326")
+unk_map_raster<-rasterFromXYZ(unk_map, crs = "+init=epsg:4326")
+proj4string(unk_map_raster)=CRS("+init=epsg:4326")
+plot(unk_map_raster)
+unk_map_raster[is.na(unk_map_raster)] <- 0
+
+prop_unk <- unk_map_raster/total_map_raster
+colr <- rev(RColorBrewer::brewer.pal(4, 'RdYlBu'))
+plot(prop_unk, col=colr, breaks=c(-0.01, 0.10, 0.30, 0.66, 1.01))
+
+library(sf)
+pts = rasterToPoints(prop_unk, spatial = TRUE)
+pts_sf <- st_as_sf(pts)
+plot(pts_sf,  pal = colr, pch=16, cex=0.005, breaks=c(-0.01, 0.10, 0.30, 0.66, 1.01))
+
+```
+
+### Create maps of destructive fishing
+Create a map including only trawl effort and a map of dredge effort:
+```{r}
+
+fishing_effort <- read_csv("/home/shares/food-systems/Food_footprint/all_food_systems/dataprep/fisheries/marine/disturbance/global_fishing_watch/FishingWatch_annual_effort_2017.csv")
+
+
+## trawl
+destructive_map <- fishing_effort %>%
+  filter(geartype %in% c("trawlers")) %>%
+  group_by(cell_ll_lat, cell_ll_lon) %>%
+  summarize(fishing_hours = sum(fishing_hours))
+
+
+destructive_map$lat <- destructive_map$cell_ll_lat
+destructive_map$lon <- destructive_map$cell_ll_lon
+destructive_map <- destructive_map[,c("lon", "lat","fishing_hours")]
+coordinates(destructive_map) <- ~lon+lat
+proj4string(destructive_map)=CRS("+init=epsg:4326")
+destructive_map_raster<-rasterFromXYZ(destructive_map, crs = "+init=epsg:4326")
+proj4string(destructive_map_raster)=CRS("+init=epsg:4326")
+plot(destructive_map_raster)
+
+writeRaster(destructive_map_raster, "/home/shares/food-systems/Food_footprint/all_food_systems/dataprep/fisheries/marine/disturbance/global_fishing_watch/FishingWatch_annual_effort_trawlers_2017.tif", overwrite=TRUE)
+
+
+## dredge
+destructive_map <- fishing_effort %>%
+  filter(geartype %in% c("dredge_fishing")) %>%
+  group_by(cell_ll_lat, cell_ll_lon) %>%
+  summarize(fishing_hours = sum(fishing_hours))
+
+
+destructive_map$lat <- destructive_map$cell_ll_lat
+destructive_map$lon <- destructive_map$cell_ll_lon
+destructive_map <- destructive_map[,c("lon", "lat","fishing_hours")]
+coordinates(destructive_map) <- ~lon+lat
+proj4string(destructive_map)=CRS("+init=epsg:4326")
+destructive_map_raster<-rasterFromXYZ(destructive_map, crs = "+init=epsg:4326")
+proj4string(destructive_map_raster)=CRS("+init=epsg:4326")
+plot(destructive_map_raster)
+
+writeRaster(destructive_map_raster, "/home/shares/food-systems/Food_footprint/all_food_systems/dataprep/fisheries/marine/disturbance/global_fishing_watch/FishingWatch_annual_effort_dredge_2017.tif", overwrite=TRUE)
+
+
+```
+
+
+### Maps of fishing effort by gear
+
+```{r}
+fishing_effort <- st_read("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/yearly_summary_cell_gear_sf/yearly_summary_sf_2020.shp")
+
+# explore the .shp to ensure we understand the attributes before plotting
+colnames(fishing_effort)
+str(fishing_effort)
+fishing_effort[1:5,]
+mapview(fishing_effort)
+
+# DID NOT LOOK GOOD...
+# ggplot() +
+#   # borders("world", fill = "gray95", color = "gray70") +
+#   # plot points with size based on count
+#   geom_sf(data = fishing_effort_count, 
+#           aes(size = point_count, color = point_count),
+#           alpha = 0.7) +
+#   # Use a better color scale
+#   scale_color_viridis_c(option = "plasma", name = "Fishing\nEffort") +
+#   scale_size_continuous(name = "Point\nDensity", range = c(1, 8)) +
+#   # Improve theme elements
+#   theme_minimal() +
+#   labs(title = "Fishing Effort Distribution (2020)",
+#        subtitle = "Circle size indicates concentration of fishing activity") +
+#   theme(
+#     plot.title = element_text(face = "bold"),
+#     legend.position = "right"
+#   )
+
+# Assuming fishing_effort is already loaded and is in a projected coordinate system
+# First, check the current coordinate system
+st_crs(fishing_effort)
+
+# Transform to WGS84 (EPSG:4326) which is what leaflet expects
+fishing_effort_wgs84 <- st_transform(fishing_effort, 4326)
+
+# Now create your count summary with the transformed data
+colnames(fishing_effort_wgs84)
+
+# Then create your summary with the effort variable
+fishing_effort_summary <- fishing_effort_wgs84 %>%
+  group_by(geometry, gear) %>% 
+  summarize(
+    point_count = n(),
+    total_effort = sum(ttl_fs_)  # Replace 'effort' with your actual column name
+  )
+
+# Create a color palette for the different gear types
+# Get unique gear types
+gear_types <- unique(fishing_effort_summary$gear)
+# Create a qualitative palette with enough colors
+gear_pal <- colorFactor(
+  palette = colorRampPalette(brewer.pal(8, "Set1"))(length(gear_types)),
+  domain = gear_types
+)
+
+# Create interactive map
+leaflet(fishing_effort_summary) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    radius = ~sqrt(total_effort) * 3,  # Size based on fishing effort
+    color = ~gear_pal(gear),           # Color based on gear type
+    fillOpacity = 0.7,
+    stroke = TRUE,
+    weight = 1,
+    popup = ~paste(
+      "Gear Type: ", gear, "<br>",
+      "Fishing Effort: ", round(total_effort, 2), "<br>",
+      "Points: ", point_count
+    )
+  ) %>%
+  # Add legend for gear types
+  addLegend(
+    position = "bottomright",
+    pal = gear_pal,
+    values = ~gear,
+    title = "Gear Type"
+  ) %>%
+  # Add legend for effort (optional, makes a second legend)
+  addLegend(
+    position = "bottomleft",
+    colors = viridisLite::viridis(5),
+    labels = quantile(fishing_effort_summary$total_effort, probs = seq(0, 1, 0.25)) %>% round(1), # shows fishing effort values at 0% (minimum value), 25% (first quartile), 50% (median), 75% (third quartile), 100% (maximum value).  shows the data distribution... most are 0 fishing effort.  That is fishy to me (pun intended).
+    title = "Fishing Effort<br>(Circle Size)",
+    opacity = 0.7
+  ) %>%
+  # Set the view to focus on the Gulf of California
+  setView(lng = -112, lat = 28, zoom = 6)
+```
+
+
+
 
 
 
