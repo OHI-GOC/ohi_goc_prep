@@ -28,9 +28,9 @@ From the largest predators to microscopic plankton, these species depend upon ea
 
 This sub-goal assesses the health of all marine species present in the Gulf of California, including endangered species and species in relatively good conditions. The presence of species that are not at risk leads to a higher score.
 
-## Exploring data sources
+# Exploring data sources
 
-### The Gulf of California Invertebrate Database:The Invertebrate Portion of the Macrofauna Golfo Database
+## The Gulf of California Invertebrate Database:The Invertebrate Portion of the Macrofauna Golfo Database
 
 Link to downloard: <https://www.desertmuseum.org/center/seaofcortez/database.php>
 
@@ -42,6 +42,379 @@ Acronyms used in the database: <https://www.desertmuseum.org/center/seaofcortez/
 
 Data stored: home/shares/ohi/OHI_GOC/_raw_data/GoC_invert_database_desertmuseum/d2025/seaofcortez_export_0_15000meters.csv
 
-# Setup
+## IUCN Red List v4
 
+### Setup
+
+```{r}
+library(rredlist)
+
+# use the IUCN API website (https://api.iucnredlist.org/), click the “Generate a token” link at the top of the web page, and fill out the form to apply for a token. You should then receive a token after completing the form. After receiving a token, open the .Renviron file on your computer (e.g., using usethis::edit_r_environ())
+usethis::edit_r_environ() # and add the token as "IUCN_REDLIST_KEY"
+
+# verify access to IUCN Red List API
+rredlist::rl_use_iucn() # make sure you did the above ^!
+
+# --------------------------------------
+
+library(ohicore)
+library(tidyverse)
+library(stringr)
+library(here)
+library(janitor)
+library(plotly)
+library(tictoc)
+library(ggplot2)
+library(leaflet)
+library(sf)
+library(viridis)
+library(dplyr)
+
+
+# ---- sources! ----
+# source(here("workflow", "R", "common.R")) # file creates objects to process data
+## set the mazu and neptune data_edit share based on operating system
+dir_M             <- c('Windows' = '//mazu.nceas.ucsb.edu/ohi',
+                       'Darwin'  = '/Volumes/ohi',    ### connect (cmd-K) to smb://mazu/ohi
+                       'Linux'   = '/home/shares/ohi')[[ Sys.info()[['sysname']] ]]
+
+# ---- set year and file path info ----
+current_year <- 2025 # Update this in the future!!
+version_year <- paste0("v",current_year)
+data_dir_version_year <- paste0("d", current_year)
+
+# ---- data directories ----
+
+# raw data directory (on Mazu)
+raw_data_dir <- here::here(dir_M, "OHI_GOC", "_raw_data")
+
+# for IUCN raw data dir
+iucn_raw_dir <- here::here(dir_M, "OHI_GOC", "_raw_data", "IUCN_spatial", data_dir_version_year)
+
+# for coastline characteristics intermediates
+int_dir <- here::here("SPP_ICO", "spp", version_year, "int")
+
+# final output dir
+output_dir <- here("SPP_ICO", "spp", version_year, "output")
+
+# spatial data for GoC
+goc_spatial <- here("spatial")
+
+# this CRS might be better for visualization, explore.
+gulf_crs <- st_crs("+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+```
+
+GoC Shapefiles:
+```{r}
+# read in ecoregion shapefiles in 
+eco_hr_latlon <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_latlon.shp"))
+# mapview(eco_hr_latlon)
+head(eco_hr_latlon)
+
+# eco_hr_eqarea <- st_read(here(goc_spatial, "GoC_polygon_ecoregion_eqarea.shp"))
+# mapview(eco_hr_eqarea)
+
+# check CRS of ecoregion boundary
+st_crs(eco_hr_latlon) # WGS84, can be used to crop global data
+
+# transform to gulf_CRS
+# eco_hr_albers <- st_transform(eco_hr_eqarea, crs = "+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+# st_crs(eco_hr_albers) # double check it worked well
+# mapview(eco_hr_albers) # looks good!
+```
+
+### Download Mexico Spp Data
+
+For spatial data, manual polygon downloads are available at <https://www.iucnredlist.org/resources/spatial-data-download>.  The API will give the list of the status and name of all species in Mexico, but it does not have any spatial data associated with it (such as locations/coordinates seen).  After downloading all marine groups manually and cropping it to the GoC, we will be able to match it with listed species and their status from `mex_species`.  It is possible there are more taxonomic group distribution data than are listed, which is okay and still good to explore.  
+
+Note: there are 19 groups (separate downloads) for spatial data.  Mazu location is /home/shares/ohi/OHI_GOC/_raw_data/IUCN_spatial/d2025.  After requesting each group, go to your account page under "saved downloads".  There, all requested downloads will be present.  Download each group and unzip, then bring into Mazu for the appropriate year. 
+
+```{r}
+mex_species <- rredlist::rl_countries("MX")  # GoC in MX
+```
+
+
+#### 1. Abalone
+
+```{r}
+# read in shapefile for polygons from Mazu
+abalone_global_raw <- st_read(here::here(iucn_raw_dir, "ABALONES","ABALONES.shp"))
+# plot(abalone_global_raw) # looks good! already in WGS 84. 28 attributes
+
+# clip to GoC by cropping the global data to the gulf ecoregion boundary
+abalone_global_wgs84 <- st_transform(abalone_global_raw, crs = 4326) # ensure it is wgs84
+unique(st_is_valid(abalone_global_wgs84))  # check validity: some are FALSE.  need to fix using `st_make_valid()` because some polygons cross each other
+unique(st_geometry_type(abalone_global_wgs84))  # confirm geometry type: all multipolygons
+
+## make valid, some issues with polygon validity
+abalone_global_wgs84_valid <- st_make_valid(abalone_global_wgs84)
+unique(st_is_valid(abalone_global_wgs84_valid)) # all true ~
+head(abalone_global_wgs84_valid) # looking good
+
+eco_hr_wgs84 <- st_transform(eco_hr_latlon, crs = 4326) # ensure it is wgs84
+
+abalone_dist_goc_wgs84 <- st_intersection(abalone_global_wgs84_valid, eco_hr_wgs84)
+head(abalone_dist_goc_wgs84) # only species in GoC: Haliotis rufescens
+
+mapview(abalone_dist_goc_wgs84)
+
+write_sf(abalone_dist_goc_wgs84, here::here(int_dir, "abalone_dist_goc_wgs84.shp"))
+```
+
+
+#### 2. Cone Snails
+
+```{r}
+# read in shapefile for polygons from Mazu
+cone_snails_global_raw <- st_read(here::here(iucn_raw_dir, "CONE_SNAILS","CONE_SNAILS.shp"))
+plot(cone_snails_global_raw[1]) # looks good! already in WGS 84. 28 attributes
+
+# clip to GoC by cropping the global data to the gulf ecoregion boundary
+cone_snails_global_wgs84 <- st_transform(cone_snails_global_raw, crs = 4326) # ensure it is wgs84
+unique(st_is_valid(cone_snails_global_wgs84))  # check validity: all valid!!
+unique(st_geometry_type(cone_snails_global_wgs84))  # confirm geometry type: all multipolygons
+
+eco_hr_wgs84 <- st_transform(eco_hr_latlon, crs = 4326) # ensure it is wgs84
+
+## make valid, some issues with polygon validity
+cone_snails_global_wgs84_valid <- st_make_valid(cone_snails_global_wgs84)
+unique(st_is_valid(cone_snails_global_wgs84_valid)) # all true ~
+head(cone_snails_global_wgs84_valid) # looking good
+
+cone_snail_dist_goc_wgs84 <- st_intersection(cone_snails_global_wgs84, eco_hr_wgs84)
+length(unique(cone_snail_dist_goc_wgs84$sci_name)) # 30 cone snail species!!!
+
+mapview(cone_snail_dist_goc_wgs84) # wide range of distribution. Could narrow down depending on if they are on the list 
+
+write_sf(cone_snail_dist_goc_wgs84, here::here(int_dir, "cone_snail_dist_goc_wgs84.shp"))
+```
+
+
+#### 3. Croakers & Drums
+
+```{r}
+# read in shapefile for polygons from Mazu
+croakers_drums_global_raw <- st_read(here::here(iucn_raw_dir, "CROAKERS_DRUMS","CROAKERS_DRUMS.shp"))
+plot(croakers_drums_global_raw[1]) # looks good! already in WGS 84. 28 attributes
+
+# clip to GoC by cropping the global data to the gulf ecoregion boundary
+croakers_drums_global_wgs84 <- st_transform(croakers_drums_global_raw, crs = 4326) # ensure it is wgs84
+unique(st_is_valid(croakers_drums_global_wgs84))  # check validity: NOT all valid, st_make_valid()
+unique(st_geometry_type(croakers_drums_global_wgs84))  # confirm geometry type: all multipolygons
+
+eco_hr_wgs84 <- st_transform(eco_hr_latlon, crs = 4326) # ensure it is wgs84
+
+## make valid, some issues with polygon validity
+croakers_drums_global_wgs84_valid <- st_make_valid(croakers_drums_global_wgs84)
+unique(st_is_valid(croakers_drums_global_wgs84_valid)) # stil NOT all true...
+
+## explore those that are not valid
+invalid_indices <- which(!st_is_valid(croakers_drums_global_wgs84_valid))
+problem_polygons <- croakers_drums_global_wgs84_valid[invalid_indices,]
+mapview(problem_polygons) # not in Mexico, can drop
+
+# drop the invlaid polygons
+valid_logical <- st_is_valid(croakers_drums_global_wgs84_valid)
+croakers_drums_global_wgs84_drop <- croakers_drums_global_wgs84_valid[valid_logical,] # now, 296 obs, correct! Dropped two invalide polygons
+
+croakers_drums_dist_goc_wgs84 <- st_intersection(croakers_drums_global_wgs84_drop, eco_hr_wgs84)
+length(unique(croakers_drums_dist_goc_wgs84$sci_name)) # 49 croaker and drum species!!!
+
+mapview(croakers_drums_dist_goc_wgs84) # wide range of distribution. Could narrow down depending on if they are on the list.. on first glance I see totoaba :)
+
+write_sf(croakers_drums_dist_goc_wgs84, here::here(int_dir, "croakers_drums_dist_goc_wgs84.shp"))
+```
+
+#### 4. Eels
+
+```{r}
+# read in shapefile for polygons from Mazu
+eels_global_raw <- st_read(here::here(iucn_raw_dir, "EELS","EELS.shp"))
+plot(eels_global_raw[1]) # looks good! already in WGS 84. 28 attributes
+
+# clip to GoC by cropping the global data to the gulf ecoregion boundary
+eels_global_wgs84 <- st_transform(eels_global_raw, crs = 4326) # ensure it is wgs84
+unique(st_is_valid(eels_global_wgs84))  # check validity: NOT all valid, st_make_valid()
+unique(st_geometry_type(eels_global_wgs84))  # confirm geometry type: all multipolygons
+
+eco_hr_wgs84 <- st_transform(eco_hr_latlon, crs = 4326) # ensure it is wgs84
+
+## make valid, some issues with polygon validity
+eels_global_wgs84_valid <- st_make_valid(eels_global_wgs84)
+unique(st_is_valid(eels_global_wgs84_valid)) # stil NOT all true...
+
+## explore those that are not valid
+invalid_indices <- which(!st_is_valid(eels_global_wgs84_valid))
+problem_polygons <- eels_global_wgs84_valid[invalid_indices,]
+mapview(problem_polygons) # none are within GoC, can drop
+
+# drop the invlaid polygons
+valid_logical <- st_is_valid(eels_global_wgs84_valid)
+eels_global_wgs84_drop <- eels_global_wgs84_valid[valid_logical,] # Dropped invalid polygons
+
+eels_dist_goc_wgs84 <- st_intersection(eels_global_wgs84_drop, eco_hr_wgs84)
+length(unique(eels_dist_goc_wgs84$sci_name)) # 79 eel species in GoC!!!
+
+mapview(eels_dist_goc_wgs84) # cool!! wide range of dist
+
+write_sf(eels_dist_goc_wgs84, here::here(int_dir, "eels_dist_goc_wgs84.shp"))
+```
+
+#### 5. Groupers
+
+```{r}
+# read in shapefile for polygons from Mazu
+groupers_global_raw <- st_read(here::here(iucn_raw_dir, "GROUPERS","GROUPERS.shp"))
+plot(groupers_global_raw[1]) # looks good! already in WGS 84. 28 attributes
+
+# clip to GoC by cropping the global data to the gulf ecoregion boundary
+groupers_global_wgs84 <- st_transform(groupers_global_raw, crs = 4326) # ensure it is wgs84
+unique(st_is_valid(groupers_global_wgs84))  # check validity: all valid!!!!
+unique(st_geometry_type(groupers_global_wgs84))  # confirm geometry type: all multipolygons
+
+eco_hr_wgs84 <- st_transform(eco_hr_latlon, crs = 4326) # ensure it is wgs84
+
+groupers_dist_goc_wgs84 <- st_intersection(groupers_global_wgs84, eco_hr_wgs84)
+length(unique(groupers_dist_goc_wgs84$sci_name)) # 17 grouper species in GoC!!!
+
+mapview(groupers_dist_goc_wgs84) # all ova!
+
+write_sf(groupers_dist_goc_wgs84, here::here(int_dir, "groupers_dist_goc_wgs84.shp"))
+```
+
+#### 6. Hagfish
+
+```{r}
+# read in shapefile for polygons from Mazu
+hagfish_global_raw <- st_read(here::here(iucn_raw_dir, "HAGFISH","HAGFISH.shp"))
+plot(hagfish_global_raw[1]) # looks good! already in WGS 84. 28 attributes
+
+# clip to GoC by cropping the global data to the gulf ecoregion boundary
+hagfish_global_wgs84 <- st_transform(hagfish_global_raw, crs = 4326) # ensure it is wgs84
+unique(st_is_valid(hagfish_global_wgs84))  # check validity: not all valid
+unique(st_geometry_type(hagfish_global_wgs84))  # confirm geometry type: all multipolygons
+
+## make valid, some issues with polygon validity
+hagfish_global_wgs84_valid <- st_make_valid(hagfish_global_wgs84)
+unique(st_is_valid(hagfish_global_wgs84_valid)) # all true now!
+
+eco_hr_wgs84 <- st_transform(eco_hr_latlon, crs = 4326) # ensure it is wgs84
+
+hagfish_dist_goc_wgs84 <- st_intersection(hagfish_global_wgs84_valid, eco_hr_wgs84)
+length(unique(hagfish_dist_goc_wgs84$sci_name)) # 4 hagfish species in GoC!!!
+
+mapview(hagfish_dist_goc_wgs84) # all southern gulf
+
+write_sf(hagfish_dist_goc_wgs84, here::here(int_dir, "hagfish_dist_goc_wgs84.shp"))
+```
+
+#### 7. Lobsters
+
+```{r}
+# read in shapefile for polygons from Mazu
+lobsters_global_raw <- st_read(here::here(iucn_raw_dir, "LOBSTERS","LOBSTERS.shp"))
+plot(lobsters_global_raw[1]) # looks good! already in WGS 84. 28 attributes
+
+# clip to GoC by cropping the global data to the gulf ecoregion boundary
+lobster_global_wgs84 <- st_transform(lobsters_global_raw, crs = 4326) # ensure it is wgs84
+unique(st_is_valid(lobster_global_wgs84))  # check validity: all valid!!
+unique(st_geometry_type(lobster_global_wgs84))  # confirm geometry type: all multipolygons
+
+eco_hr_wgs84 <- st_transform(eco_hr_latlon, crs = 4326) # ensure it is wgs84
+
+lobsters_dist_goc_wgs84 <- st_intersection(lobster_global_wgs84, eco_hr_wgs84)
+length(unique(lobsters_dist_goc_wgs84$sci_name)) # 9 lobster species in GoC!!! but the year compiled is 2011...
+
+mapview(lobsters_dist_goc_wgs84) # whole gulf!
+
+write_sf(lobsters_dist_goc_wgs84, here::here(int_dir, "lobsters_dist_goc_wgs84.shp"))
+```
+
+#### * 8. Mammals (Marine Only)
+
+```{r}
+# read in shapefile for polygons from Mazu
+marine_mammals_global_raw <- st_read(here::here(iucn_raw_dir, "MAMMALS_MARINE_ONLY","MAMMALS_MARINE_ONLY.shp"))
+plot(marine_mammals_global_raw[1]) # looks good! already in WGS 84. 28 attributes
+
+# clip to GoC by cropping the global data to the gulf ecoregion boundary
+marine_mammals_global_wgs84 <- st_transform(marine_mammals_global_raw, crs = 4326) # ensure it is wgs84
+unique(st_is_valid(marine_mammals_global_wgs84))  # check validity: not all valid...
+unique(st_geometry_type(marine_mammals_global_wgs84))  # confirm geometry type: all multipolygons
+
+eco_hr_wgs84 <- st_transform(eco_hr_latlon, crs = 4326) # ensure it is wgs84
+
+## make valid, some issues with polygon validity
+marine_mammals_global_wgs84_valid <- st_make_valid(marine_mammals_global_wgs84)
+unique(st_is_valid(marine_mammals_global_wgs84_valid)) # not all true still
+
+## explore those that are not valid
+invalid_indices <- which(!st_is_valid(marine_mammals_global_wgs84_valid))
+problem_polygons <- marine_mammals_global_wgs84_valid[invalid_indices,]
+mapview(problem_polygons) # some are within the GoC...
+
+# dissolve the polygons without losing attributes:
+library(igraph)
+
+# find overlapping clusters
+overlap_matrix <- st_intersects(marine_mammals_global_wgs84_valid)
+# graph <- graph_from_adjacency_matrix(overlap_matrix)
+# clusters <- components(graph)$membership
+# 
+# # merge polygons by cluster
+# merged_data <- your_data %>%
+#   mutate(cluster = clusters) %>%
+#   group_by(cluster) %>%
+#   summarize(do_union = TRUE)
+
+marine_mammals_dist_goc_wgs84 <- st_intersection(marine_mammals_global_wgs84_valid, eco_hr_wgs84)
+length(unique(marine_mammals_dist_goc_wgs84$sci_name)) 
+
+mapview(marine_mammals_dist_goc_wgs84)
+
+write_sf(marine_mammals_dist_goc_wgs84, here::here(int_dir, "marine_mammals_dist_goc_wgs84.shp"))
+```
+
+#### 9. Mangroves (HAB)
+
+```{r}
+# read in shapefile for polygons from Mazu
+mangroves_global_raw <- st_read(here::here(iucn_raw_dir, "MANGROVES","MANGROVES.shp"))
+
+plot(mangroves_global_raw[1]) # looks good! already in WGS 84. 28 attributes
+
+# clip to GoC by cropping the global data to the gulf ecoregion boundary
+mangroves_global_wgs84 <- st_transform(mangroves_global_raw, crs = 4326) # ensure it is wgs84
+unique(st_is_valid(mangroves_global_wgs84))  # check validity: all valid!!
+unique(st_geometry_type(mangroves_global_wgs84))  # confirm geometry type: all multipolygons
+
+eco_hr_wgs84 <- st_transform(eco_hr_latlon, crs = 4326) # ensure it is wgs84
+
+mangroves_dist_goc_wgs84 <- st_intersection(mangroves_global_wgs84, eco_hr_wgs84)
+length(unique(mangroves_dist_goc_wgs84$sci_name)) # 4 mangrove species in GoC!!! but the year compiled is 2010...
+
+mapview(mangroves_dist_goc_wgs84) # whole gulf!
+
+write_sf(mangroves_dist_goc_wgs84, here::here(int_dir, "mangroves_dist_goc_wgs84.shp"))
+```
+
+#### 10. Marinefish
+
+#### 11. Reef Forming Corals
+
+#### 12. Salmonids
+
+#### 13. Seabreams, Snappers, Grunts
+
+#### 14. Seagrasses (HAB)
+
+#### 15. Sharks, Rays, Chimaeras
+
+#### 16. Sturgeons & Paddlefishes
+
+#### 17. Syngnathiform Fishes
+
+#### 18. Tunas, Billfishes, Swordfish
+
+#### 19. Wrassess & Parrotfish
 
