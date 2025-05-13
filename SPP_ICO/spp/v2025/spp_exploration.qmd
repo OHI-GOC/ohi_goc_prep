@@ -123,7 +123,7 @@ st_crs(eco_hr_latlon) # WGS84, can be used to crop global data
 # mapview(eco_hr_albers) # looks good!
 ```
 
-### Download Mexico Spp Data
+### Download Mexico IUCN Data
 
 For spatial data, manual polygon downloads are available at <https://www.iucnredlist.org/resources/spatial-data-download>.  The API will give the list of the status and name of all species in Mexico, but it does not have any spatial data associated with it (such as locations/coordinates seen).  After downloading all marine groups manually and cropping it to the GoC, we will be able to match it with listed species and their status from `mex_species`.  It is possible there are more taxonomic group distribution data than are listed, which is okay and still good to explore.  
 
@@ -131,6 +131,14 @@ Note: there are 19 groups (separate downloads) for spatial data.  Mazu location 
 
 ```{r}
 mex_species <- rredlist::rl_countries("MX")  # GoC in MX
+
+# isolate assessment results
+mex_species_assessments <- mex_species[["assessments"]] %>% # can drop scopes for now
+  select(-scopes)
+View(mex_species_assessments) 
+
+# write to mazu for easier access
+write_csv(mex_species_assessments, here("/home/shares/ohi/OHI_GOC/goal_prep/spp/iucn_redlist/v2025", "mex_species_assessments.csv"))
 ```
 
 
@@ -558,7 +566,7 @@ mapview(problem_polygons) # some are in GoC...
 # valid_logical <- st_is_valid(sharks_rays_chimaeras_global_wgs84_valid)
 # sharks_rays_chimaeras_global_wgs84_drop <- sharks_rays_chimaeras_global_wgs84_valid[valid_logical,] 
 
-sharks_rays_chimaeras_dist_goc_wgs84 <- st_intersection(sharks_rays_chimaeras_global_wgs84, eco_hr_wgs84)
+sharks_rays_chimaeras_dist_goc_wgs84 <- st_intersection(sharks_rays_chimaeras_global_wgs84_valid, eco_hr_wgs84)
 length(unique(sharks_rays_chimaeras_dist_goc_wgs84$sci_name)) # 
 
 mapview(sharks_rays_chimaeras_dist_goc_wgs84) # 
@@ -700,4 +708,175 @@ mapview(wrasses_parrotfishes_dist_goc_wgs84) # in shallower waters
 
 write_sf(wrasses_parrotfishes_dist_goc_wgs84, here::here("/home/shares/ohi/OHI_GOC/_raw_data/IUCN_spatial/d2025/int/wrasses_parrotfishes_dist_goc_wgs84.shp"))
 ```
+
+#### Join all groups
+
+
+```{r}
+# define the paths for both directories
+int_dir <- here("SPP_ICO", "spp", version_year, "int")  # local int files
+iucn_dir <- file.path(dir_M, "OHI_GOC", "_raw_data", "IUCN_spatial", data_dir_version_year)  # Mazu files
+
+# all distribution files from BOTH directories
+shp_paths <- c(
+  list.files(int_dir, pattern = "_dist_goc_wgs84\\.shp$", full.names = TRUE),
+  list.files(iucn_dir, pattern = "_dist_goc_wgs84\\.shp$", full.names = TRUE)
+)
+
+# make sure files exist
+stopifnot(all(file.exists(shp_paths)))
+
+# different capitalizations and spellings in some
+col_names <- lapply(shp_paths, function(p) names(st_read(p, quiet = TRUE)))
+print(unique(col_names))
+
+# read all shapefiles, clean column names, and collect all unique column names
+sf_list <- map(shp_paths, ~{
+  sf <- st_read(.x, quiet = TRUE)
+  sf <- clean_names(sf)
+  sf
+})
+
+# find all unique column names across all shapefiles
+all_cols <- sf_list %>%
+  map(~ names(.)) %>%
+  unlist() %>%
+  unique()
+
+# add missing columns as NA to each sf object, so all have the same columns
+sf_list_harmonized <- map(sf_list, ~{
+  missing_cols <- setdiff(all_cols, names(.))
+  if (length(missing_cols) > 0) {
+    for (col in missing_cols) {
+      .[[col]] <- NA
+    }
+  }
+  # reorder columns to match all_cols
+  . <- .[, all_cols]
+  .
+})
+
+# combine them all into one sf object
+all_species_goc <- bind_rows(sf_list_harmonized)
+
+# write to mazu for easier access
+write_sf(all_species_goc, here("/home/shares/ohi/OHI_GOC/goal_prep/spp/iucn_redlist/v2025", "all_species_goc.shp"))
+```
+
+#### Interactive DT
+
+```{r}
+library(DT)
+
+# remove geometry column, keeping only attributes
+all_species_goc_attributes <- st_drop_geometry(all_species_goc)
+
+# write to mazu for easier access
+write_csv(all_species_goc_attributes, here("/home/shares/ohi/OHI_GOC/goal_prep/spp/iucn_redlist/v2025", "all_species_goc_attributes.csv"))
+
+# make interactive DT table!
+datatable(all_species_goc_attributes, options = list(scrollX = TRUE))
+```
+
+
+### Cross Reference the IUCN Status Codes
+
+Use `mex_species_assessments` and `all_species_goc` to determine if the status code has been correctly updated.
+
+```{r}
+# isolate columns of interest and rename for better clarification
+all_species_goc_attributes_xref <- all_species_goc_attributes %>% 
+  select(id_no, sci_name, category) %>% 
+  rename(id_no = id_no,
+         sci_name = sci_name,
+         category_goc = category)
+
+mex_species_assessments_xref <- mex_species_assessments %>% 
+  select(id_no = sis_taxon_id,
+         sci_name = taxon_scientific_name,
+         category_mex = red_list_category_code)
+
+# join the spatial and redlist data
+mex_species_assessments_join <- full_join(mex_species_assessments_xref, all_species_goc_attributes_xref, by = c("sci_name", "id_no")) %>% 
+  mutate(category_maintained = case_when(
+    category_mex == category_goc ~ "1",
+    TRUE ~ "0"
+  ))
+
+# the number of maintained species
+goc_species_assessments_xref <- mex_species_assessments_join %>% 
+  filter(category_maintained == "1") %>% 
+  distinct()
+
+length(unique(goc_species_assessments_xref$sci_name))
+
+# write to mazu for easier access
+write_csv(goc_species_assessments_xref, here("/home/shares/ohi/OHI_GOC/goal_prep/spp/iucn_redlist/v2025", "goc_species_assessments_xref.csv"))
+```
+
+
+### Interactive ways to display the IUCN data
+
+
+```{r}
+# rename for joining
+mex_species_assessments_rename <- mex_species_assessments %>% 
+  rename(id_no = sis_taxon_id,
+         sci_name = taxon_scientific_name,
+         category_mex = red_list_category_code)
+
+# join the species with the iucn URLs from the mex redlist
+goc_species_assessments_xref_viz <- left_join(goc_species_assessments_xref, mex_species_assessments_rename, by = c("id_no","sci_name", "category_mex")) %>% 
+  distinct() %>% 
+  filter(latest == "TRUE")
+
+datatable(goc_species_assessments_xref_viz)
+
+# write to mazu for easier access
+write_csv(goc_species_assessments_xref_viz, here("/home/shares/ohi/OHI_GOC/goal_prep/spp/iucn_redlist/v2025", "goc_species_assessments_xref_viz.csv"))
+```
+
+```{r}
+library(plotly)
+
+# sum the counts for each category_mex
+pie_data <- goc_species_assessments_xref_viz %>%
+  count(category_mex)
+
+# make the interactive pie chart for the categories!!
+pie_cat_fig <- plot_ly(
+  data = pie_data,
+  labels = ~category_mex,
+  values = ~n,
+  type = "pie",
+  textinfo = "label+percent",
+  insidetextorientation = "radial"
+) %>%
+  layout(title = "Species by Mexican Red List Category")
+
+pie_cat_fig
+```
+
+```{r}
+library(reactable)
+
+reactable(
+  goc_species_assessments_xref_viz,
+  groupBy = "category_mex",
+  searchable = TRUE,
+  filterable = TRUE,
+  striped = TRUE,
+  highlight = TRUE,
+  columns = list(
+    category_mex = colDef(name = "Red List Category"),
+    sci_name = colDef(name = "Scientific Name"),
+    year_published = colDef(name = "Year Published"),
+    
+  )
+)
+
+```
+
+
+
 
