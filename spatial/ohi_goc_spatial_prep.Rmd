@@ -266,3 +266,102 @@ watersheds_mexico_reproj <- st_transform(watersheds_mexico, st_crs(eco_hr))
 The image is located [here](https://docs.google.com/document/d/1m-cYhNwUm9I_iaC2oXYJDUAIVvi--2HLPQhiEDwwxf4/edit?tab=t.mg1p6em671r2).
 
 Here we can see that the watersheds from databasin actually do not look very similar to the watersheds from Hem's data, which makes me think they may be using different ways to delineate between watersheds. Or that Hem's is more updated. Example: the tip of the peninsula by La Paz looks very different and much more segmented in the watersheds_mexico_proj.
+
+
+Editing the ecoregion boundary to have a more accurate outline border
+```{r}
+library(mapedit)
+library(tidyverse)
+
+eco_hr_foredit <- st_read(here("spatial/GoC_polygon_ecoregion_latlon.shp")) # WGS 84
+
+# edit the polygon interactively
+eco_hr_foredit_interactive <- editFeatures(eco_hr_foredit)
+st_write(eco_hr_foredit_interactive, here("spatial/eco_hr_subregions_raw.shp"))
+
+mapview(eco_hr_foredit_interactive)
+
+##########################
+# keep re-adding any lines that did were not valid
+# edit interactively
+eco_hr_polygon_subregions_03 <- editFeatures(eco_hr_polygon_subregions_02)
+mapview(eco_hr_polygon_subregions_03)
+st_write(eco_hr_polygon_subregions, here("spatial/eco_hr_subregions_raw.shp"))
+##########################
+
+## now merge polylines and split the original polygon with the new lines made
+
+# original single GoC polygon
+original_goc <- subregions_02
+
+# Load the polygon with lines you just created
+drawn_features <- eco_hr_polygon_subregions_03
+
+# first extract only the lines (not the filled polygons) to see them and confirm
+lines_only <- drawn_features[st_geometry_type(drawn_features) == "LINESTRING", ]
+
+if(nrow(lines_only) == 0) {
+  # Convert polygon boundaries to lines
+  polygon_boundaries <- st_cast(drawn_features, "MULTILINESTRING")
+  lines_only <- st_cast(polygon_boundaries, "LINESTRING")
+}
+
+mapview(lines_only)
+
+# now use st_split to divide the original polygon into multiple polygons using the drawn lines
+split_goc_with_lines <- function(original_polygon, dividing_lines) {
+
+  # combine all lines into a single multilinestring
+  all_lines <- st_union(st_geometry(dividing_lines))
+
+  # split the original polygon
+  tryCatch({
+    split_result <- st_split(original_polygon, all_lines)
+
+    # extract individual polygons from the result
+    individual_polygons <- st_collection_extract(split_result, "POLYGON")
+
+    # add region identifiers
+    individual_polygons$region_id <- 1:nrow(individual_polygons)
+    individual_polygons$region_name <- paste0("Region_", individual_polygons$region_id)
+
+    return(individual_polygons)
+
+  }, error = function(e) {
+    cat("Error in splitting:", e$message, "\n")
+    cat("Trying alternative approach...\n")
+    return(NULL) # for error catching!!
+  })
+}
+
+# apply the splitting
+subregions_03 <- split_goc_with_lines(original_goc, lines_only)
+mapview(subregions_03)
+
+region_7 <- subregions_03 %>% 
+  filter(region_id == "9") # small polygon!!! needs to be merged...
+
+mapview(region_7)
+
+# drop the polygons for the southern border that are unnecessary and merge region 14 and 15. Also merge region 9 with region 8
+merge_southern_border <- subregions_03 %>% 
+  filter(!region_id %in% c("1", "16", "2")) %>% 
+  mutate(region_id = ifelse(region_id == "15", "14", region_id)) %>%  # give it the same ID to merge 
+  mutate(region_id = ifelse(region_id == "9", "8", region_id)) %>%
+  group_by(region_id) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop") # merge the geometries
+
+cleaned_subregions <- merge_southern_border %>% 
+  arrange(as.numeric(region_id)) %>%  
+  mutate(
+    new_id = row_number(),
+    region_id = as.character(new_id),
+    region_name = paste0("Region_", new_id)
+  )
+
+# save it!!
+st_write(cleaned_subregions, here("spatial/goc_subregions_draft.shp"))
+
+mapview(cleaned_subregions, zcol = "region_name", layer.name = "Subregions") # looks great!!!
+```
+
