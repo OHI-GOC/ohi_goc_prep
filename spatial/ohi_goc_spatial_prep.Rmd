@@ -285,7 +285,106 @@ red_hidrografica_250k <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/hydrogra
 mapview(red_hidrografica_250k) # not what we want!! These are all the streams in mexico, which could be helpful but not what we want (accurate watershed boundaries).
 ```
 
-Lets look at another from INEGI:
+Lets look at another from INEGI (hosted on CONABIO):
+
+Cuencas Hidrográficas de México, 2007
+Catálogo de metadatos geográficos. Comisión Nacional para el Conocimiento y Uso de la Biodiversidad
+Autor: Instituto Nacional de Estadística Geografía e Informática (INEGI), Instituto Nacional de Ecología (INE), Comisión Nacional de Agua (CONAGUA), (2007)
+
+Palabras clave: hidrología, regiones, hidrológicas, cuencas, 1:250000, aspecto, fisico, hidrologicas, hidrologia, agua
+
+Fecha de publicación: 25-06-2007, del metadato 26-02-2009
+
+Descargas: Google Earth KML, Shapefile (Proyección Cónica Conforme de Lambert), Shapefile (Coordenadas geográficas), Metadatos
+
+Accesos directos: Vista previa, Geoportal CONABIO, Metadato (HTML).
+
+<http://geoportal.conabio.gob.mx/>
+<http://geoportal.conabio.gob.mx/metadatos/doc/html/cue250k_07gw.html>
+
+
+```{r}
+cuencas_hidrografica_2007 <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/hydrography_Estados_Unidos_Mexicanos", "cue250k_07gw")) # WGS 84
+mapview(cuencas_hidrografica_2007)
+
+## read in the proposed subregions
+subregion_draft_2 <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/june_24", "subregions_draft_2.shp"))
+mapview(subregion_draft_2)
+
+# check that both have the same CRS, that the geometries are valid, before determining which watersheds border the GoC
+if(st_crs(cuencas_hidrografica_2007) != st_crs(subregion_draft_2)) {
+  subregion_draft_2_transformed <- st_transform(subregion_draft_2, crs = st_crs(cuencas_hidrografica_2007)) # in case they are not the same CRS, transform the subregions to the watershed CRS
+} # they are both in WGS 84, did not get transformed (even through the object is saved that way)
+
+if(!all(st_is_valid(cuencas_hidrografica_2007))) {
+  cuencas_hidrografica_2007_valid <- st_make_valid(cuencas_hidrografica_2007)
+} 
+# unique(st_is_valid(cuencas_hidrografica_2007)) # TRUE, not needed, but could change
+
+if(!all(st_is_valid(subregion_draft_2))) {
+  subregion_draft_2_valid <- st_make_valid(subregion_draft_2_transformed)
+} 
+# unique(st_is_valid(subregion_draft_2)) # TRUE, not needed, but could change
+
+# now, intersect and see which polygons remain
+intersection_goc_cuencas_subrgns <- st_intersection(cuencas_hidrografica_2007_valid, subregion_draft_2_valid)
+mapview(intersection_goc_cuencas_subrgns)
+```
+
+Okay, so it looks like we will need to include a buffer to ensure that all watersheds are included. I thought this buffer should be 1km, as that was mentioned in EWG #1 as a possible border. 
+
+```{r}
+# for distance calculations, transform to UTM (32611 for Baja California)
+subregion_proj_utm <- st_transform(subregion_draft_2_valid, crs = 32611) # UTM Zone 11N
+cuencas_proj_utm <- st_transform(cuencas_hidrografica_2007_valid, crs = 32611)
+
+# make a 1km buffer, aka 1000m
+subregion_buffered <- st_buffer(subregion_proj_utm, dist = 1000)
+mapview(subregion_buffered)
+
+# intersect with the buffered polygons for the subregions
+cuencas_within_1km <- st_intersection(cuencas_proj_utm, subregion_buffered)
+mapview(cuencas_within_1km)
+
+cov_id_cuencas_within_1km <- cuencas_within_1km$COV_ID
+
+# filter the watershed dataset for all watersheds that are present in the intersection.
+cuencas_surrounding_goc <- cuencas_proj_utm %>% 
+  filter(COV_ID %in% cov_id_cuencas_within_1km)
+mapview(cuencas_surrounding_goc)
+```
+
+Now, let's join the bordering watersheds to the subregion draft to create a full study area draft.
+
+```{r}
+# keep the individual cuenca polygons but add subregion information to each one
+cuencas_surrounding_goc_w_rgns <- st_join(cuencas_surrounding_goc_clean, subregion_buffered) 
+mapview(cuencas_surrounding_goc_w_rgns, zcol = "rgn_n_2")
+
+full_study_area_draft <- bind_rows(cuencas_surrounding_goc_w_rgns, subregion_proj_utm) %>% 
+  mutate(rgn_n_2 = factor(
+    rgn_n_2,
+    levels = paste0("Region_", sort(as.numeric(gsub("Region_", "", unique(rgn_n_2)))))
+  ))
+mapview(full_study_area_draft, zcol = "rgn_n_2")
+
+# save it to mazu!
+st_write(full_study_area_draft, here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/june_24", "full_study_area_draft_w_watersheds_utm.shp"))
+
+# merge all polygons that fall in the same regions together
+cuencas_surrounding_goc_by_rgn <- cuencas_surrounding_goc_w_rgns %>% 
+  group_by(rgn_n_2) %>% 
+  summarise(geometry = st_union(geometry), .groups = "drop") # merge the geometries
+mapview(cuencas_surrounding_goc_by_rgn)
+
+full_study_area_draft_merged <- bind_rows(cuencas_surrounding_goc_by_rgn, subregion_proj_utm) %>% 
+  mutate(rgn_n_2 = factor(
+    rgn_n_2,
+    levels = paste0("Region_", sort(as.numeric(gsub("Region_", "", unique(rgn_n_2)))))
+  ))
+mapview(full_study_area_draft_merged, zcol = "rgn_n_2")
+```
+
 
 
 ### Subregion drafting
