@@ -17,6 +17,8 @@ editor:
   markdown:
     wrap: sentence
   chunk_output_type: inline
+editor_options: 
+  chunk_output_type: inline
 ---
 
 # Safety & Security Goal
@@ -164,7 +166,7 @@ tsdem_goc_states <- tsdem_raw %>%
 unique(tsdem_goc_states$nom_mun) # 104
 ```
 
-Here are the municipalities that have survey data associated with them:
+#### The municipalities that have survey data associated with them:
 
 **Baja California/BCS:**
 LA PAZ [6]
@@ -199,8 +201,16 @@ data("df_mxmunicipio") # read in 2015 municipios
 
 join_tper_vic1_tsdem <- left_join(tsdem_goc_states, tper_vic1_raw)
 
+# tper_vic1_goc <- tper_vic1_raw %>% 
+  # filter(nom_ent %in% c("BAJA CALIFORNIA","SONORA","SINALOA","JALISCO","BAJA CALIFORNIA SUR","NAYARIT"))
+
 tper_vic1_goc <- tper_vic1_raw %>% 
-  filter(nom_ent %in% c("BAJA CALIFORNIA","SONORA","SINALOA","JALISCO","BAJA CALIFORNIA SUR","NAYARIT"))
+  filter(nom_mun %in% c(
+    "LA PAZ", "LOS CABOS", "MULEGE", "LORETO", "COMONDU",
+    "CAJEME", "GUAYMAS", "HERMOSILLO", "EMPALME", "HUATABAMPO", "NAVOJOA", "ETCHOJOA",
+    "AHOME",
+    "PUERTO VALLARTA"
+  ))
 
 tsdem_goc_states_int <- tper_vic1_goc %>% 
   mutate(cve_ent = as.numeric(cve_ent),
@@ -240,13 +250,397 @@ tsdem_goc_states_job_chloro <- mxmunicipio_choropleth(
 )
 " En términos de delincuencia, dígame si se siente seguro(a) o inseguro(a) en…"
 
-# BUT, THIS ONLY MAKE SENSE WHEN COMPARED TO THE POPULATION PER MUNICIPIO!
+# BUT, THIS ONLY MAKES SENSE WHEN COMPARED TO THE POPULATION PER MUNICIPIO!
 ```
-The mxmunicipio_chloropleth function is only really useful if we want to see all of Mexico.  I am instead going to use a leaflet:
+The mxmunicipio_chloropleth function is only really useful if we want to see all of Mexico.  In the future we should instead just use a leaflet.
+
+#### How many GoC municipio responses (how complete is the ENVIPE data?)
+
+##### TPer_Viv1
 
 ```{r}
+# determine the variables for each dataset that indicates a question of interest
 
+## for tper_viv1
+tper_vic1_goc <- tper_vic1_raw %>% 
+  filter(nom_mun %in% c(
+    "LA PAZ", "LOS CABOS", "MULEGE", "LORETO", "COMONDU",
+    "CAJEME", "GUAYMAS", "HERMOSILLO", "EMPALME", "HUATABAMPO", "NAVOJOA", "ETCHOJOA",
+    "AHOME",
+    "PUERTO VALLARTA"
+  ))
+colnames(tper_vic1_goc) # 232 columns... ap start questions
+
+tper_vic1_goc_complete_detailed <- tper_vic1_goc %>%
+  group_by(nom_mun) %>%
+  summarise(
+    # total observations per municipality
+    total_observations = n(),
+    
+    # for each ap question, let's calculate both counts and rates
+    across(starts_with("ap"), 
+           list(
+             # substantive responses 
+             substantive_count = ~sum(. %in% 1:8, na.rm = TRUE),
+             
+             # "don't know" responses  
+             dont_know_count = ~sum(. == 9, na.rm = TRUE),
+             
+             # true missing values
+             missing_count = ~sum(is.na(.)),
+             
+             # prop of substantive responses 
+             substantive_rate = ~mean(. %in% 1:8, na.rm = TRUE),
+             
+             # check the math: substantive_count / total_observations should equal substantive_rate
+             manual_rate_check = ~sum(. %in% 1:8, na.rm = TRUE) / n()
+           ),
+           .names = "{.fn}_{.col}")
+  )
+
+## make heatmap to visualize the substantive rate for tmod_vic
+heatmap_tper_vic1_goc_complete <- tper_vic1_goc_complete_detailed %>%
+  select(nom_mun, starts_with("substantive_rate")) %>%
+  pivot_longer(cols = starts_with("substantive_rate"), 
+               names_to = "question", 
+               values_to = "substantive_rate") %>%
+  mutate(question = str_remove(question, "substantive_rate_"))
+
+ggplot(heatmap_tper_vic1_goc_complete, aes(x = question, y = nom_mun, fill = substantive_rate)) +
+  # white borders for better visualizing
+  geom_tile(color = "white", size = 0.5) +
+  
+  # green to red, good to bad (bad meaning missing values)
+  scale_fill_gradient2(low = "red",   # low substantive response rate (bad)
+                       mid = "yellow", # medium substantive response rate (okay) 
+                       high = "darkgreen",  # high substantive response rate (good)
+                       midpoint = 0.5, # set midpoint at 50% completion
+                       name = "Substantive\nResponse Rate \nNot '9' or 'NA'",
+                       labels = scales::percent_format()) +  # as percentages
+  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 70, hjust = 1, size = 9),
+        plot.title = element_text(size = 14),
+        axis.title = element_text(size = 12)) +
+  
+  labs(title = "Substantive response rates by municipality and question: TPer_Viv1",
+       subtitle = "Perception of safety and ability of institutions in charge of public safety and justice",
+       x = "Survey questions", 
+       y = "Municipio")
 ```
+
+
+```{r}
+# ### how many responses there were per municipio/estado
+# response_summary <- tper_vic1_goc %>% 
+#   group_by(nom_ent, nom_mun) %>%  #group by both state and municipality
+#   summarise(
+#     n_responses = n(),  # count total responses per municipality
+#     .groups = "drop"  # remove grouping after summarise
+#   ) %>%
+#   # add state-level summaries for comparison
+#   group_by(nom_ent) %>%
+#   mutate(
+#     state_total = sum(n_responses),  # tot responses per state
+#     mun_pct_of_state = (n_responses / state_total) * 100,  # each muni's share of state responses
+#     n_municipios = n()  # the number of municipalities per state
+#   ) %>%
+#   ungroup()
+# 
+# # calc additional summary statistics for deeper analysis
+# detailed_summary <- response_summary %>%
+#   group_by(nom_ent) %>%
+#   summarise(
+#     n_municipios = n(),
+#     total_responses = sum(n_responses),
+#     avg_responses_per_mun = mean(n_responses),
+#     median_responses_per_mun = median(n_responses),
+#     min_responses = min(n_responses),
+#     max_responses = max(n_responses),
+#     # coefficient of variation shows how much municipalities vary within states
+#     cv_responses = sd(n_responses) / mean(n_responses),
+#     .groups = "drop"
+#   )
+# 
+# # viz showing response distribution characteristics by state
+# p2 <- ggplot(response_summary, aes(x = reorder(nom_ent, state_total))) +
+#   # Box plots show distribution of municipality response counts within each state
+#   geom_boxplot(aes(y = n_responses), alpha = 0.6, outlier.alpha = 0.5) +
+#   # Add points for individual municipalities
+#   geom_jitter(aes(y = n_responses, color = nom_ent), 
+#               width = 0.2, alpha = 0.7, size = 1.5) +
+#   coord_flip() +
+#   scale_y_continuous(labels = scales::comma_format()) +
+#   labs(
+#     title = "Distribution of Municipality Response Counts by State",
+#     subtitle = "Box plots show quartiles, points show individual municipalities",
+#     x = "State",
+#     y = "Responses per Municipality"
+#   ) +
+#   theme_minimal() +
+#   theme(legend.position = "none")
+# 
+# print(p2)
+# 
+# tper_vic1_goc_complete <- tper_vic1_goc %>% 
+#   summarise_all(~sum(is.na(.))) %>% 
+#   pivot_longer(everything(), names_to = "variable", values_to = "missing_count") %>%
+#   mutate(completeness = 1 - missing_count/nrow(tper_vic1_goc)) %>%
+#   arrange(completeness)
+# 
+# ## completeness by state and question
+# tper_vic1_goc_complete_state_ap4 <- tper_vic1_goc %>%
+#   group_by(nom_ent) %>%
+#   summarise(
+#     n_responses = n(),
+#     across(starts_with("ap4"), 
+#            list(count = ~sum(. == "9", na.rm = TRUE), # when they answer "9", it is that they do not know or they did not respond.
+#                 pct = ~mean(. == "9", na.rm = TRUE) * 100), 
+#            .names = "nosabe_{.col}_{.fn}")
+#   )
+# 
+# ## make heatmap to visualize
+# heatmap_tper_vic1_goc <- tper_vic1_goc_complete_state_ap4 %>%
+#   select(nom_ent, ends_with("_pct")) %>%
+#   pivot_longer(cols = ends_with("_pct"), 
+#                names_to = "question", 
+#                values_to = "pct_nosabe") %>%
+#   mutate(question = str_remove(question, "nosabe_|_pct"))
+# 
+# ggplot(heatmap_tper_vic1_goc, aes(x = question, y = nom_ent, fill = pct_nosabe)) +
+#   geom_tile(color = "white", size = 0.5) +
+#   scale_fill_gradient2(low = "white", mid = "yellow", high = "red", 
+#                        midpoint = 5, name = "% 'I don't know'/No Response") +
+#   theme_minimal() +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+#   labs(title = "Percentage of Missing Responses by GOC State and Question: TPer_Viv1",
+#        x = "Questions", y = "State")
+# 
+# ## completeness by municipio and question
+# tper_vic1_goc_complete_mun_ap4 <- tper_vic1_goc %>%
+#   group_by(nom_mun) %>%
+#   summarise(
+#     n_responses = n(),
+#     across(starts_with("ap4"), 
+#            list(count = ~sum(. == "9", na.rm = TRUE), # when they answer "9", it is that they do not know or they did not respond.
+#                 pct = ~mean(. == "9", na.rm = TRUE) * 100), 
+#            .names = "nosabe_{.col}_{.fn}")
+#   )
+# 
+# ## make heatmap to visualize
+# heatmap_tper_vic1_goc_mun <- tper_vic1_goc_complete_mun_ap4 %>%
+#   select(nom_mun, ends_with("_pct")) %>%
+#   pivot_longer(cols = ends_with("_pct"), 
+#                names_to = "question", 
+#                values_to = "pct_nosabe") %>%
+#   mutate(question = str_remove(question, "nosabe_|_pct"))
+# 
+# ggplot(heatmap_tper_vic1_goc_mun, aes(x = question, y = nom_mun, fill = pct_nosabe)) +
+#   geom_tile(color = "white", size = 0.5) +
+#   scale_fill_gradient2(low = "white", mid = "yellow", high = "red", 
+#                        midpoint = 5, name = "% 'I don't know'/No Response") +
+#   theme_minimal() +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+#   labs(title = "Percentage of Missing Responses by GOC Municipio and Question: TPer_Viv1",
+#        x = "Questions", y = "Municipio")
+# 
+# tper_vic1_goc_complete_state_ap4 <- tper_vic1_goc %>%
+#   filter(if_any(starts_with("ap4"), ~ . == "9")) %>%  # rows with at least one 9
+#   group_by(nom_ent) %>%
+#   summarise(across(starts_with("ap4"), ~sum(. == "9", na.rm = TRUE), .names = "nosabe_{.col}"))
+# 
+# ## double check that there are no missing values in ap4
+# tper_vic1_goc_ap4 <- tper_vic1_goc %>% 
+#   select(across(starts_with("ap4")))
+# 
+# tper_vic1_goc_complete_state_ap5 <- tper_vic1_goc %>%
+#   group_by(nom_ent) %>%
+#   summarise(across(starts_with("a57"), ~mean(!is.na(.)), .names = "complete_{.col}"))
+```
+
+##### TPer_Viv2
+
+```{r}
+#######################################
+## for tper_viv2
+tper_vic2_goc <- tper_vic2_raw %>% 
+  filter(nom_mun %in% c(
+    "LA PAZ", "LOS CABOS", "MULEGE", "LORETO", "COMONDU",
+    "CAJEME", "GUAYMAS", "HERMOSILLO", "EMPALME", "HUATABAMPO", "NAVOJOA", "ETCHOJOA",
+    "AHOME",
+    "PUERTO VALLARTA"
+  ))
+colnames(tper_vic2_goc) # 150 columns... 
+
+# tper_vic2_goc_complete <- tper_vic2_goc %>% 
+#   summarise_all(~sum(is.na(.))) %>% 
+#   pivot_longer(everything(), names_to = "variable", values_to = "missing_count") %>%
+#   mutate(completeness = 1 - missing_count/nrow(tper_vic2_goc)) %>%
+#   arrange(completeness)
+# 
+# ## completeness by state and question
+# tper_vic2_goc_complete_state_ap6 <- tper_vic2_goc %>%
+#   group_by(nom_ent) %>%
+#   summarise(across(starts_with("ap6"), ~mean(!is.na(.)), .names = "complete_{.col}"))
+# 
+# tper_vic2_goc_complete_state_ap7 <- tper_vic2_goc %>%
+#   group_by(nom_ent) %>%
+#   summarise(across(starts_with("ap7"), ~mean(!is.na(.)), .names = "complete_{.col}"))
+
+tper_vic2_goc_complete_detailed <- tper_vic2_goc %>%
+  group_by(nom_mun) %>%
+  summarise(
+    # total observations per municipality
+    total_observations = n(),
+    
+    # for each ap question, let's calculate both counts and rates
+    across(starts_with("ap"), 
+           list(
+             # substantive responses 
+             substantive_count = ~sum(. %in% 1:8, na.rm = TRUE),
+             
+             # "don't know" responses  
+             dont_know_count = ~sum(. == 9, na.rm = TRUE),
+             
+             # true missing values
+             missing_count = ~sum(is.na(.)),
+             
+             # prop of substantive responses 
+             substantive_rate = ~mean(. %in% 1:8, na.rm = TRUE),
+             
+             # check the math: substantive_count / total_observations should equal substantive_rate
+             manual_rate_check = ~sum(. %in% 1:8, na.rm = TRUE) / n()
+           ),
+           .names = "{.fn}_{.col}")
+  )
+
+## make heatmap to visualize the substantive rate for tmod_vic
+heatmap_tper_vic2_goc_complete <- tper_vic2_goc_complete_detailed %>%
+  select(nom_mun, starts_with("substantive_rate")) %>%
+  pivot_longer(cols = starts_with("substantive_rate"), 
+               names_to = "question", 
+               values_to = "substantive_rate") %>%
+  mutate(question = str_remove(question, "substantive_rate_"))
+
+ggplot(heatmap_tper_vic2_goc_complete, aes(x = question, y = nom_mun, fill = substantive_rate)) +
+  # white borders for better visualizing
+  geom_tile(color = "white", size = 0.5) +
+  
+  # green to red, good to bad (bad meaning missing values)
+  scale_fill_gradient2(low = "red",   # low substantive response rate (bad)
+                       mid = "yellow", # medium substantive response rate (okay) 
+                       high = "darkgreen",  # high substantive response rate (good)
+                       midpoint = 0.5, # set midpoint at 50% completion
+                       name = "Substantive\nResponse Rate \nNot '9' or 'NA'",
+                       labels = scales::percent_format()) +  # as percentages
+  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 70, hjust = 1, size = 9),
+        plot.title = element_text(size = 14),
+        axis.title = element_text(size = 12)) +
+  
+  labs(title = "Substantive response rates by municipality and question: TPer_Viv2",
+       subtitle = "Information about victimization in the household and personal victimization.",
+       x = "Survey questions", 
+       y = "Municipio")
+```
+
+
+##### TMod_Vic 
+
+TMod_Vic is about crimes that occurred.  Upon exploration, note that sometimes there are multiple individuals from the same household (id_viv)
+
+```{r}
+#######################################
+## for tmod_vic
+setdiff(tmod_vic_raw$id_viv, tvivienda_raw$id_viv)
+# character(0)
+setdiff(tvivienda_raw$id_viv, tmod_vic_raw$id_viv)
+# [1] "0100005.01" "0100005.04" "0100005.05" "0100012.02"
+
+# okay, so all of the id_viv observations are present in tmod_vic_raw as well!
+
+intersect(colnames(tmod_vic_raw), colnames(tvivienda_raw))
+# [1] "x1"      "id_viv"  "upm"     "viv_sel" "dominio" "est_dis"
+# [7] "upm_dis"
+
+tmod_vic_raw_0160078.15 <- tmod_vic_raw %>% 
+  filter(id_viv %in% "0160078.15") # multiple of the same id_viv
+
+tmod_vic_w_nom_ent <- left_join(tmod_vic_raw, tvivienda_raw, by = c("id_viv", "upm", "viv_sel", "dominio", "est_dis", "upm_dis")) %>% 
+  select(-c("x1.x","x1.y"))
+
+nrow(tmod_vic_w_nom_ent) == nrow(tmod_vic_raw) # TRUE, same number of rows!
+c("nom_ent","nom_mun") %in% colnames(tmod_vic_w_nom_ent) # TRUE
+
+tmod_vic_goc <- tmod_vic_w_nom_ent %>% 
+  filter(nom_mun %in% c(
+    "LA PAZ", "LOS CABOS", "MULEGE", "LORETO", "COMONDU",
+    "CAJEME", "GUAYMAS", "HERMOSILLO", "EMPALME", "HUATABAMPO", "NAVOJOA", "ETCHOJOA",
+    "AHOME",
+    "PUERTO VALLARTA"
+  ))
+colnames(tmod_vic_goc) # 144 columns...
+
+# determine the completeness of the responses (how many NAs) or "9", which means they left it blank
+tmod_vic_goc_complete_detailed <- tmod_vic_goc %>%
+  group_by(nom_mun) %>%
+  summarise(
+    # total observations per municipality
+    total_observations = n(),
+    
+    # for each bp question, let's calculate both counts and rates
+    across(starts_with("bp"), 
+           list(
+             # substantive responses 
+             substantive_count = ~sum(. %in% 1:8, na.rm = TRUE),
+             
+             # "don't know" responses  
+             dont_know_count = ~sum(. == 9, na.rm = TRUE),
+             
+             # true missing values
+             missing_count = ~sum(is.na(.)),
+             
+             # prop of substantive responses 
+             substantive_rate = ~mean(. %in% 1:8, na.rm = TRUE),
+             
+             # check the math: substantive_count / total_observations should equal substantive_rate
+             manual_rate_check = ~sum(. %in% 1:8, na.rm = TRUE) / n()
+           ),
+           .names = "{.fn}_{.col}")
+  )
+
+## make heatmap to visualize the substantive rate for tmod_vic
+heatmap_tmod_vic_goc_complete <- tmod_vic_goc_complete_detailed %>%
+  select(nom_mun, starts_with("substantive_rate")) %>%
+  pivot_longer(cols = starts_with("substantive_rate"), 
+               names_to = "question", 
+               values_to = "substantive_rate") %>%
+  mutate(question = str_remove(question, "substantive_rate_"))
+
+ggplot(heatmap_tmod_vic_goc_complete, aes(x = question, y = nom_mun, fill = substantive_rate)) +
+  # white borders for better visualizing
+  geom_tile(color = "white", size = 0.5) +
+  
+  # green to red, good to bad (bad meaning missing values)
+  scale_fill_gradient2(low = "red",   # low substantive response rate (bad)
+                       mid = "yellow", # medium substantive response rate (okay) 
+                       high = "darkgreen",  # high substantive response rate (good)
+                       midpoint = 0.5, # set midpoint at 50% completion
+                       name = "Substantive\nResponse Rate \nNot '9' or 'NA'",
+                       labels = scales::percent_format()) +  # as percentages
+  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(size = 14),
+        axis.title = element_text(size = 12)) +
+  
+  labs(title = "Substantive response rates by municipality and question: TMod_Vic",
+       subtitle = "Information about crimes experienced by the selected person and their household during the reference year",
+       x = "Survey questions", 
+       y = "Municipality")
+```
+
 
 
 
