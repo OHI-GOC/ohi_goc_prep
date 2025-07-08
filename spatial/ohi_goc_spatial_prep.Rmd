@@ -406,7 +406,7 @@ st_write(eco_hr_polygon_subregions, here("spatial/eco_hr_subregions_raw.shp"))
 # original single GoC polygon
 original_goc <- subregions_02
 
-# Load the polygon with lines you just created
+# polygon with mapedit lines
 drawn_features <- eco_hr_polygon_subregions_03
 
 # first extract only the lines (not the filled polygons) to see them and confirm
@@ -687,14 +687,14 @@ mapview(poem_subrgns_ohi_draft2_01)
 # original single GoC polygon
 original_goc <- poem_subrgns_ohi_draft2
 
-# Load the polygon with lines you just created
+# polygon with mapedit lines
 drawn_features <- poem_subrgns_ohi_draft2_01
 
 # first extract only the lines (not the filled polygons) to see them and confirm
 lines_only <- drawn_features[st_geometry_type(drawn_features) == "LINESTRING", ]
 
 if(nrow(lines_only) == 0) {
-  # Convert polygon boundaries to lines
+  # make polygon boundaries into lines
   polygon_boundaries <- st_cast(drawn_features, "MULTILINESTRING")
   lines_only <- st_cast(polygon_boundaries, "LINESTRING")
 }
@@ -912,5 +912,202 @@ mapview(poem_subrgns_ecorgn_9rgns_check, zcol = "nw_FID_s", layer.name = "Estado
 
 # check preservation of ecoregion reclassification (new_FID_ecorgn was abbreviated to nw_FID_c)
 mapview(poem_subrgns_ecorgn_9rgns_check, zcol = "nw_FID_c", layer.name = "Ecoregion") # great!!
+```
+
+
+#### Draft 3 (9 subregions, Jorge's edits)
+
+As a recap, technically this new draft will be shown to the EWG as Draft #2.  However, upon receiving Jorge's most recent comments (will paste them below), we decided to make these changes: 
+
+(1) Change the border of Region_1 and Region_5 to include San Felipe and Puerto Penasco within those regions.  Before, those two cities were in Region_2 and Region_6.  But Jorge felt it makes the most sense to include the entire city in the upper gulf ecoregion.
+
+(2) Add POEM region #61 and #71 into Region_3. **(Scratch that. ACTUALLY, we are keeping them in Region_4, as Ben W. said Punta San Antonio is best. So, no changes here.)**
+
+(3) Alter the present POEM region that borders Region_6 and Region_7 to be just north of El Choyudo, so that Tastiota is within Region_6, but the entirety of El Choyudo is within Region_7. This is important because Tastiota has shrimp farming and should all be in one region, and just north of El Choyudo marks a change in the plant species composition/terrain (becomes more elevated).  This also follows the geologic map of Scott E. K. Bennett in the textbook shared with us by Ben W. (<https://www.desertfoodplants.org/_files/ugd/d133c2_7bdc031c4f9c4dbf9907de20f1944079.pdf>).
+
+Okay! To do this, we will draw the new borders for Region_1, Region_5, and Region_6/7, and then use those lines to split the polygons.  Then instead of merging the new polygons created in the Regions_1/5 with the appropriate present POEM regions, we will just have two columns:
+
+-  "POEM_id": where the newly split polygons will have the same ID as the one they split from. Aka, both will be "0"
+-  "POEM_modified": where each polygon will have a unique name. Aka, polygon "0a" and "0b".
+
+These will then be reclassified again to fit into OHI subregions (Regions 1-9), and then those will be reclassified to fit into states and ecoregions.
+
+
+##### Map edit
+
+Make lines:
+```{r}
+library(mapedit)
+library(tidyverse)
+library(sf)
+library(here)
+library(lwgeom)
+
+# use mapedit to create the changes in the previous draft
+
+draft_2_foredit <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft","poem_subrgns_ohi_9rgns_final.shp")) # WGS 84
+
+# edit the polygon interactively
+draft_3_edited_w_lines <- editFeatures(draft_2_foredit)
+# st_write(poem_subrgns_ohi_draft2_01, here("spatial/poem_subrgns_ohi_draft2_01.shp"))
+
+mapview(draft_3_edited_w_lines)
+```
+
+Use lines to split polygons:
+```{r}
+## now merge polylines and split the original polygon with the new lines made
+
+# original single GoC polygon
+original_goc <- draft_2_foredit
+
+# load the polygon with lines from mapedit
+drawn_features <- draft_3_edited_w_lines
+
+# first extract only the lines (not the filled polygons) to see them and confirm
+lines_only <- drawn_features[st_geometry_type(drawn_features) == "LINESTRING", ]
+
+if(nrow(lines_only) == 0) {
+  # make polygon boundaries into lines
+  polygon_boundaries <- st_cast(drawn_features, "MULTILINESTRING")
+  lines_only <- st_cast(polygon_boundaries, "LINESTRING")
+}
+
+mapview(lines_only)
+
+# now use st_split to divide the original polygon into multiple polygons using the drawn lines
+split_goc_with_lines <- function(original_polygon, dividing_lines) {
+
+  # combine all lines into a single multilinestring
+  all_lines <- st_union(st_geometry(dividing_lines))
+
+  # split the original polygon
+  tryCatch({
+    split_result <- st_split(original_polygon, all_lines)
+
+    # extract individual polygons from the result for geometry
+    individual_polygons <- st_collection_extract(split_result, "POLYGON")
+
+    # add region identifiers (POEM_modified so that each one has its own identifier)
+    individual_polygons$POEM_modified <- 1:nrow(individual_polygons)
+    # individual_polygons$region_name <- paste0("Region_", individual_polygons$POEM_modified)
+
+    return(individual_polygons)
+
+  }, error = function(e) {
+    cat("Error in splitting:", e$message, "\n")
+    cat("Trying alternative approach...\n")
+    return(NULL) # for error catching!!
+  })
+}
+
+# apply the splitting
+draft_3_edited_polygons <- split_goc_with_lines(original_goc, lines_only)
+mapview(draft_3_edited_polygons)
+
+# to see what needs to be changed
+draft_3_ids <- draft_3_edited_polygons %>% 
+  # select(FID_1, new_id, POEM_modified) %>% # only used for creating the case_when
+  mutate(FID_1 = case_when(
+    new_id %in% "128" ~ 124, 
+    TRUE ~ FID_1)) %>% 
+  mutate(p_mod = case_when ( # the ones with "a" are the original poly it split from, "b" are the ones we made
+    POEM_modified %in% "1" ~ "0a", # san felipe
+    POEM_modified %in% "2" ~ "0b", # san felipe
+    POEM_modified %in% "37" ~ "34a", # puerto penasco (closer)
+    POEM_modified %in% "38" ~ "34b", # puerto penasco (closer)
+    POEM_modified %in% "85" ~ "83a", # puerto penasco (further)
+    POEM_modified %in% "86" ~ "83b", # puerto penasco (further)
+    POEM_modified %in% "22" ~ "20a", # choyudo
+    POEM_modified %in% "23" ~ "20b", # choyudo
+    POEM_modified %in% "117" ~ "112a", # region_3/4 --> 3
+    POEM_modified %in% "118" ~ "112b", # region_3/4 --> 4
+    POEM_modified %in% "95" ~ "92a", # region_8/9 --> 8
+    POEM_modified %in% "96" ~ "92b", # region_8/9 --> 9
+    TRUE ~ as.character(FID_1) # otherwise it cannot combine
+  )) %>% 
+  select(FID_1, p_mod, SUB_UGA_, CLAVE_UG_, Presión, Fragldd, Vlnrb_v, Vulnrbl, C____AS, Trsm__I, Psc_Ind, Pesc_Rb, Consrvc, Cb___IS, Trsm__P, Trsm__1, Tursm__, Psc_I_1, Psc_R_1, Psc_R_2) # only keep those that will be useful for us later on
+mapview(draft_3_ids, zcol = "p_mod", layer.name = "OHI_POEM_IDs") # good!
+
+st_write(draft_3_ids, here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft2_070825_1.shp"), append = TRUE)
+
+# draft_3_ids_check <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft2_070825_1.shp"))
+```
+
+
+##### Colors by OHI rgns
+
+```{r}
+# in case just this part needs to be altered later
+draft_3_ids <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft2_070825_1.shp"))
+
+draft_3_ohi_rgns <- draft_3_ids %>% 
+  mutate(
+    rgn_id = case_when(
+      p_mod %in% c("2", "1", "0b") ~ "Region_1",
+      
+      p_mod %in% c("39","0a", "79", "89", "90", "54", "55", "56", "57", "38", "41", "100", "104", "109", "121", "120", "118") ~ "Region_2",
+      
+      p_mod %in% c("64", "74", "63", "72", "62", "73", "42", "43", "44", "70", "60", "112a") ~ "Region_3",
+      
+      p_mod %in% c("94", "51", "61", "71", "69", "95", "96", "68", "59", "78", "76", "75", "77", "105", "112b") ~ "Region_4",
+      
+      p_mod %in% c("17", "37", "83b","34b") ~ "Region_5",
+      
+      p_mod %in% c("20b","34a", "83a", "18", "19", "84", "85", "119", "108", "123", "110", "111", "122", "99", "103", "102", "98", "91", "97", "101", "45", "116", "113") ~ "Region_6",
+      
+      p_mod %in% c("20a", "115", "65", "66", "21", "36", "88", "35", "22", "67", "40", "114", "46", "47", "23", "117", "49", "32", "50", "25") ~ "Region_7",
+      
+      p_mod %in% c("48", "10", "80", "81", "11", "24", "29", "33", "82", "12", "13", "93", "28", "14", "15", "16", "7", "8", "9", "31", "26", "92a","27", "86", "87") ~ "Region_8",
+      
+      p_mod %in% c("30","92b","3", "4", "5", "6", "107", "108", "58", "106", "124") ~ "Region_9",
+      
+      TRUE ~ NA_character_  # for any FID_1 values I missed or we are dropping (like Colorado River Delta)
+    )
+  ) %>% 
+  relocate(rgn_id, .after = "p_mod") %>% 
+  mutate(rgn_id = factor(
+    rgn_id,
+    levels = paste0("Region_", sort(as.numeric(gsub("Region_", "", unique(rgn_id)))))
+  )) # to arrange in an intuitive way
+
+mapview(draft_3_ohi_rgns, zcol = "rgn_id", layer.name = "OHI Subregions") # good!
+```
+
+
+##### Colors by state/ecoregion
+
+```{r}
+draft_3_ohi_rgns_final <- draft_3_ohi_rgns %>% 
+  mutate(estado = case_when( # by state
+      rgn_id %in% c("Region_1", "Region_2") ~ "Baja_California",
+      rgn_id %in% c("Region_3", "Region_4") ~ "Baja_California_Sur",
+      rgn_id %in% c("Region_5", "Region_6", "Region_7") ~ "Sonora",
+      rgn_id %in% c("Region_8") ~ "Sinaloa",
+      rgn_id %in% c("Region_9") ~ "Nayarit"
+      )) %>% 
+  relocate(estado, .after = "rgn_id") %>% 
+  mutate(ecorgn = case_when( # by ecoregion
+      rgn_id %in% c("Region_1", "Region_5") ~ "Upper_Gulf",
+      rgn_id %in% c("Region_2", "Region_6") ~ "Midriff_Region",
+      rgn_id %in% c("Region_3", "Region_7") ~ "Central_Gulf",
+      rgn_id %in% c("Region_4", "Region_8", "Region_9") ~ "Southern_Gulf"
+      )) %>% 
+  relocate(ecorgn, .after = "estado") %>% 
+  mutate(ecorgn = factor(
+    ecorgn,
+    levels = (c("Upper_Gulf", "Midriff_Region", "Central_Gulf", "Southern_Gulf"))
+  )) # to arrange in an intuitive way
+
+mapview(draft_3_ohi_rgns_final, zcol = "estado", layer.name = "Estados")
+mapview(draft_3_ohi_rgns_final, zcol = "ecorgn", layer.name = "Ecoregion")
+```
+
+##### Save it!!!!
+
+```{r}
+# st_write(draft_3_ohi_rgns_final, here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft2_070825_final.shp"))
+
+# draft_3_ohi_rgns_final_check <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft2_070825_final.shp")) # so beautiful!!!
 ```
 
