@@ -1111,3 +1111,348 @@ mapview(draft_3_ohi_rgns_final, zcol = "ecorgn", layer.name = "Ecoregion")
 # draft_3_ohi_rgns_final_check <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft2_070825_final.shp")) # so beautiful!!!
 ```
 
+#### Draft 4 (9 rgns, Rick's comments)
+
+Region changes  (July 10 2025, aa or ab means there is a cut in a polygon that has already been cut)
+
+**1. For moving the line between Region_1 and Region_5 to the right to make sure all of Montague island is in the Sonora side, cut into:**
+
+FID_1	p_mod
+1	1
+2	2
+
+To make:
+FID_1	p_mod
+1	1a
+1	1b
+2	2a
+2	2b
+
+**2. Move the San Basilio cutoff to Pta. Mercenarios, at the bottom of the bay of San Basilio.  Cut into:** 
+
+FID_1	p_mod
+70	70
+60	60
+112	112a
+
+To make:
+
+FID_1	p_mod
+70	70a
+70	70b
+60	60a
+60	60b
+112	112aa
+112	112ab
+
+**3. Move the border boundary for Region_6 to Region_7 from above El Choyudo to below El Choyudo.  Cut into:**
+
+FID_1	p_mod
+20	20a
+
+FID_1	p_mod
+20	20aa
+20	20ab
+
+##### Map edit
+
+Make lines:
+```{r}
+library(mapedit)
+library(tidyverse)
+library(sf)
+library(here)
+library(lwgeom)
+
+# use mapedit to create the changes in the previous draft
+
+draft_3_foredit <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft2_070825_final.shp")) # WGS 84
+
+# edit the polygon interactively
+draft_4_edited_w_lines <- editFeatures(draft_3_foredit)
+# st_write(poem_subrgns_ohi_draft2_01, here("spatial/poem_subrgns_ohi_draft2_01.shp"))
+
+mapview(draft_4_edited_w_lines)
+```
+
+Use lines to split polygons:
+```{r}
+## now merge polylines and split the original polygon with the new lines made
+
+# original single GoC polygon
+original_goc <- draft_3_foredit
+
+# load the polygon with lines from mapedit
+drawn_features <- draft_4_edited_w_lines
+
+# first extract only the lines (not the filled polygons) to see them and confirm
+lines_only <- drawn_features[st_geometry_type(drawn_features) == "LINESTRING", ]
+
+if(nrow(lines_only) == 0) {
+  # make polygon boundaries into lines
+  polygon_boundaries <- st_cast(drawn_features, "MULTILINESTRING")
+  lines_only <- st_cast(polygon_boundaries, "LINESTRING")
+}
+
+mapview(lines_only)
+
+# now use st_split to divide the original polygon into multiple polygons using the drawn lines
+split_goc_with_lines <- function(original_polygon, dividing_lines) {
+
+  # combine all lines into a single multilinestring
+  all_lines <- st_union(st_geometry(dividing_lines))
+
+  # split the original polygon
+  tryCatch({
+    split_result <- st_split(original_polygon, all_lines)
+
+    # extract individual polygons from the result for geometry
+    individual_polygons <- st_collection_extract(split_result, "POLYGON")
+
+    # add region identifiers (POEM_modified so that each one has its own identifier)
+    individual_polygons$POEM_modified <- 1:nrow(individual_polygons)
+    # individual_polygons$region_name <- paste0("Region_", individual_polygons$POEM_modified)
+
+    return(individual_polygons)
+
+  }, error = function(e) {
+    cat("Error in splitting:", e$message, "\n")
+    cat("Trying alternative approach...\n")
+    return(NULL) # for error catching!!
+  })
+}
+
+# apply the splitting
+draft_4_edited_polygons <- split_goc_with_lines(original_goc, lines_only)
+mapview(draft_4_edited_polygons)
+
+# to see what needs to be changed
+draft_4_ids <- draft_4_edited_polygons %>% 
+  # select(FID_1, p_mod, POEM_modified) %>% # only used for creating the case_when
+  mutate(p_mod_2 = case_when ( # the ones with "a" are the original poly it split from, "b" are the ones we made
+    POEM_modified %in% "3" ~ "1b", # Rgn_1 new bottom poly
+    POEM_modified %in% "4" ~ "1a", # Rgn_1 origin for new bottom poly
+    POEM_modified %in% "5" ~ "2b", # Rgn_1 new top poly (closer)
+    POEM_modified %in% "6" ~ "2a", # Rgn_1 origin for new top poly
+    POEM_modified %in% "77" ~ "70b", # going to pta. mercenario (poly closest to shore)
+    POEM_modified %in% "78" ~ "70a", # going to pta. mercenario (poly closest to shore)
+    POEM_modified %in% "66" ~ "60a", # going to pta. mercenario (middle poly)
+    POEM_modified %in% "67" ~ "60b", # going to pta. mercenario (middle poly)
+    POEM_modified %in% "123" ~ "112aa", # going to pta. mercenario (poly furthest to shore)
+    POEM_modified %in% "124" ~ "112ab", # going to pta. mercenario (poly furthes to shore)
+    POEM_modified %in% "25" ~ "20aa", # moving line from north el choyudo to south el choyudo
+    POEM_modified %in% "26" ~ "20ab",  # moving line from north el choyudo to south el choyudo
+    TRUE ~ as.character(p_mod) # otherwise it cannot combine
+  ))
+```
+
+Merging the new el choyudo polygons
+```{r}
+# this first attempt did not work.  keeping in case I need to go back
+# draft_4_ids_merge <- draft_4_ids %>% 
+#   mutate(p_mod2m = case_when( ##### for merging el choyudo polys!! p_mod2m (m stands for merged, had to remove the _ because the name was too long to be written out correctly)
+#     p_mod_2 %in% "20ab" ~ "20b",
+#     TRUE ~ as.character(p_mod_2) 
+#   )) %>% 
+#   group_by(p_mod2m) %>% # merge both 20b polygons together
+#   summarise(geometry = st_union(geometry), 
+#             FID_1 = first(FID_1), 
+#             p_mod = first(p_mod),
+#             .groups = "drop") %>%  # merge the geometries
+#   rename(p_mod2m = p_mod_2)
+
+# # join and then only use p_mod_2_m if you want the new el choyudo line to be south
+# draft_4_ids_final <- st_join(draft_4_ids_merge, draft_4_ids, join = c("FID_1", "p_mod")) 
+# 
+# %>% 
+#   select(FID_1, p_mod, p_mod_2, p_mod2m, SUB_UGA_, CLAVE_UG_, Presión, Fragldd, Vlnrb_v, Vulnrbl, C____AS, Trsm__I, Psc_Ind, Pesc_Rb, Consrvc, Cb___IS, Trsm__P, Trsm__1, Tursm__, Psc_I_1, Psc_R_1, Psc_R_2)  %>%  # only keep those that will be useful for us later on
+#   relocate(p_mod2m, .after = "p_mod_2")
+
+# split the data
+rows_to_merge <- draft_4_ids %>% 
+  mutate(p_mod_2 = case_when(
+    p_mod_2 %in% "20ab" ~ "20b",
+    TRUE ~ as.character(p_mod_2)
+  )) %>%
+  filter(p_mod_2 %in% "20b") %>% 
+  select(-c(rgn_id, estado, ecorgn, POEM_modified))
+
+other_rows <- draft_4_ids %>% 
+  mutate(p_mod_2 = case_when(
+    p_mod_2 %in% "20ab" ~ "20b",
+    TRUE ~ as.character(p_mod_2)
+  )) %>%
+  filter(p_mod_2 != "20b") %>% 
+  select(-c(rgn_id, estado, ecorgn, POEM_modified))
+
+# merge only the "20b" rows
+merged_20b <- rows_to_merge %>%
+  summarise(
+    across(c(FID_1, p_mod, SUB_UGA_, CLAVE_UG_, Presión, Fragldd, Vlnrb_v, Vulnrbl, C____AS, Trsm__I, Psc_Ind, Pesc_Rb, Consrvc, Cb___IS, Trsm__P, Trsm__1, Tursm__, Psc_I_1, Psc_R_1, Psc_R_2), first),
+    p_mod_2 = "20b",
+    geometry = st_union(geometry)
+  ) %>% 
+  mutate(p_mod = ifelse(p_mod_2 == "20b","20b", p_mod)) # due to first it was inaccurate
+  
+
+# combine back together
+draft_4_ids_merge <- bind_rows(other_rows, merged_20b) %>% 
+  select(FID_1, p_mod, p_mod_2, SUB_UGA_, CLAVE_UG_, Presión, Fragldd, Vlnrb_v, Vulnrbl, C____AS, Trsm__I, Psc_Ind, Pesc_Rb, Consrvc, Cb___IS, Trsm__P, Trsm__1, Tursm__, Psc_I_1, Psc_R_1, Psc_R_2) %>%  # only keep those that will be useful for us later on 
+  mutate(p_mod_2 = ifelse(p_mod_2 == "20aa","20a", p_mod_2)) %>%  # nice!!! 20a and 20b look good now
+  arrange(FID_1)
+
+mapview(draft_4_ids_merge, zcol = "p_mod_2", layer.name = "OHI_POEM_IDs") # good!
+
+st_write(draft_4_ids_merge, here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft3_071025_1.shp")) # had trouble with append, tried to overwrite other poem_ohi_draft3_071025.shp, but the prj file was not being updated. 
+
+draft_4_ids_check <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft3_071025_1.shp")) # YAY!
+```
+
+##### Colors by OHI rgns
+
+```{r}
+# in case just this part needs to be altered later
+draft_4_ids_new <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft3_071025_1.shp"))
+
+draft_4_ohi_rgns <- draft_4_ids_new %>% 
+  mutate(
+    rgn_id = case_when(
+      p_mod_2 %in% c("2a", "1a", "0b") ~ "Region_1",
+      
+      p_mod_2 %in% c("39","0a", "79", "89", "90", "54", "55", "56", "57", "38", "41", "100", "104", "109", "121", "120", "118") ~ "Region_2",
+      
+      p_mod_2 %in% c("64", "74", "63", "72", "62", "73", "42", "43", "44", "70a", "60a", "112aa") ~ "Region_3",
+      
+      p_mod_2 %in% c("70b", "60b", "112ab", "94", "51", "61", "71", "69", "95", "96", "68", "59", "78", "76", "75", "77", "105", "112b") ~ "Region_4",
+      
+      p_mod_2 %in% c("1b", "2b", "17", "37", "83b","34b") ~ "Region_5",
+      
+      p_mod_2 %in% c("20b","34a", "83a", "18", "19", "84", "85", "119", "108", "123", "110", "111", "122", "99", "103", "102", "98", "91", "97", "101", "45", "116", "113") ~ "Region_6",
+      
+      p_mod_2 %in% c("20a", "115", "65", "66", "21", "36", "88", "35", "22", "67", "40", "114", "46", "47", "23", "117", "49", "32", "50", "25") ~ "Region_7",
+      
+      p_mod_2 %in% c("48", "10", "80", "81", "11", "24", "29", "33", "82", "12", "13", "93", "28", "14", "15", "16", "7", "8", "9", "31", "26", "92a","27", "86", "87") ~ "Region_8",
+      
+      p_mod_2 %in% c("30","92b","3", "4", "5", "6", "107", "108", "58", "106", "124") ~ "Region_9",
+      
+      TRUE ~ NA_character_  # for any FID_1 values I missed or we are dropping (like Colorado River Delta)
+    )
+  ) %>% 
+  relocate(rgn_id, .after = "p_mod_2") %>% 
+  mutate(rgn_id = factor(
+    rgn_id,
+    levels = paste0("Region_", sort(as.numeric(gsub("Region_", "", unique(rgn_id)))))
+  )) # to arrange in an intuitive way
+
+mapview(draft_4_ohi_rgns, zcol = "rgn_id", layer.name = "OHI Subregions") # good!
+```
+
+
+##### Colors by state/ecoregion
+
+```{r}
+draft_4_ohi_rgns_final <- draft_4_ohi_rgns %>% 
+  mutate(estado = case_when( # by state
+      rgn_id %in% c("Region_1", "Region_2") ~ "Baja_California",
+      rgn_id %in% c("Region_3", "Region_4") ~ "Baja_California_Sur",
+      rgn_id %in% c("Region_5", "Region_6", "Region_7") ~ "Sonora",
+      rgn_id %in% c("Region_8") ~ "Sinaloa",
+      rgn_id %in% c("Region_9") ~ "Nayarit"
+      )) %>% 
+  relocate(estado, .after = "rgn_id") %>% 
+  mutate(ecorgn = case_when( # by ecoregion
+      rgn_id %in% c("Region_1", "Region_5") ~ "Upper_Gulf",
+      rgn_id %in% c("Region_2", "Region_6") ~ "Midriff_Region",
+      rgn_id %in% c("Region_3", "Region_7") ~ "Central_Gulf",
+      rgn_id %in% c("Region_4", "Region_8", "Region_9") ~ "Southern_Gulf"
+      )) %>% 
+  relocate(ecorgn, .after = "estado") %>% 
+  mutate(ecorgn = factor(
+    ecorgn,
+    levels = (c("Upper_Gulf", "Midriff_Region", "Central_Gulf", "Southern_Gulf"))
+  )) # to arrange in an intuitive way
+
+mapview(draft_4_ohi_rgns_final, zcol = "estado", layer.name = "Estados")
+mapview(draft_4_ohi_rgns_final, zcol = "ecorgn", layer.name = "Ecoregion")
+```
+
+##### Save it!!!!
+
+```{r}
+# save one with poem regions
+st_write(draft_4_ohi_rgns_final, here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft2_071025_final.shp"))
+
+draft_4_ohi_rgns_final_check <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","poem_ohi_draft2_071025_final.shp")) # so beautiful!!!
+```
+
+#### OHI Rgn shp (merged draft #4!)
+
+##### Dissolving internal boundaries
+
+```{r}
+# hard to get rid of little borders lines that are not dissolving
+ohi_rgns_final <- draft_4_ohi_rgns_final %>% 
+  select(c(rgn_id, estado, ecorgn, geometry)) %>% 
+  group_by(rgn_id) %>% 
+  summarise(
+    across(c(estado, ecorgn), first),
+    geometry = st_union(geometry)
+  )
+
+# region_4_before <- draft_4_ohi_rgns_final %>% filter(rgn_id == "Region_4")
+# region_4_after <- ohi_rgns_final %>% filter(rgn_id == "Region_4")
+# 
+# mapview(region_4_before, zcol = "p_mod_2") 
+# mapview(region_4_after, zcol = "rgn_id")   
+
+mapview(ohi_rgns_final, zcol = "rgn_id", layer.name = "OHI Subregions")
+mapview(ohi_rgns_final, zcol = "estado", layer.name = "Estados")
+mapview(ohi_rgns_final, zcol = "ecorgn", layer.name = "Ecoregion")
+
+# save anyway 
+# st_write(ohi_rgns_final, here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","ohi_rgns_final_071025.shp"))
+# 
+# ohi_rgns_final_check <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2","ohi_rgns_final_071025.shp")) 
+
+mapview(ohi_rgns_final_check, zcol = "rgn_id", layer.name = "OHI Subregions")
+```
+
+##### Trying to fix dissolving internal boundaries that did not dissolve
+```{r}
+####### alt ways
+ohi_rgns_final_alt <- draft_4_ohi_rgns_final %>% 
+  st_make_valid() %>% # not the issue
+  select(c(rgn_id, estado, ecorgn, geometry)) %>% 
+  group_by(rgn_id) %>% 
+  summarise(
+    across(c(estado, ecorgn), first),
+    geometry = st_combine(geometry) %>% st_union() # maybe will fix??
+  )
+
+# ohi_rgns_final_agg <- aggregate(
+#   draft_4_ohi_rgns_final["geometry"], 
+#   by = list(rgn_id = draft_4_ohi_rgns_final$rgn_id), 
+#   FUN = function(x) st_union(st_combine(x))
+# ) # did not work
+
+# ohi_rgns_final_manual <- draft_4_ohi_rgns_final %>% 
+#   select(c(rgn_id, estado, ecorgn, geometry)) %>% 
+#   split(.$rgn_id) %>% 
+#   map_dfr(~{
+#     dissolved <- st_union(.x$geometry)
+#     tibble(
+#       rgn_id = unique(.x$rgn_id),
+#       estado = first(.x$estado),
+#       ecorgn = first(.x$ecorgn)
+#     ) %>% 
+#     mutate(geometry = dissolved)
+#   }) %>% 
+#   st_as_sf() # did not work
+
+# mapview(ohi_rgns_final_manual, zcol = "rgn_id", layer.name = "OHI Subregions")
+# mapview(ohi_rgns_final_alt, zcol = "estado", layer.name = "Estados")
+# mapview(ohi_rgns_final_alt, zcol = "ecorgn", layer.name = "Ecoregion")
+```
+
+
+
