@@ -1,0 +1,172 @@
+---
+title: " "
+format: html
+toc: true
+---
+
+## Protected regions in the Gulf of California
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+# refer to ohi_goc_prep/LSP/v2025/lsp_wdpa_data_prep.qmd for full data prep
+library(raster)
+library(terra)
+library(readr)
+library(magrittr)
+library(mapview)
+library(sf)
+library(tidyverse)
+library(lwgeom)
+library(here)
+library(leaflet.extras2)
+library(fasterize)
+library(tictoc)
+library(kableExtra)
+
+# ---- sources! ----
+# source(here("workflow", "R", "common.R")) # file creates objects to process data
+## set the mazu and neptune data_edit share based on operating system
+dir_M             <- c('Windows' = '//mazu.nceas.ucsb.edu/ohi',
+                       'Darwin'  = '/Volumes/ohi',    ### connect (cmd-K) to smb://mazu/ohi
+                       'Linux'   = '/home/shares/ohi')[[ Sys.info()[['sysname']] ]]
+
+# ---- set year and file path info ----
+current_year <- 2025 # Update this in the future!!
+version_year <- paste0("v",current_year)
+data_dir_version_year <- paste0("d", current_year)
+
+# ---- data directories ----
+
+# mazu WDPA polygon directory
+wdpa_dir <- here::here(dir_M, "OHI_GOC","_raw_data","wdpa_mpa","d2025", "WDPA_Jan2025_Public_shp", "shps")
+
+# ecoregion border dir
+goc_border_dir <- here(wdpa_dir, "goc_border_gulf_crs")
+
+# spatial data for GoC
+# goc_spatial <- here(ohi_goc_prep_dir, "spatial")
+
+# set colors
+# cols = rev(colorRampPalette(brewer.pal(9, 'Spectral'))(255)) # rainbow color scheme
+
+# this CRS might be better for visualization, explore.
+gulf_crs <- "+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs"
+
+# other CRS options (but they are Mercator):
+# UTM Zone 12N (Northern Gulf)
+utm_12N <- "+proj=utm +zone=12 +datum=WGS84 +units=m +no_defs"
+# UTM Zone 13N (Southern Gulf)
+utm_13N <- "+proj=utm +zone=13 +datum=WGS84 +units=m +no_defs"
+```
+
+Protected areas are a key component of the OHI assessment. They are a measure of the extent to which the Gulf of California is protected from human activities. The data used in this analysis is from the World Database on Protected Areas (WDPA) and includes all protected areas in the Gulf of California Ecoregion boundary. The WDPA is a comprehensive global database of protected areas that is updated on a regular basis. The data includes information on the name, location, and management of protected areas, as well as the level of protection provided to the area.
+
+The protected areas in the Gulf of California include a variety of designations, including national parks, biosphere reserves, and marine protected areas. These areas are managed by a variety of organizations, including government agencies, non-governmental organizations, and local communities. The protected areas are an important tool for conserving the biodiversity of the Gulf of California and for promoting sustainable use of natural resources.
+
+The International Union for Conservation of Nature (IUCN) has established a classification system for protected areas based on their management objectives. The IUCN categories range from strict nature reserves to areas with sustainable use of natural resources. The categories are used to assess the level of protection provided to an area and to guide the management of the area.
+
+```{r protected_area_stats, echo=FALSE, warning=FALSE, message=FALSE}
+# read in percent_protected_goc written in ohi_goc_prep/LSP/v2025/lsp_wdpa_data_prep.qmd
+percent_protected_goc <- read_csv(here("chapters","data", "percent_protected_goc.csv"))
+
+# create a pretty table :)
+library(gt)
+percent_protected_goc %>%
+  rename("Percent protected" = percent_protected,
+         "Total protected area (km^2)" = sum_protected_area,
+         "Ecoregion area (km^2)" = border_area_km2) %>%
+  gt() %>% 
+  tab_header(title = md("As of January 2025, the Gulf of California has a total of 74 protected areas, covering a total area of 39,136.66 square kilometers. This is 14.94% of the entire ecoregion.")) %>% 
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+```
+
+### IUCN Category Definitions
+
+The IUCN category definitions range from most natural to least natural conditions: Ia = Ib \> II = III \> IV = VI \> V ([Leroux et al., 2010](https://www.sciencedirect.com/science/article/pii/S0006320709004832), [Dudley, 2008](https://portals.iucn.org/library/sites/library/files/documents/pag-021.pdf)).
+
+-   **Category Ia:** Strict Nature Reserve - protected area managed mainly for science.
+-   **Category Ib:** Wilderness Area - protected area managed mainly for wilderness protection.
+-   **Category II:** National Park - protected area managed mainly for ecosystem protection and recreation.
+-   **Category III:** Natural Monument - protected area managed mainly for conservation of specific natural features.
+-   **Category IV:** Habitat/Species Management Area - protected area managed mainly for conservation through management intervention.
+-   **Category V:** Protected Landscape/Seascape - protected area managed mainly for landscape/seascape conservation and recreation.
+-   **Category VI:** Protected Area with Sustainable Use of Natural Resources - protected area managed mainly for sustainable use of natural resources.
+
+### No Take Zones
+
+Some protected areas in the Gulf of California have been designated as no-take zones, where all extractive activities are prohibited.
+
+### Interactive Map
+
+The map below shows the designations of the protected areas in the Gulf of California. The searchable table provides additional information on the protected areas, including the name, designation, IUCN category, and status of the area.
+
+```{r wdpa_poly_all, echo=FALSE, warning=FALSE, message=FALSE}
+options(scipen = 999)
+
+# read in wdpa polygons in gulf_crs
+wdpa_poly_area_dir <- here(wdpa_dir, "WDPA_Jan2025_shp_clipped_area")
+
+wdpa_poly_area <- st_read(dsn = wdpa_poly_area_dir, layer = basename(wdpa_poly_area_dir), quiet = TRUE) %>% 
+  mutate(area_km2 = round(area_km2, digits = 2))
+
+# read in GoC border
+goc_border <- st_read(dsn = goc_border_dir, layer = "goc_border_gulf_crs", quiet = TRUE)
+goc_border_albers <- st_transform(goc_border, st_crs(wdpa_poly_area)) 
+goc_border_albers$border_name <- "Ecoregion Boundary"
+
+# make mapview interactive map
+library(leafpop)
+goc_mapview_fancy <- mapview(wdpa_poly_area,
+                             zcol = "desig_eng",  # color by IUCN category
+                             layer.name = "Protected Areas",
+                             map.types = c("OpenStreetMap", "Esri.WorldShadedRelief", "Esri.WorldImagery"),
+                             alpha.regions = 0.8,
+                             label = "name",
+                             popup = popupTable(wdpa_poly_area, zcol = c("name", "desig_eng", "area_km2"))) +
+  mapview(goc_border_albers, 
+          fill = NA, 
+          zcol = "border_name",
+          col.regions = "black", 
+          alpha.regions = 0.8,
+          layer.name = "Gulf of California Ecoregion",
+          homebutton = TRUE)
+goc_mapview_fancy
+```
+
+```{r wdpa_poly_all_table_DT, echo=FALSE, warning=FALSE, message=FALSE}
+library(DT)
+wdpa_table <- wdpa_poly_area %>%
+  select(name, area_km2, desig, desig_eng, iucn_cat, no_take, status, status_yr, sub_loc) %>% # select only necessary attributes for the table
+  st_drop_geometry(.) # to make the table clean
+DT::datatable(wdpa_table, 
+          class = 'cell-border stripe', # for aesthetics
+          colnames = c('Protected Area Name', 'Area (km^2)', 'Designation', 'Designation (EN)', 'IUCN Category', 'No Take Zone', 'Status', 'Year Est.', 'Location'), # to rename the columns, removing snakecase
+          rownames = FALSE) # remove column numbering 1 - 74
+```
+
+## Download WDPA data
+
+Directions to download data:
+
+1.  Link to WDPA website: <https://www.protectedplanet.net/en/thematic-areas/wdpa?tab=WDPA>
+
+2.  Select the download button in the top right hand corner.
+
+3.  Download and unzip the file.
+
+4.  There will be additional zip files within the zip file you download. Once unzipped, these are the three files you will use throughout the LSP dataprep.
+
+5.  Navigate to [ohi_goc_prep/LSP/v2025/lsp_wdpa_data_prep.qmd](https://github.com/OHI-GOC/ohi_goc_prep/blob/59ed8677462e44c6ea1c7d3cb38028ced7d55a26/LSP/v2025/lsp_wdpa_data_prep.qmd) to see how to the data was processed. This is located in the OHI-GOC/ohi_goc_prep repository.
+
+------------------------------------------------------------------------
+**Reference**: UNEP-WCMC and IUCN (2025), Protected Planet: The World Database on Protected Areas (WDPA) \[Online\], January 2025, Cambridge, UK: UNEP-WCMC and IUCN. Available at: www.protectedplanet.net.
+
+**Downloaded**: January 10, 2025
+
+**Description**: Shapefile of World Database on Protected Areas
+
+**Time range**: 1800 - 2024; some protected areas do not have an associated "status year" and are reported as year 0.
+
+**Format**: Shapefile
