@@ -73,6 +73,145 @@ Try re-saving the raw file as a .CSV again...
 ```{r}
 # for San Felipe still
 san_felipe_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/resaved_as_csv","DataturReportePublico_San_Felipe_resaved.csv")) # it works!!!
+
+san_felipe_clean <- san_felipe_raw %>% 
+  set_names(.[9, ]) %>%  # make the column names what they should be
+  slice(11:136) %>% 
+  janitor::clean_names()
+
+# clean further by trimming/replacing white spaces in the concept headers, as well as making it lower case (for my aesthetics haha)
+san_felipe_clean_concept <- san_felipe_clean %>%
+  mutate(
+    concept = str_to_lower(concepto),
+    concept = str_trim(concept),
+    concept = str_replace_all(concept, " ", "_")
+  ) %>% 
+  relocate(concept, .after = concepto) %>% 
+  select(-concepto)
+
+# identify which rows are the topic headers, and then give each row a specific name for easier pivoting.
+san_felipe_clean_by_topic <- san_felipe_clean_concept %>% 
+  mutate(
+    is_topic = !str_detect(concept, "^[0-9]_estrellas|[1-5]_estrellas|total_categorias") & !is.na(concept) # identify, true or false, if it is not the subheader (aka it IS a topic header)
+  ) %>%
+  # fill down header concepts
+  mutate(header_concept = if_else(is_topic, concept, NA)) %>% # or NA_character if there are problems.
+  fill(header_concept) %>% 
+  # make the combined concept by topic: if it’s a subcategory, combine, if not, leave as original
+  mutate(
+    concept_full = if_else(concept != header_concept, paste0(header_concept, ":", concept), concept
+    )
+  )
+
+# now, pivot longer, where we have the columns as the header_concept!
+san_felipe_long <- san_felipe_clean_by_topic %>% 
+  pivot_longer(
+    cols = 2:100,
+    names_to = "month_year",
+    values_to = "value"
+  ) # check with original data to ensure it makes sense!
+
+# great.  now let's make a column to indicate the year, making the final San Felipe dataset
+san_felipe_long_final <- san_felipe_long %>% 
+  mutate(
+    is_mo_yr = !str_detect(month_year, "acum|total"),
+    temp = if_else(is_mo_yr, month_year, NA)
+  ) %>% 
+  separate(temp, into = c("month", "year"), sep = "_", remove = FALSE) %>% 
+  filter(is_topic %in% FALSE) %>% # we do not want the rows of just titles
+  select(header_concept, concept, concept_full, month_year, month, year, value) %>% 
+  mutate(municipio = "san_felipe") # before rbinding with other cities!
+```
+
+### Function to clean the files based on this file
+
+```{r}
+clean_hotel_occupations_data <- function(municipio) {
+  
+  # where to find the file
+  file_path <- here::here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/resaved_as_csv",
+    paste0("DataturReportePublico_", municipio, "_resaved.csv")
+  )
+  
+  # read raw data
+  raw_data <- read_csv(file_path)
+  
+  # clean the column names, remove top rows, and tidy
+  cleaned <- raw_data %>% 
+    set_names(.[9, ]) %>%  
+    slice(11:136) %>% # should all be the same because of the way it is structured
+    janitor::clean_names()
+  
+  # clean and standardize the "concepto" column
+  cleaned_concept <- cleaned %>%
+    mutate(
+      concept = str_to_lower(concepto),
+      concept = str_trim(concept),
+      concept = str_replace_all(concept, " ", "_")
+    ) %>% 
+    relocate(concept, .after = concepto) %>% # these two lines of code are not really necessary because the func will do it all at once
+    select(-concepto)
+  
+  # identify topic headers and combine them with subcategories
+  by_topic <- cleaned_concept %>% 
+    mutate(
+      is_topic = !str_detect(concept, "^[0-9]_estrellas|[1-5]_estrellas|total_categorias") & !is.na(concept)
+    ) %>%
+    mutate(header_concept = if_else(is_topic, concept, NA_character_)) %>% # use NA_character_ for this stuff just in case
+    fill(header_concept) %>% 
+    mutate(
+      concept_full = if_else(concept != header_concept, paste0(header_concept, ":", concept), concept)
+    )
+  
+  # pivot longer
+  long <- by_topic %>% 
+    pivot_longer(
+      cols = 2:100, # adjust if more columns
+      names_to = "month_year",
+      values_to = "value"
+    )
+  
+  # separate year and month, filter, and tag city
+  final <- long %>% 
+    mutate(
+      is_mo_yr = !str_detect(month_year, "acum|total"),
+      temp = if_else(is_mo_yr, month_year, NA_character_)
+    ) %>% 
+    separate(temp, into = c("month", "year"), sep = "_", remove = FALSE) %>% 
+    filter(is_topic == FALSE) %>% 
+    select(header_concept, concept, concept_full, month_year, month, year, value) %>% 
+    mutate(municipio = str_to_lower(municipio))
+  
+  return(final)
+}
+```
+
+Okay! Let's try it with Cabo San Lucas.
+
+```{r}
+cabo_san_lucas_final <- clean_hotel_occupations_data("Cabo_San_Lucas") # hmmm... there are weird crosses when resaved as UTF... "†".. but it only works as a UTF-8!
+
+la_paz_final <- clean_hotel_occupations_data("La_Paz") # okay it is happening more than once.  Need to figure that out.  Come back tomorrow!
+```
+
+## COME BACK!
+
+For all at once:
+
+```{r}
+all_cities <- c("San_Felipe", "Guaymas", "La_Paz"......)
+
+all_data <- map_dfr(all_cities, clean_city_hotel_data)
+```
+
+
+
+Let's look only at "total_categorias" within categories:
+
+```{r}
+san_felipe_total_categorias <- san_felipe_long_final %>% 
+  filter(concept == "total_categorias")
 ```
 
 
