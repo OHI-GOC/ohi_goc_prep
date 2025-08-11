@@ -1,0 +1,425 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-07-29"
+---
+
+```{r}
+library(sf)
+library(terra)
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(here)
+library(mapview)
+library(lwgeom)
+sf::sf_use_s2(FALSE)
+```
+
+# get OHI ocean regions.
+```{r}
+
+# Load in POEM regions
+poem <- st_read("/home/shares/ohi/OHI_GOC/spatial/subregions_drafts/poem_w_ohi_draft2/poem_ohi_draft2_071025_final.shp") %>%
+  st_make_valid() %>%
+  st_transform(6372)
+
+#st_write(poem, here("spatial/poem/POEM.shp"))
+
+ohi_rgn_data <- data.frame(poem) %>%
+  select(rgn_id, estado, ecorgn) %>%
+  unique()
+
+poem <- st_read(here("spatial/poem/POEM.shop"))
+# merge into OHI regions:
+poem_buffered <- poem %>%
+  st_buffer(0.2)        
+
+# Step 3: Group and dissolve
+ohi <- poem_buffered %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop") 
+
+# Remove buffer
+ohi <- st_buffer(ohi, -0.2)
+
+mapview(ohi)
+
+ohi <- st_cast(ohi, "MULTIPOLYGON") %>%
+  left_join(ohi_rgn_data, by="rgn_id") %>%
+  select(rgn_id, estado, ecorgn, geometry)
+
+
+```
+
+
+## Add in the corresponding land
+```{r}
+ent02 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/02ent.shp")
+ent03 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/03ent.shp")
+ent26 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/26ent.shp")
+ent25 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/25ent.shp")
+ent18 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/18ent.shp")
+ent14 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/14ent.shp")
+states <- bind_rows(ent02, ent03, ent26, ent25, ent18, ent14)
+states <- st_transform(states, crs=6372)
+mapview(states) 
+
+
+```
+
+Some of the water regions overlap with land. Subtract the water regions from the land.
+```{r}
+ocean <- ohi
+
+states_minus_ocean <- st_difference(states, st_union(ocean))
+mapview(states_minus_ocean) + mapview(ocean) + mapview(states)
+
+st_area(states)-
+st_area(states_minus_ocean) # area lost, which is good!
+```
+
+Some gaps between the ocean and land. I want this to be ocean. Therefore, I will buffer the ocean. Then overlay the ocean and land and subtract out ocean that overlaps with land.
+
+```{r}
+## function to buffer and clip
+cut_rgn <- function(rgn, distance=200, ocean){
+#rgn = rgns[1]  
+  # Subset for current region
+  ocean_poly <- filter(ocean, rgn_id == rgn)
+  ocean_buffer <- st_buffer(ocean_poly, dist=distance)
+  ocean_minus_rgn <- filter(ocean, rgn_id != rgn)
+      land_ocean <-  
+      st_union(c(st_geometry(states_minus_ocean),
+               st_geometry(ocean_minus_rgn)))
+     
+    ocean_new <- st_difference(ocean_buffer, land_ocean)
+     ocean_new
+}
+
+new_ocean <- ocean
+
+new_1 <- cut_rgn(rgn="Region_1", dist=200, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_1"),new_1)
+
+new_5 <- cut_rgn(rgn="Region_5", dist=200, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_5"), new_5)
+
+new_2 <- cut_rgn(rgn="Region_2", dist=200, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_2"),new_2)
+
+new_6 <- cut_rgn(rgn="Region_6", dist=200, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_6"), new_6)
+
+new_3 <- cut_rgn(rgn="Region_3", dist=200, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_3"),new_3)
+
+new_7 <- cut_rgn(rgn="Region_7", dist=200, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_7"), new_7)
+
+new_4 <- cut_rgn(rgn="Region_4", dist=200, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_4"),new_4)
+
+new_8 <- cut_rgn(rgn="Region_8", dist=200, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_8"),new_8)
+
+new_9 <- cut_rgn(rgn="Region_9", dist=200, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_9"), new_9)
+
+mapview(new_ocean) + mapview(states_minus_ocean)
+
+
+## Fix artifact between 1 and 5 and below polygons
+rgn <- "Region_5"
+distance <- 0.5
+ocean <- new_ocean
+  ocean_poly <- filter(ocean, rgn_id == rgn)
+  ocean_buffer <- st_buffer(ocean_poly, dist=distance)
+  ocean_minus_rgn <- filter(ocean, !(rgn_id %in% c("Region_5", "Region_1")))
+      land_ocean <-  
+      st_union(c(st_geometry(states_minus_ocean),
+               st_geometry(ocean_minus_rgn)))
+     
+    tmp_ocean_new <- st_difference(ocean_buffer, land_ocean)
+mapview(tmp_ocean_new)
+
+new_ocean <- rbind(filter(new_ocean, rgn_id != rgn), tmp_ocean_new)
+
+new_1v2 <- cut_rgn(rgn="Region_1", dist=0, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_1"), new_1v2)
+
+mapview(new_ocean) + mapview(states_minus_ocean)
+
+
+# Fix a weird gap that should be land. 
+box_latlon <- st_as_sfc(st_bbox(c(
+  xmin = -114.90406,
+  ymin = 31.33796,
+  xmax = -114.82854,
+  ymax = 31.43288
+), crs = 4326))
+box_proj <- st_transform(box_latlon, crs = 6372)
+plot(st_geometry(box_proj), col="red")  
+
+plot(st_geometry(states_minus_ocean), add=TRUE)
+
+land_poly <- filter(states_minus_ocean, CVE_ENT == "02")
+land_minus_rgn <- filter(states_minus_ocean, CVE_ENT != "02")
+      land_box <-  
+      st_union(c(st_geometry(box_proj),
+               st_geometry(land_poly)))
+    land_new2 <- st_difference(land_box, st_union(new_ocean))
+    st_geometry(land_poly) <- land_new2
+    land_newfull <- rbind(land_poly, land_minus_rgn)
+
+mapview(new_ocean) + mapview(land_newfull)
+
+## few more fixes
+# fix overlap between region 3 and 4
+fix <- filter(new_ocean, rgn_id=="Region_3")
+rgn3polygons <- st_cast(fix, "POLYGON")   
+mapview(rgn3polygons)
+rgn3polygon <- rgn3polygons[1,]
+mapview(rgn3polygon)
+
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_3"), rgn3polygon)
+mapview(new_ocean) + mapview(land_newfull)
+
+new_4v2 <- cut_rgn(rgn="Region_4", dist=50, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_4"), new_4v2)
+
+mapview(new_ocean) + mapview(land_newfull)
+
+
+# fix a weird jag in region 5
+latlong_coords <- matrix(c(-113.52029, 31.29291, -113.51925, 31.29309), ncol = 2, byrow = TRUE)
+latlong_line <- st_sfc(st_linestring(latlong_coords))  # Create line geometry
+st_crs(latlong_line) <- 4326  # Assign CRS to the line
+latlong_sf <- st_sf(geometry = latlong_line)  # Convert to Simple Feature
+mapview(new_ocean) + mapview(latlong_sf)
+
+cut02 <- st_transform(latlong_line, st_crs(new_ocean))
+
+rgn02cut <- filter(new_ocean, rgn_id=="Region_5")
+
+cut_polygons <- st_split(rgn02cut, cut02)
+
+ split_polygons <- st_collection_extract(cut_polygons, "POLYGON")   
+
+new_ocean <- filter(new_ocean, rgn_id != "Region_5") 
+new_ocean <- rbind(new_ocean, split_polygons[1,])
+
+# fix small gap in region 6
+new_6 <- cut_rgn(rgn="Region_6", dist=200, ocean=new_ocean)
+new_ocean <- rbind(filter(new_ocean, rgn_id != "Region_6"), new_6)
+ mapview(new_ocean) + mapview(land)
+
+st_write(new_ocean, here("spatial/marine_ohi/marine_ohi.shp"), append=FALSE)
+st_write(land_newfull, here("spatial/states_ohi/states.shp"), append=FALSE)
+```
+
+## cut the OHI regions on land
+Explore watersheds. We considered using these boundaries, but it didn't really seem to work. So skip this!
+```{r}
+
+shed <- st_read("/home/shares/ohi/OHI_GOC/spatial/Cuencas_Hidrograficas_de_Mexico_2007/cue250k_07gw/cue250k_07gw.shp")
+
+```
+
+Hand cut the regions. 
+
+```{r}
+ocean <- st_read("spatial/marine_ohi/marine_ohi.shp")
+land <- st_read("spatial/states_ohi/states.shp")
+mapview(ocean) + mapview(land) 
+
+
+# cut Baja into two regions
+latlong_coords <- matrix(c(-114.78779, 30.96744, -116.13537, 30.54735), ncol = 2, byrow = TRUE)
+latlong_line <- st_sfc(st_linestring(latlong_coords))  # Create line geometry
+st_crs(latlong_line) <- 4326  # Assign CRS to the line
+latlong_sf <- st_sf(geometry = latlong_line)  # Convert to Simple Feature
+mapview(ocean) + mapview(land) + mapview(latlong_sf)
+
+cut02 <- st_transform(latlong_line, st_crs(land))
+
+rgn02cut <- filter(land, CVE_ENT=="02")
+
+cut_polygons <- st_split(rgn02cut, cut02)
+ split_polygons <- st_collection_extract(cut_polygons, "POLYGON")   
+rgn1 <- split_polygons[c(14, 17,18,19,20,21,22),] %>%
+  st_union() %>%
+  st_sf(geometry = .) %>%
+  mutate(rgn_id = "Region_1",
+         location = "land") 
+
+rgn2 <- split_polygons[-c(14, 17, 18, 19, 20, 21, 22), ] %>%
+  st_union() %>%
+  st_sf(geometry = .) %>%
+  mutate(rgn_id = "Region_2",
+         location = "land")
+
+# cut Baja Sur into two regions
+latlong_coords <- matrix(c(-111.40100,26.34925, -112.47126, 25.95715), ncol = 2, byrow = TRUE)
+latlong_line <- st_sfc(st_linestring(latlong_coords))  # Create line geometry
+st_crs(latlong_line) <- 4326  # Assign CRS to the line
+latlong_sf <- st_sf(geometry = latlong_line)  # Convert to Simple Feature
+mapview(ocean) + mapview(land) + mapview(latlong_sf)
+
+cut02 <- st_transform(latlong_line, st_crs(land))
+
+rgn02cut <- filter(land, CVE_ENT=="03")
+
+cut_polygons <- st_split(rgn02cut, cut02)
+ split_polygons <- st_collection_extract(cut_polygons, "POLYGON")   
+ mapview(split_polygons)
+rgn3 <- split_polygons[c(42,43,44,45,46,47,48,
+                         50,51,52,53,59,
+                         60,82,83,84,85,86,87,88,89),] %>%
+  st_union() %>%
+  st_sf(geometry = .) %>%
+  mutate(rgn_id = "Region_3",
+         location = "land") 
+
+rgn4 <- split_polygons[-c(42,43,44,45,46,47,48,
+                          50,51,52,53,59,
+                         60,82,83,84,85,86,87,88,89), ] %>%
+  st_union() %>%
+  st_sf(geometry = .) %>%
+  mutate(rgn_id = "Region_4",
+         location = "land")
+
+
+# cut Sonora into three regions
+latlong_coords <- matrix(c(-113.52018, 31.29295, -111.44855, 31.60423), ncol = 2, byrow = TRUE)
+latlong_line <- st_sfc(st_linestring(latlong_coords))  # Create line geometry
+st_crs(latlong_line) <- 4326  # Assign CRS to the line
+latlong_sf <- st_sf(geometry = latlong_line)  # Convert to Simple Feature
+mapview(ocean) + mapview(land) + mapview(latlong_sf)
+
+cut02 <- st_transform(latlong_line, st_crs(land))
+
+rgn02cut <- filter(land, CVE_ENT=="26")
+
+cut_polygons <- st_split(rgn02cut, cut02)
+ split_polygons <- st_collection_extract(cut_polygons, "POLYGON")   
+ mapview(split_polygons)
+
+ rgn5 <- split_polygons[c(25,26,74),] %>%
+  st_union() %>%
+  st_sf(geometry = .) %>%
+  mutate(rgn_id = "Region_5",
+         location = "land") 
+
+rgn6_7 <- split_polygons[-c(25,26,74), ] %>%
+  st_union() %>%
+  st_sf(geometry = .) %>%
+  mutate(rgn_id = "Region_6",
+         location = "land")
+mapview(rgn6_7)
+
+## 2nd cut
+latlong_coords <- matrix(c(-111.45738, 28.31612, -108.46474, 29.56174), ncol = 2, byrow = TRUE)
+latlong_line <- st_sfc(st_linestring(latlong_coords))  # Create line geometry
+st_crs(latlong_line) <- 4326  # Assign CRS to the line
+latlong_sf <- st_sf(geometry = latlong_line)  # Convert to Simple Feature
+mapview(ocean) + mapview(land) + mapview(latlong_sf)
+
+cut02 <- st_transform(latlong_line, st_crs(land))
+
+cut_polygons <- st_split(rgn6_7, cut02)
+ split_polygons <- st_collection_extract(cut_polygons, "POLYGON")   
+ mapview(split_polygons) + mapview(ocean)
+
+ rgn6 <- split_polygons[c(1,19,20,21,22,23,25,27,54),] %>%
+  st_union() %>%
+  st_sf(geometry = .) %>%
+  mutate(rgn_id = "Region_6",
+         location = "land") 
+
+rgn7 <- split_polygons[-c(1,19,20,21,22,23,25,27,54), ] %>%
+  st_union() %>%
+  st_sf(geometry = .) %>%
+  mutate(rgn_id = "Region_7",
+         location = "land")
+mapview(rgn7)
+
+
+# Pull out Sinaloa
+
+rgn8 <- filter(land, CVE_ENT=="25") %>%
+  st_union() %>%
+  st_sf(geometry = .) %>%
+  mutate(rgn_id = "Region_8",
+         location = "land") 
+
+# Pull out Nayarit and Jalisco
+rgn9 <- filter(land, CVE_ENT %in% c("18", "14")) %>%
+  st_union() %>%
+  st_sf(geometry = .) %>%
+  mutate(rgn_id = "Region_9",
+         location = "land") 
+
+mapview(rgn9)
+
+## combine land into file
+land <- rbind(rgn1, rgn2, rgn3, rgn4, rgn5, rgn6, 
+              rgn7, rgn8, rgn9)
+
+```
+
+combine land and water
+```{r}
+
+land <- left_join(land, st_drop_geometry(ocean), by="rgn_id")
+
+ocean <- ocean %>%
+  mutate(location = "marine") 
+
+finalOHI <- rbind(land, ocean)
+mapview(finalOHI)
+st_write(finalOHI, "spatial/ohi_regions/goc_ohi_rgns.shp")
+
+```
+
+
+## coastal line
+never figured out how to work with this.
+```{r}
+coast <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_coastline/conjunto_de_datos/lineacosta_mex_2023.shp") %>%
+  st_transform(6372) %>%
+  filter(TIPO == "Continental") 
+
+```
+
+Trimming to a boxed area. Might want to do this.
+```{r}
+bbox_coords_6372 <- c(
+  xmin = 1050000,  # western edge (near Baja California)
+  ymin = 900000,   # southern edge (mid-Jalisco)
+  xmax = 2300000,  # eastern edge (into Sonora/Sinaloa)
+  ymax = 2380000   # northern edge (toward US border)
+)
+
+# Convert to bbox and then to polygon
+gulf_bbox <- st_bbox(bbox_coords_6372, crs = st_crs(6372)) |> st_as_sfc()
+
+gulf <- st_crop(states, gulf_bbox)
+plot(gulf_bbox)
+plot(st_geometry(gulf), add=TRUE)
+
+gulf_bbox_vect <- vect(gulf_bbox)  # gulf_bbox must be in EPSG:6372
+
+# Now use that with terra::ext()
+r_template <- rast(
+  extent = ext(gulf_bbox_vect),
+  resolution = 1000,         # 1 km
+  crs = crs(gulf_bbox_vect)  # or "EPSG:6372"
+)
+
+gulf_rast <- rasterize(states, r_template, field = "CVEGEO", background = 0)
+
+coast <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_coastline/conjunto_de_datos/lineacosta_mex_2023.shp")
+
+```
+

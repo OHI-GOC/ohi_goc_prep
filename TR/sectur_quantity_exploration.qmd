@@ -1,0 +1,241 @@
+---
+title: "Tourist data"
+output: html_document
+date: "2025-3-6"
+editor_options: 
+  chunk_output_type: console
+---
+Data: "Ocupación en hoteles y moteles por centro turístico, corte mensual DataTur"
+Go to: <https://monitoreohotelero.sectur.gob.mx/Reportes/Menu.aspx>
+
+To download:
+
+> 1. Go to the “Generate Report” section.
+> 2. Select the “Mensual”, or monthly, time frame.
+> 3. Choose the option “Hotel and motel occupancy by tourist center, monthly DataTur snapshot.”
+> 4. Click “Continue” and then “Advanced criteria” (Criterios Avanzados)
+> 5. Select the municipality of interest, then all the variables of interest.  Specify "Serie" for "Cobertura Temporal corte mensual", starting from 2018 January (Enero) to 2025 Junio (June).
+> 6. Finally, click on “Generate Report.”
+
+The report can be downloaded in various formats and contains the information available as of the date of consultation.  It is important to note that this information is presented at the tourist center level, not the municipal level. However, it can be useful for territorial approximations in the Gulf of California region, particularly in key tourist destinations.
+
+```{r}
+library(mapview)
+library(sf)
+library(tidyverse)
+library(here)
+library(terra)
+```
+
+
+## Clean data
+
+```{r}
+# read in one municipio first. start with San Felipe
+san_felipe_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles","DataturReportePublico_San_Felipe.csv")) # hmm.. Error in vroom_(file, delim = delim %||% col_types$delim, col_names = col_names,  :                 
+  # embedded nul in string: 'O\0c\0u\0p\0a\0c\0i\0\xf3\0n\0 \0e\0n\0 \0h\0o\0t\0e\0l\0e\0s\0 \0y\0 \0m\0o\0t\0e\0l\0e\0s\0 \0p\0o\0r\0 \0c\0e\0n\0t\0r\0o\0 \0t\0u\0r\0\xed\0s\0t\0i\0c\0o\0,\0 \0c\0o\0r\0t\0e\0 \0m\0e\0n\0s\0u\0a\0l\0.\0 \0D\0a\0t\0a\0T\0u\0r'
+
+library(readr)
+library(data.table)
+
+# It looks like the file is encoded in UTF-16 (or UCS-2) instead of the usual UTF-8 or Latin1, so you need to use `data.table::fread()`
+san_felipe_raw <- read_lines("/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/DataturReportePublico_San_Felipe.csv", 
+                    locale = locale(encoding = "UTF-16LE"))
+
+# paste lines back together into one string for read_csv
+san_felipe_text <- paste(san_felipe_raw, collapse = "\n")
+
+# read into a dataframe now
+san_felipe_csv_raw <- read_csv(I(san_felipe_text)) %>% 
+  janitor::clean_names()
+
+### did not work... try downloading the report as an excel file instead... could do some cleaning from now on but it might be easier to download as an excel.  Check!!
+```
+Try the excel file download instead...
+
+```{r}
+library(readxl)
+
+# read in San Felipe .xls
+san_felipe_raw <- readxl::read_excel(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/antiquated_resaves","DataturReportePublico_San_Felipe.xls"))
+
+tools::file_ext(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/antiquated_resaves/DataturReportePublico_San_Felipe.xls")) # [1] "xls"
+readLines(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/antiquated_resaves/DataturReportePublico_San_Felipe.xls"))
+
+# .... [2] "            <table id=\"tablaReportePublico\" class=\"overflow-y\">"
+# likely has html code which is why it looks like this. Try resaving as .xlsx (YES, when I tried opening it in excel and resaving it, it was currently a .htm)
+
+# read in San Felipe .xlsx
+san_felipe_raw <- readxl::read_xlsx(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/antiquated_resaves","DataturReportePublico_San_Felipe.xlsx"), sheet = 1) # must still have .htm weirdness... Error in read_fun(path = path, sheet_i = sheet, limits = limits, shim = shim,  : invalid Unicode point 56564
+```
+
+Try re-saving the raw file as a .CSV again...
+```{r}
+# for San Felipe still
+san_felipe_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/resaved_as_csv","DataturReportePublico_San_Felipe_resaved.csv")) # it works!!!
+
+san_felipe_clean <- san_felipe_raw %>% 
+  set_names(.[9, ]) %>%  # make the column names what they should be
+  slice(11:136) %>% 
+  janitor::clean_names()
+
+# clean further by trimming/replacing white spaces in the concept headers, as well as making it lower case (for my aesthetics haha)
+san_felipe_clean_concept <- san_felipe_clean %>%
+  mutate(
+    concept = str_to_lower(concepto),
+    concept = str_trim(concept),
+    concept = str_replace_all(concept, " ", "_")
+  ) %>% 
+  relocate(concept, .after = concepto) %>% 
+  select(-concepto)
+
+# identify which rows are the topic headers, and then give each row a specific name for easier pivoting.
+san_felipe_clean_by_topic <- san_felipe_clean_concept %>% 
+  mutate(
+    is_topic = !str_detect(concept, "^[0-9]_estrellas|[1-5]_estrellas|total_categorias") & !is.na(concept) # identify, true or false, if it is not the subheader (aka it IS a topic header)
+  ) %>%
+  # fill down header concepts
+  mutate(header_concept = if_else(is_topic, concept, NA)) %>% # or NA_character if there are problems.
+  fill(header_concept) %>% 
+  # make the combined concept by topic: if it’s a subcategory, combine, if not, leave as original
+  mutate(
+    concept_full = if_else(concept != header_concept, paste0(header_concept, ":", concept), concept
+    )
+  )
+
+# now, pivot longer, where we have the columns as the header_concept!
+san_felipe_long <- san_felipe_clean_by_topic %>% 
+  pivot_longer(
+    cols = 2:100,
+    names_to = "month_year",
+    values_to = "value"
+  ) # check with original data to ensure it makes sense!
+
+# great.  now let's make a column to indicate the year, making the final San Felipe dataset
+san_felipe_long_final <- san_felipe_long %>% 
+  mutate(
+    is_mo_yr = !str_detect(month_year, "acum|total"),
+    temp = if_else(is_mo_yr, month_year, NA)
+  ) %>% 
+  separate(temp, into = c("month", "year"), sep = "_", remove = FALSE) %>% 
+  filter(is_topic %in% FALSE) %>% # we do not want the rows of just titles
+  select(header_concept, concept, concept_full, month_year, month, year, value) %>% 
+  mutate(municipio = "san_felipe") # before rbinding with other cities!
+```
+
+### Function to clean the files based on this file
+
+```{r}
+clean_hotel_occupations_data <- function(municipio) {
+  
+  # where to find the file
+  file_path <- here::here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/resaved_as_csv",
+    paste0("DataturReportePublico_", municipio, "_resaved.csv")
+  )
+  
+  # read raw data
+  # raw_data <- read_csv(file_path)
+  raw_data <- read_csv(file_path, locale = readr::locale(encoding = "UTF-8")) # changed because having error: "Error in `map()`: ℹ In index: 1. Caused by error in `nchar()`: ! invalid multibyte string, element 1"
+  
+  # clean the column names, remove top rows, and tidy
+  cleaned <- raw_data %>% 
+    set_names(.[9, ]) %>%  
+    slice(11:136) %>% # should all be the same because of the way it is structured
+    janitor::clean_names()
+  
+  # clean and standardize the "concepto" column
+  cleaned_concept <- cleaned %>%
+    mutate(
+      concept = str_to_lower(concepto),
+      concept = str_trim(concept),
+      concept = str_replace_all(concept, " ", "_")
+    ) %>% 
+    relocate(concept, .after = concepto) %>% # these two lines of code are not really necessary because the func will do it all at once
+    select(-concepto)
+  
+  # identify topic headers and combine them with subcategories
+  by_topic <- cleaned_concept %>% 
+    mutate(
+      is_topic = !str_detect(concept, "^[0-9]_estrellas|[1-5]_estrellas|total_categorias") & !is.na(concept)
+    ) %>%
+    mutate(header_concept = if_else(is_topic, concept, NA_character_)) %>% # use NA_character_ for this stuff just in case
+    fill(header_concept) %>% 
+    mutate(
+      concept_full = if_else(concept != header_concept, paste0(header_concept, ":", concept), concept)
+    )
+  
+  # pivot longer
+  long <- by_topic %>% 
+    pivot_longer(
+      cols = 2:100, # adjust if more columns
+      names_to = "month_year",
+      values_to = "value"
+    )
+  
+  # separate year and month, filter, and tag city
+  final <- long %>% 
+    mutate(
+      is_mo_yr = !str_detect(month_year, "acum|total"),
+      temp = if_else(is_mo_yr, month_year, NA_character_)
+    ) %>% 
+    separate(temp, into = c("month", "year"), sep = "_", remove = FALSE) %>% 
+    filter(is_topic == FALSE) %>% 
+    select(header_concept, concept, concept_full, month_year, month, year, value) %>% 
+    mutate(municipio = str_to_lower(municipio))
+  
+  return(final)
+}
+```
+
+#### Okay! Let's try it with Cabo San Lucas.
+
+```{r}
+cabo_san_lucas_final <- clean_hotel_occupations_data("Cabo_San_Lucas") # hmmm... there are weird crosses when resaved as UTF... "†".. but it only works as a UTF-8!
+
+la_paz_final <- clean_hotel_occupations_data("La_Paz") # okay it is happening more than once.  Need to figure that out.  Come back tomorrow!
+```
+
+Okay!! So it looks like you CANNOT save the file as a .CSV first, instead you **must** to do it in this order:
+
+1.  On the SECTUR report site, after generating the report, click "Exportar a Excel".  
+
+2.  Open the ".xls" (which is really a .htm) in Excel, and then "Save As..." a UTF-8 .CSV. Rename it `DataturReportePublico_municipio_resaved.csv` where you replace municipio with the municipality you just saved. 
+
+3.  Bring into mazu in `/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/resaved_as_csv` to be read in here.  This is the only way that you do not get any "†" in whitespaces.
+
+**These instructions will be brought to the top of the script when it is cleaned up.**
+
+```{r}
+cabo_san_lucas_final <- clean_hotel_occupations_data("Cabo_San_Lucas") # YAY, now that I followed the above procedure, it looks great!!
+```
+
+#### For all municipios at once:
+
+```{r}
+all_cities <- c(
+  "Cabo_San_Lucas", "Culiacan", "El_Fuerte", "El_Rosario", "Escuinapa",
+  "Guaymas", "Hermosillo", "La_Paz", "Loreto", "Los_Mochis",
+  "Mazatlan", "Puerto_Vallarta", "San_Felipe", "San_Jose_del_Cabo", 
+  "Zona_Corredor_Los_Cabos"
+)
+
+library(purrr)
+
+all_data <- all_cities %>% 
+  map(clean_hotel_occupations_data) %>% 
+  bind_rows() # looks good! keep checking after lunch.
+```
+
+
+
+Let's look only at "total_categorias" within categories:
+
+```{r}
+san_felipe_total_categorias <- san_felipe_long_final %>% 
+  filter(concept == "total_categorias")
+```
+
+
+
+

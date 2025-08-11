@@ -1,0 +1,216 @@
+---
+title: "Population data"
+output: html_document
+date: "2025-06-24"
+---
+
+
+Regions data downloaded from here (2020 version of regions used): https://en.www.inegi.org.mx/app/biblioteca/ficha.html?upc=889463807469
+```{r setup, include=FALSE}
+library(sf)
+library(terra)
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(here)
+library(mapview)
+
+```
+
+# map of Mexico states
+```{r}
+
+zip_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/794551132173_s"
+
+# List all .zip files
+zip_files <- list.files(zip_dir, pattern = "\\.zip$", full.names = TRUE)
+
+# Unzip each file into the same folder
+for (z in zip_files) {
+  unzip(z, exdir = zip_dir)
+}
+
+ent02 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/02ent.shp")
+ent03 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/03ent.shp")
+ent26 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/26ent.shp")
+ent25 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/25ent.shp")
+ent18 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/18ent.shp")
+ent14 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/14ent.shp")
+plot(st_geometry(ent02)) 
+plot(st_geometry(ent03))  
+plot(st_geometry(ent26))  
+plot(st_geometry(ent25)) 
+plot(st_geometry(ent18)) 
+plot(st_geometry(ent14)) 
+states <- bind_rows(ent02, ent03, ent26, ent25, ent18, ent14)
+states <- st_transform(states, crs=6372)
+plot(st_geometry(states))
+bbox_coords_6372 <- c(
+  xmin = 1050000,  # western edge (near Baja California)
+  ymin = 900000,   # southern edge (mid-Jalisco)
+  xmax = 2300000,  # eastern edge (into Sonora/Sinaloa)
+  ymax = 2380000   # northern edge (toward US border)
+)
+
+# Convert to bbox and then to polygon
+gulf_bbox <- st_bbox(bbox_coords_6372, crs = st_crs(6372)) |> st_as_sfc()
+
+gulf <- st_crop(states, gulf_bbox)
+plot(gulf_bbox)
+plot(st_geometry(gulf), add=TRUE)
+
+gulf_bbox_vect <- vect(gulf_bbox)  # gulf_bbox must be in EPSG:6372
+
+# Now use that with terra::ext()
+r_template <- rast(
+  extent = ext(gulf_bbox_vect),
+  resolution = 1000,         # 1 km
+  crs = crs(gulf_bbox_vect)  # or "EPSG:6372"
+)
+
+gulf_rast <- rasterize(states, r_template, field = "CVEGEO", background = 0)
+
+coast <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_coastline/conjunto_de_datos/lineacosta_mex_2023.shp")
+
+
+
+mapview(states) + mapview(coast)
+## failed try again later
+url <- "https://en.www.inegi.org.mx/contenidos/productos/prod_serv/contenidos/espanol/bvinegi/productos/geografia/cart_geo_hist_mex/794551131954_s.zip"
+destfile <- "/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/geoestadistico/794551131954_s.zip" 
+
+# Download the file
+download.file(url, destfile, mode = "wb")
+unzip(zipfile = destfile, exdir = "/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/geoestadistico/")
+
+library(mxmaps)
+
+
+data("df_mxstate_2020")
+df_mxstate_2020$value <- df_mxstate_2020$pop
+mxstate_choropleth(df_mxstate_2020,
+                    title = "Total population, by state") 
+st_read("data-raw/simpl/entidades.shp", "entidades")
+```
+
+
+Get the boundaries: Will need to get boundaries for rural areas as well.
+https://en.www.inegi.org.mx/app/biblioteca/ficha.html?upc=889463807469 these are teh 2020 data
+```{r}
+
+manz_prep <- function(manz_file){ # manz_file <- "/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/02_bajacalifornia/conjunto_de_datos/02m.shp"
+
+manz <- st_read(manz_file) %>%
+  mutate(id = paste(CVE_ENT, CVE_MUN, CVE_AGEB, CVE_MZA)) %>%
+  mutate(id_loc = paste(CVE_ENT, CVE_MUN, CVE_LOC)) %>%
+  arrange(CVE_MUN, CVE_LOC)
+plot(st_geometry(filter(manz, AMBITO=="Rural")), border="red", add=TRUE)
+plot(st_geometry(filter(manz, AMBITO=="Urbana")), border="blue", add=TRUE)
+
+# check the area, 99.9% are < 0.5 km2, so reasonable to convert points to 1degree raster
+manz_area <- st_area(manz) / 1e6
+hist(manz_area)
+summary(manz_area)
+
+# getting the points:
+manz_point <- st_centroid(manz)
+manz_point}
+
+manz_points <- c(manz_prep("/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/02_bajacalifornia/conjunto_de_datos/02m.shp"),
+                 manz_prep(""))
+
+
+```
+
+Get the population from 2020 census:
+This only includes the urban and rural neighborhoods, so only includes about 3.5 million people.
+(3.77 million is the actual total in Baja California, for example)
+
+https://www.inegi.org.mx/programas/ccpv/2020/#microdatos
+
+merge with points data
+``` {r}
+
+pop_manz <- read_csv("/home/shares/ohi/OHI_GOC/_raw_data/census_inegi/RESAGEBURB_02CSV20.csv") %>%
+  filter(!str_detect(NOM_LOC, "Total")) %>%
+  mutate(id = paste(ENTIDAD, MUN, AGEB, MZA))
+
+## check to see that we are accounting for most of the population
+mun_pop <- pop_manz %>%
+  group_by(MUN) %>%
+  summarize(pop = sum(POBTOT, na.rm=TRUE))
+
+missing_pop <- setdiff(pop_manz$id, manz_point$id) # very few! which is good. losing 0.2% of people (N=7318)
+missing_block <- setdiff(manz_point$id, pop$id)
+missing_pop <- filter(pop, id %in% missing_pop)
+sum(missing_pop$POBTOT)/
+sum(pop$POBTOT) 
+
+manz_pop_points <- left_join(manz_point, pop_manz, by="id") %>%
+  select(CVE_ENT, CVE_MUN, CVE_LOC, CVE_AGEB, CVE_MZA, AMBITO, TIPOMZA, NOM_ENT, NOM_MUN,id, id_loc, POBTOT) %>%
+  filter(!is.na(POBTOT))
+
+
+ggplot(data = manz_pop_points) +
+  geom_sf(aes(color = log(POBTOT)), size = 0.3) +
+  scale_color_viridis_c(option = "plasma", trans = "sqrt") +  # good for skewed population data
+  theme_minimal() +
+  labs(title = "Population by Point",
+       color = "Total Population")
+
+```
+
+Convert to a raster
+```{r}
+manz_points_vect <- vect(manz_pop_points)
+
+# 2. Rasterize: sum POBTOT in each cell
+manz_pop_raster <- rasterize(
+  x = manz_points_vect,
+  y = r_template,          # 1-km raster template
+  field = "POBTOT",        # field to sum
+  fun = "sum",             # sum values in each cell
+  background = NA          # cells with no points = NA
+)
+
+plot(log(manz_pop_raster))
+```
+
+
+Explore data
+```{r}
+
+mapview(states)+ mapview(ohi) + mapview(coast) + mapview(goc_ocean)
+ohi <- st_read("/home/shares/ohi/OHI_GOC/spatial/OHI_regions/marine/ohi_goc_final_071025.shp")
+goc_ocean <- st_read(here("spatial/GoC_polygon_ecoregion_eqarea.shp"))
+
+if (!require(devtools)) {
+    install.packages("devtools")
+}
+devtools::install_github('diegovalle/mxmaps')
+library(mxmaps)
+
+data("df_mxmunicipio_2020")
+knitr::kable(head(df_mxmunicipio_2020))
+
+df_mxmunicipio_2020$value <-  df_mxmunicipio_2020$pop 
+mxmunicipio_choropleth(df_mxmunicipio_2020, num_colors = 1,
+                       title = "Population")
+
+
+## ITER DATA
+
+tmp <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/02ent.shp") 
+plot(st_geometry(tmp))
+
+tmp <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/02l.shp") %>% arrange(CVE_MUN, CVE_LOC)
+plot(st_geometry(filter(tmp, CVE_LOC %in% c("0001", "0002", "0003", "0004", "0005", "0006"))))
+tmp <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/02lpr.shp") %>% arrange(CVE_MUN, CVE_LOC) %>%
+  mutate(id = paste(CVE_ENT, CVE_MUN, CVE_AGEB, CVE_MZA)) %>%
+  mutate(id_loc = paste(CVE_ENT, CVE_MUN, CVE_LOC))
+
+setdiff(tmp$id_loc, manz$id_loc)
+setdiff(manz$id_loc, tmp$id_loc)
+plot(st_geometry(tmp), color="orange", add=TRUE)
+filter(tmp, CVE_MUN=="002")
+```

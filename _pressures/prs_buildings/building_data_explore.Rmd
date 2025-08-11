@@ -1,0 +1,164 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-06-12"
+editor_options: 
+  chunk_output_type: console
+---
+https://en.www.inegi.org.mx/programas/ccpv/2020/#microdata
+https://en.www.inegi.org.mx/programas/mg/#downloads
+https://geoanalitica.com/the-quick-guide-to-mexico-censo-agebs-and-manzanas/
+
+https://human-settlement.emergency.copernicus.eu/ghs_pop.php
+
+## GlobalMLBuildingFootprints
+https://github.com/microsoft/GlobalMLBuildingFootprints/tree/main/scripts
+
+I checked the data against openstreetmaps and it didn't look as good as OSM for large parts of Mexico, but then .
+
+```{r setup, include=FALSE}
+# Working with GeoJSON Data in R as Spatial Files
+
+library(readr)
+library(jsonlite)
+library(sf)
+library(httr)
+library(purrr)
+library(tidyverse)
+
+library(rnaturalearth)
+library(rnaturalearthhires)
+
+## function to build polygons from raw data.
+build_polygon_from_array <- function(coord_mat) {
+  if (length(coord_mat) == 0 || is.null(dim(coord_mat))) return(NULL)
+  
+  # Extract lon and lat from the 3D matrix
+  lons <- coord_mat[1, , 1]
+  lats <- coord_mat[1, , 2]
+  
+  if (length(lons) != length(lats) || length(lons) < 3) return(NULL)
+  
+  coords <- cbind(as.numeric(lons), as.numeric(lats))
+  
+  st_polygon(list(coords))
+}
+
+
+
+# this is the name of the geography you want to retrieve. update to meet your needs
+location <- "Mexico"
+
+# read the CSV file with dataset links
+dataset_links <- read_csv("https://minedbuildings.z5.web.core.windows.net/global-buildings/dataset-links.csv")
+
+# filter for the desired location
+mexico_links <- subset(dataset_links, Location == location)
+
+# loop through each link
+for (i in seq_len(nrow(mexico_links))) {
+  #i=2
+  map_i = mexico_links[i,]
+  url <- map_i$Url
+  quadkey <- map_i$QuadKey
+  
+  # read the GeoJSON lines from the URL
+  temp <- tempfile(fileext = ".json")
+  download.file(url, temp, quiet = TRUE)
+  
+  con <- file(temp)
+  on.exit(close(con), add = TRUE)
+  features <- stream_in(con, verbose = FALSE)
+
+  # Extract geometry and build polygons
+  polygons <- map(features$geometry$coordinates, build_polygon_from_array)
+
+ # Filter out NULLs
+  valid_idx <- which(!sapply(polygons, is.null))
+
+  if (length(valid_idx) == 0) next
+
+  data_sf <- st_sf(
+    height = as.numeric(features$properties$height[valid_idx]),
+    confidence = as.numeric(features$properties$confidence[valid_idx]),
+    geometry = st_sfc(polygons[valid_idx], crs = 4326)
+  )
+ 
+  st_write(data_sf, sprintf("/home/shares/ohi/OHI_GOC/_raw_data/building_footprint_microsoft/mexico_map%s.shp", i), append = FALSE)
+  print(paste("Saved map", i))
+} 
+  
+
+## Get GofC state boundaries
+mex_states <- ne_states(country = "Mexico", returnclass = "sf")
+
+# Filter for Gulf of California states
+gulf_states <- mex_states %>%
+  filter(name %in% c("Baja California", 
+                     "Baja California Sur", 
+                     "Sonora", 
+                     "Sinaloa", 
+                     "Nayarit"))
+plot(gulf_states)
+
+template_sf <- st_read(list.files("/home/shares/ohi/OHI_GOC/_raw_data/building_footprint_microsoft", full=TRUE)[1])
+
+gulf_states <- st_transform(gulf_states, crs = st_crs(template_sf))
+
+## Identify relevant building footprint shapefiles and save to new location
+maps_files <- list.files("/home/shares/ohi/OHI_GOC/_raw_data/building_footprint_microsoft", full=TRUE)
+
+maps_files <- grep("shp", maps_files, value=TRUE)
+mapview::mapview(st_read(maps_files[5]))
+
+for(maps_file in maps_files){ #maps_file <- maps_files[1]
+  tmp <- st_read(maps_file)
+  tmp_name <- basename(maps_file)
+  tmp_clean <- st_make_valid(tmp)
+buildings_gulf <- st_filter(tmp_clean, gulf_states, .predicate = st_intersects)
+if(dim(buildings_gulf)[1]>0){ 
+   st_write(buildings_gulf, sprintf("/home/shares/ohi/OHI_GOC/goal_prep/pressures/buildings/building_footprints_GofCstates/%s", tmp_name), append=FALSE)
+}
+cat(tmp_name)
+}
+
+all_buildings_files <- list.files("/home/shares/ohi/OHI_GOC/goal_prep/pressures/buildings/building_footprints_GofCstates", full=TRUE)
+all_buildings_files <- grep(".shp", all_buildings_files, value=TRUE)
+
+all_buildings <- map(all_buildings_files, st_read, quiet = TRUE) %>% 
+  bind_rows()
+
+st_write(all_buildings, "/home/shares/ohi/OHI_GOC/goal_prep/pressures/buildings/buildings_microsoft.shp", append=FALSE)
+
+# check out Sinaloa
+all_buildings <- st_read("/home/shares/ohi/OHI_GOC/goal_prep/pressures/buildings/buildings_microsoft.shp")
+
+sinaloa <- mex_states %>%
+  filter(name %in% c("Sinaloa"))
+buildings_sinaloa <- st_filter(all_buildings, sinaloa, .predicate = st_intersects)
+mapview::mapview(buildings_sinaloa)
+
+```
+
+## OSM
+
+```{r}
+
+library(osmdata)
+library(sf)
+
+# Example: Get buildings in La Paz, Baja California Sur
+query <- opq("Sinaloa, Mexico") %>%
+  add_osm_feature(key = "building")
+
+buildings <- osmdata_sf(query)
+
+# Extract the polygon layer (building footprints)
+buildings_sf <- buildings$osm_polygons
+
+# Optional: plot
+plot(buildings_sf$geometry)
+mapview::mapview(buildings_sf)
+
+```
+
