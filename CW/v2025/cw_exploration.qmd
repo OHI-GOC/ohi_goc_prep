@@ -391,16 +391,31 @@ sitios_long_temp <- filtered_for_col_wo_NAs %>%
 ```
 
 ```{r}
+library(lubridate)
+
 # now, lets bind the water quality goc subset with the simbologia to see what each of the variables represent
 
 simb_clean <- simbologia %>% 
   mutate(clave_parametro = str_to_lower(clave_parametro),
-         nombre_parametro = str_to_lower(nombre_parametro))
+         nombre_parametro = str_to_lower(nombre_parametro)) # for joining
 
-wq_goc_w_simb <- full_join(sitios_long_wq, simb_clean, by = "clave_parametro") # 19 variables, correct!
+wq_goc_w_simb <- inner_join(sitios_long_wq, simb_clean, by = "clave_parametro") %>%  # 19 variables, correct!
+  relocate(geometry, .after = unidad_de_medida) %>% # so this is not made lower
+  mutate(across(c(nombre_del_sitio:tipo_cuerpo_de_agua), ~ str_to_lower(.x))) %>% # for easier reading (just my aesthetic preference)
+  mutate(fecha_realizacion = ymd(fecha_realizacion)) # ensure it is a lubridate
 
-mapview(wq_goc_w_simb)
+# length(unique(wq_goc_w_simb$clave_sitio)) # 268 sites! good
 
+# mapview(wq_goc_w_simb) # looks good (took a while to load though since it is in long format)
+
+#### SAVE for now (Water quality in GoC)
+write_csv(wq_goc_w_simb, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/int", "renameca_goc_long.csv"))
+long_check <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/int", "renameca_goc_long.csv"))
+```
+
+
+```{r}
+# lets look at the number of times each site was monitored per year.
 # some years early on would sample 8 times in a year, but now it is typically 1, if any.
 wq_variables_avail <- wq_goc_w_simb %>% 
   st_drop_geometry() %>% 
@@ -410,60 +425,471 @@ wq_variables_avail <- wq_goc_w_simb %>%
 
 
 ```{r}
-# summarise by parameter and year
-param_year_counts <- wq_goc_w_simb %>%
+# for each parameter and site, check if monitoring occurred in every year from 2018 to 2024
+# group data by parameter, site, and year, count distinct years monitored per parameter/site
+# filter to include only parameter/site pairs monitored at least once in all years
+
+# summarise by parameter, year, site
+coverage_per_year <- wq_goc_w_simb %>%
   st_drop_geometry() %>%             
-  group_by(clave_parametro, ano) %>%
+  group_by(clave_parametro, ano, clave_sitio) %>%
   summarise(times_monitored = n(), .groups = "drop")
 
-# filter for variables that cover all years from 2018:2024
-params_full_coverage <- param_year_counts %>%
-  group_by(clave_parametro) %>%
+# identify parameter/site pairs monitored at least once per year from 2018_2024
+coverage_summary <- coverage_per_year %>%
+  group_by(clave_parametro, clave_sitio) %>%
   summarise(years_monitored = n_distinct(ano), .groups = "drop") %>%
-  filter(years_monitored == 7)   # 7 years: 2018-2024
+  filter(years_monitored == 7)  # Only those monitored every year
 
-# OR just first filter the year...
-params_full_coverage <- param_year_counts %>%
-  filter(ano %in% 2018:2024) %>% 
-  group_by(clave_parametro) %>%
-  summarise(years_monitored = n_distinct(ano), .groups = "drop") %>%
-  filter(years_monitored == 7)   # 7 years: 2018-2024
+# select sites with at least one parameter monitored at least once in every year from 2018 to 2024
+sites_with_full_yearly_parameter <- coverage_summary %>% 
+  distinct(clave_sitio)
 
-params_full_coverage
+sites_with_full_yearly_parameter <- unique(coverage_summary$clave_sitio) # v2025: 24 sites
+parameters_w_yrly_coverage <- unique(coverage_summary$clave_parametro) # v2025: 74 parameters 
+```
+
+
+```{r}
+# # 1. Calculate yearly coverage for all site-parameter combos
+# coverage_per_year <- wq_goc_w_simb %>%
+#   st_drop_geometry() %>%
+#   group_by(clave_sitio, clave_parametro, ano) %>%
+#   summarise(times_monitored = n(), .groups = 'drop')
+# 
+# # 2. For each site-parameter, count how many years are covered
+# coverage_summary <- coverage_per_year %>%
+#   group_by(clave_sitio, clave_parametro) %>%
+#   summarise(years_monitored = n_distinct(ano), .groups = 'drop')
+# 
+# # 3. Filter to only those site-parameter combos with full coverage (7 years)
+# full_coverage_combos <- coverage_summary %>%
+#   filter(years_monitored == 7)
+# 
+# # 4. requiring parameters to be monitored fully at (e.g.) 80% or more of the 24 qualifying sites that meet full yearly coverage criteria, rather than the entire original 268 sites
+# total_filtered_sites <- length(unique(full_coverage_combos$clave_sitio))  # Should be 24 here
+# threshold <- 0.8  # For example, 80% of filtered sites
+# 
+# params_full_at_most_sites <- full_coverage_combos %>%
+#   group_by(clave_parametro) %>%
+#   summarise(sites_covered = n_distinct(clave_sitio), .groups = "drop") %>%
+#   filter(sites_covered >= threshold * total_filtered_sites) %>%
+#   pull(clave_parametro) # all 74
 ```
 
 ```{r}
-library(dplyr)
-library(tidyr)
+wq_goc_comparable <- wq_goc_w_simb %>%
+  filter(
+    clave_sitio %in% unique(full_coverage_combos$clave_sitio),
+    clave_parametro %in% params_full_at_most_sites
+  )
 
-# Step 1: summarise to param-year
-param_year_counts <- wq_goc_w_simb %>%
-  st_drop_geometry() %>%
-  group_by(clave_parametro, ano) %>%
-  summarise(times_monitored = n(), .groups = "drop")
+mapview(wq_goc_comparable)
+```
 
-# Step 2: define full set of years
-all_years <- 2018:2024
 
-# Step 3: create complete grid param × year
-diagnostic_table <- param_year_counts %>%
-  complete(clave_parametro, ano = all_years, fill = list(times_monitored = 0)) %>%
-  mutate(monitored = times_monitored > 0)
+#### Instead of requiring at least one observation yearly from 2018_2024 for each site, now:
 
-# Step 4: flag which parameters have full coverage
-diagnostic_summary <- diagnostic_table %>%
-  group_by(clave_parametro) %>%
-  summarise(
-    years_monitored = sum(monitored),
-    missing_years = paste(all_years[!all_years %in% ano[monitored]], collapse = ", "),
-    .groups = "drop"
-  ) %>%
-  mutate(has_full_coverage = years_monitored == length(all_years))
+Lets apply a threshold like 0.7 to require that sites have data for at least 70% of the years between 2018-2024 for each parameter, instead of demanding 100% coverage.
+
+1. Calculate the number of years with data per site and parameter (2018–2024).
+
+2. Calculate the percentage of years with data relative to total years (7).
+
+3. Filter to keep site-parameter pairs where percent of years with data >= 70% (i.e., at least 5 out of 7 years).
+
+Use this filtered set to identify usable sites and parameters.
+
+```{r}
+total_years <- length(2018:2024)  # 7 years
+threshold <- 0.7  # 70%
+
+# calc years monitored per site and parameter
+years_per_site_param <- wq_goc_w_simb %>%
+  filter(ano %in% 2018:2024) %>% 
+  group_by(clave_sitio, clave_parametro) %>%
+  summarise(years_monitored = n_distinct(ano), .groups = "drop") %>%
+  mutate(coverage_ratio = years_monitored / total_years) %>%
+  filter(coverage_ratio >= threshold) # basically only those that had 5 years of coverage or more
+
+# find the sites and parameters that meet the threshold
+sites_thres <- unique(years_per_site_param$clave_sitio) # v2025: 23
+params_thres <- unique(years_per_site_param$clave_parametro) # v2025: 74
+
+# filter the original data to keep these sites and parameters only
+wq_goc_filtered <- wq_goc_w_simb %>%
+  filter(clave_sitio %in% sites_thres,
+         clave_parametro %in% params_thres)
+
+mapview(wq_goc_filtered) # weird !!! These are completely different sites than those in wq_goc_comparable...
+```
+
+
+```{r}
+sites_w_parameters_generally_complete <- wq_goc_w_simb %>% 
+  filter(clave_parametro %in% parameters_w_yrly_coverage)
+
+mapview(sites_w_parameters_generally_complete)
+
+sites_w_parameters_generally_complete_noNA <- sites_w_parameters_generally_complete %>% 
+  filter(!is.na(value))
+
+library(kableExtra)
+sites_w_parameters_generally_complete_noNA %>%
+  distinct(clave_parametro, unidad_de_medida, nombre_parametro) %>%
+  arrange(clave_parametro) %>%
+  kable("html", caption = "Unique Parameters with Units and Names") %>%
+  kable_styling(full_width = FALSE, 
+                bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+```
+
+#### Values over time
+
+
+##### coliformes fecales
+
+```{r}
+library(plotly)
+
+cf <- sites_w_parameters_generally_complete_noNA %>% 
+  filter(clave_parametro %in% "coli_fec") %>% 
+  filter(ano %in% 2018:2024)
+
+ct <- sites_w_parameters_generally_complete_noNA %>% 
+  filter(clave_parametro %in% "coli_tot") %>% 
+  filter(ano %in% 2018:2024)
+
+### preliminary plot 
+line_plot <- plotly::plot_ly(ct, x = ~fecha_realizacion, y = ~value, color = ~clave_sitio, type = "scatter", mode = "lines") %>% 
+  layout(title = "coliformes fecales in MPN/100mL", 
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Value (MPN / 100mL"))
+
+line_plot
+
+## site DLNAY1893 had a big spike in Oct 2017 and july 2014 for cf.  This is in the bahia de banderas in nayarit, by puerto vallarta.
+cf_DLNAY1893 <- cf %>% 
+  filter(clave_sitio %in% "DLNAY1893") 
+mapview(cf_DLNAY1893) # it is within a waterway called Punta Pool, that contains turtles (https://www.google.com/maps/place/Pool+punta/@20.6764982,-105.2861224,3a,75y,90t/data=!3m8!1e2!3m6!1sCIABIhADyc5UcAUH7mfJAOIABnB4!2e10!3e12!6shttps:%2F%2Flh3.googleusercontent.com%2Fgps-cs-s%2FAC9h4nqIrPnx3_pyZEV8CL_0lnWBChDs9T6LW0IqC8RSf7aQV16R442e5WymlaVFGoSqHL8pAq27VWWGTO1_1GdtDA7Ds58XDJ-bE9frltgqxpBI8KxAoMcLl-dQrz0ASLCO-OEdpzM2V3Lczt6F%3Dw203-h270-k-no!7i3000!8i4000!4m15!1m7!3m6!1s0x84214541150fa951:0x3aee618b164963f2!2sPool+punta!8m2!3d20.6764982!4d-105.2861224!16s%2Fg%2F11tcd8qxj1!3m6!1s0x84214541150fa951:0x3aee618b164963f2!8m2!3d20.6764982!4d-105.2861224!10e5!16s%2Fg%2F11tcd8qxj1?entry=ttu&g_ep=EgoyMDI1MDgxOC4wIKXMDSoASAFQAw%3D%3D).  
+
+## plus, after Tropical Storm Lidia hit the Pacific coast at the end of Aug–early Sept 2017 and caused widespread flooding and infrastructure issues across the region; so it makes sense that water-quality impacts can persist for weeks, especially near river mouths (Ameca, Pitillal, Cuale) that drain into Bahía de Banderas.
+
+## lets look at sites nearby during 2017: DLNAY1933, also at the mouth of the river, and DLNAY1934, outside near a harbor.
+cf_DLNAY <- cf %>% 
+  filter(clave_sitio %in% c("DLNAY1893", "DLNAY1933","DLNAY1934"))
+
+line_plot_DLNAY <- plotly::plot_ly(cf_DLNAY, x = ~fecha_realizacion, y = ~value, color = ~clave_sitio, type = "scatter", mode = "lines") %>% 
+  layout(title = "coliformes fecales in MPN/100mL", 
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Value (MPN / 100mL"))
+
+line_plot_DLNAY # very localized effects at DLNAY18933.  
 
 ```
 
 
+#### Cont. exploration
+
+```{r}
+total_years <- length(2018:2024)  # = 7 years
+threshold <- 0.5  # i.e., 50%
+
+years_per_site_param <- wq_goc_w_simb %>%
+  filter(ano %in% 2018:2024) %>% 
+  st_drop_geometry() %>% 
+  group_by(clave_sitio, clave_parametro) %>%
+  summarise(years_monitored = n_distinct(ano), .groups = "drop") %>%
+  mutate(coverage_ratio = years_monitored / total_years)
 
 
+site_param_kept <- years_per_site_param %>%
+  filter(coverage_ratio >= threshold)
 
+sites_thres <- unique(site_param_kept$clave_sitio)
+params_thres <- unique(site_param_kept$clave_parametro)
+
+
+param_coverage <- site_param_kept %>%
+  group_by(clave_parametro) %>%
+  summarise(sites_meeting_threshold = n_distinct(clave_sitio), .groups = "drop")
+
+# require that parameter is present in at least 70% of sites that had any data
+site_cutoff <- 0.5 * length(unique(site_param_kept$clave_sitio))
+
+params_generalizable <- param_coverage %>%
+  filter(sites_meeting_threshold >= site_cutoff) %>%
+  pull(clave_parametro)
+
+
+wq_goc_comparable <- wq_goc_w_simb %>%
+  filter(clave_sitio %in% sites_thres,
+         clave_parametro %in% params_generalizable)
+
+mapview(wq_goc_comparable) 
+
+```
+
+
+```{r}
+threshold_seq <- seq(0.5, 1, 0.1) # from 50% to 100%
+diagnostic_thresholds <- purrr::map_df(threshold_seq, function(th) {
+  
+  site_param_temp <- years_per_site_param %>%
+    filter(coverage_ratio >= th)
+  
+  tibble(
+    threshold = th,
+    n_sites = n_distinct(site_param_temp$clave_sitio),
+    n_params = n_distinct(site_param_temp$clave_parametro)
+  )
+})
+
+ggplot(diagnostic_thresholds, aes(x = threshold, y = n_sites)) +
+  geom_line(color = "steelblue") +
+  geom_point() +
+  ylab("Number of sites retained") +
+  xlab("Coverage threshold") +
+  ggtitle("Impact of coverage threshold on site retention") +
+  theme_minimal()
+
+```
+
+
+```{r}
+coverage_summary <- wq_goc_w_simb %>%
+  filter(ano %in% 2018:2024) %>%
+  st_drop_geometry() %>%
+  group_by(clave_parametro, ano, clave_sitio) %>%  # include site to avoid duplicates
+  summarise(has_data = any(!is.na(value)), .groups = "drop") %>%
+  group_by(clave_parametro, ano) %>%
+  summarise(
+    coverage_fraction = mean(has_data),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = ano, values_from = coverage_fraction, values_fill = 0) %>%
+  column_to_rownames("clave_parametro") %>%
+  as.matrix()
+
+
+plot_ly(
+  z = coverage_summary,
+  x = colnames(coverage_summary),
+  y = rownames(coverage_summary),
+  type = "heatmap",
+  colors = colorRamp(c("white", "royalblue")),
+  hoverinfo = "x+y+z"
+) %>%
+  layout(
+    title = "Fraction of sites in the GoC that have data by parameter and year",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Parameter")
+  )
+
+# ### CHECK:
+# 
+# data_2024 <- wq_goc_w_simb %>% 
+#   filter(ano %in% 2024) 
+# 
+# unique(data_2024$clave_sitio) # only one...
+# 
+# data_2024_noNA <- wq_goc_w_simb %>% 
+#   filter(ano %in% 2024) %>% 
+#   filter(!is.na(value))
+# unique(data_2024_noNA$clave_parametro) # 7.... instead of 74
+
+
+```
+
+##### Explore SST (Sólidos Suspendidos Totales)
+
+```{r}
+sst <- sites_w_parameters_generally_complete_noNA %>% 
+  filter(clave_parametro %in% "sst") %>% 
+  filter(ano %in% 2018:2024)
+
+unique(sst$clave_sitio) # v2025: 254 sites!!!
+mapview(sst)
+
+# summarize years monitored per site for sst
+sst_site_coverage <- sst %>%
+  group_by(clave_sitio) %>%
+  summarise(years_monitored = n_distinct(ano)) %>%
+  arrange(desc(years_monitored))
+
+# bar plot for # of sites by years monitored
+ggplot(sst_site_coverage, aes(x = years_monitored)) +
+  geom_bar(fill = "steelblue") +
+  scale_x_continuous(breaks = 1:7) +
+  labs(
+    title = "Number of Sites by Years of SST Data Coverage (2018-2024)",
+    x = "Years Monitored",
+    y = "Number of Sites"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+line_plot_sst <- plotly::plot_ly(sst, x = ~fecha_realizacion, y = ~value, color = ~clave_sitio, type = "scatter", mode = "lines") %>% 
+  layout(title = "suspended solids", 
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Value"))
+line_plot_sst
+
+### look at the only site that has a value in 2024...
+sst_DLNAY1915 <- sst %>% 
+  filter(clave_sitio %in% "DLNAY1915")
+
+line_plot_sstDLNAY1915 <- plotly::plot_ly(sst_DLNAY1915, x = ~fecha_realizacion, y = ~value, color = ~clave_sitio, type = "scatter", mode = "lines") %>% 
+  layout(title = "suspended solids", 
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Value"))
+line_plot_sstDLNAY1915
+```
+
+### Sampling frequency
+
+```{r}
+sampling_counts <- wq_goc_w_simb %>%
+  st_drop_geometry() %>%
+  group_by(clave_sitio, clave_parametro, ano) %>%
+  summarise(n_samples = n(), .groups = "drop")
+
+
+site_summary <- sampling_counts %>%
+  group_by(clave_sitio, clave_parametro) %>%
+  summarise(mean_per_year = mean(n_samples),
+            sd_per_year   = sd(n_samples),
+            years_sampled = n(),
+            .groups = "drop")
+
+coverage_thresholds <- sampling_counts %>%
+  mutate(quarterly = n_samples >= 4,
+         monthly   = n_samples >= 12)
+
+```
+
+### Explore available data further, in a different way...
+
+```{r}
+# count years of data per site/parameter
+site_param_coverage <- wq_goc_w_simb %>%
+  filter(ano %in% 2018:2024) %>%
+  filter(!is.na(value)) %>% 
+  st_drop_geometry() %>% 
+  group_by(clave_parametro, clave_sitio) %>%
+  summarise(n_years = n_distinct(ano), .groups = "drop")
+
+# count how many sites meet threshold (>= 3 years)
+param_threshold <- site_param_coverage %>%
+  mutate(threshold_met = n_years >= 3)
+
+param_threshold_sites <- param_threshold %>%  
+  filter(threshold_met == TRUE) %>% 
+  distinct(clave_sitio)
+
+param_threshold_count <- param_threshold %>% 
+  group_by(clave_parametro) %>% 
+  summarise(
+    total_sites = n(),
+    sites_meeting = sum(threshold_met),
+    perc_sites_meeting = sites_meeting / total_sites,
+    .groups = "drop"
+  )
+
+# plot
+ggplot(param_threshold_count, aes(x = reorder(clave_parametro, perc_sites_meeting),
+                            y = perc_sites_meeting)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Usable parameters (≥3 years of data per site, 2018–2024)",
+    x = "Parameter",
+    y = "Proportion of sites meeting threshold (3 years)"
+  ) +
+  theme_minimal()
+
+
+######################
+# for 2020-2024
+######################
+
+# count years of data per site/parameter
+site_param_coverage <- wq_goc_w_simb %>%
+  filter(ano %in% 2020:2024) %>%
+  filter(!is.na(value)) %>% 
+  st_drop_geometry() %>% 
+  group_by(clave_parametro, clave_sitio) %>%
+  summarise(n_years = n_distinct(ano), .groups = "drop")
+
+# count how many sites meet threshold (>= 3 years)
+param_threshold <- site_param_coverage %>%
+  mutate(threshold_met = n_years >= 3)
+
+param_threshold_sites <- param_threshold %>%  
+  filter(threshold_met == TRUE) %>% 
+  distinct(clave_sitio)
+
+param_threshold_count <- param_threshold %>% 
+  group_by(clave_parametro) %>% 
+  summarise(
+    total_sites = n(),
+    sites_meeting = sum(threshold_met),
+    perc_sites_meeting = sites_meeting / total_sites,
+    .groups = "drop"
+  )
+
+# plot
+ggplot(param_threshold_count, aes(x = reorder(clave_parametro, perc_sites_meeting),
+                            y = perc_sites_meeting)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Usable parameters (≥3 years of data per site, 2020–2024)",
+    x = "Parameter",
+    y = "Proportion of sites meeting threshold (3 years)"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+n_tot <- sites_w_parameters_generally_complete_noNA %>% 
+  filter(clave_parametro %in% "n_tot") %>% 
+  filter(ano %in% 2018:2024)
+
+line_plot_n_tot <- plotly::plot_ly(n_tot, x = ~fecha_realizacion, y = ~value, color = ~clave_sitio, type = "scatter", mode = "lines") %>% 
+  layout(title = "n_tot", 
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Value"))
+line_plot_n_tot
+```
+
+#### For those that have data for 2020-2024
+
+```{r}
+# see if each parameter has data in >= 4 of 5 years (somewhere)
+param_year_presence_4of5 <- spy %>%
+  group_by(clave_parametro) %>%
+  summarise(years_with_any_site = n_distinct(ano), .groups = "drop") %>%
+  filter(years_with_any_site >= 4)
+
+params_2020_2024_4of5 <- sp %>%
+  group_by(clave_parametro) %>%
+  summarise(
+    sites_union_2020_2024 = n_distinct(clave_sitio),
+    sites_5of5            = sum(years_monitored == 5),
+    sites_4of5plus        = sum(years_monitored >= 4),
+    pct_sites_4of5plus    = sites_4of5plus / sites_union_2020_2024,
+    median_years_per_site = median(years_monitored),
+    median_samples_per_site_year = median(median_samples_per_year),
+    .groups = "drop"
+  ) %>%
+  inner_join(param_year_presence_4of5, by = "clave_parametro") %>%
+  arrange(desc(sites_4of5plus), desc(sites_union_2020_2024))
+
+params_2020_2024_4of5 %>%
+  kable("html", caption = "Parameters with coverage in all years (2020–2024)") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+```
 
