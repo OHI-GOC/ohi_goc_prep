@@ -81,10 +81,12 @@ At least for now, let's only look at coastal sites (costeros) in the GoC, and th
 ```{r}
 # filter the sites to only be coastal
 unique(sitios_raw$`TIPO DE CUERPO DE AGUA`)
+colnames(sitios_costeros)
 
 sitios_costeros <- sitios_raw %>% 
   janitor::clean_names() %>% 
-  filter(tipo_de_cuerpo_de_agua %in% c("COSTERO", "COSTERO (HUMEDAL)", "LÓTICO - COSTERO", "LÓTICO - COSTERO (HUMEDAL)", "LÉNTICO - COSTERO", "LÉNTICO - COSTERO (HUMEDAL)","COSTERO Y SEDIMENTOS")) # all coastal/coastal adjacent sites
+  filter(tipo_de_cuerpo_de_agua %in% c("COSTERO", "COSTERO (HUMEDAL)", "LÓTICO - COSTERO", "LÓTICO - COSTERO (HUMEDAL)", "LÉNTICO - COSTERO", "LÉNTICO - COSTERO (HUMEDAL)","COSTERO Y SEDIMENTOS")) %>%  # all coastal/coastal adjacent sites
+  select(-c(clave_acuifero, acuifero)) # only present in non-coastal sites
 
 
 # filter sites to be in GoC
@@ -105,6 +107,8 @@ sitios_costeros_goc_sf <- st_as_sf(sitios_costeros_goc, coords = c("longitud", "
 head(sitios_costeros_goc_sf) # looks correct
 st_crs(sitios_costeros_goc_sf) # good, WGS 84 for now
 
+
+library(mapview)
 mapview(sitios_costeros_goc_sf)
 ```
 
@@ -302,7 +306,7 @@ resultados <- resultados_raw %>%
   janitor::clean_names()
 
 # join cleaned sheet 1 and sheet 2
-sitios_resultados_goc <- left_join(sitios_costeros_goc_sf_4, resultados, by = c("clave_sitio","nombre_del_sitio"))
+sitios_resultados_goc <- left_join(sitios_costeros_goc_sf_4, resultados, by = c("clave_sitio","nombre_del_sitio")) 
 
 # check that everything is there...
 length(unique(sitios_resultados_goc$clave_sitio))
@@ -311,26 +315,152 @@ length(unique(sitios_costeros_goc_sf_4$clave_sitio)) # both 268! yay. that means
 # check the number of years per site
 years_per_site <- sitios_resultados_goc %>% 
   group_by(clave_sitio) %>% 
-  summarise(num_years = length(unique(.$ano))) # yay!! They all have 12, which is from 2012-2024. at least one observation for every year for every site!
+  summarise(num_years = length(unique(.$ano))) # yay!! They all have 12, which is from 2012-2024.
 
-colnames(sitios_resultados_goc)
+colnames(sitios_resultados_goc) # 480 cols
 
 # out of curiosity, it looks like only 131 variables have at least one non-NA value
 filtered_for_col_wo_NAs <- sitios_resultados_goc %>% 
-  select(where(~ any(!is.na(.))))
+  select(where(~ any(!is.na(.)))) %>% 
+  mutate(across(where(is.character), ~ str_replace_all(.x, "<", "")))
 
-# what about for hg_tot?
+##### let's save these subsets, which is in wide format, but contains data only from the Gulf.
+write_csv(filtered_for_col_wo_NAs, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/int", "renameca_goc_at_least_one_obs.csv"))
+write_csv(sitios_resultados_goc, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/int", "renameca_goc_wide.csv"))
+
+wide_check <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/int", "renameca_goc_wide.csv"), col_types = cols(.default = "c"))
+clean_wide_check <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/int", "renameca_goc_at_least_one_obs.csv"), col_types = cols(.default = "c")) # remember to use the col_types otherwise you will lose the observations that had "<" that have not been mutated to as.character or as.numeric -- we will do that later
+```
+
+
+```{r}
+# for fun, what about for hg_tot?
 years_per_site_hg <- sitios_resultados_goc %>% 
   group_by(clave_sitio, ano) %>%
   summarise(hg_tot_values = sum(!is.na(hg_tot)), .groups = "drop") # depends on the site.  some have multiple observations of results per site per year.
 
 hg_tot_only <- sitios_resultados_goc %>% 
   select(clave_sitio, fecha_realizacion,ano, hg_tot)
-
 ```
 
 
+### Explore the available metrics 
 
+...and see how many years they have been monitored!
+
+```{r}
+# first, let's see the symbology:
+simbologia <- simbologia_raw %>% 
+  janitor::clean_names()
+
+## now, lets pivot longer so that there is a column named "clave_parametro" like the simbologia df
+
+# see what columns are available (aka variables monitored)
+colnames(filtered_for_col_wo_NAs) # okay, so we want to pivot, but likely depth and temperature should be their own pivot. and maybe their own df???
+
+# pivot all the water quality indicators EXCEPT temp profiles
+sitios_long_wq <- filtered_for_col_wo_NAs %>% 
+  select(-starts_with("temp_")) %>%  # note that profundidad = depth (meters), st = (total solids), caudal (L/s) is "flow or discharge"
+  mutate(across(c(alc_fen:st), ~ as.numeric(.x))) %>% 
+  pivot_longer(
+    cols = c(alc_fen:st),
+    names_to = "clave_parametro",
+    values_to = "value"
+  )
+
+# pivot temperature profile separately
+sitios_long_temp <- filtered_for_col_wo_NAs %>%
+  pivot_longer(
+    cols = starts_with("temp_agua"),
+    names_to = "depth_raw",
+    values_to = "temp_C"
+  ) %>%
+  select(-c(alc_fen:st)) %>% 
+  mutate(
+    # clean depth information from column names
+    depth_m = case_when(
+      depth_raw == "temp_agua_sup" ~ 0, # surface ("superficie")
+      depth_raw == "temp_agua_med" ~ NA_real_, # "media" ("average")... hard for us to know, come back to this!!!
+      depth_raw == "temp_agua_fon" ~ NA_real_, # "fondo" ("background..." maybe environmental?)
+      TRUE ~ as.numeric(
+        str_remove(depth_raw, "temp_agua_") %>%    # remove prefix
+          str_replace("_", ".")   # for the 0.5 meters and 39.5
+      )
+    )
+  )
+```
+
+```{r}
+# now, lets bind the water quality goc subset with the simbologia to see what each of the variables represent
+
+simb_clean <- simbologia %>% 
+  mutate(clave_parametro = str_to_lower(clave_parametro),
+         nombre_parametro = str_to_lower(nombre_parametro))
+
+wq_goc_w_simb <- full_join(sitios_long_wq, simb_clean, by = "clave_parametro") # 19 variables, correct!
+
+mapview(wq_goc_w_simb)
+
+# some years early on would sample 8 times in a year, but now it is typically 1, if any.
+wq_variables_avail <- wq_goc_w_simb %>% 
+  st_drop_geometry() %>% 
+  group_by(clave_parametro, ano, clave_sitio) %>% 
+  summarise(times_monitored = n(), .groups = "drop")
+```
+
+
+```{r}
+# summarise by parameter and year
+param_year_counts <- wq_goc_w_simb %>%
+  st_drop_geometry() %>%             
+  group_by(clave_parametro, ano) %>%
+  summarise(times_monitored = n(), .groups = "drop")
+
+# filter for variables that cover all years from 2018:2024
+params_full_coverage <- param_year_counts %>%
+  group_by(clave_parametro) %>%
+  summarise(years_monitored = n_distinct(ano), .groups = "drop") %>%
+  filter(years_monitored == 7)   # 7 years: 2018-2024
+
+# OR just first filter the year...
+params_full_coverage <- param_year_counts %>%
+  filter(ano %in% 2018:2024) %>% 
+  group_by(clave_parametro) %>%
+  summarise(years_monitored = n_distinct(ano), .groups = "drop") %>%
+  filter(years_monitored == 7)   # 7 years: 2018-2024
+
+params_full_coverage
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Step 1: summarise to param-year
+param_year_counts <- wq_goc_w_simb %>%
+  st_drop_geometry() %>%
+  group_by(clave_parametro, ano) %>%
+  summarise(times_monitored = n(), .groups = "drop")
+
+# Step 2: define full set of years
+all_years <- 2018:2024
+
+# Step 3: create complete grid param × year
+diagnostic_table <- param_year_counts %>%
+  complete(clave_parametro, ano = all_years, fill = list(times_monitored = 0)) %>%
+  mutate(monitored = times_monitored > 0)
+
+# Step 4: flag which parameters have full coverage
+diagnostic_summary <- diagnostic_table %>%
+  group_by(clave_parametro) %>%
+  summarise(
+    years_monitored = sum(monitored),
+    missing_years = paste(all_years[!all_years %in% ano[monitored]], collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  mutate(has_full_coverage = years_monitored == length(all_years))
+
+```
 
 
 
