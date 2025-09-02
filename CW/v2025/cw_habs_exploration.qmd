@@ -1,0 +1,142 @@
+---
+title: 'OHI GoC 2025: Clean Waters: HAEDAT (HABs)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+# Harmful Algal Event Database (HAEDAT) Exploration
+
+GBIF.org (02 September 2025) GBIF Occurrence Download https://doi.org/10.15468/dl.b4bqty
+
+The Harmful Algal Event Database (HAEDAT) is a component of the Harmful Algal Information system (HAIS) within the International Oceanographic Data and Information Exchange (IODE) of the Intergovernmental Oceanographic Commission (IOC) of UNESCO, and in cooperation with ICES, and PICES. The HAEDAT is a meta database containing records of harmful algal events. HAEDAT contains records from the ICES area (North Atlantic) since 1985, and from the PICES area (North Pacific) since 2000. IOC Regional networks in South America, South Pacific and Asia, and North Africa have recently started contributing. This instantiation of the HAEDAT database contains all species occurrences associated with harmful algal events, including abundance and toxicity ranges.
+
+## Exploration
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(here)
+library(janitor)
+
+# read in occurrence data
+hab_occurrence_raw <- read_excel(here::here("/home/shares/ohi/OHI_GOC/_raw_data/HAEDAT_IODE_IOC/resaved_occurrence","HAEDAT_occurrence.xlsx"), sheet = 1, col_names = TRUE)
+
+# for MEXICO
+hab_occurrence_mx <- hab_occurrence_raw %>% 
+  filter(countryCode %in% "MX") %>% 
+  filter(hasGeospatialIssues == "FALSE") %>% 
+  filter(hasCoordinate == "TRUE")
+```
+
+
+Let's filter to only GoC states, and see if we can transform the coordinates into geometry.
+
+```{r}
+# let's clean the set and see how the states are notated
+hab_occurrence_mx_cleannames <- hab_occurrence_mx %>% 
+  janitor::clean_names() 
+
+unique(hab_occurrence_mx_cleannames$higher_geography)
+
+#  [1] "Baja California"                     "SInaloa"                             "Colima"                             
+#  [4] "Navolato, Sinaloa"                   "Tabasco"                             "Baja California Sur"                
+#  [7] "Tamaulipas"                          "Todos Santos Bay, B. C. N."          "Guerrero"                           
+# [10] NA                                    "Yucatan"                             "Sinaloa"                            
+# [13] "Jalisco"                             "Campeche"                            "Chiapas"                            
+# [16] "La Paz, B. C. S."                    "Veracruz"                            "Oaxaca"                             
+# [19] "Sonora"                              "Quintana Roo"                        "Nayarit"                            
+# [22] "Tamaulipas, north of Gulf of Mexico" "Michoac√°n"                          "Los Mochis, Sinaloa"                
+# [25] "Sinalo"                              "Tehuantepec"                         "Bja California Sur"       
+
+# filter to only include goc estados and convert st to sf
+hab_occurrence_goc_est <- hab_occurrence_mx_cleannames %>% 
+  filter(higher_geography %in% c("Baja California", "SInaloa", "Navolato, Sinaloa", "Baja California Sur","Todos Santos Bay, B. C. N.", "Sinaloa","Jalisco","La Paz, B. C. S.","Sonora","Nayarit","Los Mochis, Sinaloa", "Sinalo","Bja California Sur")) 
+  # select(c, bibliographic_citation,
+  # publisher,
+  # references,
+  # institution_id,
+  # institution_code,
+  # collection_id,
+  # collection_code,
+  # dataset_id,
+  # dataset_name,
+  # owner_institution_code,
+  # recorded_by,
+  # recorded_by_id,
+  # georeferenced_by,
+  # georeference_sources,
+  # location_according_to,
+  # identification_references,
+  # name_according_to,
+  # publishing_country, occurrence_id, organism_quantity, organism_quantity_type, occurrence_status, occurrence_remarks, event_date, start_day_of_year, end_day_of_year, year, event_remarks, higher_geography, country_code, locality, iucn_red_list_category, elevation, depth, is_invasive, generic_name, scientific_name, decimal_latitude, decimal_longitude, coordinate_uncertainty_in_meters, coordinate_precision, verbatim_coordinate_system, georeferenced_by)
+
+unique(hab_occurrence_goc_est$higher_geography) # good, only goc states
+
+
+### convert to spatial object
+library(sf)
+
+hab_occurrence_goc_sf <- st_as_sf(hab_occurrence_goc_est, coords = c("decimal_longitude", "decimal_latitude"), crs = 4326)
+head(hab_occurrence_goc_sf) # looks correct
+st_crs(hab_occurrence_goc_sf) # good, WGS 84 for now
+
+
+library(mapview)
+mapview(hab_occurrence_goc_sf) # of those that were georeferenced, there are missing 
+```
+
+Note:
+
+If NA for year, that likely means that the bloom occurred over two years (ex: occurrence_id == "HAEDAT:MEX-GC-1:MX-17-014:causative:14652" which starts at the end of 2017 and ends in 2018).
+
+
+---
+
+
+Looking closer, the decimal long/lat locations of the blooms are not accurate: all of them have `coordinate_uncertainty_in_meters` of > 163003.  This is reflected in examples such as occurrence_id "HAEDAT:GC:MX-17-011:causative:14654" (Feature ID 32), which is noted as having the higher_geography of Sinaloa, locality of Bahia de Ohuira, yet its geometry put it near the Los Cabos. 
+
+Another example of this is `occurrence_id` == "HAEDAT:MEX-GC-1:MX-17-001:causative:9732" (Feature ID 125), which has geometry near San Felipe in Baja California, but the higher_geography is Sonora. 
+
+Looking at the column `issue`, every observation in the GoC with a coordinate has the issue "FOOTPRINT_WKT_INVALID" meaning that ["The Footprint Well-Known-Text given could not be interpreted."](https://gbif.github.io/gbif-api/apidocs/org/gbif/api/vocabulary/OccurrenceIssue.html).  This may explain why the point data does not match the geography.
+
+However, even more alarming, is that none of the observations have associated citations or contibutors noted except for in the `occurrence_remarks` column, which has one observation for each from a paper and the Mexican government's COFEPRIS:
+
+> unique(hab_occurrence_goc_sf$occurrence_remarks)
+ [1] "COFEPRIS"                      "Medina Elizalde et al. (2018)" "44908"                        
+ [4] NA                              "erythraea"                     "Levanderina fissa"            
+ [7] "vaginula"                      "shikokuense"                   "Infect by Amoebophyra ceratii"
+[10] "dactylus"    
+
+So, I am going to disregard the spatial aspect for now, and go back to the beginning to include observations that do not have coordinates:
+
+```{r}
+# even those without coordinates
+hab_occurrence_goc_all <- hab_occurrence_raw %>% 
+  janitor::clean_names() %>% 
+  filter(country_code %in% "MX") %>% 
+  filter(higher_geography %in% c("Baja California", "SInaloa", "Navolato, Sinaloa", "Baja California Sur","Todos Santos Bay, B. C. N.", "Sinaloa","Jalisco","La Paz, B. C. S.","Sonora","Nayarit","Los Mochis, Sinaloa", "Sinalo","Bja California Sur")) # there is only one more entry, 145 obs versus 144 before.
+  
+write_csv(hab_occurrence_goc_all, here("/home/shares/ohi/OHI_GOC/_raw_data/HAEDAT_IODE_IOC/int","hab_occurrence_goc_all.csv"))
+```
+
+So, I am going to doo some more exploring to see if I can find where the observations came from, because it is weird the amount of specificity on the taxonomic levels and the length of time the bloom occurred, and yet such a lack of data on where the information was sourced. 
+
+
+
