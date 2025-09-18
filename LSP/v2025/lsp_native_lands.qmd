@@ -1,0 +1,217 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP) Native Lands'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Native Lands in the Gulf of California
+
+Slug present after the name. 
+
+Example: for Pericu, it is *pericu*. `Sample Request:https://native-land.ca/api/index.php?maps=territories&name=pericu`
+
+### Baja California + BCS
+
+- Pericu: pericu
+- Guaycura: guaycura
+- Monqui: monqui
+- Comom'ti-pa (Cochimi): cochimi
+- Xawiƚƚ kwñchawaay (Cocopah): cocopah
+
+### Sonora
+
+- Hia-Ced O’odham: hia-ced-oodham
+- O’odham Jeweḍ: tohono-oodham
+- Comcaac (Seri): seri
+- Yoeme (Yaqui): yaqui
+
+- Tohono O’odham: papago-tohono-oodham
+
+### Sinaloa
+
+- Cahita: cahita
+- Yoreme (Mayo): mayo
+
+- Achires: achires
+- Tahues: tahues
+- Acaxee: acaxee
+- Totorames: totorames
+- Tepehuan: tepehuan-2
+
+### Nayarit
+
+- Wixárika (Huichol): huichol-wixaritari
+- Náayerite (Cora): cora
+
+
+```{r}
+library(tidyverse)
+library(here)
+library(janitor)
+library(httr)
+library(jsonlite)
+
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(sf)
+
+# --- Your API key, from Native-Land.ca ---
+api_key <- "0d0mnukIMvZ-ZC9Yg-64c"  # from this dashboard: https://native-land.ca/dashboard/api
+
+base_url <- "https://native-land.ca/api/index.php"
+
+# Function: get territory by slug -> sf
+get_territory_by_slug_sf <- function(slug) {
+  res <- GET(
+    base_url,
+    query = list(
+      maps = "territories",
+      name = slug,
+      key = api_key
+    )
+  )
+  
+  if (status_code(res) != 200) {
+    warning(paste("API request failed for:", slug))
+    return(NULL)
+  }
+  
+  json_data <- content(res, as = "text", encoding = "UTF-8") %>%
+    fromJSON(flatten = TRUE)
+  
+  if (length(json_data) == 0) {
+    warning(paste("Empty data for:", slug))
+    return(NULL)
+  }
+  
+  # If no geometry present, skip
+  if (!"geometry" %in% names(json_data)) {
+    warning(paste("No geometry for:", slug))
+    return(NULL)
+  }
+  
+  # Convert to sf
+  tryCatch({
+    sf_obj <- st_as_sf(json_data, crs = 4326)
+    sf_obj$slug <- slug
+    return(sf_obj)
+  }, error = function(e) {
+    warning(paste("Error converting to sf for:", slug, "-", e$message))
+    return(NULL)
+  })
+}
+
+# Slugs
+slugs <- c(
+  "pericu", "guaycura", "monqui", "cochimi", "cocopah",
+  "hia-ced-oodham", "tohono-oodham", "seri", "yaqui", "papago-tohono-oodham",
+  "cahita", "mayo", "achires", "tahues", "acaxee", "totorames", "tepehuan-2",
+  "huichol-wixaritari", "cora"
+)
+
+# Fetch all
+territories_sf_list <- map(slugs, get_territory_by_slug_sf) %>%
+  compact()
+
+# Combine into single sf if any succeeded
+if (length(territories_sf_list) > 0) {
+  territories_sf <- do.call(rbind, territories_sf_list)
+  print(territories_sf)
+  plot(territories_sf["properties.Name"])
+} else {
+  message("No territories returned with geometry.")
+}
+
+library(mapview)
+mapview(territories_sf)
+```
+
+# Trying by position: slug queries do not produce geometry.  
+
+```{r}
+library(httr)
+library(jsonlite)
+library(sf)
+library(dplyr)
+library(mapview)
+library(here)
+library(rmapshaper)
+
+goc_poly <- st_read(here("spatial/ohi_regions","goc_ohi_rgns.shp"))
+st_crs(goc_poly) # not WGS84: Mexico ITRF2008 / LCC
+mapview(goc_poly)
+
+# reproject to WGS84 (required by API)
+goc_poly <- st_transform(goc_poly, 4326)
+
+# in order for this to run and not get error 502, we have to reduce the OHI rgns polygon to ~5% of original vertices
+goc_poly_simple <- rmapshaper::ms_simplify(goc_poly, keep = 0.05, keep_shapes = TRUE)
+mapview(goc_poly_simple)
+
+# convert simplified polygon to GeoJSON
+goc_geojson <- geojsonsf::sf_geojson(goc_poly_simple)
+goc_fc <- jsonlite::fromJSON(goc_geojson, simplifyVector = FALSE)
+
+
+# the request
+req_body <- list(
+  key = "0d0mnukIMvZ-ZC9Yg-64c", # the API key
+  maps = "territories", # could also be "territories,languages,treaties"
+  polygon_geojson = goc_fc
+)
+
+# POST request
+res <- httr::POST(
+  url = "https://native-land.ca/api/index.php",
+  body = jsonlite::toJSON(req_body, auto_unbox = TRUE),
+  encode = "raw",
+  httr::content_type_json()
+)
+
+if (status_code(res) == 200) {
+  geojson_txt <- content(res, as = "text", encoding = "UTF-8")
+  
+  # convert GeoJSON string into an sf object directly
+  territories_sf <- geojsonsf::geojson_sf(geojson_txt)
+  
+  print(territories_sf)
+  plot(territories_sf["Name"])
+} else {
+  message("Request failed with status: ", status_code(res))
+}
+
+
+mapview(territories_sf)
+
+```
+
+## Make a kable
+
+```{r}
+library(kableExtra)
+
+territories_sf %>%
+  st_drop_geometry() %>%
+  janitor::clean_names() %>%
+  kable("html", caption = "Territories returned by Native-Land API that intersect with OHI GoC Regions") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#3C6E71")
+```
+
