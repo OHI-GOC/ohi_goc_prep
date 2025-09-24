@@ -214,7 +214,7 @@ cabo_san_lucas_final <- clean_hotel_occupations_data("Cabo_San_Lucas") # YAY, no
 #### Apply function to all municipios
 
 ```{r}
-all_cities <- c(
+all_tourist_centers <- c(
   "Cabo_San_Lucas", "Culiacan", "El_Fuerte", "El_Rosario", "Escuinapa",
   "Guaymas", "Hermosillo", "La_Paz", "Loreto", "Los_Mochis",
   "Mazatlan", "Puerto_Vallarta", "San_Felipe", "San_Jose_del_Cabo", 
@@ -223,7 +223,7 @@ all_cities <- c(
 
 library(purrr)
 
-all_data <- all_cities %>% 
+all_data <- all_tourist_centers %>% 
   map(clean_hotel_occupations_data) %>% 
   bind_rows() # looks good! keep checking after lunch.
 
@@ -498,6 +498,146 @@ heatmap_list[[1]]
 
 ```
 
+# Tourism Quantity
 
+Now that we have the data source cleaned up in general, let's clean it up specifically for tourism "quantity" use.
+
+We think that tourism arrivals, aka, the number of individuals, matter the most in terms of value. If we count not just the number of tourist that come to the area, but also the days that they stay, then we are inferring that there is a higher value of the visit by the person who stays longer.  However, many people do not have the finances to stay very long, but they still value the trip and location just as much, if not more.  
+
+So, we want to filter to the tourism metric tourist arrivals, "llegadas_de_turistas", and have category = "total_categorias" because we value 1-star establishments the same as 5-star (just a different type of tourist, does not necessarily mean one provides the better value trip).
+
+```{r}
+# so that we can have the yearly total, not just by month, because we will have the scores per year.
+all_data_yearly <- all_data_clean %>% 
+  filter(str_detect(month_year, "total_anual_")) %>% 
+  select(-c(month, year)) %>% 
+  separate_wider_delim(., month_year, delim = "_anual_", names = c("type","year"))
+
+quantity_clean <- all_data_yearly %>% 
+  filter(metric %in% "llegadas_de_turistas") %>% 
+  filter(category %in% "total_categorias")
+
+# let's make them an sf object
+quantity_geocode <- quantity_clean %>% 
+  mutate(country = "Mexico") %>% 
+  mutate(estado = case_when(
+    municipio %in% c("cabo_san_lucas", "la_paz", "loreto", "san_jose_del_cabo", "zona_corredor_los_cabos") ~ "Baja California Sur",
+    municipio %in% c("san_felipe") ~ "Baja California",
+    municipio %in% c("guaymas", "hermosillo") ~ "Sonora",
+    municipio %in% c("culiacan", "el_fuerte", "los_mochis", "mazatlan", "escuinapa", "el_rosario") ~ "Sinaloa",
+    municipio %in% c("puerto_vallarta") ~ "Jalisco",
+    TRUE ~ ""  # default case for any unmatched cities
+  )) %>% 
+  tidygeocoder::geocode(city = municipio, country = country, state = estado) # to give each city a lat, long
+  
+quantity_sf <- quantity_geocode %>% 
+  mutate(lat = ifelse(municipio %in% "zona_corredor_los_cabos", 23.1539, lat)) %>% # adding in the coordinates manually from <https://latitude.to/articles-by-country/mx/mexico/56998/los-cabos-corridor>
+  mutate(long = ifelse(municipio %in% "zona_corredor_los_cabos", -109.720233, long)) %>% 
+  st_as_sf(coords = c("long", "lat"),
+           crs = 4326, # WGS84
+           remove = FALSE)
+
+mapview(quantity_sf)
+```
+
+Now, let us assign each tourist center to an OHI region. 
+
+```{r}
+goc_poly <- st_read(here("spatial/ohi_regions","goc_ohi_rgns.shp"))
+st_crs(goc_poly) # not WGS84: Mexico ITRF2008 / LCC
+mapview(goc_poly)
+
+quantity_sf_transform <- st_transform(quantity_sf, crs = st_crs(goc_poly)) %>%  # transform the tourist centers to Mexico ITRF2008 / LCC
+   mutate(value = as.numeric(value))
+crs(quantity_sf_transform)
+
+quantity_goc <- st_intersection(quantity_sf_transform, goc_poly)
+mapview(quantity_goc) # now each tourist center has associated region data
+
+```
+
+A cool plot to see them each:
+
+```{r}
+# map of all goc tourist centers
+mapview(quantity_goc, zcol = "rgn_id") + mapview(goc_poly, zcol = "rgn_id")
+```
+
+### Current status
+
+The reference point could be a 40% increase in total tourist arrivals per year, assuming that it does not really matter if they are international or domestic: <https://tourismanalytics.com/blog-posts/how-mexicos-forty-percent-tourism-growth-plan-aims-for-fifth-global-spot-by-2030-with-twenty-billion-dollar-investment-in-infrastructure-and-market-expansion>
+
+The most current full year of data is 2024.  Plan Mexico was announced on January 13, 2025, which means the 40% tourism growth target by 2030 would logically use 2024 as the baseline year.
+
+So, the current status for the quantity could be:
+
+(Current arrivals / Target arrivals) × 100
+
+Score of 100 = meeting the 2030 target
+Score < 100 = below target
+Score > 100 = exceeding target
+
+```{r}
+# identify the reference point for each tourist center using 2024 as the baseline
+baseline_2024 <- quantity_goc %>% 
+  filter(year == "2024") %>% 
+  select(municipio, rgn_id, baseline_arrivals = value) %>% 
+  mutate(baseline_arrivals = as.numeric(baseline_arrivals))
+```
+
+
+```{r}
+## there are NAs for tourist centers without data. drop them to viz
+baseline_2024_no_NAs <- drop_na(baseline_2024, baseline_arrivals)
+
+# map of the tourist centers with available data 2024
+mapview(baseline_2024_no_NAs, zcol = "rgn_id") + mapview(goc_poly, zcol = "rgn_id")
+```
+
+
+```{r}
+# calc the target values (40% increase from 2024 baseline)
+tourism_targets <- baseline_2024 %>% 
+  mutate(target_2030 = baseline_arrivals * 1.40) %>%  # 40% increase means we multiply by 1.40
+  st_drop_geometry()
+```
+
+Now, use the reference point to identify how close each tourist center is to the ideal (by 2030).
+
+```{r}
+tourism_quantity_score <- quantity_goc %>%
+  left_join(tourism_targets, by = c("municipio", "rgn_id")) %>% 
+  mutate(
+    # calculate current tourism arrivals as percentage of 2030 sustainability target (baseline year 2024)
+    index_score = (value / target_2030) * 100,
+    
+    # rename 2030 target values for easy comparison and reference in analysis
+    target_arrivals = target_2030,
+    
+    # the difference between the # of current arrivals for that year and 2030 target in raw numbers
+    gap_to_target = target_2030 - value,
+    
+    # calc percentage increase required from current levels to reach 2030 target (approximately 40% growth needed from 2024 baseline)
+    gap_percentage = ((target_2030 - value) / value) * 100
+  ) %>% 
+  select(municipio, rgn_id, year, current_arrivals = value, 
+         baseline_arrivals, target_arrivals, index_score, 
+         gap_to_target, gap_percentage, everything())
+```
+
+
+```{r}
+# preliminary plot of the index score with target reference line
+line_plot_score <- plotly::plot_ly(tourism_quantity_score, x = ~year, y = ~index_score, color = ~municipio, type = "scatter", mode = "lines") %>% 
+  layout(title = "INDEX SCORE: Llegadas de Turistas (total per year for all hotels) por Municipio", 
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Score (out of 100)")) %>%
+  add_lines(x = range(tourism_quantity_score$year), y = c(100, 100), 
+            line = list(color = "black", width = 2, dash = "dash"),
+            name = "2030 Target (100/100)", 
+            inherit = FALSE)
+
+line_plot_score
+```
 
 
