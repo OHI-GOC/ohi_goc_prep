@@ -1,0 +1,235 @@
+---
+title: "Population data"
+output: html_document
+date: "2025-06-24"
+---
+
+## NOTE: I started a script that estimates population at the Manzana scale for urban populations. Rural populatiosn needed to be estimated at the Local scale.
+
+I decided to go the Local route because it was more straightforward, and I didn't think the data was going to be worse. However, if we need higher resolution, the manzana approach is available (with a bit more work to complete the script).
+
+Regions data downloaded from here (2020 version of regions used): https://en.www.inegi.org.mx/app/biblioteca/ficha.html?upc=889463807469
+```{r setup, include=FALSE}
+
+library(sf)
+library(terra)
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(here)
+library(mapview)
+
+# Function to covert lat/long into decimal degrees
+
+dms_to_dd <- function(x, is_lon = FALSE) {
+  parse_one <- function(s) {
+    if (is.na(s) || !nzchar(s)) return(NA_real_)
+    s <- str_trim(s)
+    # normalize quotes and strip letters (N/S/E/W) but keep digits and separators
+    s <- str_replace_all(s, "[“”\"]", "\"")
+    s <- str_replace_all(s, "[’`′']", "'")
+    s <- str_replace_all(s, "[NnSsEeWw]", "")
+    # try D M S
+    m <- str_match(s, "^(\\d{1,3})\\D+(\\d{1,2})\\D+(\\d{1,2}(?:\\.\\d+)?)")
+    if (!any(is.na(m))) {
+      deg <- as.numeric(m[,2]); min <- as.numeric(m[,3]); sec <- as.numeric(m[,4])
+    } else {
+      # try D M only
+      m2 <- str_match(s, "^(\\d{1,3})\\D+(\\d{1,2})")
+      if (any(is.na(m2))) return(NA_real_)
+      deg <- as.numeric(m2[,2]); min <- as.numeric(m2[,3]); sec <- 0
+    }
+    deg + min/60 + sec/3600
+  }
+  out <- vapply(x, parse_one, numeric(1))
+  # Longitudes in Mexico are West → negative. If any already negative, keep it negative.
+  if (is_lon) out <- -abs(out)
+  out
+}
+
+
+```
+
+
+# Making base raster 
+(although maybe it would be better to use our other raster)
+```{r}
+
+#zip_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/794551132173_s"
+
+# List all .zip files
+#zip_files <- list.files(zip_dir, pattern = "\\.zip$", full.names = TRUE)
+
+## Unzip each file into the same folder
+#for (z in zip_files) {
+#  unzip(z, exdir = zip_dir)
+#}
+
+ent02 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/02ent.shp")
+ent03 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/03ent.shp")
+ent26 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/26ent.shp")
+ent25 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/25ent.shp")
+ent18 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/18ent.shp")
+ent14 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/14ent.shp")
+plot(st_geometry(ent02)) 
+plot(st_geometry(ent03))  
+plot(st_geometry(ent26))  
+plot(st_geometry(ent25)) 
+plot(st_geometry(ent18)) 
+plot(st_geometry(ent14)) 
+states <- bind_rows(ent02, ent03, ent26, ent25, ent18, ent14)
+states <- st_transform(states, crs=6372)
+plot(st_geometry(states), add=TRUE)
+bbox_coords_6372 <- c(
+  xmin = 1050000,  # western edge (near Baja California)
+  ymin = 900000,   # southern edge (mid-Jalisco)
+  xmax = 2300000,  # eastern edge (into Sonora/Sinaloa)
+  ymax = 2380000   # northern edge (toward US border)
+)
+# Convert to bbox and then to polygon
+gulf_bbox <- st_bbox(bbox_coords_6372, crs = st_crs(6372)) |> st_as_sfc()
+plot(gulf_bbox, add=TRUE)
+
+gulf <- st_crop(states, gulf_bbox)
+plot(gulf_bbox)
+plot(st_geometry(gulf), add=TRUE)
+
+gulf_bbox_vect <- vect(gulf_bbox)  # gulf_bbox must be in EPSG:6372
+
+# Now use that with terra::ext()
+r_template <- rast(
+  extent = ext(gulf_bbox_vect),
+  resolution = 1000,         # 1 km
+  crs = crs(gulf_bbox_vect)  # or "EPSG:6372"
+)
+```
+
+## Obtain location population data
+Spatial boundary data originally downloaded from here:
+https://en.www.inegi.org.mx/app/biblioteca/ficha.html?upc=889463807469 these are the 2020 data.
+
+Population data:
+https://www.inegi.org.mx/app/descarga/ficha.html?tit=326108&ag=0&f=csv
+
+I confirmed that the data summed across locations equals the total reported for the state.
+
+```{r}
+tmp <- read_csv("/home/shares/ohi/OHI_GOC/_raw_data/census_inegi/iter_location/iter_00_cpv2020/conjunto_de_datos/conjunto_de_datos_iter_00CSV20.csv") %>%
+  filter(ENTIDAD == "02") %>%
+  filter(NOM_LOC != "Localidades de una vivienda") %>%
+  filter(NOM_LOC != "Localidades de dos viviendas") %>%
+  filter(as.numeric(as.character(LOC)) > 0)
+
+sum(tmp$POBTOT)
+
+```
+
+```{r}
+
+
+loc_file <- rbind(
+  st_read("/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/02_bajacalifornia/conjunto_de_datos/02l.shp"),
+  st_read("/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/03_bajacaliforniasur/conjunto_de_datos/03l.shp"),
+  st_read("/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/14_jalisco/conjunto_de_datos/14l.shp"),
+  st_read("/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/18_nayarit/conjunto_de_datos/18l.shp"),
+  st_read("/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/25_sinaloa/conjunto_de_datos/25l.shp"),
+  st_read("/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/26_sonora/conjunto_de_datos/26l.shp"))
+
+pop_data <- "/home/shares/ohi/OHI_GOC/_raw_data/census_inegi/iter_location/iter_00_cpv2020/conjunto_de_datos/conjunto_de_datos_iter_00CSV20.csv"
+
+loc <- loc_file %>%
+  mutate(id = paste(CVE_ENT, CVE_MUN, CVE_LOC)) %>%
+  arrange(CVE_MUN, CVE_LOC) 
+#mapview(filter(loc, AMBITO=="Rural")) + mapview(filter(loc, AMBITO=="Urbana"), col.region="red")
+#mapview(loc)
+
+pop <- read_csv(pop_data) %>%
+  filter(!str_detect(NOM_LOC, "Total")) %>%
+  mutate(id = paste(ENTIDAD, MUN, LOC)) %>%
+  filter(ENTIDAD %in% c("02", "03", "14", "18", "25", "26")) %>%
+  filter(NOM_LOC != "Localidades de una vivienda") %>%
+  filter(NOM_LOC != "Localidades de dos viviendas") %>%
+  filter(as.numeric(as.character(LOC)) > 0)
+
+missing_loc <- setdiff(pop$id, loc$id)
+missing_pop_loc <- filter(pop, id %in% missing_loc)
+#sum(missing_pop_loc$POBTOT)/sum(pop$POBTOT) # only about 2% not accounted for in local polygons
+
+## Take care of the polygon data
+pop_loc <- left_join(loc, pop, by="id") %>%
+  select(CVE_ENT, CVE_MUN, CVE_LOC, AMBITO, NOM_ENT, NOM_MUN, id, POBTOT) %>%
+  filter(!is.na(POBTOT)) %>%
+   mutate(
+    area_km2  = st_area(geometry)/1e6) %>%
+  mutate(POBTOT_km2 = POBTOT/area_km2)
+## Check
+#sum(pop_loc$POBTOT)
+#sum(pop_loc$POBTOT_km2 * pop_loc$area_km2)
+## summary(pop_loc$area_km2)
+## quantile(pop_loc$area_km2, c(0.99, 0.999))
+
+#st_write(pop_loc, "/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_localities/inegi_boundaries_pop.shp")
+
+pop_loc_vect <- vect(pop_loc)
+pop_rast <- rasterize(
+  x = pop_loc_vect,
+  y = r_template, # 1km template raster
+  field = "POBTOT_km2",
+  fun = "sum",
+  background = 0
+)
+##global(pop_rast, "sum", na.rm=TRUE) ## this drops because most of Jalisco is not included in the raster
+
+
+## Take care of the data that did not align with a polygon
+pop_pts <- missing_pop_loc %>%
+  mutate(
+    lon_dd = dms_to_dd(LONGITUD, is_lon = TRUE),
+    lat_dd = dms_to_dd(LATITUD,  is_lon = FALSE)
+  ) %>%
+  # (optional) drop rows with missing/invalid coords
+  filter(!is.na(lon_dd), !is.na(lat_dd)) %>%
+  st_as_sf(coords = c("lon_dd", "lat_dd"), crs = 4326)
+#sum(missing_pop_loc$POBTOT)
+
+#mapview(pop_pts)
+
+pop_pts <- st_transform(pop_pts, "EPSG:6372")  # MEXICO_ITRF_2008_LCC
+
+pop_pts_vect <- vect(pop_pts)
+pop_pts_rast <- rasterize(
+  x = pop_pts_vect,
+  y = r_template, # 1km template raster
+  field = "POBTOT",
+  fun = "sum",
+  background = 0
+)
+#global(pop_pts_rast, "sum", na.rm=TRUE)
+# mapview(pop_pts_rast)
+
+final_raster <- pop_pts_rast + pop_rast
+writeRaster(final_raster, "/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_rasters/pop_2020.tif")
+final_cap <- ifel(final_raster>10000, 10000, final_raster)
+final_cap <- ifel(final_cap==0, NA, final_cap)
+
+final_cap_sinaloa <- crop(final_cap, ent25)
+
+#mapview(final_cap, maxpixels=1.85e+08)
+# global(final_raster, "sum", na.rm=TRUE)
+pts <- as.data.frame(final_cap, xy = TRUE, na.rm = TRUE)
+cols <- grDevices::colorRampPalette(c("red","orange","yellow","green","cyan","blue","purple"))(256)
+scale_color_gradientn(colors = cols)
+
+ggplot(pts, aes(x = x, y = y, color = sum)) +
+  geom_point(size = 0.01, alpha = 0.1) +
+  geom_sf(data = gulf, fill = NA, color = "black", linewidth = 0.4,
+          inherit.aes = FALSE) +      # <— key line
+  coord_sf(datum = NA) +              # works well with sf overlays
+  scale_color_gradientn(colors = rev(cols)) +
+  labs(color = "people/km2") +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank())
+
+```
+

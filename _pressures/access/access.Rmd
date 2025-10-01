@@ -1,0 +1,180 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-09-17"
+---
+
+Attempting to get data from OSM that are indicators of access.
+
+```{r setup, include=FALSE}
+
+# --- Packages ---
+library(sf)
+library(dplyr)
+library(osmdata)
+library(mapview)
+library(units)
+
+get_local_boundary <- function(id_loc = "25 012 0001"){
+  tmp_rgn <- st_read( "/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_localities/inegi_boundaries_pop.shp")
+tmp_rgn <- filter(tmp_rgn, id==id_loc)
+tmp_rgn
+}
+ 
+town <- get_local_boundary(id_loc="25 012 0001")
+town_bb <-st_bbox(st_transform(town, 4326))
+
+ 
+coastline <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_coastline/conjunto_de_datos_2024/conjunto_de_datos/lc_rep_mex_v_2024.shp")
+coastline <- st_transform(coastline, st_crs(town))
+
+beach <-  coastline %>% filter(SUBTIPO %in% c("Playa", "Rompeolas", "Construcción portuaria") & TIPO=="Continental")
+
+## check this out:
+mapview(beach)
+
+## buffer (200 m inland)
+beach_buffer <- st_buffer(beach, dist = 400)
+beach_buffer <- st_union(beach_buffer)
+beach_buffer <- st_sf(geometry = beach_buffer)
+mapview(beach_buffer) + mapview(beach)
+
+beach <- st_intersection(beach, beach_buffer)
+beach_buffer <- st_intersection(beach_buffer, town)
+
+
+```
+
+
+Function to get openstreet map data:
+```{r}
+
+osm_get <- function(bbox, key, value = NULL,
+                    return = c("points","lines","polygons","multilines","multipolygons"),
+                    timeout = 180) {
+  stopifnot(requireNamespace("osmdata", quietly = TRUE))
+  q <- osmdata::opq(bbox = bbox, timeout = timeout) |>
+    osmdata::add_osm_feature(key = key, value = value)
+  res <- osmdata::osmdata_sf(q)
+
+  # assemble outputs consistently
+  out <- list(
+    points         = res$osm_points,
+    lines          = res$osm_lines,
+    polygons       = res$osm_polygons,
+    multilines     = res$osm_multilines,
+    multipolygons  = res$osm_multipolygons
+  )
+  out[match.arg(return, choices = names(out), several.ok = TRUE)]
+}
+
+# usage ---------------------------------------------------------------
+# 1) Make sure your bbox is lon/lat (EPSG:4326), not Mexico LCC
+bb <- sf::st_bbox(sf::st_transform(maz_boundary, 4326))
+
+# 2) Get OSM coastlines (as lines)
+coast_lines <- osm_get(bb, key = "natural", value = "coastline",
+                       return = "lines")[[1]]
+
+# quick sanity check
+plot(sf::st_geometry(coast_lines))
+
+
+mapview(maz_boundary) + mapview(coast_lines)
+
+
+```
+
+```{r}
+
+
+# --- 3) Pull OSM features relevant to beach access ---
+# Sidewalks (stored as footway=sidewalk)
+
+ q <- osmdata::opq(bbox = town_bb, timeout = 500) |>
+    osmdata::add_osm_feature(key = "footway", value = "sidewalk")
+  res <- osmdata::osmdata_sf(q)
+
+
+sidewalks  <- osm_get(bb, key="footway", value="sidewalk",
+                      return = c("lines"))[[1]]
+mapview(sidewalks)
+
+tmp <- osm_get(bb, key="highway", return = c("lines"))
+mapview(tmp[[1]])
+
+## Pedestrian walkways
+promenades_l <- osm_get(bb, key="highway",                    value=c("footway","path","steps","pedestrian","cycleway", "living_street"), return = c("lines"))
+mapview(promenades_l)
+
+promenades_p <- osm_get(bb, key="highway",                    value=c("footway","path","steps","pedestrian","cycleway", "living_street", "sidewalk"), return = c("polygons"))
+mapview(promenades_p)
+
+parking_pts <- osm_get(place, key="amenity", value=c("parking", "parking_space"),
+                       return = c("polygons"))
+#parking_pts <- dplyr::bind_rows(
+#  parking_pts[[1]],
+#  st_centroid(parking_pts[[2]])
+#)
+mapview(parking_pts)
+
+
+waste <- osm_get(bb, key="amenity", value=c("water_point"),
+                       return = c("points"))
+
+mapview(waste)
+# 3c) Transit (bus stops)
+bus_stops <- osm_get(place, key="highway", value="bus_stop",
+                     return = c("points", "polygons"))[[1]]
+
+mapview(bus_stops)
+
+# 3d) Piers, viewpoints, explicit beach_access
+piers      <- osm_get(place, key="man_made", value="pier", return=c("lines","polygons"))[[2]]
+
+mapview(piers)
+
+viewpoints <- osm_get(place, key="tourism", value="viewpoint", return=c("points"))[[1]]
+mapview(viewpoints) 
+
+## Toilets
+q <- opq(bb, timeout = 180) |>
+  add_osm_feature(key = "amenity", value = "toilets")
+
+res <- osmdata_sf(q)
+
+parts <- list(res$osm_points, res$osm_polygons, res$osm_multipolygons) |>
+  Filter(function(x) !is.null(x) && nrow(x) > 0, x = _)
+
+# UNION columns (not intersection), then restore sf
+toilets <- do.call(dplyr::bind_rows, parts) |>
+  st_as_sf()
+
+library(osmextract)
+mzt <- oe_get(
+  place = "Mazatlán, Sinaloa, Mexico",
+  layer = "points",
+  extra_tags = c("amenity","name","access","wheelchair","unisex",
+                 "changing_table","fee","opening_hours","operator","toilets")
+)
+
+toilets <- filter(mzt, amenity == "toilets")
+mapview(toilets)
+table(toilets$access)
+
+# optional: filter to likely-public
+if ("access" %in% names(toilets)) {
+  toilets <- filter(toilets, is.na(access) | access %in% c("public","yes","permissive"))
+}
+mapview(toilets)
+
+
+
+# Coastline (OSM stores as lines with natural=coastline)
+coast_lines <- osm_get(place, key="natural", value="coastline",
+                       return = c("lines"))[[1]] |>
+  st_make_valid()
+
+
+```
+

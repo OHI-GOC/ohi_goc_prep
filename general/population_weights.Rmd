@@ -1,0 +1,73 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-09-26"
+---
+Population weights
+```{r setup, include=FALSE}
+
+library(sf)
+library(terra)
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(here)
+library(mapview)
+library(exactextractr)
+```
+
+## Get the states of relevance
+```{r}
+ent02 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/02ent.shp")
+ent03 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/03ent.shp")
+ent26 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/26ent.shp")
+ent25 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/25ent.shp")
+ent18 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/18ent.shp")
+ent14 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/14ent.shp")
+states <- bind_rows(ent02, ent03, ent26, ent25, ent18, ent14)
+states <- st_transform(states, crs=6372)
+
+```
+
+## get coastline buffered 10 km inland.
+```{r}
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+regions_land <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "land")
+
+coast_buffer <- st_buffer(regions_marine, dist = 10000) %>%
+  st_union() %>%
+st_sf()
+
+inland_10 <- st_intersection(coast_buffer, regions_land)
+inland_10_state_region <- st_intersection(inland_10, states)
+mapview(inland_10_state_region[16,])
+
+# removed the weird ones by hand, probably should have done this in a more reproducible way!
+inland_10_state_region <- inland_10_state_region[-c(3, 4, 10, 11, 13, 14),] %>%
+st_make_valid()
+  
+i <- which(st_geometry_type(inland_10_state_region) == "GEOMETRYCOLLECTION")
+g <- inland_10_state_region[i,]
+poly_only <- st_collection_extract(g, c("POLYGON"))
+poly_only <- st_cast(st_union(poly_only), "MULTIPOLYGON")
+inland_10_state_region$geometry[i] <- poly_only
+
+mapview(inland_10_state_region)
+```
+
+
+population raster
+```{r}
+population <- rast( "/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_rasters/pop_2020.tif")
+mapview(ifel(population==0, NA, population), maxpixels=1850000))
+pop <- exact_extract(population, inland_10_state_region, 'sum')   # for single-band rasters
+
+population_weights_df <- st_drop_geometry(inland_10_state_region) %>%
+  select(-estado) %>%
+  rename(estado = "NOMGEO") %>%
+  mutate(population_10km_2020 = round(pop))
+write_csv(population_weights_df, here("general/OHI_rgn_population_10km.csv"))
+
+```
