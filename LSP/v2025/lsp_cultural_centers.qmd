@@ -1,0 +1,422 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP): Cultural Centers'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: console
+---
+
+# Ministry of Culture: Directorio de centros culturales y casas de cultura
+
+## Clean the datasets
+
+Note that while many of these centers have longitude and latitude, some are at 0,0 though they have specified municipality locations.  So I will have to identify their location from their federal entity, municipality, and locality.
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(here)
+library(janitor)
+library(tmaptools)
+library(sf)
+library(mapview)
+library(tidygeocoder)
+
+## cc = centros culturales / casas de cultura
+cc_raw <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/ministry_of_culture","0_centro_cultural_directorio.csv"))
+
+## mu = museos
+mu_raw <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/ministry_of_culture","museos.csv"))
+  
+## mon = monumentos registrados 
+mon_raw <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/ministry_of_culture","INAH_6_monumentos_registrados.csv"))
+  
+## uni = universidades
+uni_raw <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/ministry_of_culture","0_universidad_directorio.csv"))
+
+## gal = galleria 
+gal_raw <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/ministry_of_culture","0_galeria_directorio.csv"))
+
+## cdi = centro desarrollo indigena
+cdi_raw <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/ministry_of_culture","0_centro_desarrollo_indigena_directorio.csv"))
+
+## ce = centro educacion
+ce_raw <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/ministry_of_culture","0_centro_educacion_directorio.csv"))
+
+## ca = casa artesania
+ca_raw <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/ministry_of_culture","0_casa_artesania_directorio.csv"))
+
+## cat = catedrals
+cat_raw <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/ministry_of_culture","0_catedral_directorio.csv"))
+```
+
+### Filter out CCs without long/lat
+
+We will use tmaptools::geocode_OSM() to obtain coordinates for cities.
+
+```{r}
+## first, lets filter out all the CCs that do not have coordinates.
+cc_no_coords <- cc_raw %>% 
+  filter(longitud == "0") # if either long or lat are zero, the other one seems to be as well.
+```
+
+
+Let's try using tmaptools::geocode_OSM to get coordinates for localidades o municipios:
+
+```{r}
+## now lets try obtaining coordinates for these based on the localidad (more granular than municipio)
+# cc_new_coords <- cc_no_coords %>% 
+#   group_by(nom_mun) %>% 
+#   mutate(geometry = purrr::map(nom_mun, ~ st_geometry(geocode_OSM(.x, as.sf = TRUE)))) %>%
+#       unnest(geometry) %>%
+#       st_as_sf()
+```
+
+Did not work, too many to geocode. Trying `tidygeocoder`:
+
+```{r}
+devtools::install_github("jessecambon/tidygeocoder")
+library(dplyr, warn.conflicts = FALSE)
+library(tidygeocoder)
+library(mapview)
+
+cc_new_coords <- cc_no_coords %>%
+  geocode(nom_loc, method = 'osm', lat = latitude , long = longitude) # 411.9 seconds!
+
+cc_new_coords_na <- cc_new_coords %>% 
+  mutate(coord_na = ifelse(is.na(longitude) | is.na(latitude), TRUE, FALSE)) %>% 
+  filter(coord_na == TRUE) # if NA in either longitude or latitude, filter
+
+na_id <- unique(cc_new_coords_na$centro_cultural_id)
+
+cc_new_coords_sf <- cc_new_coords %>% 
+  select(-c(longitud, latitud)) %>% 
+  filter(!centro_cultural_id %in% na_id) %>% 
+  st_as_sf(coords = c("longitude", "latitude"),
+           crs = 4326, # WGS84
+           remove = FALSE) # convert to sf object
+
+mapview(cc_new_coords_sf)
+```
+
+Okay, so there were issues using nom_loc because sometimes they did not make sense out of context.  For example, San Antonio was what the Nominatim (“osm”) geocoding service used, but it is actually in La Paz:
+<!-- 1	centro_cultural_id 1635  -->
+<!-- 2	centro_cultural_nombre Casa de Cultura de San Antonio  -->
+<!-- 3	centro_cultural_fecha_fundacion	1972-01-01 -->
+<!-- 4	centro_cultural_adscripcion	Ayuntamiento de La Paz -->
+<!-- 5	estado_id 3 -->
+<!-- 6	nom_ent Baja California Sur -->
+<!-- 7	municipio_id 3 -->
+<!-- 8	nom_mun	La Paz -->
+<!-- 9	localidad_id 766 -->
+<!-- 10	nom_loc San Antonio -->
+
+```{r}
+## make a combined name for the place of nom_ent, nom_mun, and nom_loc
+
+# unite columns for one name, "nom"
+cc_no_coords_nom <- cc_no_coords %>% 
+  unite("nom", nom_ent, nom_mun, nom_loc, sep = ",", remove = FALSE)
+
+# with the nom column, use tidygeocoder::geocode to obtain long/lat coords
+cc_new_coords_nom <- cc_no_coords_nom %>%
+  geocode(nom, method = 'osm', lat = latitude , long = longitude) # 414.3 seconds!
+
+# remove NAs but keep track of them to add them back later
+cc_new_coords_na_nom <- cc_new_coords_nom %>% 
+  mutate(coord_na = ifelse(is.na(longitude) | is.na(latitude), TRUE, FALSE)) %>% 
+  filter(coord_na == TRUE) # if NA in either longitude or latitude, filter
+
+na_id_nom <- unique(cc_new_coords_na_nom$centro_cultural_id) # these are all not in GoC states, so we can drop them 
+
+cc_new_coords_sf_nom <- cc_new_coords_nom %>% 
+  select(-c(longitud, latitud)) %>% 
+  filter(!centro_cultural_id %in% na_id_nom) %>% 
+  st_as_sf(coords = c("longitude", "latitude"),
+           crs = 4326, # WGS84
+           remove = FALSE) # convert to sf object
+
+mapview(cc_new_coords_sf_nom) # yay!! none outside of Mexico! 
+```
+
+### Combine new coordinate CCs with ones that already had lat/longs
+
+```{r}
+## first, let's make the ones that already had lat/longs into sf objects
+cc_sf <- cc_raw %>% 
+  filter(longitud != "0") %>% 
+  filter(centro_cultural_id != "1063") %>% # drop 1063 because it is in Zacatecas, Sain Alto, and it has incorrect long/lats
+  st_as_sf(coords = c("longitud", "latitud"),
+           crs = 4326, # WGS84
+           remove = FALSE) # convert to sf object
+
+mapview(cc_sf) # yay!! none outside of Mexico! 
+```
+
+Now, we combine them:
+
+```{r}
+cc_all_sf <- bind_rows(cc_sf, cc_new_coords_sf_nom)  # bind them!
+summary(st_coordinates(cc_all_sf)) # not all are within 180 and 90.  Specifically, this is happening in longitud/latitud, not the longitude/latitudes.
+
+# which are outside of the bounding box?
+cc_all_sf_out <- cc_all_sf %>% 
+  mutate(bad_coord = case_when(
+    longitud < -180 | longitud > 180 ~ TRUE,
+    latitud < -90  | latitud > 90  ~ TRUE,
+    TRUE ~ FALSE
+  )) %>% 
+  filter(bad_coord == TRUE) # these are not in GoC.  Just drop them.
+
+# the ids for the CCs outside of the bounding box, which are not in the GoC.
+out_id <- unique(cc_all_sf_out$centro_cultural_id)
+
+# filter them out
+cc_all_clean_sf <- cc_all_sf %>% 
+  filter(!centro_cultural_id %in% out_id)
+
+# map it!
+mapview(cc_all_clean_sf) # yay!! no more warnings.
+```
+
+## Filter for only GoC CCs 
+
+First, lets bring in the most recent OHI GoC regions, including inland areas.
+
+```{r}
+ohi_rgns <- st_read(here("spatial/ohi_regions","goc_ohi_rgns.shp"))
+st_crs(ohi_rgns) # not WGS84: Mexico ITRF2008 / LCC
+
+mapview(ohi_rgns)
+```
+
+Now, let's filter for only CCs in the OHI rgn area.
+
+```{r}
+## make st_crs(cc_all_clean_sf) == st_crs(ohi_rgns)
+cc_all_clean_sf_ohicrs <- st_transform(cc_all_clean_sf, st_crs(ohi_rgns))
+
+# check it
+st_crs(cc_all_clean_sf_ohicrs) == st_crs(ohi_rgns) # TRUE
+
+# intersect to only keep the points within the ohi_rgns polygon.
+cc_goc_sf <- st_intersection(cc_all_clean_sf_ohicrs, ohi_rgns)
+
+mapview(cc_goc_sf) # great!!
+```
+
+## Explore the cultural centers 
+
+```{r}
+unique(cc_goc_sf$centro_cultural_nombre) # 324, many are casas or centros
+
+unique(cc_goc_sf$centro_cultural_fecha_fundacion) # the dates the CCs were founded
+
+colnames(cc_goc_sf)
+```
+I want to make a plotly to see how many were founded per year:
+```{r}
+library(lubridate)
+library(plotly)
+
+# prep for time series
+cc_goc_ts <- cc_goc_sf %>% 
+  mutate(centro_cultural_fecha_fundacion = ymd(centro_cultural_fecha_fundacion))
+
+# count CCs per year
+cc_goc_year <- cc_goc_ts %>%
+  mutate(year = year(centro_cultural_fecha_fundacion)) %>%
+  filter(!is.na(year)) %>%
+  count(year) %>% 
+  st_drop_geometry()
+
+# interactive plotly line chart
+fig <- plot_ly(cc_goc_year,
+               x = ~year,
+               y = ~n,
+               type = 'scatter',
+               mode = 'lines+markers',
+               line = list(color = 'steelblue'),
+               marker = list(size = 6)) %>%
+  layout(title = "Cultural centers (CCs) founded per year",
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Number of CCs"))
+fig
+```
+
+
+
+# Doing the same for all the datasets
+
+```{r}
+## function to clean and geocode any dataset
+clean_places <- function(df, id_col, lon_col, lat_col, ent_col, mun_col, loc_col, place_type) {
+  
+  ## 1. separate into those with and without coords
+  df_no_coords <- df %>% 
+    filter(.data[[lon_col]] == 0 | .data[[lat_col]] == 0)
+  
+  df_yes_coords <- df %>%
+    filter(.data[[lon_col]] != 0 & .data[[lat_col]] != 0)
+  
+  ## 2. build combined location string for geocoding
+  df_no_coords_nom <- df_no_coords %>%
+    unite("nom", all_of(c(ent_col, mun_col, loc_col)), sep = ",", remove = FALSE)
+  
+  ## 3. geocode (can take a while!)
+  df_new_coords_nom <- df_no_coords_nom %>%
+    geocode(nom, method = 'osm', lat = "latitude", long = "longitude")
+  
+  ## 4. drop failed geocodes
+  na_ids <- df_new_coords_nom %>%
+    filter(is.na(longitude) | is.na(latitude)) %>%
+    pull(!!sym(id_col))
+  
+  df_new_coords_sf <- df_new_coords_nom %>%
+    filter(!.data[[id_col]] %in% na_ids) %>%
+    st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+  
+  ## 5. convert original coords into sf
+  df_yes_coords_sf <- df_yes_coords %>%
+    st_as_sf(coords = c(lon_col, lat_col), crs = 4326, remove = FALSE)
+  
+  ## 6. bind together and filter out invalid coords
+  df_all_sf <- bind_rows(df_yes_coords_sf, df_new_coords_sf) %>%
+    mutate(bad_coord = case_when(
+      .data[[lon_col]] < -180 | .data[[lon_col]] > 180 ~ TRUE,
+      .data[[lat_col]] < -90  | .data[[lat_col]] > 90  ~ TRUE,
+      TRUE ~ FALSE
+    )) %>%
+    filter(!bad_coord) %>%
+    mutate(type = place_type)  ## add column for place type
+  
+  return(df_all_sf)
+}
+
+```
+
+
+```{r}
+## cultural centers -- works, ofc!!
+cc_clean <- clean_places(cc_raw, 
+                         id_col = "centro_cultural_id", 
+                         lon_col = "longitud", 
+                         lat_col = "latitud", 
+                         ent_col = "nom_ent", 
+                         mun_col = "nom_mun", 
+                         loc_col = "nom_loc", 
+                         place_type = "Centro Cultural")
+
+## museums -- worked!!
+mu_clean <- clean_places(mu_raw, 
+                         id_col = "museo_id", 
+                         lon_col = "longitud", 
+                         lat_col = "latitud", 
+                         ent_col = "nom_ent", 
+                         mun_col = "nom_mun", 
+                         loc_col = "nom_loc", 
+                         place_type = "Museo")
+
+## registered monuments: -- different set up
+mon_int <- mon_raw %>% 
+  mutate(monumento_id = row_number()) 
+
+mon_clean <- clean_places(mon_int, 
+                          id_col = "monumento_id", 
+                          lon_col = "longitud", 
+                          lat_col = "latitud", 
+                          ent_col = "entidad_federativa", 
+                          mun_col = "municipio_alcaldia", # municipality city hall
+                          loc_col = "localidad_colonia", 
+                          place_type = "Monumento")
+
+## universities -- works!!
+uni_clean <- clean_places(uni_raw, 
+                          id_col = "universidad_id", 
+                          lon_col = "longitud", 
+                          lat_col = "latitud", 
+                          ent_col = "nom_ent", 
+                          mun_col = "nom_mun", 
+                          loc_col = "nom_loc", 
+                          place_type = "Universidad")
+
+## galleries -- NO zeros in lat/long, func not needed!!
+gal_clean <- gal_raw %>% 
+  mutate(type = "Galería") %>% 
+  st_as_sf(coords = c("longitud", "latitud"), crs = 4326, remove = FALSE)
+
+## indigenous development centers -- worked!!
+cdi_clean <- clean_places(cdi_raw, 
+                          id_col = "centro_desarrollo_indigena_id", 
+                          lon_col = "longitud", 
+                          lat_col = "latitud", 
+                          ent_col = "nom_ent", 
+                          mun_col = "nom_mun", 
+                          loc_col = "nom_loc", 
+                          place_type = "Centro Desarrollo Indígena")
+
+## education centers -- works!!
+ce_clean <- clean_places(ce_raw, 
+                         id_col = "centro_educacion_id", 
+                         lon_col = "longitud", 
+                         lat_col = "latitud", 
+                         ent_col = "nom_ent", 
+                         mun_col = "nom_mun", 
+                         loc_col = "nom_loc", 
+                         place_type = "Centro Educación")
+
+## artisan houses -- workss!
+ca_clean <- clean_places(ca_raw, 
+                         id_col = "casa_artesania_id", 
+                         lon_col = "longitud", 
+                         lat_col = "latitud", 
+                         ent_col = "nom_ent", 
+                         mun_col = "nom_mun", 
+                         loc_col = "nom_loc", 
+                         place_type = "Casa Artesanía")
+
+## cathedrals -- same error as gallerias
+cat_clean <- cat_raw %>%
+  mutate(type = "Cateral") %>% 
+  st_as_sf(coords = c("longitud", "latitud"), crs = 4326, remove = FALSE)
+```
+
+```{r}
+all_places_sf <- bind_rows(cc_clean, mu_clean, mon_clean, uni_clean, cdi_clean, ce_clean, ca_clean,
+                           gal_clean, cat_clean) %>%
+  st_transform(st_crs(ohi_rgns)) %>%
+  st_intersection(ohi_rgns)
+
+```
+
+```{r}
+mapview(all_places_sf, zcol = "type") + mapview(territories_sf)
+
+## add in protected areas
+wdpa_prot <- st_read(here("LSP", "v2025", "output", "WDPA_Jan2025_shp_clipped_all.shp"))
+
+mapview(all_places_sf, zcol = "type") + mapview(territories_sf, col.regions = "pink") + mapview(wdpa_prot, color = "black")
+```
+
+
+# Quick look at ZOFEMAT for La Paz
+
+```{r}
+el_sargento <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/delimitaciones_zona_federal/03003_2024_02_EL_SARGENTO","03003_2024_02.shp"))
+mapview(el_sargento)
+```
+

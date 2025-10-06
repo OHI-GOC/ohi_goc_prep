@@ -1,0 +1,150 @@
+---
+title: "Salt Volume by Municipio"
+output: html_document
+date: "2025-3-6"
+editor_options: 
+  chunk_output_type: console
+---
+
+# Natural Products: Salt
+
+Unfortunately, none of the open data/massive download INEGI data are at the same scale (volume produced by municipios per year) as the annual statistical yearbooks for minerals.
+
+So, I started the process of manually making a clean dataset for us to use. I can continue to an earlier year as we go along, but in future years it should be easy to just add the observations for each municipio that is within the Gulf (as historical numbers do not seem to change retrospectively).
+
+Here is my manual inputs from the yearbooks, 2018 - 2023, though I could go further back than 2018:
+https://docs.google.com/spreadsheets/d/1kjUVqnsytcDZuImL5iyhxQsgdNujG4Y6A4uWS1KTTK8/edit?gid=0#gid=0
+
+And this is where I downloaded the yearbooks: https://www.sgm.gob.mx/Gobmx/productos/Anuarios-historicos.html
+
+```{r}
+library(mapview)
+library(sf)
+library(tidyverse)
+library(here)
+library(terra)
+library(pdftools)
+library(tabula)
+```
+
+
+
+```{r}
+if(!require(remotes)) install.packages("remotes")
+remotes::install_github("ropensci/tabulizer")
+
+library(tabulapdf)
+file_path <- here::here("NP","v2025","sal_anuario_estadistico", "Anuario_2023_Edicion_2024.pdf")
+out <- extract_tables(file_path, pages = 458)
+df <- as.data.frame(out[[1]], stringsAsFactors = FALSE)
+head(df)
+
+
+library(pdftools)
+txt <- pdf_text(file_path)
+cat(txt[458])
+```
+
+
+Easier to manually input it into a google sheet.  
+
+```{r}
+sal_vol <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/Anuario_Estadistico_de_la_Mineria_Mexicana","NP_Sal_Anuario_Estadistico_tidy_sal.csv"))
+```
+
+## Visualizations
+
+```{r}
+
+library(scales)
+p1 <- sal_vol %>%
+  group_by(year, estado) %>%
+  # filter(!estado %in% "baja_california_sur") %>% 
+  summarise(total_volume = sum(volume_tons, na.rm = TRUE), .groups = 'drop') %>%
+  ggplot(aes(x = year, y = total_volume, color = estado)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_y_continuous(labels = comma_format()) +
+  scale_color_viridis_d(name = "Estado", 
+                       labels = c("Baja California Sur", "Sinaloa", "Sonora")) +
+  labs(title = "Salt production by state // Producción de sal por estado",
+       subtitle = "Total volume in tons // Volumen total en toneladas",
+       x = "Year", y = "Volume (tons)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+ggsave(here("NP","v2025","sal_anuario_estadistico","sal_estado.png"), plot = p1, dpi = 400, width = 14, height = 8, units = "in")
+
+print(p1)
+
+p2 <- sal_vol %>%
+  group_by(year, estado) %>%
+  # filter(!estado %in% "baja_california_sur") %>% 
+  summarise(total_volume = sum(volume_tons, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(vol_log = log(total_volume)) %>% 
+  ggplot(aes(x = year, y = vol_log, color = estado)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_y_continuous(labels = comma_format()) +
+  scale_color_viridis_d(name = "Estado", 
+                       labels = c("Baja California Sur", "Sinaloa", "Sonora")) +
+  labs(title = "Log of salt production by state // Logaritmo producción de sal por estado",
+       subtitle = "Log total volume in tons // Logaritmo volumen total en toneladas",
+       x = "Year", y = "Volume (log tons)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p2)
+ggsave(here("NP","v2025","sal_anuario_estadistico","sal_estado_log.png"), plot = p2, dpi = 300, width = 14, height = 8, units = "in")
+
+
+## heatmap
+p3 <- sal_vol %>%
+  drop_na(volume_tons) %>% 
+  filter(volume_tons != "0") %>% 
+  mutate(municipio_estado = paste(municipio, estado, sep = " - "),
+         log_volume = log10(volume_tons + 1)) %>% # log transform for better visualization
+  ggplot(aes(x = factor(year), y = reorder(municipio_estado, volume_tons), fill = log_volume)) +
+  geom_tile(color = "white", size = 0.1) +
+  scale_fill_viridis_c(name = "log10(volume + 1)", 
+                      guide = guide_colorbar(title.position = "top")) +
+  labs(title = "Production heatmap by municipality and year // Mapa de calor de la producción por municipio y año",
+       subtitle = "Color intensity represents log-transformed volume // La intensidad del color representa el volumen transformado logarítmicamente",
+       x = " ", y = " ") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8),
+        legend.position = "right")
+
+print(p3)
+ggsave(here("NP","v2025","sal_anuario_estadistico","heatmap_municipio_log.png"), plot = p3, dpi = 400, width = 14, height = 8, units = "in")
+
+
+## summary stats
+cat("\n=== DATA SUMMARY ===\n")
+cat("Years covered:", min(sal_vol$year), "to", max(sal_vol$year), "\n")
+cat("Number of municipalities:", length(unique(paste(sal_vol$municipio, sal_vol$estado))), "\n")
+cat("States:", paste(unique(sal_vol$estado), collapse = ", "), "\n")
+
+
+library(kableExtra)
+total_by_year <- sal_vol %>%
+  group_by(year) %>%
+  summarise(total = sum(volume_tons, na.rm = TRUE))
+
+total_by_year %>%
+  kbl(caption = "Total Volume by Year") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+
+```{r}
+## plotly
+library(plotly)
+# preliminary plot of the index score with target reference line
+line_plot_score <- plotly::plot_ly(sal_vol, x = ~year, y = ~volume_tons, color = ~municipio, type = "scatter", mode = "lines") %>% 
+  layout(title = "Salt production by municipality and year // Mapa de la producción de sal por municipio y año", 
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Volume (tons)")) 
+line_plot_score
+```
+
