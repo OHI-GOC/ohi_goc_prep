@@ -1,0 +1,364 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-10-01"
+---
+Identifying the location of CONAPESCA fishing locations.
+
+Exploring Juan Carlos fishing data
+
+https://github.com/mex-Fisheries
+
+office Names?
+https://github.com/mex-fisheries/mex_ports/blob/main/data/clean/mex_ports.csv
+also: mex_vessel_registry
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidygeocoder)
+library(dplyr)
+library(stringr)
+library(readr)
+library(here)
+library(sf)
+library(mapview)
+library(osmdata)
+library(purrr)
+library(stringi)
+library(fuzzyjoin)
+
+
+jc_data <- "/home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/mex_landings/data/clean"
+
+list.files(jc_data)
+
+sites <- read_csv(here("FIS/v2025/data/conapesca_landing_sites_baja_sonora.csv"))
+fish <- readRDS(file.path(jc_data, "mex_landings_2000_present.rds")) 
+```
+
+
+## NOTE: Figure out origin!
+```{r}
+
+baja_sites <- filter(sites, State=="Baja California") 
+## two of these regions, one on pacific and one on gulf, but the gulf site is very small
+## will just assume landings are for the pacific side
+filter(baja_sites, landing_site == "SAN CARLOS PUNTA")
+baja_sites <- baja_sites %>%
+filter(!(landing_site =="SAN CARLOS PUNTA" & GofC == "yes"))
+## average the other duplicates which are close to each other
+baja_sites <- baja_sites %>%
+  group_by(landing_site) %>%
+  summarize(clave=mean(clave), 
+            subregion= mean(subregion),
+            long = mean(long),
+            lat = mean(lat),
+            State = unique(State))
+
+tmp1 <- filter(baja_sites, landing_site_sites == "AGUA BLANCA PLAYA")
+tmp1$landing_site_stes <- "AGUA BLANCA"
+tmp2 <- filter(baja_sites, landing_site_sites == "COLORADA PUNTA")
+tmp2$landing_site_sites <- "CAMPO COLORADA"
+tmp3 <- filter(baja_sites, landing_site_sites == "CANOAS PUNTA")
+tmp3$landing_site_sites <- "CANOAS"
+tmp4 <- filter(baja_sites, landing_site_sites == "CAMPITO PUNTA EL")
+tmp4$landing_site_sites <- "EL CAMPITO"
+tmp5 <- filter(baja_sites, landing_site_sites == "CUCHILLO PUERTO")
+tmp5$landing_site_sites <- "EL CUCHILLO"
+
+
+  mutate(landing_site = ifelse("SOCORRO CALETA EL", "EL SOCORRO", landing_site)) %>%
+  mutate(landing_site = ifelse("GUADALUPE ISLA", "ISLA DE GUADALUPE", landing_site)) %>%
+  mutate(landing_site = ifelse("ANIMAS ISLA", "ISLA LAS ANIMAS", landing_site)) %>%
+  mutate(landing_site = ifelse("SAN RAMÓN BAHÍA", "ISLA SAN RAMON", landing_site)) %>%
+  mutate(landing_site = ifelse("PLAYA LA", "PLAYA", landing_site)) %>%
+  mutate(landing_site = ifelse("SAN RAMÓN BAHÍA", "ISLA SAN RAMON", landing_site)) %>%
+
+baja_fish <- filter(fish, state %in% c("BAJA CALIFORNIA")) 
+
+sort(setdiff(baja_fish$landing_site, baja_sites$landing_site))
+sort(setdiff(baja_sites$landing_site, baja_fish$landing_site))
+intersect(baja_sites$landing_site, baja_fish$landing_site)
+                      
+                      
+# Words that don't help matching
+# ---- stoplist you can tweak ----
+stop_terms <- c("PUERTO","PUNTA","ISLOTE","BAHIA","BAHÍA","LITORAL",
+                "CALA","CALETA","CAMPO","PLAYA","RANCHO",
+                "DEL","DE","LA","LAS","LOS","EL")
+
+# ---- helpers (compatible with older R) ----
+norm_tokens <- function(x) {
+  x <- str_to_upper(x)
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+  x <- str_replace_all(x, "[^A-Z0-9 ]", " ")
+  x <- str_squish(x)
+  str_split(x, "\\s+")
+}
+
+normalize_basic <- function(x) {
+  toks <- norm_tokens(x)
+  vapply(toks, function(v) paste(sort(unique(v)), collapse = " "),
+         FUN.VALUE = character(1))
+}
+
+normalize_stopless <- function(x) {
+  toks <- norm_tokens(x)
+  toks <- lapply(toks, function(v) v[!v %in% stop_terms])
+  vapply(toks, function(v) paste(sort(unique(v)), collapse = " "),
+         FUN.VALUE = character(1))
+}
+
+# ---- build working copies ----
+sites_k <- baja_sites %>%
+  mutate(
+    name_basic   = normalize_basic(landing_site),
+    name_stopless = normalize_stopless(landing_site)
+  ) %>%
+  select(landing_site_sites = landing_site,
+         name_basic, name_stopless, clave, subregion, long, lat)
+
+fish_k <- baja_fish %>%
+  mutate(
+    name_basic   = normalize_basic(landing_site),
+    name_stopless = normalize_stopless(landing_site)
+  )
+
+# Distinct fish names to map once
+fish_names <- fish_k %>% distinct(landing_site, name_basic, name_stopless)
+
+# ---- 1) EXACT RAW ----
+map1 <- fish_names %>%
+  inner_join(sites_k %>% select(landing_site_sites, clave, subregion, long, lat),
+             by = c("landing_site" = "landing_site_sites")) %>%
+  transmute(landing_site,
+            landing_site_sites = landing_site,
+            clave, subregion, long, lat,
+            dist = 0, match_type = "exact_raw")
+
+todo1 <- anti_join(fish_names, map1, by = "landing_site")
+
+# ---- 2) EXACT BASIC (no stop removal) ----
+map2 <- todo1 %>%
+  inner_join(sites_k %>% select(name_basic, landing_site_sites, clave, subregion, long, lat),
+             by = "name_basic") %>%
+  transmute(landing_site,
+            landing_site_sites, clave, subregion, long, lat,
+            dist = 0, match_type = "exact_basic")
+
+todo2 <- anti_join(todo1, map2 %>% select(landing_site), by = "landing_site")
+
+# ---- 3) EXACT STOPLESS (with stop removal) ----
+map3 <- todo2 %>%
+  inner_join(sites_k %>% select(name_stopless, landing_site_sites, clave, subregion, long, lat),
+             by = "name_stopless") %>%
+  transmute(landing_site,
+            landing_site_sites, clave, subregion, long, lat,
+            dist = 0, match_type = "exact_stopless")
+
+todo3 <- anti_join(todo2, map3 %>% select(landing_site), by = "landing_site")
+
+
+
+# ---- 4) FUZZY on STOPLESS ----
+map4 <- if (nrow(todo3)) {
+  stringdist_inner_join(
+    todo3,
+    sites_k %>% select(name_stopless, landing_site_sites, site_id, subregion, long, lat),
+    by = c("name_stopless" = "name_stopless"),
+    method = "jw", max_dist = 0.15, distance_col = "dist"
+  ) %>%
+    group_by(landing_site) %>%
+    slice_min(dist, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    transmute(landing_site,
+              landing_site_sites, site_id, subregion, long, lat,
+              match_type = "fuzzy_stopless", dist)
+} else dplyr::tibble()
+
+# ---- combine + attach back ----
+map_all <- bind_rows(map1, map2, map3, map4)
+
+fish_matched <- fish_k %>%
+  left_join(map_all, by = "landing_site")
+
+# ---- quick QA ----
+fish_matched %>% count(match_type, matched = !is.na(site_id))
+fish_matched %>%
+  filter(match_type == "fuzzy_stopless") %>%
+  arrange(desc(dist)) %>%
+  select(landing_site, landing_site_sites, dist) %>%
+  head(20)
+
+
+
+#, "BAJA CALIFORNIA SUR", " NAYARIT", "JALISCO", "SINALOA", "SONORA"))
+
+
+
+tmp <- readRDS(file.path(jc_data, "mex_conapesca_apertura_2018_present.rds")) %>%
+  filter(state %in% c("BAJA CALIFORNIA", "BAJA CALIFORNIA SUR", " NAYARIT", "JALISCO", "SINALOA", "SONORA")) %>%
+  filter(fishing_zone_type != "AGUAS CONTINENTALES")
+
+fishing_sites <- tmp %>%
+  select(state, fishing_site_name) %>%
+    mutate(fishing_site_clean = iconv(fishing_site_name, from = "latin1", to = "UTF-8")) %>%
+    mutate(fishing_site_clean = str_squish(fishing_site_clean),
+         fishing_site_clean = str_to_title(fishing_site_clean)) %>% # keep nice casing
+  unique()
+
+write_csv(fishing_sites, here("FIS/v2025/data/fishing_site_locs_raw.csv"))
+
+## There is not always a match between the state and fishing location, but should be general correspondence
+baja <- fishing_sites %>%
+  filter(state %in% c("BAJA CALIFORNIA"))
+
+```
+
+```{r}
+state_sites <- baja
+# geocode via OSM (Nominatim). Add ", Mexico" to focus results.
+geo1 <- state_sites %>%
+  mutate(address = paste(fishing_site_clean, ", Mexico")) %>%
+  geocode(address = address,
+          method  = "osm",
+          limit   = 1,
+          full_results = TRUE)  # keep extras for QC
+
+pts <- geo1 %>%
+  filter(!is.na(lat)) %>%
+  select(state, fishing_site_name, lat, long, osm_type, osm_id)
+
+pts <- st_as_sf(pts, coords = c("long", "lat"),
+                crs = 4326, remove = FALSE)
+
+mapview::mapview(pts)
+
+
+
+# OSM
+# your cleaned names vector
+nm <- state_sites$fishing_site_clean
+
+# (1) escape regex specials so names like "San Isidro (Ejido …)" don't break the regex
+escape_regex <- function(x) str_replace_all(x, "([\\W])", "\\\\\\1")
+
+# (2) split into manageable batches
+make_batches <- function(x, size = 30) split(x, ceiling(seq_along(x)/size))
+batches <- make_batches(nm, size = 30)
+
+# (3) helper to build one query for a batch
+build_query <- function(names_batch, bbox = "Mexico", timeout = 180,
+                        restrict = TRUE) {
+  # optional: restrict by likely feature keys to speed up
+  # (turn off with restrict = FALSE if you want all features)
+  name_pat <- paste0("^(", paste(escape_regex(names_batch), collapse="|"), ")$")
+  q <- opq(bbox = bbox, timeout = timeout) |>
+    add_osm_feature(key = "name", value = name_pat, value_exact = FALSE, match_case = FALSE)
+  if (restrict) {
+    # Add a few typical keys to cut search space; each additional add_osm_feature
+    # narrows the result, so we need OR logic. We'll just run separate queries per key
+    # for speed in the outer function instead of stacking here.
+    return(list(q = q, name_pat = name_pat))
+  }
+  list(q = q, name_pat = name_pat)
+}
+
+# (4) fetch one batch with retry + optional key-type splitting (faster)
+fetch_batch <- function(names_batch, bbox = "Mexico", timeout = 180, pause = 2) {
+  qinfo <- build_query(names_batch, bbox = bbox, timeout = timeout)
+  name_pat <- qinfo$name_pat
+
+  # try a few narrower key-based passes to reduce load (fast in Mexico):
+  key_passes <- list(
+    list(key="place", values=c("city","town","village","hamlet")),
+    list(key="natural", values=c("beach","cape","coastline")),
+    list(key="harbour", values="yes"),
+    list(key="man_made", values=c("pier","breakwater","lighthouse","dam")),
+    list(key="waterway", values=c("dam")),
+    list(key="amenity", values=c("ferry_terminal"))
+  )
+
+  res_list <- list()
+
+  # helper: run a single overpass call with retry
+  run_q <- function(q) {
+    tries <- 3
+    for (i in 1:tries) {
+      out <- try(osmdata_sf(q), silent = TRUE)
+      if (!inherits(out, "try-error")) return(out)
+      Sys.sleep(pause * i)  # backoff
+    }
+    NULL
+  }
+
+  # First: run several narrower queries (OR across them)
+  for (kp in key_passes) {
+    q <- opq(bbox = bbox, timeout = timeout) |>
+      add_osm_feature(key = "name", value = name_pat, match_case = FALSE) |>
+      add_osm_feature(key = kp$key, value = kp$values)
+    out <- run_q(q)
+    if (!is.null(out)) res_list <- append(res_list, list(out))
+  }
+
+  # Fallback: a general name-only query for any leftovers
+  remaining <- names_batch
+  if (length(res_list)) {
+    found_names <- res_list |>
+      map(~ bind_rows(.$osm_points, .$osm_polygons, .$osm_multipolygons, .$osm_lines)) |>
+      bind_rows() |>
+      as_tibble() |>
+      distinct(name) |>
+      pull(name) |>
+      unique() |>
+      str_to_upper()
+    remaining <- setdiff(str_to_upper(names_batch), found_names)
+  }
+
+  if (length(remaining)) {
+    q_rem <- opq(bbox = bbox, timeout = timeout) |>
+      add_osm_feature(key = "name",
+                      value = paste0("^(", paste(escape_regex(remaining), collapse="|"), ")$"),
+                      match_case = FALSE)
+    out_rem <- run_q(q_rem)
+    if (!is.null(out_rem)) res_list <- append(res_list, list(out_rem))
+  }
+
+  if (!length(res_list)) return(NULL)
+
+  # combine geometries and create a representative point for non-point features
+  comb <- res_list |>
+    map(~ bind_rows(.$osm_points, .$osm_polygons, .$osm_multipolygons, .$osm_lines)) |>
+    purrr::compact() |>
+    bind_rows()
+
+  if (!nrow(comb)) return(NULL)
+
+  sf_all <- st_as_sf(comb) |>
+    mutate(name_u = str_to_upper(name)) |>
+    group_by(name_u) |>
+    summarize(geom = st_point_on_surface(st_combine(geometry)), .groups="drop") |>
+    st_set_crs(4326)
+
+  sf_all
+}
+
+# (5) run all batches and bind
+
+tmp <- fetch_batch(batches[[1]], bbox = "Mexico", timeout = 180, pause = 3)
+
+res_sf <- batches |>
+  purrr::map(fetch_batch, bbox = "Mexico", timeout = 180, pause = 3) |>
+  purrr::compact() |>
+  (\(lst) if (length(lst)) do.call(rbind, lst) else NULL)()
+
+# (6) join coordinates back to your table (left join by uppercase cleaned name)
+coords <- res_sf |>
+  mutate(lat = st_coordinates(geom)[,2],
+         long = st_coordinates(geom)[,1]) |>
+  st_drop_geometry() |>
+  select(name_u, lat, long)
+
+final <- state_sites %>%
+  mutate(name_u = str_to_upper(fishing_site_clean)) %>%
+  left_join(coords, by = "name_u")
