@@ -1,0 +1,205 @@
+---
+title: 'OHI GoC 2025: Safety'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: inline
+---
+
+# SESNSP: Secretariado Ejecutivo del Sistema Nacional de Seguridad Pública
+
+<https://sspcgob-my.sharepoint.com/personal/cni_sspc_gob_mx/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fcni%5Fsspc%5Fgob%5Fmx%2FDocuments%2FID%2F05%2EID%5FFC%2F12%2EDB%2FMunicipal%2DDelitos%2D2015%2D2025%5Fago2025%2Ezip&parent=%2Fpersonal%2Fcni%5Fsspc%5Fgob%5Fmx%2FDocuments%2FID%2F05%2EID%5FFC%2F12%2EDB&ga=1>
+
+<https://www.gob.mx/sesnsp/acciones-y-programas/datos-abiertos-de-incidencia-delictiva>
+
+
+## Read in data
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(here)
+library(janitor)
+library(readxl)
+library(purrr)
+```
+
+
+```{r}
+## for years 2015 - 2025
+# sesnsp_2015 <- readxl::read_xlsx(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SESNSP/d2025/Municipal-Delitos-2015-2025_ago2025","2015.xlsx")) %>% 
+#   janitor::clean_names() 
+
+years <- 2015:2025
+
+sesnsp_all <- purrr::map_dfr(years, function(y) {
+  readxl::read_xlsx(
+    here::here("/home/shares/ohi/OHI_GOC/_raw_data/SESNSP/d2025/Municipal-Delitos-2015-2025_ago2025", paste0(y, ".xlsx"))
+  ) %>%
+    janitor::clean_names()
+})
+
+unique(sesnsp_all$ano) # all years present
+```
+
+## Summarize number of crimes annually
+
+```{r}
+## need to pivot longer to obtain a number annually for the type of crime per municipio per year
+sesnsp_all_long <- sesnsp_all %>% 
+  pivot_longer(
+    cols = enero:diciembre,
+    names_to = "mes",
+    values_to = "n_delitos"
+  )
+
+sesnsp_anual <- sesnsp_all_long %>% 
+  group_by(ano, entidad, municipio, bien_juridico_afectado, tipo_de_delito, subtipo_de_delito) %>%
+  summarise(
+    annual_total = sum(n_delitos, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+unique(sesnsp_anual$entidad)
+#  [1] "Aguascalientes"                  "Baja California"                 "Baja California Sur"            
+#  [4] "Campeche"                        "Chiapas"                         "Chihuahua"                      
+#  [7] "Ciudad de México"                "Coahuila de Zaragoza"            "Colima"                         
+# [10] "Durango"                         "Guanajuato"                      "Guerrero"                       
+# [13] "Hidalgo"                         "Jalisco"                         "Michoacán de Ocampo"            
+# [16] "Morelos"                         "México"                          "Nayarit"                        
+# [19] "Nuevo León"                      "Oaxaca"                          "Puebla"                         
+# [22] "Querétaro"                       "Quintana Roo"                    "San Luis Potosí"                
+# [25] "Sinaloa"                         "Sonora"                          "Tabasco"                        
+# [28] "Tamaulipas"                      "Tlaxcala"                        "Veracruz de Ignacio de la Llave"
+# [31] "Yucatán" 
+```
+
+## Filter to GoC
+
+```{r}
+library(tidygeocoder)
+library(mapview)
+library(sf)
+
+sesnsp_anual_goc_states <- sesnsp_anual %>% 
+  filter(entidad %in% c("Baja California","Baja California Sur","Jalisco","Nayarit","Sinaloa","Sonora")) %>% 
+  mutate(country = "Mexico") %>% 
+  tidygeocoder::geocode(city = municipio, country = country, state = entidad)  # to give each city a lat, long.  v2025: 265.2 seconds
+
+sesnsp_anual_goc_states_na <- sesnsp_anual_goc_states %>% 
+  filter(is.na(lat))
+
+unique(sesnsp_anual_goc_states_na$municipio)
+```
+
+
+```{r}
+sesnsp_anual_goc_states_sf <- sesnsp_anual_goc_states %>%
+  
+  # adding in the coordinates manually for Cabo Corrientes, Jalisco
+  mutate(lat = ifelse(municipio %in% "Cabo Corrientes", 20.4039, lat)) %>% 
+  mutate(long = ifelse(municipio %in% "Cabo Corrientes", -105.5292, long)) %>% 
+  
+  # Bahía de Banderas, Nayarit
+  mutate(lat = ifelse(municipio %in% "Bahía de Banderas", 20.7500, lat)) %>% 
+  mutate(long = ifelse(municipio %in% "Bahía de Banderas", -105.3333, long)) %>%
+  
+  # drop other NA places.
+  filter(!municipio %in% c("Teocaltiche","General Plutarco Elías Calles","Otros Municipios","No Especificado","Casimiro Castillo", "Zapotlán el Grande")) %>% 
+  
+  # making sf object
+  st_as_sf(coords = c("long", "lat"),
+           crs = 4326, # WGS84
+           remove = FALSE)
+
+st_write(sesnsp_anual_goc_states_sf, here::here("/home/shares/ohi/OHI_GOC/goal_prep/ss/int", "sesnsp_anual_goc_states_sf.shp"))
+```
+
+
+```{r}
+## check their placement 
+
+sesnsp_municipios_sf <- sesnsp_anual_goc_states_sf %>% 
+  select(municipio) %>% 
+  distinct()
+
+mapview(sesnsp_municipios_sf)
+```
+
+#### Get coastline buffered 50 km inland
+
+```{r}
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+regions_land <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "land")
+
+coast_buffer <- st_buffer(regions_marine, dist = 50000) %>%
+  st_union() %>%
+st_sf()
+
+inland_50 <- st_intersection(coast_buffer, regions_land)
+mapview(inland_50)
+
+st_write(inland_50, here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
+```
+
+### Only keep points within the coastline buffer
+
+```{r}
+sesnsp_anual_goc_states_sf_trans <- st_transform(sesnsp_anual_goc_states_sf, st_crs(inland_50))
+sesnsp_goc_sf <- st_intersection(sesnsp_anual_goc_states_sf_trans, inland_50)
+
+mapview(sesnsp_goc_sf) + mapview(inland_50)
+
+st_write(sesnsp_goc_sf, here::here("/home/shares/ohi/OHI_GOC/goal_prep/ss/int","sesnsp_goc_municipios_50km.shp"))
+```
+
+## Safety
+
+Now that we have the municipalities in the GoC isolated, let's make a table of all the types of crimes recorded by SESNSP.
+
+```{r}
+sesnsp_goc_crimes <- sesnsp_goc_sf %>% 
+  st_drop_geometry() %>% 
+  select(bien_juridico_afectado, tipo_de_delito, subtipo_de_delito) %>% 
+  distinct()
+
+write_csv(sesnsp_goc_crimes, here::here("/home/shares/ohi/OHI_GOC/goal_prep/ss/int","types_of_crimes_goc_sesnsp.csv"))
+
+## also save here for easy access
+write_csv(sesnsp_goc_crimes, here::here("SS/v2025/int_sesnsp","types_of_crimes_goc_sesnsp.csv"))
+st_write(sesnsp_goc_sf, here::here("SS/v2025/int_sesnsp","sesnsp_goc_municipios_50km.shp"))
+
+# check <- st_read(here::here("SS/v2025/int_sesnsp","sesnsp_goc_municipios_50km.shp")) ## need to fix the names / make a document describing the abbreviations!!
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
