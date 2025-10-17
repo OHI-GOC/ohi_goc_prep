@@ -1,0 +1,234 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-10-01"
+---
+
+STEP 1: Ran through with this data: conapesca_landing_sites_baja_sonora.csv
+STEP 2: Saved as: fishing_site_locs_raw.csv
+STEP 3: Added by hand some additional regions (called: landing_sites_BC.csv, this is the primary list
+that needs to be edited with location changes/additions, etc.). After running the code to see what sites were still missing after all the matching techniques.
+STEP 4: Running with the updated data to see if we can get all locations!
+
+
+Identifying the location of CONAPESCA fishing locations.
+
+Exploring Juan Carlos fishing data
+
+https://github.com/mex-Fisheries
+
+office Names?
+https://github.com/mex-fisheries/mex_ports/blob/main/data/clean/mex_ports.csv
+also: mex_vessel_registry
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidygeocoder)
+library(dplyr)
+library(stringr)
+library(readr)
+library(here)
+library(sf)
+library(mapview)
+library(osmdata)
+library(purrr)
+library(stringi)
+library(fuzzyjoin)
+
+
+jc_data <- "/home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/mex_landings/data/clean"
+
+list.files(jc_data)
+
+## started with this file, but then added some regions that were missing from the 
+## catch data
+#sites <- read_csv(here("FP/FIS/v2025/data/conapesca_landing_sites_baja_sonora.csv"))
+# baja_sites <- filter(sites, State=="Baja California") 
+# 
+# ## Take care of regions with the same name (very rude!)
+# ## two of these regions, one on pacific and one on gulf, but the gulf site is very small
+# ## will just assume landings are for the pacific side
+# filter(baja_sites, landing_site == "SAN CARLOS PUNTA")
+# 
+# baja_sites <- baja_sites %>%
+# filter(!(landing_site =="SAN CARLOS PUNTA" & GofC == "yes"))
+# ## average the other duplicates which are close to each other
+# baja_sites <- baja_sites %>%
+#   group_by(landing_site) %>%
+#   summarize(clave=mean(clave), 
+#             subregion= mean(subregion),
+#             long = mean(long),
+#             lat = mean(lat),
+#             State = unique(State))
+# write_csv(baja_sites, here("FP/FIS/v2025/data/fishing_site_locs_raw.csv"))
+
+
+baja_sites <- read_csv(here("FP/FIS/v2025/data/landing_sites_BC.csv"))
+fish <- readRDS(file.path(jc_data, "mex_landings_2000_present.rds")) 
+baja_fish <- filter(fish, state %in% c("BAJA CALIFORNIA")) 
+intersect(baja_sites$landing_site, baja_fish$landing_site)
+
+```
+
+
+```{r}
+
+
+# Words that don't help matching
+# ---- stoplist you can tweak ----
+stop_terms <- c("PUERTO","PUNTA","ISLOTE","BAHIA","BAHÍA","LITORAL",
+                "CALA","CALETA","CAMPO","PLAYA","RANCHO",
+                "DEL","DE","LA","LAS","LOS","EL")
+
+# ---- helpers (compatible with older R) ----
+norm_tokens <- function(x) {
+  x <- str_to_upper(x)
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+  x <- str_replace_all(x, "[^A-Z0-9 ]", " ")
+  x <- str_squish(x)
+  str_split(x, "\\s+")
+}
+
+normalize_basic <- function(x) {
+  toks <- norm_tokens(x)
+  vapply(toks, function(v) paste(sort(unique(v)), collapse = " "),
+         FUN.VALUE = character(1))
+}
+
+normalize_stopless <- function(x) {
+  toks <- norm_tokens(x)
+  toks <- lapply(toks, function(v) v[!v %in% stop_terms])
+  vapply(toks, function(v) paste(sort(unique(v)), collapse = " "),
+         FUN.VALUE = character(1))
+}
+
+# ---- build working copies ----
+sites_k <- baja_sites %>%
+  mutate(
+    name_basic   = normalize_basic(landing_site),
+    name_stopless = normalize_stopless(landing_site)
+  ) %>%
+  select(landing_site_sites = landing_site,
+         name_basic, name_stopless, clave, subregion, long, lat)
+
+fish_k <- baja_fish %>%
+  mutate(
+    name_basic   = normalize_basic(landing_site),
+    name_stopless = normalize_stopless(landing_site)
+  )
+
+# Distinct fish names to map once
+fish_names <- fish_k %>% distinct(landing_site, name_basic, name_stopless)
+
+# ---- 1) EXACT RAW ----
+# N=187
+map1 <- fish_names %>%
+  inner_join(sites_k %>% select(landing_site_sites, clave, subregion, long, lat),
+             by = c("landing_site" = "landing_site_sites")) %>%
+  transmute(landing_site,
+            landing_site_sites = landing_site,
+            clave, subregion, long, lat,
+            dist = 0, match_type = "exact_raw")
+
+todo1 <- anti_join(fish_names, map1, by = "landing_site")
+
+# ---- 2) EXACT BASIC (no stop removal) ----
+# N=105, do a quick check to make sure they are sensible!
+map2 <- todo1 %>%
+  inner_join(sites_k %>% select(name_basic, landing_site_sites, clave, subregion, long, lat),
+             by = "name_basic") %>%
+  transmute(landing_site,
+            landing_site_sites, clave, subregion, long, lat,
+            dist = 0, match_type = "exact_basic")
+
+todo2 <- anti_join(todo1, map2 %>% select(landing_site), by = "landing_site")
+
+# ---- 3) EXACT STOPLESS (with stop removal) ----
+# N=24
+map3 <- todo2 %>%
+  inner_join(sites_k %>% select(name_stopless, landing_site_sites, clave, subregion, long, lat),
+             by = "name_stopless") %>%
+  transmute(landing_site,
+            landing_site_sites, clave, subregion, long, lat,
+            dist = 0, match_type = "exact_stopless") %>%
+  filter(!is.na(landing_site))
+
+todo3 <- anti_join(todo2, map3 %>% select(landing_site), by = "landing_site")
+
+
+
+# ---- 4) FUZZY on STOPLESS ----
+
+## N = 35: Some questionable ones, but mostly seem reasonable.
+map4 <- if (nrow(todo3)) {
+  stringdist_inner_join(
+    todo3,
+    sites_k %>% select(name_stopless, landing_site_sites, clave, subregion, long, lat),
+    by = c("name_stopless" = "name_stopless"),
+    method = "jw", max_dist = 0.15, distance_col = "dist"
+  ) %>%
+    group_by(landing_site) %>%
+    slice_min(dist, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    transmute(landing_site,
+              landing_site_sites, clave, subregion, long, lat,
+              match_type = "fuzzy_stopless", dist)
+} else dplyr::tibble()
+
+
+# ---- combine + attach back ----
+map_all <- bind_rows(map1, map2, map3, map4)
+
+fish_matched <- fish_k %>%
+  left_join(map_all, by = "landing_site")
+
+
+# ---- quick QA of fuzzy matching ----
+fish_matched %>% count(match_type, matched = !is.na(lat))
+fish_matched %>%
+  filter(match_type == "fuzzy_stopless") %>%
+  arrange(desc(dist)) %>%
+  select(landing_site, landing_site_sites, dist) %>%
+  head(20)
+
+
+# these should be the same:
+sum(fish_matched$live_weight)
+sum(baja_fish$live_weight)
+
+fish_matched %>%
+  filter(!is.na(lat)) %>%
+  summarize(sum(live_weight))
+fish_matched %>%
+  filter(is.na(lat)) %>%
+  summarize(sum(live_weight))
+142644549/(3631128240+142644549) #4% of catch couldn't find a match for.
+
+fish_matched %>%
+  filter(!is.na(lat) & year == 2024) %>%
+  summarize(sum(live_weight))
+fish_matched %>%
+  filter(is.na(lat) & year == 2024) %>%
+  summarize(sum(live_weight))
+
+## for 2024 only 0.5% not accounted for. Most of mismatches are in previous years
+1664744/(1664744+353647569)
+missing_sites <- fish_matched %>%
+  filter(is.na(lat)) %>%
+  select(state, office_name, landing_site, year, landing_site_sites)
+summary(missing_sites)
+filter(missing_sites, is.na(landing_site_sites)) ## all sites were accounted for in the list, but
+# I couldn't find the location unambiguously of all sites.
+table(missing_sites$year)
+table(baja_fish$year)
+## nearly all the missmatches are from 2005 and earlier
+bc_data <- fish_matched %>%
+  select(-name_basic, -name_stopless, -landing_site_sites, -clave, -dist, -match_type)
+write_csv(bc_data, file.path(jc_data, "mex_landings_2000_present_with_lat_long.rds"))
+
+
+#, "BAJA CALIFORNIA SUR", " NAYARIT", "JALISCO", "SINALOA", "SONORA"))
+
+
+```
+
