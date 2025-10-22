@@ -12,7 +12,8 @@ library("foreach")
 library("doParallel")
 library("gplots")
 
-setwd('/Users/EricaFerrer/Desktop/Overfishing & Emissions/')
+setwd('~/ohi_goc_prep/FP/CMSY/TEST/')
+
 #-----------------------------------------
 # Some general settings
 #-----------------------------------------
@@ -39,17 +40,18 @@ registerDoParallel(cl, cores = ncores_for_computation)
 #-----------------------------------------
 # Required settings, File names
 #-----------------------------------------
-catch_file  <-  "Data/File 1_CONAPESCA_SoI Timeseries.csv" #timeseries file
-id_file     <-  "Data/File 2_Stocks Metadata.csv"  #metadata file
+catch_file  <-  "File 1_CONAPESCA_SoI Timeseries.csv" #timeseries file
+id_file     <-  "File 2_Stocks Metadata.csv"  #metadata file
 
-outfile     <- "Output/results_MSY.csv"
+outfile     <- "results_MSY_Oct22_2025.csv"
 #Output/CMSY_Output/
-outfile.txt <- "Output/results_MSY.txt"
+outfile.txt <- "results_MSY_Oct22_2025.txt"
 RESULT_TS = data.frame()
+
 #----------------------------------------
 # Select stock to be analyzed
 #----------------------------------------
-stocks      <-NA
+stocks      <- NA
 # If the input files contain more than one stock, specify below the stock to be analyzed
 # If the line below is commented out (#), all stocks in the input file will be analyzed
 #stocks <-  "HH_H_15" # c("SEPIOFF_CY","MICRPOU_IS","EPINGUA_IS","CHAMGAL_SA","CORYHIP_SA","ILLECOI_SA")
@@ -244,7 +246,6 @@ if(is.na(stocks[1])==TRUE){
   # stocks         <- as.character(cinfo$Stock[cinfo$Subregion=="Sardinia"]) # Analyze stocks in Region
 }
 
-i=3
 # analyze one stock after the other
 for (i in 1:nrow(cinfo)){ #nrow(cinfo)){#1:nrow(cinfo) or c(50,55,64,78,89,101)) {
   stock = stocks[i]
@@ -1353,5 +1354,5 @@ for (i in 1:nrow(cinfo)){ #nrow(cinfo)){#1:nrow(cinfo) or c(50,55,64,78,89,101))
 stopCluster(cl)
 stopImplicitCluster()
 
-write.csv(RESULT_TS,file = 'Output/results_timeseries_MSY.csv')
+write.csv(RESULT_TS,file = 'results_timeseries_MSY.csv')
 
