@@ -43,9 +43,9 @@ registerDoParallel(cl, cores = ncores_for_computation)
 catch_file  <-  "File 1_CONAPESCA_SoI Timeseries.csv" #timeseries file
 id_file     <-  "File 2_Stocks Metadata.csv"  #metadata file
 
-outfile     <- "results_MSY_Oct22_2025.csv"
+outfile     <- "Output/results_MSY.csv"
 #Output/CMSY_Output/
-outfile.txt <- "results_MSY_Oct22_2025.txt"
+outfile.txt <- "Output/results_MSY.txt"
 RESULT_TS = data.frame()
 
 #----------------------------------------
@@ -1354,5 +1354,5 @@ for (i in 1:nrow(cinfo)){ #nrow(cinfo)){#1:nrow(cinfo) or c(50,55,64,78,89,101))
 stopCluster(cl)
 stopImplicitCluster()
 
-write.csv(RESULT_TS,file = 'results_timeseries_MSY.csv')
+write.csv(RESULT_TS,file = 'Output/results_timeseries_MSY.csv')
 
