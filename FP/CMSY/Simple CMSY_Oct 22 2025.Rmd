@@ -1,0 +1,201 @@
+---
+title: "Simple CMSY_Oct 22 2025"
+output: html_document
+date: "2025-10-22"
+---
+
+# PRE-WORK
+```{r Loading Libraries}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(tidytext)
+library(lubridate)
+library(plotly)
+library(htmlwidgets)
+library(here)
+library(janitor)
+```
+
+```{r Review the CMSY protocol developed by Ferrer et al. (2021)}
+### View PDF in Notebook
+pdf_path <- "~/ohi_goc_prep/FP/CMSY/Copy of Ferrer et al. (2021) CMSY Protocol.pdf"
+
+# Get the absolute path
+abs_path <- normalizePath("~/ohi_goc_prep/FP/CMSY/Copy of Ferrer et al. (2021) CMSY Protocol.pdf")
+
+# Convert to file URL (Windows or Unix-style)
+file_url <- paste0("file:///", URLencode(abs_path))
+
+# Open the PDF
+browseURL(file_url)
+```
+
+
+# GENERATING FILES 1 & 2 FROM SCRATCH
+Preparing Files 1 and 2
+NOTES TO SELF - Oct 22 2025
+
+FILE 1: Create a file with annual landings in kg (and n_count observations) grouped by year per "stock". Here, stock is defined as the total population of taxa X fished within the Gulf of California not including not the Pacific.
+
+- At present, we do not have the municipality lat-longs so I will group stocks by the six state of interest first (Baja, BCS, Son, Sin, Nay, Jal) and then plan to re-make the file (File 1) once we can filter out specific municipalities.
+- This means that this timeseries is likely to be an OVER-ESTIMATE of landings.
+
+File 2: Create a file with Region, [Subregion], Stock, Group = Name, English Name, Scientific Name, Source, and a whole bunch of year columns that you populate using the various R files shared by Alfredo. This file can probably be trimmed down but for now I recommend formatting it exactly as it appears from before.
+
+```{r File 1 - Stock Timeseries (JC data)}
+# CONAPESCA data shared by JC
+# These data were shared with us by Juan Carlos Villaseñor and originally accessed on September 26, 2025 from this GitHub repository: https://github.com/mex-fisheries
+
+MexLandings_2000.present<- readRDS(here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/mex_landings/data/clean/mex_landings_2000_present.rds"))
+# n = 12,153,879 records from all states in Mexico from January 2000 through January 2025
+
+
+# Skimming through the dat. What does it look like?
+# Yes aquaculture production
+# Records up to January, 2025
+
+head(MexLandings_2000.present)
+
+table(MexLandings_2000.present$acuaculture_production)
+
+max(MexLandings_2000.present$year)
+max(MexLandings_2000.present$month[MexLandings_2000.present$year])
+```
+
+```{r Basic filtering}
+States_of_Interest<- c("BAJA CALIFORNIA", "BAJA CALIFORNIA SUR", "SONORA", "SINALOA", "NAYARIT", "JALISCO")
+
+# PENDING: HERE IS WHERE WE COULD FILTER BY MUNICIPALITY
+# Landing_Sites_of_Interest<- c(...)
+
+MexLandings_filtered<- MexLandings_2000.present %>% filter(state %in% States_of_Interest)
+# n obs.= 4,713,144 (-7,440,735 obs)
+
+table(MexLandings_filtered$fleet)
+# large_scale small_scale 
+#      181823     1438462 
+table(MexLandings_filtered$acuaculture_production) 
+#there are also mariculture landings in this dataset and NAs in this column...
+
+FisheryLandings_filtered<- MexLandings_filtered %>% filter(acuaculture_production== "NO" | is.na(acuaculture_production)) # 4684000 obs.
+
+MaricultureLandings_filtered<- MexLandings_filtered %>% filter(acuaculture_production== "SÍ")
+# n obs.= 29,144 (-4,684,000 obs)
+
+# NOTE: SOME RECORDS ARE NOT APPENDED WITH INFORMATION ABOUT RECORD TYPE: no information on wild-catch versus aquaculture. For this preliminary analyses, these records are assumed to be landings from fishery operations and are included.
+
+table(FisheryLandings_filtered$year)
+
+# OTRAS_filtered<- MexLandings_filtered %>% filter(main_species_group== "OTRAS")
+# n obs.= 715.547 (-1,011,581 obs)
+```
+
+```{r Summary table}
+# Turn off scientific notation:
+options(scipen = 999)
+
+# Create timeseries FILE 1
+head(FisheryLandings_filtered)
+
+StateLandings_AnnualSummary_byTaxa <- FisheryLandings_filtered %>%
+  select(year, state, main_species_group, live_weight, landed_weight, value) %>%
+  group_by(main_species_group, year, state) %>%
+  summarise(
+    Total_Live_Biomass = sum(live_weight, na.rm = TRUE),
+    Total_Landed_Biomass = sum(landed_weight, na.rm = TRUE),
+    Total_Value = sum(value, na.rm = TRUE),
+    n_Records = n(),
+    .groups = "drop"  # optional: ungroup after summarising
+  )
+
+TotalLandings_AnnualSummary_byTaxa <- FisheryLandings_filtered %>%
+  select(year, main_species_group, live_weight, landed_weight, value) %>%
+  group_by(main_species_group, year) %>%
+  summarise(
+    Total_Live_Biomass = sum(live_weight, na.rm = TRUE),
+    Total_Landed_Biomass = sum(landed_weight, na.rm = TRUE),
+    Total_Value = sum(value, na.rm = TRUE),
+    n_Records = n(),
+    .groups = "drop"  # optional: ungroup after summarising
+  )
+
+File1_df<- TotalLandings_AnnualSummary_byTaxa
+
+# Re-name column
+colnames(File1_df)[colnames(File1_df) == "main_species_group"] <- "Stock"
+colnames(File1_df)[colnames(File1_df) == "year"] <- "Year"
+```
+## SAVE FILE 1
+```{r SAVE FILE 1}
+write.csv(File1_df, "~/ohi_goc_prep/FP/CMSY/File1_UNDER_CONSTRUCTION_Oct 22 2025.csv", row.names = FALSE)
+```
+
+```{r Create File 2 (Metadata File) based on File 1}
+# STEP 1:
+# Which taxa (stocks) do we want to account for in our File 2?
+Stock_names<- unique(File1_df$Stock)
+# don’t 57 unique taxa
+
+## Read in the column names of File 2 from Ferrer et al. (2022) CSV file
+headers <- names(read.csv("Ferrer et al 2021_File 2_Stocks Metadata.csv", nrows = 1))
+
+## Create an empty dataframe with the same headers
+File2_df <- data.frame(matrix(ncol = length(headers), nrow = 0))
+colnames(File2_df) <- headers
+
+## Add Stock_names to the 'Stock' column
+File2_df <- File2_df[1:length(Stock_names), ]  # Expand rows
+File2_df$Stock <- Stock_names
+
+## Reset rownames / the index column numbered 1-57
+rownames(File2_df) <- NULL
+
+
+# STEP 2:
+# Trim some of the columns off this file or re-name:
+File2_df <- File2_df[ , !(names(File2_df) %in% c("ID", "Subregion", "Group", "Name")) ]
+colnames(File2_df)[colnames(File2_df) == "Keep"] <- "Sufficient_No_Years"
+colnames(File2_df)[colnames(File2_df) == "Pick"] <- "Yes_Run"
+
+
+# STEP 3:
+# Fill in some of the columns off this file:
+File2_df$Region <- c("GOC")
+File2_df$Class <- c("TBD")
+File2_df$Source <- c("JC_data")
+
+
+# STEP 4:
+# For species with less than 10 years of data, do not keep (Keep = 0)
+StockYears_per_Taxa <- File1_df %>%
+  group_by(Stock) %>%
+  summarise(n_Stock_Years = n_distinct(Year), .groups = "drop")
+
+StockYears_per_Taxa <- StockYears_per_Taxa %>%
+  mutate(Sufficient_No_Years = ifelse(n_Stock_Years < 10, 0, 1))
+
+## How many stocks will we be keeping based on number of years?
+table(StockYears_per_Taxa$Sufficient_No_Years)
+## We will keep 54 out of 57 stocks, exclude 3
+
+##  Add this information to the File 2 dataframe: join StockYears_per_Taxa to File2_df by "Stock", bringing in the filled Sufficient_No_Years column
+File2_df <- File2_df %>%
+  select(-Sufficient_No_Years) %>%  # Remove empty column to avoid duplicates
+  left_join(
+    StockYears_per_Taxa %>% select(Stock, Sufficient_No_Years),
+    by = "Stock"
+  )
+
+# STEP 5:
+# Re-order columns:
+File2_df <- File2_df[c(1, 3, 2, 4:5, 6, 37, 39, 38, 7:36)]
+```
+
+## SAVE FILE 2
+```{r SAVE FILE 2}
+# NEXT STEPS: Fill in the rest of column 2 using the ancillary files shared by Alfredo in Ferrer et al. (2022)
+write.csv(File2_df, "~/ohi_goc_prep/FP/CMSY/File2_UNDER_CONSTRUCTION_Oct 22 2025.csv", row.names = FALSE)
+```
+
+# RUNNING CMSY WITH FILES 1 & 2
