@@ -1,0 +1,257 @@
+---
+title: 'OHI GoC 2025: Clean Waters: Chl-A'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Global Ocean Colour (Copernicus-GlobColour), Bio-Geo-Chemical, L4 (monthly and interpolated) from Satellite Observations (1997-ongoing): Chlorophyll-A concentration
+
+For the Global Ocean Satellite Observations, ACRI-ST company (Sophia Antipolis, France) is providing Bio-Geo-Chemical (BGC) products based on the Copernicus-GlobColour processor.
+
+*Upstreams:* SeaWiFS, MODIS, MERIS, VIIRS-SNPP & JPSS1, OLCI-S3A & S3B for the ""multi"" products, and S3A & S3B only for the ""olci"" products.
+
+*Variables:* Chlorophyll-a (CHL), Phytoplankton Functional types and sizes (PFT), Primary Production (PP), Suspended Matter (SPM), Secchi Transparency Depth (ZSD), Diffuse Attenuation (KD490), Particulate Backscattering (BBP), Absorption Coef. (CDM) and Reflectance (RRS).
+
+*Temporal resolutions:* monthly plus, for some variables, daily gap-free based on a space-time interpolation to provide a ""cloud free"" product.
+
+*Spatial resolutions:* 4 km and a finer resolution based on olci 300 meters inputs.
+
+Recent products are organized in datasets called Near Real Time (NRT) and long time-series (from 1997) in datasets called Multi-Years (MY).
+
+To find the Copernicus-GlobColour products in the catalogue, use the search keyword ""GlobColour""."
+
+*DOI (product):*
+https://doi.org/10.48670/moi-00281
+
+*Product identifier*
+OCEANCOLOUR_GLO_BGC_L4_MY_009_104
+
+*Product name*
+Global Ocean Colour (Copernicus-GlobColour), Bio-Geo-Chemical, L4 (monthly and interpolated) from Satellite Observations (1997-ongoing)
+
+*Dataset*
+Plankton, multi-sensor (4 km), monthly   ·   cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M
+
+<https://data.marine.copernicus.eu/product/OCEANCOLOUR_GLO_BGC_L4_MY_009_104/download?dataset=cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M_202411> 
+
+## Setup
+
+```{r}
+# load packages
+if (!require(librarian)){
+  install.packages("librarian")
+  library(librarian)
+}
+
+librarian::shelf(
+  here,
+  CopernicusMarine,
+  janitor,
+  raster,
+  terra,
+  maps,
+  httr,
+  jsonlite,
+  purrr,
+  tictoc,
+  sf, 
+  googleVis,
+  RColorBrewer,
+  foreach,
+  doParallel, # for using multiple cores, if needed
+  tidyverse, 
+  ohicore,
+  ggplot2,
+  reticulate, # for python coding
+  ncmeta,
+  ncdf4,
+  plotly
+)
+
+# ---- set year and file path info ----
+current_year <- 2025 # Update this in the future!!
+version_year <- paste0("v",current_year)
+data_dir_version_year <- paste0("d", current_year)
+
+# ---- data directories ----
+
+# Raw data directory (on Mazu)
+raw_data_dir <- here::here("/home/shares/ohi/OHI_GOC/_raw_data")
+
+# CMS (Copernicus Marine Service) raw data directory
+cms_dir <- here(raw_data_dir, "CMS", data_dir_version_year)
+
+# cw dir
+cw_dir <- here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025")
+
+# output data dir for intermediate data products
+int_dir <- here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int")
+
+# where to save monthly rasters
+int_monthly_dir <- here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/monthly_rasters")
+# dir.create(int_dir) # to create the path on Mazu if it has not already been done
+
+# set colors
+cols = rev(colorRampPalette(brewer.pal(9, 'Spectral'))(255)) # rainbow color scheme
+```
+
+## Install copernicusmarine tool in python
+
+For the next two chunks, we will be using a Python Library API (Application Programming Interface) to automate the download of the data.
+
+
+```{python}
+# first, we need to install the CMS tool using python!
+
+# these are "modules", much like packages in R
+import sys
+import subprocess
+
+def install(package): # a function to download the copernicusmarine package
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package]) # `sys.executable` is the path to the python executable. for example, "/usr/bin/python3".  This makes the process more reproducible because on the server the sys.executable for python could be different based on the individual.
+    #"-m" tells the Python interpreter to run a module, in this case "pip", as a script, using the new function "install" that we created using `def` and inputting the name of the function for the variable "package"
+
+try:
+    install("copernicusmarine") # use the function to download the package
+    import copernicusmarine # will import the package copernicusmarine.
+    # if the package is already installed, the rest of the code will be skipped
+except ImportError:
+    print(f"Installing copernicusmarine...") # if it does not work, this will print in the console. 
+
+print(f"copernicusmarine version: {copernicusmarine.__version__}") # if correctly downloaded, then it will print the version
+# copernicusmarine version: 2.2.3
+```
+
+If that is not updating, then restart R and run this chunk:
+
+```{r}
+library(reticulate)
+
+# point reticulate to the same virtual environment you installed into
+use_virtualenv("~/.virtualenvs/r-reticulate", required = TRUE)
+
+# force the reinstall (to be sure)
+py_install("copernicusmarine", pip = TRUE, upgrade = TRUE)
+
+# check the version from R
+py_run_string("import copernicusmarine; print(copernicusmarine.__version__)")
+```
+
+# Automated download of raw data
+
+## New Data Download (Copernicus Marine Service, 1997 - 2025; Downloaded October 28th, 2025)
+
+In Quarto documents, you are able to fluidly exchange between python and R code by specifying what language will be used in the chunk name.
+This is extremely helpful for us, as it allows us to use the python API on the [CMS website](https://data.marine.copernicus.eu/product/MULTIOBS_GLO_BIO_CARBON_SURFACE_REP_015_008/download).
+Here are the steps to download the data properly:
+
+1.  Login to CMS: go to their website and make your username and password. It is quick and should be usable immediately after the credentials have been made.
+2.  Go to <https://data.marine.copernicus.eu/product/OCEANCOLOUR_GLO_BGC_L4_MY_009_104/download?dataset=cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M_202411>. This is the link to the "Global Ocean Surface Carbon" product. Ensure that you read the overview and check for any changes from the previous year (references, characteristics, etc).
+3.  Click the "Download data" button. FYI: the button itself does not have words on it, it is just an arrow pointing downwards. It is in the upper right hand corner of the page, next to the star and map icons.
+4.  This will bring you to their graphical tool download page. For the [**Variables**]{.underline}, "Clear all" and select "Chlorophyll-a concentration - Uncertainty estimationCHL_uncertainty [%]", "Mass concentration of chlorophyll a in sea waterCHL [mg/m3]", and "Status flag". Scroll to the bottom of the page, and under **Date Range**, specify 01/09/1997, 00:00 to 01/09/2025, 00:00.
+5.  After, instead of clicking the dark blue "Download" button, you will select the grey "Automate" button. Select Python API, and copy the `copernicusmarine.subset()` code. **This would be pasted starting from `copernicus.subset(...` to `...disable_progress_bar=False,`**
+
+```{python}
+
+import os
+import copernicusmarine
+
+# set the credentials made on the CMS website
+copernicusmarine.login(username='smanos', password='OHI_GOC_copernicus_2025') 
+# v2024: INFO - 2024-07-30T16:04:43Z - Credentials file stored in /home/lecuona/.copernicusmarine/.copernicusmarine-credentials.
+
+# define cms_dir, since the python chunk cannot read objects from previous R chunks/in your environment
+cms_dir = os.path.join("/home/shares/ohi/OHI_GOC/_raw_data/CMS/d2025") # for the specific CMS folder within _raw_data
+
+# make sure the directory exists
+os.makedirs(cms_dir, exist_ok=True) # will create the dir if it does not already exist
+
+# use copernicusmarine to download the data --this is from the python API copyable code on the CMS site
+# ============== Update each year!!!!================
+copernicusmarine.subset( # start of copied code from CMS website
+  dataset_id="cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M",
+  variables=["CHL"],
+  minimum_longitude=-118.52665401785711,
+  maximum_longitude=-98.83917589285713,
+  minimum_latitude=16.492029666573647,
+  maximum_latitude=34.17058145228793,
+  start_datetime="1997-09-01T00:00:00",
+  end_datetime="2025-09-01T00:00:00", # end of copied code from CMS website
+
+    output_filename=os.path.join(cms_dir, "global_ocean_color_chla.nc") ## This line is not copied!!! Need it to specify the Mazu directory for the data to download to
+    
+) # v2025 python API download code, which will download as a singular multi-layer NetCDF file (nc-file)
+
+print(f"Data downloaded to: {os.path.join(cms_dir, 'global_ocean_color_chla.nc')}") # print in console: data download finished! Data downloaded to: /home/shares/ohi/OHI_GOC/_raw_data/CMS/d2025/global_ocean_color_chla.nc
+```
+
+## Open as SpatRaster to explore
+
+```{r}
+# load the file as a SpatRaster to begin with, for greater usability with terra
+chla_raster <- terra::rast(here::here(cms_dir, "global_ocean_color_chla.nc")) # Warning: [rast] unknown calendar (assuming standard): Gregorian
+
+# check the current CRS
+crs(chla_raster) # v2025: ""GEOGCRS[\"WGS 84 (CRS84)\",\n".  
+plot(chla_raster) # to get a quick visualization of the multi-layer SpatRaster
+
+# since nc_raster is already loaded as a SpatRaster object
+# check the number of layers
+num_layers <- terra::nlyr(chla_raster)
+print(num_layers) # v2025: 337 layers, which *almost* makes sense because the data goes from 1997 - 2025 monthly, which is 336 months
+
+# get the time attribute for each layer, to check that it goes from 1997 - 2025 (v2025)
+time_attribute <- terra::time(chla_raster)
+print(time_attribute)  # v2025: yay! goes from "1997-09-01" to "2025-09-01".
+```
+
+## Save individual monthly tifs.
+
+```{r}
+# make a list to store individual rasters
+individual_rasters <- list()
+
+# loop through each layer and create individual rasters from the SpatRaster
+for (i in 1:num_layers) {
+  layer <- chla_raster[[i]] # the layer in the seq from 1:156 (v2024)
+  date <- time_attribute[i] # the month, in this case, of the raster
+  layer_name <- format(date, "%Y-%m-%d") # the name for the .tif when it is saved
+  individual_rasters[[layer_name]] <- layer # put them in the list 
+}
+
+# print the names of the individual rasters in the list, to ensure the loop worked
+names(individual_rasters) # v2025: "1997-09-01" to "2025-09-01"
+
+# save individual rasters to files on Mazu at `int_monthly_dir`
+tic()
+for (name in names(individual_rasters)) {
+  output_file <- file.path(int_monthly_dir, paste0(name, ".tif")) # move each raster to the specified path in Mazu
+  writeRaster(individual_rasters[[name]], filename = output_file, overwrite = TRUE) # if files already exist, overwrite them
+  print(paste("Saved:", output_file)) # allows us to see the names of the files as they are being saved
+} #great! check Mazu that files are all there
+toc() # v2025: 16.19 sec elapsed
+
+# let's take a look at one of the monthly rasters we just saved
+rast_2001_10_01 <- rast(here::here(int_monthly_dir, "2001-10-01.tif")) # read it in and rasterize it using terra
+plot(rast_2001_10_01, main = "Mean Chla Concentration - October 2001", xlab = "Longitude", ylab = "Latitude") # plot it!
+
+is.lonlat(rast_2001_10_01) # TRUE, so it does currently have a long/lat CRS
+crs(rast_2001_10_01) # v2025: GEOGCRS[\"WGS 84\",\n. We will have to reproject later. 
+```
+
