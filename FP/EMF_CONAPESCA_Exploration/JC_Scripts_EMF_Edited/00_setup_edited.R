@@ -1,7 +1,7 @@
 # Functions
-source(here::here("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/JC_Scripts_EMF_Edited/", "helpers_clean_dates.R"))
-source(here::here("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/JC_Scripts_EMF_Edited/", "helpers_clean_eu_names.R"))
-source(here::here("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/JC_Scripts_EMF_Edited/", "helpers_fix_rnpa.R"))
+source(here::here("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/JC_Scripts_EMF_Edited", "helpers_clean_dates.R"))
+source(here::here("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/JC_Scripts_EMF_Edited", "helpers_clean_eu_names.R"))
+source(here::here("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/JC_Scripts_EMF_Edited", "helpers_fix_rnpa.R"))
 # String-fixing function
 str_fix <- function(x) {
   x <- str_to_upper(x)        # String to upper
