@@ -6,17 +6,16 @@
 # juancvd@stanford.edu
 # date
 #
-# ERICA's NOTES / EDITS I MADE (Oct 29 2025):
-# I changed the working directory on files as necessary to load in the right functions, scripts, and data.
-# The raw data files come directly from Juan Carlos and are saved to the /home/shares/ohi/OHI_GOC/_raw_data directory, 
-# The edited script files, including this one, are save through the home/ferrer/ohi_goc_prep directory
-# I also edited the last couple of lines to include select("species_name") and saved this new dataframe to the home/ferrer/ohi_goc_prep directory
-#
+# ERICA's EDITS - Oct 29 2025
+# The raw data and output data for this file is included in the /home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/ directory
+# Small files (including this script) is included in the /home/ferrer/ohi_goc_prep directory
+# I made a few edits here and there with the objective of extracting the species names from the landings data.
+
 ################################################################################
 
 ## SET UP ######################################################################
 
-# Clear environment - EMF, Oct 29 2025
+# Clear environment
 rm(list=ls(all=T))
 
 # Load packages ----------------------------------------------------------------
@@ -25,14 +24,18 @@ pacman::p_load(
   tidyverse
 )
 
-# Load and define functions ----------------------------------------------------  
-source(here("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/JC_Scripts_EMF_Edited/00_setup.R"))
+library(dplyr)
+
+# Load and define functions ----------------------------------------------------
+source(here("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/JC_Scripts_EMF_Edited", "00_setup_edited.R"))
 
 # Load data --------------------------------------------------------------------
-old <- readRDS(here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/mex_landings/data/clean/", "mex_conapesca_avisos_2000_2019.rds")) |> 
+avisos_old_landings <- readRDS(here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/mex_landings/data/clean/", "mex_conapesca_avisos_2000_2019.rds")) |> 
   filter(year_cut <= 2017)
+# 8270314 obs.
 
-apertura <- readRDS(here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/mex_landings/data/clean/", "mex_conapesca_apertura_2018_present.rds"))
+apertura_newer_landings <- readRDS(here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/mex_landings/data/clean/", "mex_conapesca_apertura_2018_present.rds"))
+# 3883565 obs.
 
 months <- tibble(month_cut = c("ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"),
                  month = 1:12) 
@@ -40,8 +43,8 @@ months <- tibble(month_cut = c("ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JU
 ## PROCESSING ##################################################################
 
 # Combine and select columns ---------------------------------------------------
-landings <- bind_rows(old,
-                      apertura) |> 
+landings <- bind_rows(avisos_old_landings,
+                      apertura_newer_landings) |> 
   left_join(months, by = "month_cut")
 
 # Fix dates --------------------------------------------------------------------
@@ -71,13 +74,16 @@ final_landings_edited <- landings_fixed_dates |>
          vessel_rnpa,
          vessel_name,
          main_species_group,
-         species_name,
+         species_name, # I added this column, Erica - Oct 29 2025
          landed_weight,
          live_weight,
          value)
 
+# 12,153,879 obs. 
+
 ## EXPORT ######################################################################
 
 # Export file ------------------------------------------------------------------
-saveRDS(object = final_landings_edited,
-        file = here("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/JC_Scripts_EMF_Edited/", "mex_landings_2000_present_with_Species.rds"))
+# This creates all sorts of issues because it's so big.
+saveRDS(final_landings_edited, 
+        file = "/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/mex_landings_2000_present_EMF_edited.rds")
