@@ -7,8 +7,11 @@
 # date
 #
 # ERICA's EDITS - Oct 29 2025
-# The raw data and output data for this file is included in the /home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/ directory
-# Small files (including this script) is included in the /home/ferrer/ohi_goc_prep directory
+
+# The raw data for this file is included in the /home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/ directory.
+# The output data is stored in the /home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/ directory.
+# Small files (including this script) is included in the /home/ferrer/ohi_goc_prep directory.
+
 # I made a few edits here and there with the objective of extracting the species names from the landings data.
 
 ################################################################################
