@@ -494,9 +494,8 @@ write.csv(Fisheries_summaries_merged, "FIS/v2025/CONAPESCAdata_Summaries_Merged_
 ```
 
 
-# Explore: Species Names in CONAPESCA data ------------------------------
-
-```{r Species Explore}
+# Regenerating J.C. CONAPESCA data with species names ------------------------------
+```{r Regenerating J.C. CONAPESCA data with species names}
 # How many species are fished in the GoC?
 Species_data_dissertation <- read_csv("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/CONAPESCA_SpMasterFile_EMF.csv")
 length(unique(Species_data_dissertation$ScientificName))
@@ -549,7 +548,10 @@ length(unique(Landings_GoC$main_species_group))
 saveRDS(Landings_GoC, file="/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds")
 ```
 
-```{r Load in the Landings_GoC dataframe / skip the original prep}
+
+# Explore: Species Names in CONAPESCA data ------------------------------
+
+```{r Load in the Landings_GoC dataframe / skip the full file prep}
 Landings_GoC<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds"))
 # n = 3716415 obs.
 ```
@@ -739,7 +741,7 @@ keyword_list <- c(
 # Sort by descending length to match multi-word keywords first
 keyword_list <- keyword_list[order(nchar(keyword_list), decreasing = TRUE)]
 
-TopLanded_Sp <- Landings_GoC_filtered %>%
+TopLanded_Sp <- Landings_GoC_TopGroupings %>%
   select(main_species_group, recorded_species_name = species_name) %>%
   distinct() %>%
   
@@ -783,9 +785,84 @@ TopLanded_Sp <- TopLanded_Sp %>%
 
 unique(TopLanded_Sp$keyword_1)
 unique(TopLanded_Sp$recorded_species_name_clean)
+# 281 names
 
 #write.csv(TopLanded_Sp, "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/PrelimLook_CONAPESCA_SpeciesNames_Oct302025/TopLanded_Sp_Oct312025.csv", row.names = FALSE)
 ```
+```{r Playing around with the taxize package}
+library(taxize)
+library(worrms)
+library(stringr)
+library(tidyr)
+library(dplyr)
+library(rgbif)
+
+# Testing, testing, 1 2 3
+get_tsn("Gadus morhua")  # Atlantic cod
+classification("Gadus morhua", db = "itis")
+get_gbifid_("Magallana gigas", method= "backbone")
+get_gbifid_("ENGRAULIS", method= "backbone")
+get_gbifid_("ATUN", method= "backbone")
+
+library(taxize)
+
+# Step 1: Extract scientific names from parentheses
+TopLanded_Sp$scientific_name <- sub(".*\\(([^)]+)\\).*", "\\1", TopLanded_Sp$recorded_species_name_clean)
+TopLanded_Sp$scientific_name[!grepl("\\(", TopLanded_Sp$recorded_species_name_clean)] <- NA
+TopLanded_Sp$scientific_name <- trimws(TopLanded_Sp$scientific_name)
+
+# Convert to proper binomial capitalization
+capitalize_binomial <- function(x){
+  x <- tolower(x)                    # all lowercase
+  words <- strsplit(x, " ")[[1]]     # split words
+  if(length(words) >= 2){
+    words[1] <- paste0(toupper(substring(words[1],1,1)), substring(words[1],2))  # Genus capitalized
+    words[2] <- words[2]  # species lowercase
+    return(paste(words[1], words[2]))
+  } else {
+    return(x)
+  }
+}
+
+TopLanded_Sp$scientific_name_clean <- sapply(TopLanded_Sp$scientific_name, function(x){
+  if(!is.na(x)) capitalize_binomial(x) else NA
+})
+
+# Step 2: Unique names to query
+taxa_list <- unique(na.omit(TopLanded_Sp$scientific_name_clean))
+
+# Step 3: Get GBIF IDs safely
+# function to get classification from GBIF
+get_gbif_classification <- function(name){
+  # search for the name
+  res <- name_backbone(name = name, strict = FALSE)  # fuzzy search
+  if(is.null(res$species)) res$species <- NA
+  if(is.null(res$genus)) res$genus <- NA
+  if(is.null(res$family)) res$family <- NA
+  data.frame(
+    scientific_name = name,
+    species = res$species,
+    genus = res$genus,
+    family = res$family,
+    stringsAsFactors = FALSE
+  )
+}
+
+gbif_results <- do.call(rbind, lapply(taxa_list, get_gbif_classification))
+
+# Step 4: Merge
+# Merge GBIF taxonomy back to the original dataframe
+TopLanded_Sp <- merge(
+  TopLanded_Sp,
+  gbif_results,
+  by.x = "scientific_name_clean",   # column in your original df
+  by.y = "scientific_name",         # column in gbif_results
+  all.x = TRUE                      # keep all rows from TopLanded_Sp
+)
+
+#write.csv(TopLanded_Sp, "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/PrelimLook_CONAPESCA_SpeciesNames_Oct302025/TopLanded_Sp_Nov032025.csv", row.names = FALSE)
+```
+
 
 ```{r Next question: how many sp of Abulon and Anchoveta}
 unique(Landings_GoC$main_species_group)
