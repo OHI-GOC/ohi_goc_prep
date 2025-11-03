@@ -302,8 +302,8 @@ Formats: CSV
 Institution: Secretariat of Environment and Natural Resources (SEMARNAT)
 
 ```{r}
-"/home/shares/ohi/OHI_GOC/_raw_data/SEMARNAT/d2025"
-"sitios_remediados_geoportal.csv"
+# "/home/shares/ohi/OHI_GOC/_raw_data/SEMARNAT/d2025"
+# "sitios_remediados_geoportal.csv"
 
 remediated_sites <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SEMARNAT/d2025","sitios_remediados_geoportal.csv"))
 
@@ -336,6 +336,7 @@ colnames(remediated_sites_sf)
 mapview(remediated_sites_sf, zcol = "anio_conclusion_remediacion")
 
 ```
+
 ### Bind contamindated and remediated 
 
 They should not share their `numero_registro` id, they should either be contaminated or remediated.
@@ -424,12 +425,18 @@ sites_all_sf <- sites_all %>%
   st_as_sf(coords = c("longitud", "latitud"),
            crs = 4326, # WGS84
            remove = FALSE)
+
+inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
+
 sites_all_sf_trans <- st_transform(sites_all_sf, st_crs(inland_50))
 all_sites_50km <- st_intersection(sites_all_sf_trans, inland_50)
 
 mapview(all_sites_50km, zcol = "status_code") + mapview(inland_50)
 ```
 
+## Score 1: Are there sites in a region?
+
+If there are no sites in a region, they should get a 1.  If they have some sites in the region, then the concentration of sites should be considered. That will be sites per unit area.
 
 ```{r}
 summary(all_sites_50km) # no NAs in anio!
@@ -439,11 +446,95 @@ status_by_year <- all_sites_50km %>%
   st_drop_geometry() %>% 
   group_by(rgn_id, anio) %>%
   summarise(
-    n_sites = n(),
-    mean_status = mean(status_code, na.rm = TRUE),
-    score = mean_status * 100
-  )
+    n_sites = n()
+  ) # this is not a concentration of sites by area.  we need to do that!!
 ```
+
+### Cumulative hazardous waste site density by region:
+
+```{r}
+#--- 1. calculate region area (km^2) ---
+## this will be changed to be WATERSHED data in the future!!!!
+rgn_area <- inland_50 %>%
+  mutate(area_km2 = as.numeric(st_area(.) / 1e6)) %>%
+  st_drop_geometry() %>%
+  select(rgn_id, area_km2)
+```
+
+
+```{r}
+#--- 2. count sites per region and year ---
+sites_per_region <- all_sites_50km %>%
+  st_drop_geometry() %>%
+  mutate(anio = as.numeric(anio)) %>%
+  group_by(rgn_id, anio) %>%
+  summarise(n_sites = n(), .groups = "drop") %>%
+  left_join(rgn_area, by = "rgn_id")
+```
+
+
+```{r}
+#--- 3. expand to full year sequence per region, at least as much as possible ---
+sites_expanded <- sites_per_region %>%
+  group_by(rgn_id) %>%
+  complete(anio = seq(min(anio, na.rm = TRUE), max(anio, na.rm = TRUE))) %>% # note that since this is grouped by region that you might see certain regions only having one year of data, because their min and max are that year.  even after using complete()
+  replace_na(list(n_sites = 0)) %>%
+  fill(area_km2, .direction = "downup") %>% # filling in the area for that region for all years
+  arrange(anio) %>% # arrange so that the year is ascending per region id.
+  
+  #--- 4. cumulative sum of sites per region ---
+  mutate(
+    cum_sites = cumsum(n_sites),
+    density_cum = cum_sites / area_km2
+  ) %>%
+  ungroup()
+```
+
+
+```{r}
+#--- 5. rescale density to 0 to 1 per year (1 = best, 0 = worst) ---
+score1_cumulative <- sites_expanded %>%
+  mutate(
+    score1 = 1 - (density_cum / max(density_cum, na.rm = TRUE)), # essentially, across all years, if the density_cum of that row divided by the maximum density_cum across all observations. 
+    # if a score1 is = 0, then that is because that observation was the max overall. Oof!
+    score1_100 = score1 * 100,
+    rgn_id = as.factor(rgn_id),
+    anio = as.numeric(anio),
+    score1_100 = as.numeric(score1_100)
+  )
+
+```
+
+```{r}
+library(plotly)
+
+score1_cumulative_plotly <- plotly::plot_ly(
+  score1_cumulative, 
+  x = ~anio, 
+  y = ~score1_100, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "Score 1: Cumulative site density rescaled against the maxmimum density across all years",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(score1_cumulative$anio), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+score1_cumulative_plotly
+
+# htmlwidgets::saveWidget(score1_cumulative_plotly, here::here("CW/v2025/int","hazardous_sites_score1_110325.html"), selfcontained = TRUE)
+```
+
+
+## Score 2: do those sites have plans to be remediated, and to what extent are they?
 
 We actually need to make this cumulative!!!! An example of how that would look:
 
@@ -455,35 +546,33 @@ We actually need to make this cumulative!!!! An example of how that would look:
 
 The goal would be to have all sites remediated, 100/100.
 
-#### Score: cumulative
-
 ```{r}
 ### cumulative version: HAS DUPLICATES
-status_all_cumulative <- all_sites_50km %>%
-  st_drop_geometry() %>%
-  mutate(anio = as.numeric(anio)) %>% # make sure it is numeric
-  group_by(rgn_id) %>%
-  arrange(rgn_id, anio) %>% # make sure years are in order for cumulative logic
-  group_modify(~ { # expand all combinations of region and year
-    df <- .
-    all_years <- seq(min(df$anio, na.rm = TRUE), max(df$anio, na.rm = TRUE))
-    df_expanded <- tidyr::expand_grid(anio = all_years) %>%
-      left_join(df, by = "anio")
-    
-    # cumulative calculation
-    df_expanded %>%
-      mutate(
-        n_sites_total = cumsum(!is.na(status_code)),
-        sum_status = cumsum(replace_na(status_code, 0)),
-        mean_status = if_else(n_sites_total > 0, sum_status / n_sites_total, NA_real_),
-        score = mean_status * 100
-      )
-  }) %>%
-  ungroup() %>%
-  select(rgn_id, anio, n_sites_total, mean_status, score)
+# score2_cumulative <- all_sites_50km %>%
+#   st_drop_geometry() %>%
+#   mutate(anio = as.numeric(anio)) %>% # make sure it is numeric
+#   group_by(rgn_id) %>%
+#   arrange(rgn_id, anio) %>% # make sure years are in order for cumulative logic
+#   group_modify(~ { # expand all combinations of region and year
+#     df <- .
+#     all_years <- seq(min(df$anio, na.rm = TRUE), max(df$anio, na.rm = TRUE))
+#     df_expanded <- tidyr::expand_grid(anio = all_years) %>%
+#       left_join(df, by = "anio")
+#     
+#     # cumulative calculation
+#     df_expanded %>%
+#       mutate(
+#         n_sites_total = cumsum(!is.na(status_code)),
+#         sum_status = cumsum(replace_na(status_code, 0)),
+#         mean_status = if_else(n_sites_total > 0, sum_status / n_sites_total, NA_real_),
+#         score = mean_status * 100
+#       )
+#   }) %>%
+#   ungroup() %>%
+#   select(rgn_id, anio, n_sites_total, mean_status, score)
 
 ## fixing duplicates
-status_all_cumulative_no_dups <- all_sites_50km %>%
+score2_cumulative <- all_sites_50km %>%
   st_drop_geometry() %>%
   mutate(anio = as.numeric(anio)) %>%
   group_by(rgn_id) %>%
@@ -506,42 +595,42 @@ status_all_cumulative_no_dups <- all_sites_50km %>%
         n_sites_total = cumsum(!is.na(mean_status)),
         sum_status = cumsum(replace_na(mean_status, 0)),
         mean_status = if_else(n_sites_total > 0, sum_status / n_sites_total, NA_real_),
-        score = mean_status * 100
+        score2_100 = mean_status * 100
       )
   }) %>%
   ungroup() %>%
-  select(rgn_id, anio, n_sites_total, mean_status, score)
+  select(rgn_id, anio, n_sites_total, mean_status, score2_100)
 ```
 
-##### Plotlys
+##### Plotly
 
 ```{r}
 library(plotly)
 
-## plot the score over time
-all_hazardous_sites_plotly <- plotly::plot_ly(
-  status_all_cumulative_no_dups, 
+## plot the score2 over time
+score2_cumulative_plotly <- plotly::plot_ly(
+  score2_cumulative, 
   x = ~anio, 
-  y = ~score, 
+  y = ~score2_100, 
   color = ~rgn_id, 
   type = "scatter", 
   mode = "lines"
 ) %>% 
   layout(
-    title = "CURRENT STATUS: Mean status of remediation for all hazardous sites within a region",
+    title = "Score 2: Cumulative percent remediation for all hazardous sites within a region",
     xaxis = list(title = "Año // Year"),
     yaxis = list(title = "Puntaje // Percent (out of 100)")
   ) %>%
   add_lines(
-    x = range(status_all_cumulative_no_dups$anio), 
+    x = range(score2_cumulative$anio), 
     y = c(100, 100),
     line = list(color = "black", width = 2, dash = "dash"),
     name = "Meta // Goal (100/100)",
     inherit = FALSE
   )
-all_hazardous_sites_plotly
+score2_cumulative_plotly
 
-htmlwidgets::saveWidget(all_hazardous_sites_plotly, here::here("CW/v2025/int","hazardous_sites_pct_remediation_score_102425.html"), selfcontained = TRUE)
+htmlwidgets::saveWidget(score2_cumulative_plotly, here::here("CW/v2025/int","hazardous_sites_score2_110325.html"), selfcontained = TRUE)
 ```
 
 Gut check with a plotly of cumulative sites over time:
@@ -549,9 +638,9 @@ Gut check with a plotly of cumulative sites over time:
 ```{r}
 library(plotly)
 
-## plot the score over time
+## plot the score2 over time
 sites_plotly <- plotly::plot_ly(
-  status_all_cumulative_no_dups, 
+  score2_cumulative, 
   x = ~anio, 
   y = ~n_sites_total, 
   color = ~rgn_id, 
@@ -572,7 +661,7 @@ sites_plotly
 #### Gapfilled options
 
 ```{r}
-#### cumulative version gapfilled between years
+#### cumulative version of score2 gapfilled between years
 
 status_all_cumulative_gf <- all_sites_50km %>%
   st_drop_geometry() %>%
@@ -613,9 +702,6 @@ status_all_cumulative_gf <- all_sites_50km %>%
 
 ```{r}
 ### updates cumulative with full gapfilling
-library(dplyr)
-library(tidyr)
-
 # to find the full range of years across all regions
 all_years <- seq(min(all_sites_50km$anio, na.rm = TRUE),
                  max(all_sites_50km$anio, na.rm = TRUE))
@@ -699,21 +785,61 @@ status_all_cumulative_gf_max <- all_sites_50km %>%
 ```
 
 
+## Average Score1+2
+
+Making the full current status by joining score1_cumulative and score2_cumulative:
+
+```{r}
+final_hazardous_indicator <- score1_cumulative %>%
+  select(rgn_id, anio, score1 = score1_100) %>%
+  left_join(score2_cumulative %>%
+              select(rgn_id, anio, score2 = score2_100), 
+            by = c("rgn_id", "anio")) %>%
+  mutate(
+    final_score = rowMeans(select(., score1, score2), na.rm = TRUE)
+  )
+```
+
+```{r}
+library(plotly)
+
+## plot final_score over time
+final_hazardous_indicator_plotly <- plotly::plot_ly(
+  final_hazardous_indicator, 
+  x = ~anio, 
+  y = ~final_score, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: Coastal Hazardous Waste Sites as Point Sources",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(final_hazardous_indicator$anio), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+final_hazardous_indicator_plotly
+
+htmlwidgets::saveWidget(final_hazardous_indicator_plotly, here::here("CW/v2025/int","hazardous_sites_current_status_110325.html"), selfcontained = TRUE)
+```
 
 
-## Estimated generation of hazardous waste by type of waste
+# Estimated generation of hazardous waste by type of waste
 
 Estimated annual generation of hazardous waste by type of waste under ASEA's jurisdiction, from 2017 to 2023. State and municipal data with information on waste type, sector, and estimated generation.
 
 Category: Environment
-
 Formats: CSV
-
 Institution: Agency for Safety, Energy and Environment (ASEA)
 
 ```{r}
-"/home/shares/ohi/OHI_GOC/_raw_data/ASEA/d2025"
-"ASEA_3_Generacio_n_estimada_de_residuos_peligrosos_por_tipo_de_residuo_2017-2023.csv"
+ASEA_3_Generacio_n_estimada_de_residuos_peligrosos_por_tipo_de_residuo_2017 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/ASEA/d2025", "ASEA_3_Generacio_n_estimada_de_residuos_peligrosos_por_tipo_de_residuo_2017-2023.csv"))
 ```
 
 
