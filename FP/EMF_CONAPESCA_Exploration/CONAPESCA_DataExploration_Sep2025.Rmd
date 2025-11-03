@@ -14,6 +14,7 @@ rm(list=ls(all=T))
 # Read In
 library(here)
 library(readxl)
+library(readr)
 # Data Processing
 library(tidyverse)
 library(dplyr)
@@ -497,7 +498,7 @@ write.csv(Fisheries_summaries_merged, "FIS/v2025/CONAPESCAdata_Summaries_Merged_
 
 ```{r Species Explore}
 # How many species are fished in the GoC?
-Species_data_dissertation <- read_csv("CONAPESCA_Sp_MasterFile_EMF.csv")
+Species_data_dissertation <- read_csv("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/CONAPESCA_SpMasterFile_EMF.csv")
 length(unique(Species_data_dissertation$ScientificName))
 # At least 496 unique species, according to a study I did in my dissertation (focused on a smaller sub-set of fisheries and area).
 
@@ -527,7 +528,7 @@ temp_df <- Landings_NWMexico %>%
   )
 
 table(temp_df$GoC)
-# 4713144 (total) - 996729 (no) = 3716415 (yes or NA) obs. are explicitly in the GoC or have NA in this column.
+# 4713144 (total) - 996729 (no) = 3716415 obs. that are explicitly as "yes" in the GoC or NA. I have removed entries that are definitely "no" not in the Gulf.
 
 # Generate filtered landings data for the GoC:
 Landings_GoC <- temp_df %>%
@@ -544,6 +545,15 @@ length(unique(Landings_GoC$main_species_group))
 ```
 1693 unique species in the Gulf of California according to Juan Carlos' version of the CONAPESCA data base, keeping in mind that these are not really SPECIES (per se) but rather log-book entries for species.
 
+```{r Save the Landings_GoC dataframe}
+saveRDS(Landings_GoC, file="/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds")
+```
+
+```{r Load in the Landings_GoC dataframe / skip the original prep}
+Landings_GoC<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds"))
+# n = 3716415 obs.
+```
+
 ```{r What if we do some filtering by groups?}
 # How many species (log-book entries) are there per grouping?
 Species_summary_table <- Landings_GoC %>%
@@ -557,10 +567,72 @@ Landings_GoC_filtered <- Landings_GoC %>%
 # 3185035 obs.
 
 length(unique(Landings_GoC_filtered$species_name))
-GoC_Species<- unique(Landings_GoC_filtered$species_name)
-# 1246 unique species...
+# 1246 unique species, exluding otras and ornamentals...
 # Still a lot...
 
+# Start filtering out species names from notes about their preparation: 
+
+# List of all key terms (these terms are not names, they are preparation notes):
+keyword_list <- c(
+  "DESC", "IND", "ENT", "FCO", "DESV", "S", "FCA", "DES", "DSC", 
+  "ECO", "CONG", "CONGELADO", "DE CULTIVO", "DE CULTIVO VIVO", 
+  "FILETE", "FILETE DE", "ECA", "CABEZA DE", "FILETE DE ECO", 
+  "PIEL DE ECA", "PIEL DE SECA", "ALETA ECA DE", "DESCABEZADO", "FRESCO", "SECO DE", "ALETA", "SECA", "SECA DE", "SECO", "SECO DE", "DE ALTA MAR", "ENTERO",
+  "POLVO DE", "CONCHA DE", "COCINERO"
+)
+
+# Sort by descending length to match multi-word keywords first
+keyword_list <- keyword_list[order(nchar(keyword_list), decreasing = TRUE)]
+
+GoC_Sp <- Landings_GoC_filtered %>%
+  select(main_species_group, recorded_species_name = species_name) %>%
+  distinct() %>%
+  
+  # Extract keywords as whole words with optional punctuation
+  mutate(
+    keywords = str_extract_all(
+      recorded_species_name,
+      paste0("\\b(", paste(keyword_list, collapse="|"), ")\\b[.,]?")
+    )
+  ) %>%
+  
+  # Pad for unnesting (if you want fixed number of columns)
+  mutate(keywords = lapply(keywords, function(x) { length(x) <- 5; x })) %>%
+  unnest_wider(keywords, names_sep = "_") %>%
+  rename(
+    keyword_1 = keywords_1,
+    keyword_2 = keywords_2,
+    keyword_3 = keywords_3,
+    keyword_4 = keywords_4,
+    keyword_5 = keywords_5
+  ) %>%
+  
+  # Remove keywords from species name, except for "TIBURON ALETA BLANCA"
+  rowwise() %>%
+  mutate(
+    recorded_species_name_clean = if_else(
+      recorded_species_name == "TIBURON ALETA BLANCA",
+      recorded_species_name,  # leave as-is
+      str_remove_all(
+        recorded_species_name,
+        paste0("\\b(", paste(keyword_list, collapse="|"), ")\\b[.,]?")
+      )
+    ),
+    recorded_species_name_clean = str_remove_all(recorded_species_name_clean, "\\bY\\b"),
+    recorded_species_name_clean = str_squish(recorded_species_name_clean)
+  ) %>%
+  ungroup()
+
+GoC_Sp <- GoC_Sp %>%
+  arrange(main_species_group, recorded_species_name_clean)
+
+unique(GoC_Sp$keyword_1)
+unique(GoC_Sp$recorded_species_name_clean)
+
+#write.csv(GoC_Sp, "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/PrelimLook_CONAPESCA_SpeciesNames_Oct302025/AllGoC_SpKey_Oct312025.csv", row.names = FALSE)
+```
+
+```{r Top Landed Species}
 # What if I filtered by the top catch groupings over the last 10 years?
 Landings_GoC_cumulative.contributions <- Landings_GoC_filtered %>%
   filter(year > 2014 & year < 2025) %>%
@@ -587,7 +659,7 @@ Landings_GoC_cumulative.contributions <- Landings_GoC_filtered %>%
 
 # Create a list of main_species_group for which percent_state catch was >= than 10% (during this timeframe)
 
-Landings_GoC_TopGroupings <- Landings_GoC_filtered %>%
+Landings_GoC_TopGroupings_summary <- Landings_GoC_filtered %>%
   filter(year > 2014 & year < 2025) %>%
   select(state, main_species_group, live_weight) %>%
   group_by(state, main_species_group) %>%
@@ -600,30 +672,26 @@ Landings_GoC_TopGroupings <- Landings_GoC_filtered %>%
   filter(Percent_of_State >= 10) %>%
   ungroup()
 
-TopLandedGroupings<- unique(Landings_GoC_TopGroupings$main_species_group)
+TopLandedGroupings<- unique(Landings_GoC_TopGroupings_summary$main_species_group)
 
 # Which groups would we be dropping?
 setdiff(Landings_GoC_filtered$main_species_group,
-        Landings_GoC_TopGroupings$main_species_group)
+        Landings_GoC_TopGroupings_summary$main_species_group)
 
 unique(Landings_GoC_filtered$main_species_group)
-unique(Landings_GoC_TopGroupings$main_species_group)
-
-# Export these species as a dataframe and I'll append the species info offline:
-#TopLanded_Sp <- data.frame(TopLandedGroupings)
-#write.csv(TopLanded_Sp, "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/TopLanded_Sp_Oct312025.csv", row.names = FALSE)
-
+unique(Landings_GoC_TopGroupings_summary$main_species_group)
 
 # Okay, so now let's filter for only the Top Landed Groupings
-Landings_GoC_filtered <- Landings_GoC %>%
+Landings_GoC_TopGroupings <- Landings_GoC %>%
   filter(main_species_group %in% TopLandedGroupings)
 # 1757236 obs.
-length(unique(Landings_GoC_filtered$species_name))
+
+length(unique(Landings_GoC_TopGroupings$species_name))
 # Only 600 species according to this filtration!
-GoC_Species_filtered<- unique(Landings_GoC_filtered$species_name)
+unique(Landings_GoC_TopGroupings$species_name)
 
 # But how much (biomass) information do we lose when we filter like this?
-TotalBiomass_TopGroupings<- Landings_GoC_filtered %>%
+TotalBiomass_TopGroupings<- Landings_GoC_TopGroupings %>%
   filter(year > 2014 & year < 2025) %>%
   select(state, live_weight) %>%
   group_by(state) %>%
@@ -654,6 +722,69 @@ BiomassCompare_AllvsTopGroupings <- BiomassCompare_AllvsTopGroupings %>%
   )
 
 # The short answer is that we lose anywhere from 15-41% of the biomass, depending on the state.
+
+# Export these species as a dataframe and I'll append the species info offline:
+```
+
+```{r filtering out keywords to get at species}
+# List of all key terms
+keyword_list <- c(
+  "DESC", "IND", "ENT", "FCO", "DESV", "S", "FCA", "DES", "DSC", 
+  "ECO", "CONG", "CONGELADO", "DE CULTIVO", "DE CULTIVO VIVO", 
+  "FILETE", "FILETE DE", "ECA", "CABEZA DE", "FILETE DE ECO", 
+  "PIEL DE ECA", "PIEL DE SECA", "ALETA ECA DE", "DESCABEZADO", "FRESCO", "SECO DE", "ALETA", "SECA", "SECA DE", "SECO", "SECO DE", "DE ALTA MAR", "ENTERO",
+  "POLVO DE", "CONCHA DE", "COCINERO"
+)
+
+# Sort by descending length to match multi-word keywords first
+keyword_list <- keyword_list[order(nchar(keyword_list), decreasing = TRUE)]
+
+TopLanded_Sp <- Landings_GoC_filtered %>%
+  select(main_species_group, recorded_species_name = species_name) %>%
+  distinct() %>%
+  
+  # Extract keywords as whole words with optional punctuation
+  mutate(
+    keywords = str_extract_all(
+      recorded_species_name,
+      paste0("\\b(", paste(keyword_list, collapse="|"), ")\\b[.,]?")
+    )
+  ) %>%
+  
+  # Pad for unnesting (if you want fixed number of columns)
+  mutate(keywords = lapply(keywords, function(x) { length(x) <- 5; x })) %>%
+  unnest_wider(keywords, names_sep = "_") %>%
+  rename(
+    keyword_1 = keywords_1,
+    keyword_2 = keywords_2,
+    keyword_3 = keywords_3,
+    keyword_4 = keywords_4,
+    keyword_5 = keywords_5
+  ) %>%
+  
+  # Remove keywords from species name, except for "TIBURON ALETA BLANCA"
+  rowwise() %>%
+  mutate(
+    recorded_species_name_clean = if_else(
+      recorded_species_name == "TIBURON ALETA BLANCA",
+      recorded_species_name,  # leave as-is
+      str_remove_all(
+        recorded_species_name,
+        paste0("\\b(", paste(keyword_list, collapse="|"), ")\\b[.,]?")
+      )
+    ),
+    recorded_species_name_clean = str_remove_all(recorded_species_name_clean, "\\bY\\b"),
+    recorded_species_name_clean = str_squish(recorded_species_name_clean)
+  ) %>%
+  ungroup()
+
+TopLanded_Sp <- TopLanded_Sp %>%
+  arrange(main_species_group, recorded_species_name_clean)
+
+unique(TopLanded_Sp$keyword_1)
+unique(TopLanded_Sp$recorded_species_name_clean)
+
+#write.csv(TopLanded_Sp, "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/PrelimLook_CONAPESCA_SpeciesNames_Oct302025/TopLanded_Sp_Oct312025.csv", row.names = FALSE)
 ```
 
 ```{r Next question: how many sp of Abulon and Anchoveta}
