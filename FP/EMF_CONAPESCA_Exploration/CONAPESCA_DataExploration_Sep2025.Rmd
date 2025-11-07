@@ -1871,53 +1871,151 @@ write.csv(Organisms_to_Class, "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Explor
 ```
 
 # Estimating CPUE over Time for General Groups------------------------------
-```{r}
-CONAPESCA_data_filtered <- CONAPESCA_data_filtered %>%
-  filter(dias_efectivos > 0) %>%
-  mutate(CPUE_est = peso_kg / dias_efectivos)
+```{r Estimate CPUE for GoC landings}
+Landings_GoC<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds"))
+# n = 3716415 obs.
 
-max(CONAPESCA_data_filtered$CPUE_est) #NaN
-min(CONAPESCA_data_filtered$CPUE_est) #NaN
+CPUE_Landings_GoC<- Landings_GoC
 
-CPUE_summary <- CONAPESCA_data_filtered %>%
-  select(year, entidad_federativa, especie_nombre_general, dias_efectivos, peso_kg, ganancia_total_mxn, CPUE_est) %>%
-  group_by(year, entidad_federativa, especie_nombre_general) %>%
+# Calculate the difference in days betweem period start and end:
+CPUE_Landings_GoC$days_fishing <- as.numeric(CPUE_Landings_GoC$period_end_fixed - CPUE_Landings_GoC$period_start_fixed) + 1
+
+# Kind of looks like sometimes 'landed weight' is 'live weight' and vice versa.
+CPUE_Landings_GoC$weight_kg_corrected<- c(NA)
+ii<- length(CPUE_Landings_GoC$weight_kg_corrected)
+
+CPUE_Landings_GoC$weight_kg_corrected <- ifelse(
+  CPUE_Landings_GoC$live_weight >= CPUE_Landings_GoC$landed_weight,
+  CPUE_Landings_GoC$live_weight,
+  CPUE_Landings_GoC$landed_weight
+)
+
+CPUE_Landings_filtered<- CPUE_Landings_GoC %>%
+  filter(!is.na(days_fishing) & days_fishing > 0 & live_weight > 0) %>%
+  mutate(CPUE_kg.day = weight_kg_corrected / days_fishing)
+# 3397596 obs.
+
+max(CPUE_Landings_filtered$CPUE_kg.day) #4500070
+min(CPUE_Landings_filtered$CPUE_kg.day) #0
+
+# In general, the receipts from early trips are a bit funky. Let's filter those out for now.
+CPUE_Landings_filtered<- CPUE_Landings_filtered %>%
+  filter(year >= 2005)
+# 2957910 obs.
+
+max(CPUE_Landings_filtered$CPUE_kg.day) #4500070
+min(CPUE_Landings_filtered$CPUE_kg.day) #0
+
+##### NOTES TO SELF:
+# - There is some funky stuff going on with date end and start. Come back to this.
+# - I am not sure what to do about the days with no recorded live weight. Exclude these for now.
+```
+
+```{r Summarize CPUE in the GoC for major groupings}
+unique(CPUE_Landings_filtered$main_species_group)
+colnames(CPUE_Landings_filtered)
+
+CPUE_summary <- CPUE_Landings_filtered %>%
+  filter(year >= 2014 & year < 2025) %>% # Optional: filter for only the last 10 years
+  select(year, state, main_species_group, days_fishing, weight_kg_corrected, value, CPUE_kg.day) %>%
+  group_by(year, state, main_species_group) %>%
   summarise(
-    Total_Biomass_kg_dataMares = sum(peso_kg, na.rm = TRUE),
-    Total_Days_Spent_Fishing = sum(dias_efectivos, na.rm= TRUE),
-    Avg_CPUE_dataMares = round(mean(CPUE_est, na.rm= TRUE)),
-    Total_Value_mxn_dataMares = sum(ganancia_total_mxn, na.rm = TRUE),
-    n_Records_dataMares = n(),
+    Total_Biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    Total_Days_Spent_Fishing = sum(days_fishing, na.rm= TRUE),
+    Avg_CPUE_kg.days = round(mean(CPUE_kg.day, na.rm= TRUE)),
+    Total_Value_mxn = sum(value, na.rm = TRUE),
+    n_Records = n(),
     .groups = "drop"  # optional: ungroup after summarising
-  )
-
-glimpse(CPUE_summary)
-
-Top10_species <- CONAPESCA_data_filtered %>%
-  group_by(especie_nombre_general) %>%
-  summarise(Total_Biomass = sum(peso_kg, na.rm = TRUE)) %>%
-  arrange(desc(Total_Biomass)) %>%
-  slice_head(n = 10) %>%
-  pull(especie_nombre_general)
-
-Top10_data <- CPUE_summary %>%
-  filter(especie_nombre_general %in% Top10_species)
+  )  %>%
+  arrange(state, main_species_group, year)
 
 library(ggplot2)
+library(ggforce)
 
-CPUE_plot<- ggplot(Top10_data, aes(x = year, y = Avg_CPUE_dataMares, color = especie_nombre_general)) +
-  facet_wrap(~ entidad_federativa, scales = "free_y") +
-  geom_point(size = 2, alpha= 0.5) +
-  geom_line(size= 1) +
+state_colors <- c(
+  "BAJA CALIFORNIA" = "royalblue",
+  "BAJA CALIFORNIA SUR" = "skyblue",
+  "SONORA" = "orange",
+  "SINALOA" = "sienna1",
+  "NAYARIT" = "plum", 
+  "JALISCO" = "purple4"
+)
+
+# Build the base plot
+CPUE_plot_base <- CPUE_summary %>%
+  filter(year > 2020) %>%
+  ggplot(aes(x = year, y = Avg_CPUE_kg.days, color = state)) +
+  geom_point(size = 2) +
+  geom_line(size = 0.5, alpha = 0.5) +
+  facet_wrap_paginate(~ main_species_group, scales = "free_y", ncol = 3, nrow = 3, page = 3) +
+
   labs(
-    title = "Preliminary Look at CPUE Over Time",
-    subtitle = "Top 10 Species by Biomass (dataMares data)",
+    title = "CPUE Over Time [per Taxonomic Grouping]",
+    subtitle = "Source: CONAPESCA data from J.C., cleaned & filtered",
     x = "Year",
     y = "Average CPUE (kg/day)",
-    color = "Species"
+    color = "State"
   ) +
+  
   theme_bw() +
-  theme(legend.position = "bottom")
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 18),       # Center and bold title
+    plot.subtitle = element_text(hjust = 0.5, size = 14)                    # Center subtitle
+  ) +
+  scale_color_manual(values = state_colors, name = "State")
 
-CPUE_plot
+CPUE_plot_base
+
+# Get the number of pages correctly
+# n_pages <- ggforce::n_pages(CPUE_plot_base)
+# print(n_pages)
 ```
+
+```{r CPUE Continued...}
+options(scipen = 999) # Force same numeric format; don't want scientific notation
+
+# Setting up the dataframe to compare to the C.N.P.
+CPUE_Landings_summarized <- CPUE_Landings_filtered %>%
+  filter(year %in% 2020:2024) %>%
+  select(state, main_species_group, year, CPUE_kg.day, weight_kg_corrected) %>%
+  group_by(state, main_species_group) %>%
+  summarize(
+    # First sum per year, then average across years 2020–2022
+    Baseline_Total_Catch_2020_2022 = mean(
+      tapply(weight_kg_corrected[year %in% 2020:2022],
+             year[year %in% 2020:2022],
+             sum, na.rm = TRUE)
+    ),
+    Total_Catch_2023 = sum(weight_kg_corrected[year == 2023], na.rm = TRUE),
+    Total_Catch_2024 = sum(weight_kg_corrected[year == 2024], na.rm = TRUE),
+    Avg_CPUE_2020_2022 = mean(CPUE_kg.day[year %in% 2020:2022], na.rm = TRUE),
+    Avg_CPUE_2023 = mean(CPUE_kg.day[year == 2023], na.rm = TRUE),
+    Avg_CPUE_2024 = mean(CPUE_kg.day[year == 2024], na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Define a 5% margin of error around the baseline mean
+    lower_bound = Baseline_Total_Catch_2020_2022 * 0.95,
+    upper_bound = Baseline_Total_Catch_2020_2022 * 1.05,
+
+    # 2023 comparison with margin of error
+    CatchCompare_2023_vs_Baseline = case_when(
+      Total_Catch_2023 > upper_bound ~ "higher",
+      Total_Catch_2023 < lower_bound ~ "lower",
+      TRUE ~ "similar"
+    ),
+
+    # 2024 comparison with margin of error
+    CatchCompare_2024_vs_Baseline = case_when(
+      Total_Catch_2024 > upper_bound ~ "higher",
+      Total_Catch_2024 < lower_bound ~ "lower",
+      TRUE ~ "similar"
+    )
+  ) %>%
+  select(-lower_bound, -upper_bound)  # remove helper columns if not needed
+
+# Re-arrange columns:
+CPUE_Landings_summarized<- CPUE_Landings_summarized[c(1:4, 9, 5, 10, 6:8)]
+```
+
