@@ -102,9 +102,35 @@ saic_accommodations <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/S
 saic_accommodations_liv <- saic_accommodations %>%
   janitor::clean_names() %>% 
   select(ano_censal, entidad, municipio,actividad_economica, ue_unidades_economicas, matches("^(h|i)"))
+summary(saic_accommodations_liv)
 
-saic_accommodations_liv_loscabos <- saic_accommodations_liv %>% 
-  filter(municipio %in% "008 Los Cabos")
+# unique(saic_accommodations_liv$ano_censal)
+# [1] "2023"                          
+# [2] "2018"                                     
+# [3] "2013"                                 
+# [4] "2008"                              
+# [5] "2003"                              
+# [6] NA                                  
+# [7] "Nota: para las celdas que aparecen vacías, se omitieron los datos absolutos de las variables económicas, con el fin de garantizar el principio de confidencialidad y reserva."
+
+## see which municipios are missing data for at least one year, and for how many years it is NA.
+saic_accommodations_liv_check_complete <- saic_accommodations_liv %>% 
+  filter(ano_censal %in% c("2023","2018","2013","2008","2003")) %>% 
+  filter(actividad_economica %in% "Subsector 721 Servicios de alojamiento temporal") %>% 
+  group_by(municipio) %>% 
+  summarise(
+    na_values = sum(is.na(h001a_personal_ocupado_total))
+  )  ## if it is NA for every year, it has an na_values of 5. 
+  
+saic_accommodations_liv_noncomplete <- saic_accommodations_liv_check_complete %>% 
+  filter(!na_values == 0) # any that have NAs for one or more years.
+
+############## percent of municipios that have at least one year of data missing: #########
+length(unique(saic_accommodations_liv_noncomplete$municipio))/length(unique(saic_accommodations_liv_check_complete$municipio)) * 100 # v2025: 23.52941% of municipios have at least one year missing data.
+
+## check that 013 San Pedro Lagunillas has all NAs: YUP! good.
+
+setdiff(unique(saic_accommodations_liv$municipio), unique(saic_accommodations_liv_complete$municipio)) # "012 Bácum" missing any registered economic units.
 ```
 
 ### Relationship between economic units registered and the number of individuals employed:
@@ -200,13 +226,407 @@ saic_fishing <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SAIC/d20
 saic_fishing_liv <- saic_fishing %>%
   janitor::clean_names() %>% 
   select(ano_censal, entidad, municipio,actividad_economica, ue_unidades_economicas, matches("^(h|i)"))
+```
 
+### Expanding
+
+I am realizing that I need to expand the dataset so that every combination of ano_censal × municipio × actividad_economica exists, even if the values are missing (so we can clearly see which municipios or years lack data).
+
+```{r}
+# first, define the unique combinations we want for each dimension
+years <- c("2023","2018","2013","2008","2003")
+municipios <- unique(saic_fishing_liv$municipio)
+actividades_fishing <- unique(saic_fishing_liv$actividad_economica)
+
+# then we can make a full grid of all possible combinations
+complete_grid_fishing <- expand_grid(
+  ano_censal = years,
+  municipio = municipios,
+  actividad_economica = actividades_fishing
+)
+
+# join back with the OG dataset
+saic_fishing_liv_expanded <- complete_grid_fishing %>%
+  left_join(saic_fishing_liv, 
+            by = c("ano_censal", "municipio", "actividad_economica"))
+
+# final step: fill entidad where it is missing
+saic_fishing_liv_expanded <- saic_fishing_liv_expanded %>%
+  group_by(municipio) %>%
+  fill(entidad, .direction = "downup") %>%
+  ungroup()
+```
+
+### Now, how much data do we have?
+
+```{r}
+all_complete_fishing <- saic_fishing_liv_expanded %>%
+  filter(!actividad_economica %in% "Total municipal") %>% 
+  summarise(
+    total_cells = n(),
+    with_data = sum(!is.na(h001a_personal_ocupado_total)),
+    completeness_pct = with_data / total_cells * 100
+  )
+
+by_muni_complete_fishing <- saic_fishing_liv_expanded %>%
+  filter(!actividad_economica %in% "Total municipal") %>% 
+  group_by(municipio) %>%
+  summarise(
+    n_records = n(),
+    n_missing = sum(is.na(h001a_personal_ocupado_total)),
+    completeness_pct = 100 * (1 - n_missing / n_records)
+  ) %>%
+  arrange(completeness_pct)
+
+
+by_year_complete_fishing <- saic_fishing_liv_expanded %>%
+  filter(!actividad_economica %in% "Total municipal") %>% 
+  group_by(ano_censal) %>%
+  summarise(
+    total = n(),
+    non_missing = sum(!is.na(h001a_personal_ocupado_total)),
+    completeness_pct = 100 * non_missing / total
+  )
+
+by_actividad_complete_fishing <- saic_fishing_liv_expanded %>%
+  filter(!actividad_economica %in% "Total municipal") %>% 
+  group_by(actividad_economica) %>%
+  summarise(
+    total = n(),
+    non_missing = sum(!is.na(h001a_personal_ocupado_total)),
+    completeness_pct = 100 * non_missing / total
+  ) %>%
+  arrange(desc(completeness_pct)) # oof
+
+library(ggplot2)
+
+## uncensored
+saic_fishing_liv_expanded %>%
+  filter(!actividad_economica %in% "Total municipal") %>% 
+  group_by(municipio, ano_censal) %>%
+  summarise(has_data = any(!is.na(h001a_personal_ocupado_total))) %>%
+  ggplot(aes(x = factor(ano_censal), y = municipio, fill = has_data)) +
+  geom_tile(color = "white") +
+  scale_fill_manual(values = c("TRUE" = "darkblue", "FALSE" = "grey80")) +
+  theme_minimal() +
+  labs(
+    x = "Census Year",
+    y = "Municipio",
+    fill = "Has data for at least one of the sectors",
+    title = "Fishing: Data availability by municipio and census year"
+  )
+
+## economic units
+saic_fishing_liv_expanded %>%
+  filter(!actividad_economica %in% "Total municipal") %>% 
+  group_by(municipio, ano_censal) %>%
+  summarise(has_data = any(!is.na(ue_unidades_economicas))) %>%
+  ggplot(aes(x = factor(ano_censal), y = municipio, fill = has_data)) +
+  geom_tile(color = "white") +
+  scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "grey80")) +
+  theme_minimal() +
+  labs(
+    x = "Census Year",
+    y = "Municipio",
+    fill = "Has data for at least one of the sectors",
+    title = "Fishing: Economic units present per municipio and census year"
+  )
+```
+### Clean LIV
+
+So, what I really want to know is out of the observations that have registered economic units, how many observations have data versus how many are suppressed?
+
+First, let's make a clean dataset with columns that indicate whether the data has been suppressed or not!!
+
+```{r}
+# --- func to classify SAIC data completeness and confidentiality ---
+classify_saic_status <- function(df,
+                                 ue_col = "ue_unidades_economicas", # economic units
+                                 var_check = "h001a_personal_ocupado_total") { # number of employees: if this column contains data, then all other variables do as well.
+  df %>%
+    mutate(
+      data_status = case_when(
+        # case 1: if there is a numeric UE, non-NA, and there is also data on number of employees... it should be valid!
+        !is.na(.data[[ue_col]]) & .data[[ue_col]] > 0 & !is.na(.data[[var_check]]) ~ "valid",
+        
+        # case 2: if there is a non-NA numerica UE, but the employment data is NA... then it was likely suppressed. From the methodological document: "For cells that appear empty, the absolute values of the economic variables were omitted to ensure confidentiality."
+        !is.na(.data[[ue_col]]) & .data[[ue_col]] > 0 & is.na(.data[[var_check]]) ~ "suppressed",
+        
+        # case 3: if there were no units registered no activity, and therefore in the raw dataset there was no observation for that economic activity, then we can say it has no activity.
+        is.na(.data[[ue_col]]) ~ "no_activity",
+        
+        # case 4: if the UEs exist but the numbers are reported as zeros, then it is either a low number or rounded to zero: "Furthermore, when a zero appears in a row, it is because the respondents declared zero for the variable or because the reported value was less than $500,000, and since the figures are presented in millions of pesos, it was rounded to zero. Negative figures are indicated with a minus sign (-) to the left of the data."
+        !is.na(.data[[ue_col]]) & .data[[ue_col]] > 0 & .data[[var_check]] == 0 ~ "low_or_rounded",
+        
+        TRUE ~ NA_character_ # otherwise, keep NA.
+      )
+    )
+}
+
+saic_fishing_liv_clean <- classify_saic_status(saic_fishing_liv_expanded) %>% 
+  filter(!actividad_economica %in% "Total municipal",
+         !is.na(actividad_economica))
+
+saic_fishing_liv_clean_check <- saic_fishing_liv_clean %>% 
+  select(ano_censal, entidad, municipio, actividad_economica, ue_unidades_economicas, h001a_personal_ocupado_total, data_status) ## looks great!! 001 Acaponeta looks about right: <https://www.emis.com/php/company-profile/MX/La_Princesa_De_Acaponeta_SPR_de_RL_es_11105923.html>, <https://dsiappsdev.semarnat.gob.mx/inai/F69/2021/138/4T/18NA2020PD043.pdf> 
+```
+
+### LIV plotly
+
+```{r}
+### only Subrama 11411 Pesca
+employment_mun <- saic_fishing_liv_clean %>%
+  filter(actividad_economica %in% "Subrama 11411 Pesca")
+
+library(plotly)
+
+fig <- plot_ly(
+  data = employment_mun,
+  x = ~ano_censal,
+  y = ~h001a_personal_ocupado_total,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Empleo total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Empleo pesca total por municipio: Subrama 11411 Pesca (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig
+
+htmlwidgets::saveWidget(fig, here::here("LIV/liv_int_plotlys","fishing_number_jobs_saic_110625.html"), selfcontained = TRUE)
+
+### only UEs from Subrama 11411 Pesca
+employment_mun <- saic_fishing_liv_clean %>%
+  filter(actividad_economica %in% "Subrama 11411 Pesca")
+
+library(plotly)
+
+fig <- plot_ly(
+  data = employment_mun,
+  x = ~ano_censal,
+  y = ~ue_unidades_economicas,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Unidades Economicas total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Unidades economicas por municipio: Subrama 11411 Pesca (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig
+
+htmlwidgets::saveWidget(fig, here::here("LIV/liv_int_plotlys","fishing_ue_saic_110625.html"), selfcontained = TRUE)
+
+
+## only Clase 114119 Pesca y captura de otros peces, crustáceos, moluscos y otras especies
+employment_mun_moluscos <- saic_fishing_liv_clean %>%
+  filter(actividad_economica %in% "Clase 114119 Pesca y captura de otros peces, crustáceos, moluscos y otras especies")
+
+fig_moluscos <- plot_ly(
+  data = employment_mun_moluscos,
+  x = ~ano_censal,
+  y = ~h001a_personal_ocupado_total,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Empleo total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Empleo pesca total por municipio: Clase 114119 Pesca y captura de otros peces, crustáceos, moluscos y otras especies (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig_moluscos
+
+# htmlwidgets::saveWidget(fig_moluscos, here::here("LIV/liv_int_plotlys","fishing_moluscos_otros_number_jobs_saic_110625.html"), selfcontained = TRUE)
+
+## NOW ITS UEs: only Clase 114119 Pesca y captura de otros peces, crustáceos, moluscos y otras especies
+employment_mun_moluscos <- saic_fishing_liv_clean %>%
+  filter(actividad_economica %in% "Clase 114119 Pesca y captura de otros peces, crustáceos, moluscos y otras especies")
+
+fig_moluscos <- plot_ly(
+  data = employment_mun_moluscos,
+  x = ~ano_censal,
+  y = ~ue_unidades_economicas,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Unidades Economicas total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Unidades Economicas por municipio: Clase 114119 Pesca y captura de otros peces, crustáceos, moluscos y otras especies (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig_moluscos
+
+htmlwidgets::saveWidget(fig_moluscos, here::here("LIV/liv_int_plotlys","fishing_ue_moluscos_otros_number_jobs_saic_110625.html"), selfcontained = TRUE)
+```
+
+
+```{r}
+## only Clase 114111 Pesca de camarón
+employment_mun <- saic_fishing_liv_clean %>%
+  filter(actividad_economica %in% "Clase 114111 Pesca de camarón")
+
+library(plotly)
+
+fig <- plot_ly(
+  data = employment_mun,
+  x = ~ano_censal,
+  y = ~h001a_personal_ocupado_total,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Empleo total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Empleo pesca total por municipio: Clase 114111 Pesca de camarón (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig
+
+htmlwidgets::saveWidget(fig, here::here("LIV/liv_int_plotlys","fishing_camaron_number_jobs_saic_110625.html"), selfcontained = TRUE)
+
+
+
+## only Clase 114111 Pesca de camarón
+employment_mun <- saic_fishing_liv_clean %>%
+  filter(actividad_economica %in% "Clase 114111 Pesca de camarón")
+
+library(plotly)
+
+fig <- plot_ly(
+  data = employment_mun,
+  x = ~ano_censal,
+  y = ~h001a_personal_ocupado_total,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Empleo total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Empleo pesca total por municipio: Clase 114111 Pesca de camarón (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig
+
+htmlwidgets::saveWidget(fig, here::here("LIV/liv_int_plotlys","fishing_camaron_number_jobs_saic_110625.html"), selfcontained = TRUE)
+
+## only Clase 114113 Pesca de sardina y anchoveta
+employment_mun <- saic_fishing_liv_clean %>%
+  filter(actividad_economica %in% "Clase 114113 Pesca de sardina y anchoveta")
+
+library(plotly)
+
+fig <- plot_ly(
+  data = employment_mun,
+  x = ~ano_censal,
+  y = ~h001a_personal_ocupado_total,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Empleo total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Empleo pesca total por municipio: Clase 114113 Pesca de sardina y anchoveta (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig
+
+htmlwidgets::saveWidget(fig, here::here("LIV/liv_int_plotlys","fishing_sardina_anchoveta_number_jobs_saic_110625.html"), selfcontained = TRUE)
+```
+
+### ECO
+
+```{r}
 saic_fishing_liv_loscabos <- saic_fishing_liv %>% 
   filter(municipio %in% "008 Los Cabos") # none
 
 saic_fishing_eco <- saic_fishing %>%
   janitor::clean_names() %>% 
   select(ano_censal, entidad, municipio,actividad_economica, ue_unidades_economicas, matches("^(a|m)"))
+
+## expanding ECO
+# first, define the unique combinations we want for each dimension
+years <- c("2023","2018","2013","2008","2003")
+municipios <- unique(saic_fishing_liv$municipio)
+actividades_fishing <- unique(saic_fishing_liv$actividad_economica)
+
+# then we can make a full grid of all possible combinations
+complete_grid_fishing <- expand_grid(
+  ano_censal = years,
+  municipio = municipios,
+  actividad_economica = actividades_fishing
+)
+
+# join back with the OG dataset
+saic_fishing_liv_expanded <- complete_grid_fishing %>%
+  left_join(saic_fishing_liv, 
+            by = c("ano_censal", "municipio", "actividad_economica"))
+
+# final step: fill entidad where it is missing
+saic_fishing_liv_expanded <- saic_fishing_liv_expanded %>%
+  group_by(municipio) %>%
+  fill(entidad, .direction = "downup") %>%
+  ungroup()
 ```
 
 ## Aquaculture
@@ -218,7 +638,528 @@ saic_aquaculture <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SAIC
 saic_aquaculture_liv <- saic_aquaculture %>%
   janitor::clean_names() %>% 
   select(ano_censal, entidad, municipio,actividad_economica, ue_unidades_economicas, matches("^(h|i)"))
+```
 
+```{r}
+# ----- for clase ---------
+## see which municipios are missing data for at least one year, and for how many years it is NA.
+saic_aquaculture_liv_check_complete <- saic_aquaculture_liv %>% 
+  filter(ano_censal %in% c("2023","2018","2013","2008","2003")) %>% 
+  filter(actividad_economica %in% "Clase 112513 Camaronicultura y acuicultura de otros crustáceos en agua salada") %>% 
+  group_by(municipio) %>% 
+  summarise(
+    na_values = sum(is.na(h001a_personal_ocupado_total))
+  )  ## if it is NA for every year, it has an na_values of 5. 
+
+#### THIS IS NOT A GOOD WAY!!! BECAUSE SOME OF THE MUNICIPIOS DO NOT HAVE ENTRIES FOR EVERY YEAR!!!!
+  
+saic_aquaculture_liv_noncomplete <- saic_aquaculture_liv_check_complete %>% 
+  filter(!na_values == 0) # any that have NAs for one or more years.
+
+############## percent of municipios that have at least one year of data missing: #########
+length(unique(saic_aquaculture_liv_noncomplete$municipio))/length(unique(saic_aquaculture_liv_check_complete$municipio)) * 100 # v2025: 96.66667% of municipios have at least one year missing data.
+
+setdiff(unique(saic_aquaculture_liv$municipio), unique(saic_aquaculture_liv_check_complete$municipio)) #  
+# [1] "006 San Quintín"           "007 San Felipe"            "002 Mulegé"                "008 Los Cabos"            
+#  [5] "009 Loreto"                "020 Cabo Corrientes"       "067 Puerto Vallarta"       "008 Xalisco"              
+#  [9] "011 Ruíz"                  "013 San Pedro Lagunillas"  "014 Santa María del Oro"   "020 Bahía de Banderas"    
+# [13] "004 Concordia"             "005 Cosalá"                "007 Choix"                 "010 El Fuerte"            
+# [17] "013 Mocorito"              "017 Sinaloa"               "020 Juan José Ríos"        "017 Caborca"              
+# [21] "047 Pitiquito"             "055 San Luis Río Colorado" NA  
+# are missing any registered economic units.
+```
+
+
+```{r}
+# ----- for subrama --------
+## see which municipios are missing data for at least one year, and for how many years it is NA.
+saic_aquaculture_liv_check_complete <- saic_aquaculture_liv %>% 
+  filter(ano_censal %in% c("2023","2018","2013","2008","2003")) %>% 
+  filter(actividad_economica %in% "Subrama 11251 Acuicultura") %>% 
+  group_by(municipio) %>% 
+  summarise(
+    na_values = sum(is.na(h001a_personal_ocupado_total))
+  )  ## if it is NA for every year, it has an na_values of 5. 
+  
+saic_aquaculture_liv_noncomplete <- saic_aquaculture_liv_check_complete %>% 
+  filter(!na_values == 0) # any that have NAs for one or more years.
+
+############## percent of municipios that have at least one year of data missing: #########
+length(unique(saic_aquaculture_liv_noncomplete$municipio))/length(unique(saic_aquaculture_liv_check_complete$municipio)) * 100 # v2025: 92.30769% of municipios have at least one year missing data for the subrama acricultura
+
+setdiff(unique(saic_aquaculture_liv$municipio), unique(saic_aquaculture_liv_check_complete$municipio)) #  
+#  [1] "007 San Felipe"            "008 Los Cabos"             "009 Loreto"                "020 Cabo Corrientes"      
+#  [5] "011 Ruíz"                  "020 Bahía de Banderas"     "004 Concordia"             "007 Choix"                
+#  [9] "013 Mocorito"              "017 Sinaloa"               "020 Juan José Ríos"        "047 Pitiquito"            
+# [13] "055 San Luis Río Colorado" NA  
+# are missing any registered economic units.
+```
+### Expanding
+
+I am realizing that I need to expand the dataset so that every combination of ano_censal × municipio × actividad_economica exists, even if the values are missing (so we can clearly see which municipios or years lack data).
+
+```{r}
+# first, define the unique combinations we want for each dimension
+years <- c("2023","2018","2013","2008","2003")
+municipios <- unique(saic_aquaculture_liv$municipio)
+actividades_aqua <- unique(saic_aquaculture_liv$actividad_economica)
+
+# > years
+# [1] "2023" "2018" "2013" "2008" "2003"
+# > municipios <- unique(saic_aquaculture_liv$municipio)
+# > municipios
+#  [1] "002 Mexicali"              "006 San Quintín"           "007 San Felipe"           
+#  [4] "001 Comondú"               "002 Mulegé"                "003 La Paz"               
+#  [7] "008 Los Cabos"             "009 Loreto"                "020 Cabo Corrientes"      
+# [10] "067 Puerto Vallarta"       "001 Acaponeta"             "004 Compostela"           
+# [13] "008 Xalisco"               "010 Rosamorada"            "011 Ruíz"                 
+# [16] "012 San Blas"              "013 San Pedro Lagunillas"  "014 Santa María del Oro"  
+# [19] "015 Santiago Ixcuintla"    "016 Tecuala"               "017 Tepic"                
+# [22] "018 Tuxpan"                "020 Bahía de Banderas"     "001 Ahome"                
+# [25] "002 Angostura"             "004 Concordia"             "005 Cosalá"               
+# [28] "006 Culiacán"              "007 Choix"                 "008 Elota"                
+# [31] "009 Escuinapa"             "010 El Fuerte"             "011 Guasave"              
+# [34] "012 Mazatlán"              "013 Mocorito"              "014 Rosario"              
+# [37] "015 Salvador Alvarado"     "016 San Ignacio"           "017 Sinaloa"              
+# [40] "018 Navolato"              "019 Eldorado"              "020 Juan José Ríos"       
+# [43] "012 Bácum"                 "017 Caborca"               "018 Cajeme"               
+# [46] "025 Empalme"               "029 Guaymas"               "030 Hermosillo"           
+# [49] "033 Huatabampo"            "047 Pitiquito"             "048 Puerto Peñasco"       
+# [52] "055 San Luis Río Colorado" NA                         
+# > actividades <- unique(saic_aquaculture_liv$actividad_economica)
+# > actividades
+# [1] "Total municipal"                                                              
+# [2] "Subrama 11251 Acuicultura"                                                    
+# [3] "Clase 112515 Piscicultura en agua dulce"                                      
+# [4] "Clase 112516 Piscicultura en agua salada"                                     
+# [5] "Clase 112519 Otra acuicultura"                                                
+# [6] "Clase 112513 Camaronicultura y acuicultura de otros crustáceos en agua salada"
+# [7] "Clase 112514 Camaronicultura y acuicultura de otros crustáceos en agua dulce" 
+# [8] NA      
+
+# then we can make a full grid of all possible combinations
+complete_grid_aquaculture <- expand_grid(
+  ano_censal = years,
+  municipio = municipios,
+  actividad_economica = actividades_aqua
+)
+
+# join back with the OG dataset
+saic_aquaculture_liv_expanded <- complete_grid_aquaculture %>%
+  left_join(saic_aquaculture_liv, 
+            by = c("ano_censal", "municipio", "actividad_economica"))
+
+# final step: fill entidad where it is missing
+saic_aquaculture_liv_expanded <- saic_aquaculture_liv_expanded %>%
+  group_by(municipio) %>%
+  fill(entidad, .direction = "downup") %>%
+  ungroup()
+```
+
+### Now, how much data do we have?
+
+```{r}
+all_complete_aqua <- saic_aquaculture_liv_expanded %>%
+  summarise(
+    total_cells = n(),
+    with_data = sum(!is.na(h001a_personal_ocupado_total)),
+    completeness_pct = with_data / total_cells * 100
+  )
+
+by_muni_complete_aqua <- saic_aquaculture_liv_expanded %>%
+  group_by(municipio) %>%
+  summarise(
+    n_records = n(),
+    n_missing = sum(is.na(h001a_personal_ocupado_total)),
+    completeness_pct = 100 * (1 - n_missing / n_records)
+  ) %>%
+  arrange(completeness_pct)
+
+
+by_year_complete_aqua <- saic_aquaculture_liv_expanded %>%
+  group_by(ano_censal) %>%
+  summarise(
+    total = n(),
+    non_missing = sum(!is.na(h001a_personal_ocupado_total)),
+    completeness_pct = 100 * non_missing / total
+  ) # fairly consistent
+
+by_actividad_complete_aqua <- saic_aquaculture_liv_expanded %>%
+  group_by(actividad_economica) %>%
+  summarise(
+    total = n(),
+    non_missing = sum(!is.na(h001a_personal_ocupado_total)),
+    completeness_pct = 100 * non_missing / total
+  ) %>%
+  arrange(desc(completeness_pct)) # oof
+
+library(ggplot2)
+
+## uncensored
+saic_aquaculture_liv_expanded %>%
+  filter(!actividad_economica %in% "Total municipal") %>% 
+  group_by(municipio, ano_censal) %>%
+  summarise(has_data = any(!is.na(h001a_personal_ocupado_total))) %>%
+  ggplot(aes(x = factor(ano_censal), y = municipio, fill = has_data)) +
+  geom_tile(color = "white") +
+  scale_fill_manual(values = c("TRUE" = "darkblue", "FALSE" = "grey80")) +
+  theme_minimal() +
+  labs(
+    x = "Census Year",
+    y = "Municipio",
+    fill = "Has Data",
+    title = "Aquaculture: Data availability by municipio and census year"
+  )
+
+## economic units
+saic_aquaculture_liv_expanded %>%
+  filter(!actividad_economica %in% "Total municipal") %>% 
+  group_by(municipio, ano_censal) %>%
+  summarise(has_data = any(!is.na(ue_unidades_economicas))) %>%
+  ggplot(aes(x = factor(ano_censal), y = municipio, fill = has_data)) +
+  geom_tile(color = "white") +
+  scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "grey80")) +
+  theme_minimal() +
+  labs(
+    x = "Census Year",
+    y = "Municipio",
+    fill = "Has Data",
+    title = "Aquaculture: Economic units present per municipio and census year"
+  )
+```
+### Clean LIV
+
+So, what I really want to know is out of the observations that have registered economic units, how many observations have data versus how many are suppressed?
+
+First, let's make a clean dataset with columns that indicate whether the data has been suppressed or not!!
+
+```{r}
+# --- func to classify SAIC data completeness and confidentiality ---
+classify_saic_status <- function(df,
+                                 ue_col = "ue_unidades_economicas", # economic units
+                                 var_check = "h001a_personal_ocupado_total") { # number of employees: if this column contains data, then all other variables do as well.
+  df %>%
+    mutate(
+      data_status = case_when(
+        # case 1: if there is a numeric UE, non-NA, and there is also data on number of employees... it should be valid!
+        !is.na(.data[[ue_col]]) & .data[[ue_col]] > 0 & !is.na(.data[[var_check]]) ~ "valid",
+        
+        # case 2: if there is a non-NA numerica UE, but the employment data is NA... then it was likely suppressed. From the methodological document: "For cells that appear empty, the absolute values of the economic variables were omitted to ensure confidentiality."
+        !is.na(.data[[ue_col]]) & .data[[ue_col]] > 0 & is.na(.data[[var_check]]) ~ "suppressed",
+        
+        # case 3: if there were no units registered no activity, and therefore in the raw dataset there was no observation for that economic activity, then we can say it has no activity.
+        is.na(.data[[ue_col]]) ~ "no_activity",
+        
+        # case 4: if the UEs exist but the numbers are reported as zeros, then it is either a low number or rounded to zero: "Furthermore, when a zero appears in a row, it is because the respondents declared zero for the variable or because the reported value was less than $500,000, and since the figures are presented in millions of pesos, it was rounded to zero. Negative figures are indicated with a minus sign (-) to the left of the data."
+        !is.na(.data[[ue_col]]) & .data[[ue_col]] > 0 & .data[[var_check]] == 0 ~ "low_or_rounded",
+        
+        TRUE ~ NA_character_ # otherwise, keep NA.
+      )
+    )
+}
+
+saic_aquaculture_liv_clean <- classify_saic_status(saic_aquaculture_liv_expanded) %>% 
+  filter(!actividad_economica %in% "Total municipal",
+         !is.na(actividad_economica))
+
+saic_aquaculture_liv_clean_check <- saic_aquaculture_liv_clean %>% 
+  select(ano_censal, entidad, municipio, actividad_economica, ue_unidades_economicas, h001a_personal_ocupado_total, data_status) ## looks great!! 001 Acaponeta looks about right: <https://www.emis.com/php/company-profile/MX/La_Princesa_De_Acaponeta_SPR_de_RL_es_11105923.html>, <https://dsiappsdev.semarnat.gob.mx/inai/F69/2021/138/4T/18NA2020PD043.pdf> 
+```
+
+
+```{r}
+saic_aquaculture_liv_clean %>%
+  count(data_status) %>%
+  mutate(percentage = n / sum(n) * 100)
+
+saic_aquaculture_liv_clean %>%
+  group_by(ano_censal, data_status) %>%
+  summarise(n = n()) %>%
+  mutate(pct = n / sum(n) * 100)
+
+saic_aquaculture_liv_clean %>%
+  group_by(ano_censal, municipio, data_status) %>%
+  summarise(n = n()) %>%
+  mutate(pct = n / sum(n) * 100) %>% 
+  arrange(desc(data_status))
+
+
+# saic_aquaculture_liv_clean %>%
+#   group_by(municipio, ano_censal) %>%
+#   summarise(
+#     suppressed = any(data_status == "suppressed"),
+#     no_activity = all(data_status == "no_activity")
+#   ) %>%
+#   ggplot(aes(x = factor(ano_censal), y = municipio, fill = suppressed)) +
+#   geom_tile(color = "white") +
+#   scale_fill_manual(values = c("TRUE" = "darkred", "FALSE" = "grey80")) +
+#   theme_minimal() +
+#   labs(
+#     title = "Municipios con datos suprimidos por confidencialidad (SAIC)",
+#     x = "Año censal",
+#     y = "Municipio",
+#     fill = "Suprimido"
+#   )
+```
+
+### Relationship between UE and employees
+
+Okay, I am going to see all the municipios...
+
+```{r}
+lm_all_municipios_aquaculture <-  saic_aquaculture_liv_clean %>%
+  filter(
+    !is.na(h001a_personal_ocupado_total)
+  ) %>%
+  group_by(municipio) %>%
+  summarise(
+    model = list(lm(h001a_personal_ocupado_total ~ ue_unidades_economicas, data = cur_data())),
+    r_squared = {
+      sm <- summary(model[[1]])
+      if(length(sm$coefficients[,1]) >= 2) sm$r.squared else NA_real_
+    },
+    slope = {
+      sm <- summary(model[[1]])
+      if(length(sm$coefficients[,1]) >= 2) coef(model[[1]])[2] else NA_real_
+    },
+    intercept = {
+      sm <- summary(model[[1]])
+      if(length(sm$coefficients[,1]) >= 1) coef(model[[1]])[1] else NA_real_
+    },
+    p_value = {
+      sm <- summary(model[[1]])
+      if(length(sm$coefficients[,1]) >= 2) sm$coefficients[2,4] else NA_real_
+    }
+  )
+
+print(lm_all_municipios_aquaculture) 
+```
+
+### LIV plotly
+
+```{r}
+### only Subrama 11251 Acuicultura
+employment_mun <- saic_aquaculture_liv_clean %>%
+  filter(actividad_economica %in% "Subrama 11251 Acuicultura")
+
+library(plotly)
+
+fig <- plot_ly(
+  data = employment_mun,
+  x = ~ano_censal,
+  y = ~h001a_personal_ocupado_total,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Empleo total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Empleo acuícola total por municipio: Subrama 11251 Acuicultura (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig
+
+htmlwidgets::saveWidget(fig, here::here("LIV/liv_int_plotlys","aquaculture_number_jobs_saic_110625.html"), selfcontained = TRUE)
+
+## only unidades economicas from Subrama 11251 Acuicultura
+
+employment_mun <- saic_aquaculture_liv_clean %>%
+  filter(actividad_economica %in% "Subrama 11251 Acuicultura")
+
+library(plotly)
+
+fig <- plot_ly(
+  data = employment_mun,
+  x = ~ano_censal,
+  y = ~ue_unidades_economicas,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Unidades Economicas total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Unidades Economicas por municipio: Subrama 11251 Acuicultura (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Unidades Economicas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig
+
+htmlwidgets::saveWidget(fig, here::here("LIV/liv_int_plotlys","aquaculture_ue_saic_110625.html"), selfcontained = TRUE)
+
+
+## only Clase 112513 Camaronicultura y acuicultura de otros crustáceos en agua salada
+
+employment_mun <- saic_aquaculture_liv_clean %>%
+  filter(actividad_economica %in% "Clase 112513 Camaronicultura y acuicultura de otros crustáceos en agua salada")
+
+fig <- plot_ly(
+  data = employment_mun,
+  x = ~ano_censal,
+  y = ~h001a_personal_ocupado_total,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Empleo total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Empleo acuícola total por municipio: Clase 112513 Camaronicultura y acuicultura de otros crustáceos en agua salada (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig
+
+# htmlwidgets::saveWidget(fig, here::here("LIV/liv_int_plotlys","aquaculture_camaronicultura_salada_number_jobs_saic_110625.html"), selfcontained = TRUE)
+
+## only Clase 112516 Piscicultura en agua salada
+employment_mun <- saic_aquaculture_liv_clean %>%
+  filter(actividad_economica %in% "Clase 112516 Piscicultura en agua salada")
+
+fig <- plot_ly(
+  data = employment_mun,
+  x = ~ano_censal,
+  y = ~h001a_personal_ocupado_total,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Empleo total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Empleo acuícola total por municipio: Clase 112516 Piscicultura en agua salada (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig # none. all nas!!
+
+
+## only Clase 112519 Otra acuicultura
+employment_mun <- saic_aquaculture_liv_clean %>%
+  filter(actividad_economica %in% "Clase 112519 Otra acuicultura")
+
+fig <- plot_ly(
+  data = employment_mun,
+  x = ~ano_censal,
+  y = ~h001a_personal_ocupado_total,
+  color = ~municipio,
+  text = ~municipio, 
+  type = "scatter",
+  mode = "lines+markers",
+  hovertemplate = paste(
+    "<b>Municipio:</b> %{text}<br>",
+    "<b>Año:</b> %{x}<br>",
+    "<b>Empleo total:</b> %{y:,.0f}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Empleo acuícola total por municipio: Clase 112519 Otra acuicultura (SAIC)",
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    legend = list(title = list(text = "Municipio"))
+  )
+
+fig
+
+```
+
+```{r}
+
+# --- Build plot with dropdown selector ---
+municipios_list <- unique(employment_mun$municipio)
+
+# Create one trace per municipio, hidden initially except the first
+fig <- plot_ly()
+
+for (i in seq_along(municipios_list)) {
+  muni <- municipios_list[i]
+  df_sub <- filter(employment_mun, municipio == muni)
+  
+  fig <- fig %>%
+    add_trace(
+      data = df_sub,
+      x = ~ano_censal,
+      y = ~empleo_total,
+      type = "scatter",
+      mode = "lines+markers",
+      name = muni,
+      text = ~municipio,  # <-- this makes the hover label correct!
+      hovertemplate = paste(
+        "<b>Municipio:</b> %{text}<br>",
+        "<b>Año:</b> %{x}<br>",
+        "<b>Empleo total:</b> %{y:,.0f}<extra></extra>"
+      ),
+      visible = if (i == 1) TRUE else FALSE
+    )
+}
+
+# --- Build dropdown buttons ---
+buttons <- lapply(seq_along(municipios_list), function(i) {
+  vis <- rep(FALSE, length(municipios_list))
+  vis[i] <- TRUE
+  list(
+    method = "update",
+    args = list(list(visible = vis),
+                list(title = paste("Empleo acuícola –", municipios_list[i]))),
+    label = municipios_list[i]
+  )
+})
+
+# --- Final layout with dropdown menu ---
+fig <- fig %>%
+  layout(
+    title = paste("Empleo acuícola total por municipio (SAIC) –", municipios_list[1]),
+    xaxis = list(title = "Año censal"),
+    yaxis = list(title = "Personas empleadas"),
+    updatemenus = list(
+      list(
+        y = 1.05,
+        buttons = buttons,
+        direction = "down",
+        showactive = TRUE,
+        xanchor = "left",
+        yanchor = "top"
+      )
+    ),
+    showlegend = FALSE
+  )
+
+fig
+```
+
+
+
+
+
+### ECO
+
+```{r}
 saic_aquaculture_liv_loscabos <- saic_aquaculture_liv %>% 
   filter(municipio %in% "008 Los Cabos") # none
 
