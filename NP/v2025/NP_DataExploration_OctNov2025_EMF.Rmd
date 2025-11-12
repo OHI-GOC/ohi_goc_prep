@@ -156,7 +156,7 @@ table(CONAPESCA_data_naturalproducts0$NewClass)
 
 # Natural Products Inquiry (J.C. CONAPESCA data) (November 2025) ----------------
 
-# PRE-WORK ------------------------------
+## PRE-WORK
 ```{r Clear environment}
 rm(list=ls(all=T))
 ```
@@ -168,11 +168,17 @@ library(readxl)
 library(readr)
 # Data Processing
 library(tidyverse)
+library(tidyr)
 library(dplyr)
 library(tidytext)  # for reorder_within and scale_x_reordered
 library(lubridate)
 library(janitor)
 library(stringi)
+library(stringr)
+# Taxonomy
+library(taxize)
+library(worrms)
+library(rgbif)
 # Visualization
 library(ggplot2)
 library(plotly)
@@ -190,26 +196,26 @@ NP_Keywords <- LandingReceipts_Keywords %>%
   filter(NP_flag %in% c("yes", "maybe")) %>%
   pull(Keyword)
 
-NP_Landings <- Landings_GoC_TopGroupings_wSp %>%
+NP_TopGroupings_Landings <- Landings_GoC_TopGroupings_wSp %>%
   filter(keyword_1 %in% NP_Keywords |
            keyword_2 %in% NP_Keywords |
            keyword_3 %in% NP_Keywords |
            keyword_4 %in% NP_Keywords |
            keyword_5 %in% NP_Keywords)
 
-unique(NP_Landings$common_name_english_estimated)
+unique(NP_TopGroupings_Landings$common_name_english_estimated)
 # Previous: 3031 obs. over 17 taxa (common names)
 # WITH SHARK FIN: 18495 obs. over 26 taxa (common names)
 # NOTE: adding additional key word "BUCHE", "CARNADA", AND "S.C." did not change total NP observations.
 
-unique(NP_Landings$species_name)
+unique(NP_TopGroupings_Landings$species_name)
 # Previous: And 21 styles of preparation
 # And 65 styles of preparation
 ```
 
-```{r NP Summary Table}
+```{r NP Summary Table: take 1}
 # How many species (log-book entries) are there per grouping?
-NP_summary_table <- NP_Landings %>%
+NP_summary_table <- NP_TopGroupings_Landings %>%
   select(common_name_english_estimated, species_name) %>%
   group_by(common_name_english_estimated) %>%
   summarize(species_list = paste(unique(species_name), collapse = ", "))
@@ -253,12 +259,12 @@ unique(Seashell_Landings$species_name)
 ```{r Filter out keywords from recorded_species_name}
 # List of all key terms:
 keyword_list <- c(
-  "DESC", "IND", "ENT", "FCO", "DESV", "S", "FCA", "DES", "DSC", 
+  "DESC", "IND", "ENT", "FCO", "S", "DESV", "FCA", "DES", "DSC", 
   "ECO", "CONG", "CONGELADO", "DE CULTIVO", "DE CULTIVO VIVO", 
   "FILETE", "FILETE DE", "ECA", "CABEZA DE", "FILETE DE ECO", 
   "PIEL DE ECA", "PIEL DE SECA", "ALETA ECA DE", "DESCABEZADO", "FRESCO", "SECO DE", "ALETA", "SECA", "SECA DE", "SECO", "SECO DE", "DE ALTA MAR", "ENTERO",
   "POLVO DE", "CONCHA DE", "COCINERO",
-  "CARNADA", "BUCHE", "S.C."
+  "CARNADA", "BUCHE", "S.C.", "CONCHA" # These last 4 words are words added as of Nov. 10
 )
 
 # NOTE TO SELF: THIS LIST IS UNDER CONSTRUCTION (as of Nov 10 2025)
@@ -289,26 +295,328 @@ Seashell_Sp_List <- Seashell_Landings %>%
     keyword_5 = keywords_5
   ) %>%
   
-  # Clean species names (remove keywords and extra spaces)
+  # Remove keywords from species name, except for "ALMEJA CONCHA ESPINA" (spiny oyster)
+  rowwise() %>%
   mutate(
-    recorded_species_name_clean = str_remove_all(
-      recorded_species_name,
-      paste0("\\b(", paste(keyword_list, collapse="|"), ")\\b[.,]?")
+    recorded_species_name_clean = if_else(
+      recorded_species_name == "ALMEJA CONCHA ESPINA",
+      recorded_species_name,  # leave as-is
+      str_remove_all(
+        recorded_species_name,
+        paste0("\\b(", paste(keyword_list, collapse="|"), ")\\b[.,]?")
+      )
     ),
     recorded_species_name_clean = str_remove_all(recorded_species_name_clean, "\\bY\\b"),
     recorded_species_name_clean = str_squish(recorded_species_name_clean)
-  )
-
-Seashell_Sp_List <- Seashell_Sp_List %>%
+  ) %>%
   arrange(main_species_group, recorded_species_name_clean)
 
 unique(Seashell_Sp_List$keyword_1)
 unique(Seashell_Sp_List$recorded_species_name_clean)
 
-# Only 83 names to sort through here!!
+# Only 82 names to sort through here!!
+```
+
+```{r Use taxize to determine scientific names where possible}
+# Step 1: Extract scientific names from parentheses
+Seashell_Sp_List$scientific_name <- sub(".*\\(([^)]+)\\).*", "\\1", Seashell_Sp_List$recorded_species_name_clean)
+Seashell_Sp_List$scientific_name[!grepl("\\(", Seashell_Sp_List$recorded_species_name_clean)] <- NA
+Seashell_Sp_List$scientific_name <- trimws(Seashell_Sp_List$scientific_name)
+
+# Convert to proper binomial capitalization
+capitalize_binomial <- function(x){
+  x <- tolower(x)                    # all lowercase
+  words <- strsplit(x, " ")[[1]]     # split words
+  if(length(words) >= 2){
+    words[1] <- paste0(toupper(substring(words[1],1,1)), substring(words[1],2))  # Genus capitalized
+    words[2] <- words[2]  # species lowercase
+    return(paste(words[1], words[2]))
+  } else {
+    return(x)
+  }
+}
+
+Seashell_Sp_List$scientific_name_clean <- sapply(Seashell_Sp_List$scientific_name, function(x){
+  if(!is.na(x)) capitalize_binomial(x) else NA
+})
+
+# Step 2: Unique names to query
+taxa_list <- unique(na.omit(Seashell_Sp_List$scientific_name_clean))
+
+# Step 3: Get GBIF IDs safely
+# function to get classification from GBIF
+get_gbif_classification <- function(name){
+  # search for the name
+  res <- name_backbone(name = name, strict = FALSE)  # fuzzy search
+  if(is.null(res$species)) res$species <- NA
+  if(is.null(res$genus)) res$genus <- NA
+  if(is.null(res$family)) res$family <- NA
+  data.frame(
+    scientific_name = name,
+    species = res$species,
+    genus = res$genus,
+    family = res$family,
+    stringsAsFactors = FALSE
+  )
+}
+
+gbif_results <- do.call(rbind, lapply(taxa_list, get_gbif_classification))
+
+# Step 4: Merge
+# Merge GBIF taxonomy back to the original dataframe
+Seashell_Sp_List <- merge(
+  Seashell_Sp_List,
+  gbif_results,
+  by.x = "scientific_name_clean",   # column in your original df
+  by.y = "scientific_name",         # column in gbif_results
+  all.x = TRUE                      # keep all rows from Seashell_Sp_List
+)
 ```
 
 ```{r save this as a CSV}
-write.csv(Seashell_Sp_List, "/home/ferrer/ohi_goc_prep/NP/v2025/Seashell_Sp_Nov102025.csv", row.names = FALSE)
+#write.csv(Seashell_Sp_List, "/home/ferrer/ohi_goc_prep/NP/v2025/Seashell_SpKey_UNDER CONSTRUCTION_Nov102025.csv", row.names = FALSE)
 ```
 
+Added information about each top-landed species manually, offline.
+```{r Manually research and add species info (Nov 10 2025)}
+dataMares_CONAPESCA_data<- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByDataMares/", "dataMares_CONAPESCA_Data_Oct6_2025.csv"))
+# 4755692 obs.
+
+#### Manually identify species info given their common names (Nov 10)
+SpeciesInquiry<- dataMares_CONAPESCA_data %>% filter(`Especie nombre general`=="ALMEJA")
+unique(SpeciesInquiry$`Especie nombre`)
+unique(SpeciesInquiry$Especie_nombre_cientifico)
+unique(SpeciesInquiry$Especie_nombre_cientifico[which(SpeciesInquiry$`Especie nombre`=="RONOSA NEGRA")])
+
+get_gbifid_("Megathura", method= "backbone")
+
+# rm(SpeciesInquiry)
+# rm(dataMares_CONAPESCA_data)
+
+#### TOP-LANDED SPECIES LIST - Nov 5 2025
+#Seashell_Sp_List<- read_csv(here("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/PrelimLook_CONAPESCA_SpeciesNames_Oct302025/Seashell_Sp_List_Nov052025.csv"))
+# 600 obs., 17 columns
+unique(Seashell_Sp_List$common_name_english_estimated)
+```
+
+```{r ALMEJA and CARACOL species key}
+Seashell_SpKey<- read_csv("/home/ferrer/ohi_goc_prep/NP/v2025/Seashell_SpKey_UNDER CONSTRUCTION_Nov102025.csv")
+```
+
+```{r Append Seashell_SpKey to Seashell_Landings}
+Seashell_Landings_wSp<- left_join(Seashell_Landings, Seashell_SpKey, 
+          by = c("main_species_group", "species_name"="recorded_species_name"))
+# 50336 obs., 40 vars.
+
+Seashell_Landings_wSp<- Seashell_Landings_wSp[, -c(25:26)]
+# 50336 obs., 38 vars.
+
+unique(Seashell_Landings_wSp$keyword_1)
+```
+
+```{r Seashell Summary Table: take 2}
+# How many species (log-book entries) are there per grouping?
+Seashell_summary_table <- Seashell_Landings_wSp %>%
+  select(genus_estimated, species_estimated) %>%
+  group_by(genus_estimated) %>%
+  summarize(species_list = paste(unique(species_estimated), collapse = ", "))
+```
+
+```{r Aquaculture Production Associated with Top Landings}
+Keywords_Key<- read_csv("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/LandingReceipts_KeywordsKey_Nov102025.csv")
+
+NP_Keywords <- Keywords_Key %>%
+  filter(NP_flag %in% c("yes", "maybe")) %>%
+  pull(Keyword)
+
+NP_Seashell_Landings <- Seashell_Landings_wSp %>%
+  filter(acuaculture_production == "yes" |
+           keyword_1 %in% NP_Keywords |
+           keyword_2 %in% NP_Keywords |
+           keyword_3 %in% NP_Keywords |
+           keyword_4 %in% NP_Keywords |
+           keyword_5 %in% NP_Keywords)
+
+unique(NP_Seashell_Landings$common_name_english_estimated)
+unique(NP_Seashell_Landings$main_species_group)
+# 1428 obs. over 22 taxa (common names) and 2 groupings
+
+unique(NP_Seashell_Landings$species_name)
+# And 32 styles of preparation
+```
+
+```{r Join NP dataframes together}
+NP_Fishery_Landings <- bind_rows(NP_Seashell_Landings, NP_TopGroupings_Landings)
+# 19923 obs., 38 vars.
+
+unique(NP_Fishery_Landings$main_species_group)
+unique(NP_Fishery_Landings$species_name)
+```
+
+```{r Adjust fisheries 'live weight' versus 'landed weight'}
+# Kind of looks like sometimes 'landed weight' is 'live weight' and vice versa.
+NP_Fishery_Landings$weight_kg_corrected<- c(NA)
+
+NP_Fishery_Landings$weight_kg_corrected <- ifelse(
+  NP_Fishery_Landings$live_weight >= NP_Fishery_Landings$landed_weight,
+  NP_Fishery_Landings$live_weight,
+  NP_Fishery_Landings$landed_weight
+)
+```
+
+
+# Natural Products List for NP gorup meeting #4
+```{r Natural Products: products by name}
+# How many species (log-book entries) are there per grouping?
+NP_List_for_Review <- NP_Fishery_Landings %>%
+  select(main_species_group, species_name, common_name_english_estimated,
+    species_estimated, genus_estimated, family_estimated,
+    keyword_1, keyword_2, keyword_3, keyword_4, keyword_5,
+    year, weight_kg_corrected
+  ) %>%
+  group_by(main_species_group, species_name, common_name_english_estimated,
+           species_estimated, genus_estimated, family_estimated) %>%
+  summarize(
+    mean_annual_biomass = sum(weight_kg_corrected, na.rm = TRUE) / n_distinct(year),
+    products = paste(
+      unique(na.omit(c(keyword_1, keyword_2, keyword_3, keyword_4, keyword_5))),
+      collapse = ", "
+    ),
+ .groups = "drop"
+  )
+
+NP_List_for_Review <- NP_List_for_Review %>%
+  relocate(products, .after = common_name_english_estimated)
+
+NP_List_for_Review$added_by<- c("Erica_Nov_2025")
+
+# Add Liliana's additions:
+NP_Additions_by_Liliana<- read_csv("/home/ferrer/ohi_goc_prep/NP/v2025/Avisos_NP_fromLiliana_Nov12_2025.csv")
+
+# Reduce the dataframe down to unique records so that I can add them to the NP_List_for_Review
+NP_Additions_by_Liliana<- NP_Additions_by_Liliana[,c(28,30)]
+NP_Additions_by_Liliana<- unique(NP_Additions_by_Liliana)
+
+# Re-name the columns:
+colnames(NP_Additions_by_Liliana) <- c("main_species_group", "species_name")
+
+# Add a column:
+NP_Additions_by_Liliana$added_by<- c("Liliana_Nov_2025")
+
+NP_List_for_Review <- bind_rows(NP_List_for_Review, NP_Additions_by_Liliana)
+```
+
+
+```{r Save this dataframe NP_List_for_Review}
+#write.csv(NP_List_for_Review, "/home/ferrer/ohi_goc_prep/NP/v2025/NP_List_UNDER CONSTRUCTION_Nov122025.csv", row.names = FALSE)
+```
+
+
+# NP work continued...
+```{r Natural Products: Fisheries Residues by State}
+# How many species (log-book entries) are there per grouping?
+NP_Genus_summary_table <- NP_Fishery_Landings %>%
+  select(year, state, genus_estimated, weight_kg_corrected, keyword_1, keyword_2, keyword_3, keyword_4, keyword_5) %>%
+  group_by(year, state, genus_estimated) %>%
+  summarize(
+    TotalBiomass_annual = sum(weight_kg_corrected, na.rm = TRUE),
+    products = paste(
+      unique(na.omit(c(keyword_1, keyword_2, keyword_3, keyword_4, keyword_5))),
+      collapse = ", "
+    ),
+    .groups = "drop"
+  )
+```
+
+```{r Plot products through time by state}
+# Plot seashells, shark fins, and dried fish
+NP_Fisheries_Biomass_plot<- NP_Genus_summary_table %>%
+  filter(genus_estimated != "Thunnus") %>%
+  filter(year > 2014 & year < 2025) %>%
+  ggplot(
+       aes(x = year,
+           y = log10(TotalBiomass_annual),        # match your new column name
+           color = genus_estimated,
+           group = genus_estimated)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ state, scales = "free_y") +
+  labs(
+    title = "Natural Products Total Biomass (2015–2024)",
+    subtitle = "Products include seashells, heads, and shark fins [under construction]",
+    x = "Year",
+    y = "Total Biomass (kg)",
+    color = "Common Name"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+NP_Fisheries_Biomass_plot
+
+# Save the plot as PNG
+# ggsave(filename = "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/PrelimLook_CONAPESCA_SpeciesNames_Oct302025/Corvina.Biomass_plot_Nov032025.png",
+#        plot = Corvina_Biomass_plot,
+#        width = 10,        # width in inches
+#        height = 6,        # height in inches
+#        dpi = 300)         # resolution
+```
+
+```{r Summary table: how the products are prepared}
+NP_Prep_summary_table <- NP_Fishery_Landings %>%
+  select(year, state, genus_estimated, weight_kg_corrected, keyword_1, keyword_2, keyword_3, keyword_4, keyword_5) %>%
+  pivot_longer(
+    cols = starts_with("keyword_"),
+    names_to = "keyword_type",
+    values_to = "keyword"
+  ) %>%
+  filter(!is.na(keyword) & keyword != "") %>%  # remove blanks and NAs
+  group_by(year, state, keyword) %>%
+  summarize(
+    TotalBiomass_annual = sum(weight_kg_corrected, na.rm = TRUE),
+    products = paste(
+      unique(genus_estimated),
+      collapse = ", "
+    ),
+    .groups = "drop"
+  )
+```
+
+```{r Plot products through time by state}
+# Plot seashells, shark fins, and dried fish
+NP_Biomass_by_Prep_plot<- NP_Prep_summary_table %>%
+  filter(year > 2014 & year < 2025) %>%
+  ggplot(
+       aes(x = year,
+           y = log10(TotalBiomass_annual),        # match your new column name
+           color = keyword,
+           group = keyword)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ state, scales = "free_y") +
+  labs(
+    title = "Natural Products Total Biomass (2015–2024)",
+    subtitle = "Products include seashells, heads, and shark fins [under construction]",
+    x = "Year",
+    y = "Total Biomass (kg)",
+    color = "Common Name"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+NP_Biomass_by_Prep_plot
+
+# Save the plot as PNG
+# ggsave(filename = "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/PrelimLook_CONAPESCA_SpeciesNames_Oct302025/Corvina.Biomass_plot_Nov032025.png",
+#        plot = Corvina_Biomass_plot,
+#        width = 10,        # width in inches
+#        height = 6,        # height in inches
+#        dpi = 300)         # resolution
+```
