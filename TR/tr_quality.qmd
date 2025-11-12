@@ -66,10 +66,12 @@ mapview(banos_publicos_goc, zcol = "descripcion_del_sector_economico")
 ### Read in SESNSP GoC data
 
 ```{r}
-sesnsp_goc <- st_read(here::here("SS/v2025/int_sesnsp","sesnsp_goc_municipios_50km.shp")) ## need to fix the names / make a document describing the abbreviations!!
+sesnsp_goc_10km <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/ss/int","sesnsp_goc_municipios_10km.shp")) ## need to fix the names / make a document describing the abbreviations!!
 
-unique(sesnsp_goc$rgn_id) # [1] "Region_1" "Region_3" "Region_4" "Region_5" "Region_7" "Region_8" "Region_9"
+unique(sesnsp_goc_10km$rgn_id) # for 10km: [1] "Region_1" "Region_3" "Region_4" "Region_5" "Region_7" "Region_8" [7] "Region_9"
+# for 50km: [1] "Region_1" "Region_3" "Region_4" "Region_5" "Region_7" "Region_8" "Region_9"
 ```
+
 Out of the crimes listed in `SS/v2025/int_sesnsp/types_of_crimes_goc_sesnsp.csv`, these are the ones I think affect tourism quality the most:
 
 bien_juridico_afectado	tipo_de_delito	subtipo_de_delito
@@ -163,7 +165,7 @@ tr_qual_crime_subtypes <- c(
 )
 
 # filter sesnsp_goc by those subtypes
-sesnsp_goc_tr_qual <- sesnsp_goc %>%
+sesnsp_goc_tr_qual <- sesnsp_goc_10km %>%
   filter(sbtp_d_ %in% tr_qual_crime_subtypes)
 
 unique(sesnsp_goc_tr_qual$rgn_id) # [1] "Region_1" "Region_3" "Region_4" "Region_5" "Region_7" "Region_8" "Region_9"
@@ -179,15 +181,43 @@ sesnsp_goc_tr_qual_sum <- sesnsp_goc_tr_qual %>%
   summarise(number_crimes = sum(annl_tt))
 
 unique(sesnsp_goc_tr_qual_sum$rgn_id) # [1] "Region_1" "Region_3" "Region_4" "Region_5" "Region_7" "Region_8" "Region_9"
-
-tr_qual_crime_score <- sesnsp_goc_tr_qual_sum %>%
-  group_by(ano) %>% 
-  mutate(
-    max_crime = max(number_crimes, na.rm = TRUE),
-    current_status = (1 - (number_crimes / max_crime)) * 100
-  ) %>%
-  ungroup()
 ```
+
+#### Divide by coastal population in each region
+
+##### NOTE: NEED TO UPDATE...
+
+1. We will have to update this because we eventually want to use 2015, 2020, and 2025 census data for population, not just static 2020.
+2. I think maybe we should use the population per municipality (instead of population per OHI Region).  Because for some regions there are multiple municipios in the region that have data collected for them, versus some only have one or two.  
+
+```{r}
+coastal_10km_pop <- read_csv(here::here("general","OHI_rgn_population_10km.csv")) 
+
+coastal_10km_pop_sumrgn9 <- coastal_10km_pop %>% 
+  group_by(rgn_id) %>% 
+  summarize(rgn_population_10km = sum(population_10km_2020))
+
+sesnsp_goc_tr_sum_percapita <- left_join(sesnsp_goc_tr_qual_sum, coastal_10km_pop_sumrgn9, by = "rgn_id")
+
+sesnsp_goc_tr_crimes_percapita <- sesnsp_goc_tr_sum_percapita %>% 
+  group_by(ano, rgn_id) %>% 
+  mutate(crimes_percapita = 100 * (number_crimes / rgn_population_10km))
+```
+
+#### Prelim Scores
+
+```{r}
+max_crime_percapita_allrgns <- max(sesnsp_goc_tr_crimes_percapita$crimes_percapita, na.rm = TRUE)
+
+tr_qual_crime_score_alt <- sesnsp_goc_tr_crimes_percapita %>%
+  mutate(
+    current_status = (1 - (crimes_percapita / max_crime_percapita_allrgns)) * 100
+  ) 
+
+write_csv(tr_qual_crime_score, here::here("TR/tr_quality_int","tr_qual_crime_score_111025.csv"))
+```
+
+#### Plotly
 
 ```{r}
 library(plotly)
@@ -202,7 +232,7 @@ tr_qual_crime_plotly <- plotly::plot_ly(
   mode = "lines"
 ) %>%
   layout(
-    title = "CURRENT STATUS: Índice de delitos que afectan la calidad turística por región",
+    title = "CURRENT STATUS: Índice de delitos per cápita que afectan la calidad turística por región",
     xaxis = list(title = "Año // Year"),
     yaxis = list(title = "Puntaje // Score (out of 100)"),
     legend = list(title = list(text = "Región"))
