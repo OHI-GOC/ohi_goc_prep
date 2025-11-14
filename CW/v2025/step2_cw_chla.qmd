@@ -1,0 +1,223 @@
+---
+title: 'OHI GoC 2025: Clean Waters: Chl-A'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Global Ocean Colour (Copernicus-GlobColour), Bio-Geo-Chemical, L4 (monthly and interpolated) from Satellite Observations (1997-ongoing): Chlorophyll-A concentration
+
+For the Global Ocean Satellite Observations, ACRI-ST company (Sophia Antipolis, France) is providing Bio-Geo-Chemical (BGC) products based on the Copernicus-GlobColour processor.
+
+*Upstreams:* SeaWiFS, MODIS, MERIS, VIIRS-SNPP & JPSS1, OLCI-S3A & S3B for the ""multi"" products, and S3A & S3B only for the ""olci"" products.
+
+*Variables:* Chlorophyll-a (CHL), Phytoplankton Functional types and sizes (PFT), Primary Production (PP), Suspended Matter (SPM), Secchi Transparency Depth (ZSD), Diffuse Attenuation (KD490), Particulate Backscattering (BBP), Absorption Coef. (CDM) and Reflectance (RRS).
+
+*Temporal resolutions:* monthly plus, for some variables, daily gap-free based on a space-time interpolation to provide a ""cloud free"" product.
+
+*Spatial resolutions:* 4 km and a finer resolution based on olci 300 meters inputs.
+
+Recent products are organized in datasets called Near Real Time (NRT) and long time-series (from 1997) in datasets called Multi-Years (MY).
+
+To find the Copernicus-GlobColour products in the catalogue, use the search keyword ""GlobColour""."
+
+*DOI (product):*
+https://doi.org/10.48670/moi-00281
+
+*Product identifier*
+OCEANCOLOUR_GLO_BGC_L4_MY_009_104
+
+*Product name*
+Global Ocean Colour (Copernicus-GlobColour), Bio-Geo-Chemical, L4 (monthly and interpolated) from Satellite Observations (1997-ongoing)
+
+*Dataset*
+Plankton, multi-sensor (4 km), monthly   ·   cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M
+
+<https://data.marine.copernicus.eu/product/OCEANCOLOUR_GLO_BGC_L4_MY_009_104/download?dataset=cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M_202411> 
+
+## Setup
+
+```{r}
+# load packages
+if (!require(librarian)){
+  install.packages("librarian")
+  library(librarian)
+}
+
+librarian::shelf(
+  here,
+  CopernicusMarine,
+  janitor,
+  raster,
+  terra,
+  maps,
+  httr,
+  jsonlite,
+  purrr,
+  tictoc,
+  sf, 
+  googleVis,
+  RColorBrewer,
+  foreach,
+  doParallel, # for using multiple cores, if needed
+  tidyverse, 
+  ohicore,
+  ggplot2,
+  reticulate, # for python coding
+  ncmeta,
+  ncdf4,
+  plotly
+)
+
+
+# monthly chl-a rasters
+int_monthly_dir <- here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/monthly_rasters")
+# dir.create(int_dir) # to create the path on Mazu if it has not already been done
+
+chl_files <- list.files(int_monthly_dir, full=TRUE)
+plot(log(rast(chl_files[1])+1))
+
+```
+
+
+## Checking NAs, since this can be a problem with these data.
+```{r}
+
+# this seems fine! I don't see any systematic problem here.
+na_count_data <- data.frame()
+years <- 1998:2024
+for(year in years){ #year = years[27]
+  tmp_files <- grep(chl_files, pattern=year, value=TRUE)
+  tmp_stack <- rast(tmp_files)
+  na_count <- app(tmp_stack, function(x) sum(is.na(x)))
+  plot(na_count)
+  new_data <- data.frame(table(values(na_count)))
+  new_data$year <- year
+  na_count_data <- rbind(na_count_data, new_data)
+  writeRaster(na_count, sprintf("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/missing_data_rasters/na_count_%s.tif", year), overwrite = TRUE)
+}
+write_csv(na_count_data, here("CW/v2025/data/chla_missing_data.csv"))
+
+na_rasts <- list.files("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/missing_data_rasters/", full=TRUE)
+for(year in years){ # year <- years[1]
+  rast_file <- grep(na_rasts, pattern = sprintf("na_count_%s.tif", year), value=TRUE)
+  plot(raster(rast_file), main=year)
+}
+
+
+```
+
+Do a trend analysis for each month.
+
+```{r}
+
+trend_fun <- function(y, t) {
+  # y = cell values
+  if (all(is.na(y))) return(c(NA, NA))  # skip cells with no data
+
+  ok <- !is.na(y) & !is.na(t)
+  y_ok <- y[ok]
+  t_ok <- t[ok]
+
+  # need at least 3 points for a slope
+  if (length(y_ok) < 3) return(c(NA, NA))
+
+  fit <- try(lm(y_ok ~ t_ok), silent = TRUE)
+  if (inherits(fit, "try-error")) return(c(NA, NA))
+
+  sm <- summary(fit)$coefficients
+
+  slope <- sm["t_ok", "Estimate"]
+  pval  <- sm["t_ok", "Pr(>|t|)"]
+
+  c(slope, pval)
+}
+
+months <- c("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12")
+for(month in months){ # month = months[1]
+tmp_month <- grep(chl_files, pattern=sprintf("-%s-01.tif", month), value=TRUE)
+tmp_month <- grep(tmp_month, pattern = "/2025-", invert=TRUE, value=TRUE)
+month_stack <- rast(tmp_month)
+yrs <- as.numeric(format(time(month_stack), "%Y"))
+
+sum_raster <- sum(month_stack, na.rm=TRUE)
+writeRaster(sum_raster,  
+            sprintf("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/trend/month%s_chl_mean.tif", month),  overwrite = TRUE)
+
+trend_raster <- app(month_stack, trend_fun, t = yrs)
+names(trend_raster) <- c("slope", "p_value")
+writeRaster(trend_raster$slope,  
+            sprintf("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/trend/month%s_chl_trend_slope.tif", month),  overwrite = TRUE)
+writeRaster(trend_raster$p_value, 
+            sprintf("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/trend/month%s_chl_trend_pvalue.tif", month), overwrite = TRUE)
+}
+
+
+for(i in 1:12){ # i = 1
+slopes <- list.files("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/trend/", full=TRUE, pattern="slope")
+tmp_s <- rast(slopes[i])
+tmp_s <- ifel(tmp_s>0, 1, -1)
+
+pvalue <- list.files("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/trend/", full=TRUE, pattern="pvalue")
+tmp_p <- rast(pvalue[i])
+tmp_p <- ifel(tmp_p<0.05, 1, 0)
+
+out_rasts <- gsub("_chl_trend_slope.tif", "", basename(slopes[i]))
+
+writeRaster(tmp_s,  
+            sprintf("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/trend2/%s_chl_slope.tif", out_rasts),  overwrite = TRUE)
+writeRaster(tmp_p, 
+            sprintf("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/trend2/%s_chl_trend.tif", out_rasts), overwrite = TRUE)
+
+out_png <- sprintf("trend_%s.png", gsub("_chl_trend_slope.tif", "", basename(slopes[i])))
+png(sprintf(here("CW/v2025/chl_int/monthly_slopes/%s"), out_png), width = 2400, height = 1200, res = 200)
+
+par(mfrow = c(1, 2))      # 1 row, 2 columns
+par(mar = c(4, 4, 4, 5))  # give room for legends/titles if needed
+
+plot(tmp_s, main=gsub(".tif", "", basename(slopes[i])), col=c("#008080", "red"))
+plot(tmp_p, main=gsub(".tif", "", basename(pvalue[i])), col=c("#ffefb3", "orange"))
+dev.off()
+
+}
+
+## get overview
+
+neg_colors <- colorRampPalette(c("#045a8d", "#74a9cf"))(12)   # -12 to -1
+zero_color <- "white"                                         # 0
+pos_colors <- colorRampPalette(c("#ffefb3", "#ffb400"))(12)   # 1 to 12
+
+pal <- c(neg_colors, zero_color, pos_colors)
+
+slope <- list.files("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/trend2", pattern= "slope", full=TRUE)
+tmp <- rast(slope)
+slope_total <- sum(tmp)
+plot(slope_total, col=pal, zlim=c(-12, 12))
+
+
+pal <- c(colorRampPalette(c("#fff8db", "red"))(13)) 
+pval <- list.files("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/trend2", pattern="trend", full=TRUE)
+tmp <- rast(pval)
+slope_total <- sum(tmp)
+plot(slope_total,
+     col = pal)
+
+```
+
+
+The previous analysis provides some indication of change over time. Now I want to assess the magnitude of the change over time.
