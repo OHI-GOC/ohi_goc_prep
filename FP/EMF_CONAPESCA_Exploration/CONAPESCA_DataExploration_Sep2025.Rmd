@@ -1996,22 +1996,6 @@ CPUE_summary <- CPUE_Landings_filtered %>%
   arrange(state, main_species_group, year)
 ```
 
-```{r Summarize Biomass and CPUE for all groupings}
-CPUE_all_summary <- CPUE_Landings_filtered %>%
-  filter(year >= 2014 & year < 2025) %>% # Optional: filter for only the last 10 years
-  select(year, state, days_fishing, weight_kg_corrected, value, CPUE_kg.day) %>%
-  group_by(year, state) %>%
-  summarise(
-    Total_Biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),
-    Total_Days_Spent_Fishing = sum(days_fishing, na.rm= TRUE),
-    Avg_CPUE_kg.days = round(mean(CPUE_kg.day, na.rm= TRUE)),
-    Total_Value_mxn = sum(value, na.rm = TRUE),
-    n_Records = n(),
-    .groups = "drop"  # optional: ungroup after summarising
-  )  %>%
-  arrange(year, state)
-```
-
 ```{r Plot Biomass and CPUE}
 #### PLOT BIOMASS & CPUE OVER TIME ####
 library(ggplot2)
@@ -2157,13 +2141,35 @@ for (i in 1:num_pages) {
 print(plots[[1]])   # page 1
 print(plots[[3]])   # page 3
 ```
-`
+
+```{r Summarize Biomass and CPUE for all groupings}
+hist(CPUE_summary$Avg_CPUE_kg.days)
+
+CPUE_all_summary <- CPUE_Landings_filtered %>%
+  filter(year >= 2014 & year < 2025) %>% # Optional: filter for only the last 10 years
+  # RELEVANT FILTERS:
+  # filter(main_species_group != "SARDINA") %>%
+  # filter(main_species_group != "ANCHOVETA") %>%
+  filter(CPUE_kg.day < 20000) %>%
+  
+  select(year, state, days_fishing, weight_kg_corrected, value, CPUE_kg.day) %>%
+  group_by(year, state) %>%
+  summarise(
+    Total_Biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    Total_Days_Spent_Fishing = sum(days_fishing, na.rm= TRUE),
+    Avg_CPUE_kg.days = round(mean(CPUE_kg.day, na.rm= TRUE)),
+    Total_Value_mxn = sum(value, na.rm = TRUE),
+    n_Records = n(),
+    .groups = "drop"  # optional: ungroup after summarising
+  )  %>%
+  arrange(year, state)
+```
 
 ```{r Plot CPUE and Biomass across all taxonomic groupings}
 ## CPUE
 AllGroups_CPUE_plot <- CPUE_all_summary %>%
   filter(year > 2010) %>%
-  ggplot(aes(x = year, y = log10(Avg_CPUE_kg.days), color = state)) +
+  ggplot(aes(x = year, y = Avg_CPUE_kg.days, color = state)) +
   geom_point(size = 2) +
   geom_line(size = 0.5, alpha = 0.5) +
   
@@ -2171,10 +2177,11 @@ AllGroups_CPUE_plot <- CPUE_all_summary %>%
     title = "CPUE Over Time [across all taxonomic groups]",
     subtitle = "Source: CONAPESCA data from J.C., cleaned & filtered (as of Nov 13)",
     x = "Year",
-    y = "log10 Average CPUE (kg/day)",
+    y = "Average CPUE (kg/day)",
     color = "State"
   ) +
   theme_bw() +
+  geom_vline(xintercept = 2018, linetype = "dashed", color = "black") +
   geom_vline(xintercept = 2019, linetype = "dashed", color = "black") +
   theme(
     legend.position = "bottom",
@@ -2195,7 +2202,7 @@ AllGroups_CPUE_plot
 ## BIOMASS
 AllGroups_Biomass_plot <- CPUE_all_summary %>%
   filter(year > 2010) %>%
-  ggplot(aes(x = year, y = log10(Total_Biomass_kg), color = state)) +
+  ggplot(aes(x = year, y = Total_Biomass_kg, color = state)) +
   geom_point(size = 2) +
   geom_line(size = 0.5, alpha = 0.5) +
   
@@ -2203,10 +2210,11 @@ AllGroups_Biomass_plot <- CPUE_all_summary %>%
     title = "Landings Over Time [across all taxonomic groups]",
     subtitle = "Source: CONAPESCA data from J.C., cleaned & filtered (as of Nov 13)",
     x = "Year",
-    y = "log10 Total Biomass (kg)",
+    y = "Total Biomass (kg)",
     color = "State"
   ) +
   theme_bw() +
+  geom_vline(xintercept = 2018, linetype = "dashed", color = "black") +
   geom_vline(xintercept = 2019, linetype = "dashed", color = "black") +
   theme(
     legend.position = "bottom",
@@ -2227,7 +2235,7 @@ AllGroups_Biomass_plot
 
 ## Testing the effect of subsidy removal on Biomass & CPUE
 ```{r Testing the effect of subsidy removal on Biomass & CPUE}
-CPUE_Landings_filtered <- CPUE_Landings_filtered %>%
+CPUE_summary <- CPUE_summary %>%
   mutate(
     subsidy_period = case_when(
       year < 2018 ~ "pre",
@@ -2236,6 +2244,19 @@ CPUE_Landings_filtered <- CPUE_Landings_filtered %>%
     )
   )
 
+CPUE_Landings_filtered2 <- CPUE_Landings_filtered %>%
+  filter(year >= 2014 & year < 2025) %>%
+  mutate(
+    subsidy_period = case_when(
+      year < 2018 ~ "pre",
+      year > 2019 ~ "post",
+      TRUE ~ "in between"
+    )
+  )
+
+CPUE_Landings_filtered2 %>%
+  distinct(year, subsidy_period)
+# looks good, four years on either side
 
 ## Mixed-effects linear model
 library(Matrix)
@@ -2244,17 +2265,27 @@ library(lattice)
 library(nlme)
 library(sjPlot)
 
-CPUE_Landings_filtered$main_species_group <- factor(CPUE_Landings_filtered$main_species_group)
+CPUE_Landings_filtered2$main_species_group <- factor(CPUE_Landings_filtered2$main_species_group)
 
-SubsidyTest_mixedLM <- lme(
-  weight_kg_corrected ~ subsidy_period,      # fixed effects
-  random = ~1 | main_species_group,         # random intercept
-  data = CPUE_Landings_filtered
+Biomass.SubsidyTest_mixedLM <- lme(
+  log10(weight_kg_corrected) ~ subsidy_period,       # fixed effect
+  random = ~1 | main_species_group/state,  # nested random intercept
+  data = CPUE_Landings_filtered2
 )
 
-summary(SubsidyTest_mixedLM)
-# Summarize the model as a table
-tab_model(SubsidyTest_mixedLM)
+summary(Biomass.SubsidyTest_mixedLM)
+
+CPUE.SubsidyTest_mixedLM <- lme(
+  # fixed effects of subsidy period and time
+  CPUE_kg.day ~ subsidy_period + year,
+  data = CPUE_Landings_filtered2,
+  random = list(
+    state = pdSymm(~ 1),   # random intercept + slope for year by state
+    main_species_group  = pdDiag(~ 1)       # random intercept for taxa
+  )
+)
+
+summary(CPUE.SubsidyTest_mixedLM)
 ```
 
 
