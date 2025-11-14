@@ -1,0 +1,121 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-11-12"
+---
+
+```{r setup, include=FALSE}
+library(sf)
+library(here)
+library(dplyr)
+library(ggplot2)
+library(ggspatial)   # for scale bar & north arrow
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(tmap)
+library(tmaptools)
+
+options(java.parameters = "-Djava.awt.headless=true")
+Sys.setenv(JAVA_TOOL_OPTIONS = "-Djava.awt.headless=true")
+
+
+ohi <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+
+mapview::mapview(ohi)
+
+
+bbox_lcc <- st_as_sfc(st_bbox(ohi)) |> st_buffer(20000)
+
+land <- ne_countries(scale = "medium", returnclass = "sf") |>
+  filter(admin %in% c("Mexico","United States of America")) |>
+  st_transform(st_crs(ohi)) |>
+  st_crop(st_bbox(bbox_lcc))
+
+states <- ne_states(country = "Mexico", returnclass = "sf") |>
+  st_transform(st_crs(ohi))
+
+
+tmap_mode("plot")
+
+tm <- 
+  tm_shape(land) + tm_polygons(col = "#eeeeee", border.col = "#c7c7c7", lwd = 0.3) +
+  tm_shape(ohi)  + tm_polygons("id", palette = "viridis", n=9, alpha = 0.7,
+                               border.col = "white", lwd = 0.6, title = "OHI Region") +
+  tm_shape(states) +                             
+    tm_borders(col = "grey80", lwd = 0.5) +      
+  
+  tm_layout(bg.color = "#cce6ff",      # keep blue water
+  frame = TRUE,
+  inner.margins = c(0, 0, 0, 0),  # kill the blue rim
+  legend.show = FALSE) +
+  tm_compass(type = "8star", position = c("left","bottom"), size = 2) +
+  tm_scale_bar(position = c("left","bottom")) 
+
+tmap_save(tm, here("spatial/images/ohi_goc_regions.pdf"), width = 8, height = 11, units = "in")
+
+
+
+library(maptiles)
+
+bbox_wgs <- st_transform(st_as_sfc(st_bbox(ohi)), 4326) |> st_buffer(0.02) # ~a tiny pad
+
+tiles <- get_tiles(
+  x        = bbox_wgs,
+  provider = "CartoDB.Positron",
+  zoom     = 10,       # 7–10 for regional maps; 10–12 for close-ups (bigger file)
+  crop     = TRUE
+)
+
+
+## attempt 3
+
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(viridisLite)
+library(dplyr)
+
+
+ohi <- st_read(here::here("spatial/ohi_regions/goc_ohi_rgns.shp")) |>
+  filter(location == "marine") |>
+  st_transform(4326)  # Leaflet needs lon/lat
+
+# Mexico state lines
+states_mx <- ne_states(country = "Mexico", returnclass = "sf") |>
+  st_transform(4326)
+
+# Color palette (9 distinct)
+pal <- colorFactor(viridis(9, option = "C"), domain = as.factor(ohi$id), ordered = FALSE)
+
+m <- leaflet(options = leafletOptions(zoomControl = TRUE, preferCanvas = TRUE)) |>
+  addProviderTiles(providers$CartoDB.Positron, options = providerTileOptions(updateWhenIdle = TRUE)) |>
+  # state boundaries under polygons
+  addPolylines(data = states_mx, color = "#8a8a8a", weight = 1, opacity = 0.8) |>
+  # OHI regions
+  addPolygons(
+    data = ohi,
+    fillColor = ~pal(as.factor(id)),
+    fillOpacity = 0.7,
+    color = "white", weight = 1, opacity = 1,
+    smoothFactor = 0.5,
+    # hover highlight
+    highlightOptions = highlightOptions(color = "#333", weight = 2, bringToFront = TRUE),
+    # tooltip label
+       ),
+    popup = ~sprintf("<b>%s</b><br/>Region ID: %s", htmltools::htmlEscape(lbl), htmltools::htmlEscape(id))
+  ) |>
+  addScaleBar(position = "bottomleft", options = scaleBarOptions(imperial = FALSE)) |>
+  addMiniMap(tiles = providers$CartoDB.Positron, toggleDisplay = TRUE) |>
+  addControl(
+    html = "<div style='background:rgba(255,255,255,0.9); padding:6px 10px; border-radius:8px; font-weight:600;'>Gulf of California — OHI Marine Regions</div>",
+    position = "topleft"
+  ) |>
+  fitBounds(lng1 = st_bbox(ohi)["xmin"], lat1 = st_bbox(ohi)["ymin"],
+            lng2 = st_bbox(ohi)["xmax"], lat2 = st_bbox(ohi)["ymax"])
+
+m
+```
+
