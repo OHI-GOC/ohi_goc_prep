@@ -64,7 +64,28 @@ These are the ones that I will be downloading:
 Note that for the years 2025, 2017, and 2016 you will need to rename the files to have the appropriate month and date when they are unzipped.
 
 
-## Servicios de alojamiento temporal y de preparación de alimentos y bebidas
+NOTE: `fecha_alta` is "Fecha en la que la unidad económica se integró al Directorio Estadístico Nacional de Unidades Económicas y al Registro Estadístico de Negocios de México (RENEM)."
+
+Aka, in English, it is the date on which the economic unit was added to the National Statistical Directory of Economic Units and the Statistical Registry of Businesses in Mexico (RENEM).
+
+*Other things to note:*
+
+1.  DENUE versions are cumulative but filtered by active status.
+  Every DENUE release only includes active establishments at the time of publication.
+  If an establishment was closed (temporarily or permanently) in 2022, it might be missing from the 2022 file, even if it has reopened or been reactivated by 2024.
+
+2. Reactivated establishments keep their original `fecha_alta`.
+  That is why there are fecha_altas as far back as 2010 in the 2024 file that were not present in the 2022 file: these businesses first entered RENEM in 2010, later disappeared from the active roster, and were likely revalidated by INEGI in 2024.
+
+3. Differences between years do NOT equal purely new/closed businesses.
+  Some IDs are newly added (new businesses).
+  Some are reactivations.
+  Some disappear because they closed, changed name or location, or failed verification.
+  
+SO, there can be establishments split/merged (1 --> 2 or 2 --> 1), occasional ID reassignments, etc.
+
+
+## servicios_alojamiento_temporal_y_preparación_alimentos_y_bebidas
 
 ```{r}
 library(tidyverse)
@@ -178,7 +199,7 @@ comida_bebidas_2024_goc_10km <- alojamientos_bebidas_2024_goc_10km %>%
 mapview(comida_bebidas_2024_goc_10km)
 ```
 
-### Function to read in and separate each 
+### Function to read in and separate alojamientos from comida & bebidas 
 
 ```{r}
 library(tidyverse)
@@ -189,7 +210,7 @@ library(tmaptools)
 library(sf)
 library(mapview)
 
-# Define accommodation and food/beverage categories
+# defining these categories based on 2024
 alojamientos_categories <- c(
   "Moteles",
   "Hoteles sin otros servicios integrados",
@@ -236,7 +257,8 @@ get_folder_suffix <- function(year) {
   return(suffixes[[as.character(year)]])
 }
 
-# Main function to process data for a given year
+###########################
+# function to process data for a given year
 process_denue_year <- function(year, inland_10, base_path = "/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025") {
   
   cat(paste0("Processing year: ", year, "\n"))
@@ -257,21 +279,27 @@ process_denue_year <- function(year, inland_10, base_path = "/home/shares/ohi/OH
                     "conjunto_de_datos",
                     "denue_inegi_72_1.csv")
   
-  sp_1 <- read_csv(sp_1_path, show_col_types = FALSE)
+  sp_1 <- read_csv(sp_1_path)
   
+  cat("  Mutating 72_1 dataset...\n")
   sp_1_goc <- sp_1 %>%
     mutate(entidad = stringr::str_to_lower(entidad)) %>% 
     select(-c(edificio_e, telefono)) %>% 
     filter(entidad %in% goc_states)
   
+  cat("  Converting 72_1 to spatial object ...\n")
   sf_sp_1_goc <- sp_1_goc %>%
     st_as_sf(coords = c("longitud", "latitud"),
              crs = 4326,
              remove = FALSE)
   
+  cat("  Transforming 72_1 dataset...\n")
   sf_sp_1_goc_trans <- st_transform(sf_sp_1_goc, st_crs(inland_10))
+  
+  cat("  Intersct 72_1 dataset...\n")
   sf_sp_1_goc_10km <- st_intersection(sf_sp_1_goc_trans, inland_10)
   
+  cat("  Fix UTF issue for 72_1 dataset...\n")
   sf_sp_1_goc_10km[] <- lapply(sf_sp_1_goc_10km, function(x) {
     if (is.character(x)) iconv(x, from = "", to = "UTF-8", sub = "byte") else x
   })
@@ -286,19 +314,25 @@ process_denue_year <- function(year, inland_10, base_path = "/home/shares/ohi/OH
   
   sp_2 <- read_csv(sp_2_path, show_col_types = FALSE)
   
+  cat("  Mutating 72_2 dataset...\n")
   sp_2_goc <- sp_2 %>%
     mutate(entidad = stringr::str_to_lower(entidad)) %>% 
     select(-c(edificio_e, telefono)) %>% 
     filter(entidad %in% goc_states)
   
+  cat("  Converting 72_2 to spatial object ...\n")
   sf_sp_2_goc <- sp_2_goc %>%
     st_as_sf(coords = c("longitud", "latitud"),
              crs = 4326,
              remove = FALSE)
   
+  cat("  Transforming 72_2 dataset...\n")
   sf_sp_2_goc_trans <- st_transform(sf_sp_2_goc, st_crs(inland_10))
+  
+  cat("  Intersct 72_2 dataset...\n")
   sf_sp_2_goc_10km <- st_intersection(sf_sp_2_goc_trans, inland_10)
   
+  cat("  Fix UTF issue for 72_2 dataset...\n")
   sf_sp_2_goc_10km[] <- lapply(sf_sp_2_goc_10km, function(x) {
     if (is.character(x)) iconv(x, from = "", to = "UTF-8", sub = "byte") else x
   })
@@ -314,7 +348,7 @@ process_denue_year <- function(year, inland_10, base_path = "/home/shares/ohi/OH
     filter(nombre_act %in% alojamientos_categories)
   
   # separate out food & beverages
-  cat("  Filtering food & beverages...\n")
+  cat("  Filtering comida y bebidas...\n")
   comida_bebidas_goc_10km <- alojamientos_bebidas_goc_10km %>%
     filter(nombre_act %in% comida_bebidas_categories)
   
@@ -337,20 +371,31 @@ inland_10 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_bu
 result_2024 <- process_denue_year(2024, inland_10)
 alojamientos_2024_goc_10km <- result_2024$alojamientos
 comida_bebidas_2024_goc_10km <- result_2024$comida_bebidas
+```
 
+### Using function
+
+```{r}
+##########################################
 # process years 2019 to 2024!
 years <- 2019:2024
 results <- lapply(years, function(y) process_denue_year(y, inland_10))
 names(results) <- paste0("year_", years)
 
 # joining all of these into one object for alojamientos and comida & bebidas.
-all_alojamientos <- bind_rows(lapply(results, function(x) x$alojamientos %>% select(-c(edificio_e, telefono))))
+
+all_alojamientos <- bind_rows(lapply(results, function(x) x$alojamientos))
+# 1701 + 1107 + 1630 + 1630 + 1639 + 1551 = 9258
+# great!!
 mapview(all_alojamientos, zcol = "data_year")
-all_comida_bebidas <- bind_rows(lapply(results, function(x) x$comida_bebidas %>% select(-c(edificio_e, telefono))))
-mapview(all_alojamientos, zcol = "data_year")
+
+
+all_comida_bebidas <- bind_rows(lapply(results, function(x) x$comida_bebidas))
+mapview(all_comida_bebidas, zcol = "data_year")
+##########################################
 ```
 
-### Exploring 2020
+#### Checking fxn for various years
 
 Was hitting lots of warnings prior to 2021, so I decided to take a look, and it seems like they notated the states in all caps instead of camel case.  Will need to alter the function to account for that. 
 
@@ -379,25 +424,99 @@ sf_sp_1_2020_goc <- sp_1_2020_goc %>%
            remove = FALSE)
 ```
 
-### Exploring 2019
-
-Making sure this looks similar to later years.
+Exploring 2019: making sure this looks similar to later years.
 
 ```{r}
 sp_1_2019 <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_alojamiento_temporal_y_preparación_alimentos_y_bebidas/denue_00_72_1_1119_csv/conjunto_de_datos","denue_inegi_72_1.csv"))
 
-sp_1_2020_goc <- sp_1_2020 %>% 
-  filter(entidad %in% c("Baja California","Baja California Sur","Jalisco","Nayarit","Sinaloa","Sonora")) #### here is the issue
+# sp_1_2019_goc <- sp_1_2019 %>% 
+  # filter(entidad %in% c("Baja California","Baja California Sur","Jalisco","Nayarit","Sinaloa","Sonora")) #### here is the issue also.
 
-na_2020 <-sp_1_2020_goc %>% 
-  filter(is.na(longitud))
-
-sf_sp_1_2020_goc <- sp_1_2020_goc %>% 
-  st_as_sf(coords = c("longitud", "latitud"),
-           crs = 4326, # WGS84
-           remove = FALSE)
+na_2019 <-sp_1_2019 %>% 
+  filter(is.na(longitud)) # none even without filtering for GoC
 ```
 
 
+2023 looks suspiciously low for accommodations in terms of records (comparatively)
 
+```{r}
+sp_1_2023 <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_alojamiento_temporal_y_preparación_alimentos_y_bebidas/denue_00_72_1_1123_csv/conjunto_de_datos","denue_inegi_72_1.csv"))
+
+sp_1_2023_goc <- sp_1_2023 %>% 
+  mutate(entidad = stringr::str_to_lower(entidad)) %>% 
+  filter(entidad %in% c("baja california","baja california sur","jalisco","nayarit","sinaloa","sonora")) 
+
+na_2023 <-sp_1_2023_goc %>% 
+  filter(is.na(longitud)) ## none
+
+sf_sp_1_2023_goc <- sp_1_2023_goc %>% 
+  st_as_sf(coords = c("longitud", "latitud"),
+           crs = 4326, # WGS84
+           remove = FALSE)
+
+sf_sp_1_2023_goc_trans <- st_transform(sf_sp_1_2023_goc, st_crs(inland_10))
+sf_sp_1_2023_goc_10km <- st_intersection(sf_sp_1_2023_goc_trans, inland_10)
+
+sf_sp_1_2023_goc_10km[] <- lapply(sf_sp_1_2023_goc_10km, function(x) {
+  if (is.character(x)) iconv(x, from = "", to = "UTF-8", sub = "byte") else x
+})
+
+mapview(sf_sp_1_2023_goc_10km)
+
+alojamientos_2023_sp1_goc_10km <- sf_sp_1_2023_goc_10km %>% 
+  filter(nombre_act %in% c("Moteles","Hoteles sin otros servicios integrados","Pensiones y casas de hu<e9>spedes","Departamentos y casas amueblados con servicios de hoteler<ed>a","Campamentos y albergues recreativos","Hoteles con otros servicios integrados","Caba<f1>as, villas y similares")) # 762 obs.
+
+###############################
+sp_2_2023 <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_alojamiento_temporal_y_preparación_alimentos_y_bebidas/denue_00_72_2_1123_csv/conjunto_de_datos","denue_inegi_72_2.csv"))
+
+sp_2_2023_goc <- sp_2_2023 %>% 
+  mutate(entidad = stringr::str_to_lower(entidad)) %>% 
+  filter(entidad %in% c("baja california","baja california sur","jalisco","nayarit","sinaloa","sonora")) 
+
+na_2023 <-sp_2_2023_goc %>% 
+  filter(is.na(longitud)) ## none
+
+sf_sp_2_2023_goc <- sp_2_2023_goc %>% 
+  st_as_sf(coords = c("longitud", "latitud"),
+           crs = 4326, # WGS84
+           remove = FALSE)
+
+sf_sp_2_2023_goc_trans <- st_transform(sf_sp_2_2023_goc, st_crs(inland_10))
+sf_sp_2_2023_goc_10km <- st_intersection(sf_sp_2_2023_goc_trans, inland_10)
+
+sf_sp_2_2023_goc_10km[] <- lapply(sf_sp_2_2023_goc_10km, function(x) {
+  if (is.character(x)) iconv(x, from = "", to = "UTF-8", sub = "byte") else x
+})
+
+mapview(sf_sp_2_2023_goc_10km)
+
+alojamientos_2023_sp2_goc_10km <- sf_sp_2_2023_goc_10km %>% 
+  filter(nombre_act %in% c("Moteles","Hoteles sin otros servicios integrados","Pensiones y casas de hu<e9>spedes","Departamentos y casas amueblados con servicios de hoteler<ed>a","Campamentos y albergues recreativos","Hoteles con otros servicios integrados","Caba<f1>as, villas y similares")) # 345 obs.
+
+##### 762 + 345 = 1107, which is the same as what the function produced!! Yay, so it works!!!
+```
+
+### Write out accommodations and comida/bebidas
+
+```{r}
+### alojamientos
+# st_write(all_alojamientos, here::here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_alojamiento_temporal_y_preparación_alimentos_y_bebidas/int","alojamientos_2019_2024_goc_10km.shp"))
+
+# ### comida bebidas
+# st_write(all_comida_bebidas, here::here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_alojamiento_temporal_y_preparación_alimentos_y_bebidas/int","comida_bebidas_2019_2024_goc_10km.shp"))
+```
+
+## agricultura_cria_explotacion_forestal_pesca_y_caza
+
+
+## mineria
+
+
+## servicios_apoyo_negocios_y_manejo_desechos_y_servicios_de_remediación
+
+
+## servicios_esparcimiento_culturales_y_deportivos_servicios_recreativos
+
+
+## servicios_profesionales_científicos_técnicos
 
