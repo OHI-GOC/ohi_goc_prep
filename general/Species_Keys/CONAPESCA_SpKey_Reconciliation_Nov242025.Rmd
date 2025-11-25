@@ -31,7 +31,7 @@ library(htmlwidgets)
 setwd("/home/ferrer/ohi_goc_prep/")
 ```
 
-```{r Erica's species key}
+```{r Species keys}
 # Erica_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/general/Species_Keys/Erica_CONAPESCA_SpKey_Nov052025.csv")
 # # 600 obs of 17 variables
 
@@ -85,4 +85,106 @@ merged_df2 <- stringdist_join(
 )
 
 ```
+
+## Filtering out key words from landing receipts:
+```{r Load in the Landings_GoC dataframe}
+Landings_GoC<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds"))
+# n = 3716415 obs.
+```
+
+```{r Filter out keywords from recorded_species_name to get recorded_species_name_clean}
+# ------------------------------------------------------------
+# Keyword list
+# ------------------------------------------------------------
+keyword_list <- c(
+  "S.C.", "S", 
+  "ENTERO", "IND", "ENT",
+  "FRESCO", "FCA", "FCO",
+  "ECO",
+  "CONG", "CONGELADO",
+  "VIVO", "VIVA", "VIVITA",
+  "DE CULTIVO", "DE CULTIVO VIVO", "ABASTO RANCHO", "RANCHO",
+  "HUEVA DE",
+  "FILETE", "FILETE DE", "ECA", "FILETE DE ECO", "DESHUESADA",
+  "DESCABEZADO", "DES", "DSC", "DESC",  "DESV",
+  "CABEZA DE", "BUCHE", "BUCHE DE", "TRIPA DE", "COLAS DE",
+  "PIEL DE ECA", "PIEL DE SECA", "PIEL DE",
+  "SECO DE", "SECA", "SECA DE", "SECO", "SECO DE",
+  "COCINERO", "COCIDO", "COCIDA",
+  "ALETA", "ALETA ECA DE", "ALETA FCA DE",
+  "DE ALTA MAR",
+  "CONCHA DE", "CONCHA",
+  "POLVO DE",
+  "CARNADA", "P/CARNADA",
+  "DE AGUA DULCE",
+  "MANTO DE", "PULPA DE", "PULPO DE", "TENTACULOS DE", "TUBO DE",
+  "NO APTO PARA EMPAQUE"
+)
+
+# Sort by descending length to match multi-word keywords first
+keyword_list <- keyword_list[order(nchar(keyword_list), decreasing = TRUE)]
+
+
+# ------------------------------------------------------------
+# Escape regex metacharacters
+# ------------------------------------------------------------
+escape_regex <- function(x) {
+  str_replace_all(x, "([.|(){}+*?^$\\[\\]\\\\])", "\\\\\\1")
+}
+
+keyword_list_escaped <- escape_regex(keyword_list)
+
+# ------------------------------------------------------------
+# Create safe lookaround-based regex
+#   This allows punctuation inside keywords (e.g., "S.C.")
+# ------------------------------------------------------------
+keyword_pattern <- paste0(
+  "(?<![A-Za-z0-9])(",
+  paste(keyword_list_escaped, collapse = "|"),
+  ")(?![A-Za-z0-9])"
+)
+
+# ------------------------------------------------------------
+# Apply the extraction & cleaning
+# ------------------------------------------------------------
+Landed_Sp_Names <- Landings_GoC %>%
+  select(main_species_group, recorded_species_name = species_name) %>%
+  distinct() %>%
+  
+  mutate(
+    keywords = str_extract_all(recorded_species_name, keyword_pattern)
+  ) %>%
+  
+  mutate(keywords = lapply(keywords, function(x) { length(x) <- 5; x })) %>%
+  unnest_wider(keywords, names_sep = "_") %>%
+  
+  rowwise() %>%
+  mutate(
+    recorded_species_name_clean =
+      if_else(
+        recorded_species_name %in% c(
+          "TIBURON ALETA BLANCA",
+          "BERRUGATA ALETA AMARILLA",
+          "CORVINA ALETA CORTA",
+          "CORVINA ALETA AMARILLA"
+        ),
+        recorded_species_name,
+        str_remove_all(recorded_species_name, keyword_pattern)
+      ),
+    
+  # Remove the standalone "Y"
+  recorded_species_name_clean = str_remove_all(recorded_species_name_clean, "\\bY\\b"),
+  
+  # NEW: clean up leftover punctuation such as ". ." or "."
+  recorded_species_name_clean = str_replace_all(recorded_species_name_clean, "[.]+", " "),
+  
+  # Collapse whitespace
+  recorded_species_name_clean = str_squish(recorded_species_name_clean)
+) %>%
+ungroup()
+
+length(unique(Landed_Sp_Names$recorded_species_name_clean))
+# 848 unique names
+```
+
 
