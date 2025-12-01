@@ -18,6 +18,9 @@ library(readr)
 # Data Processing
 library(tidyverse)
 library(dplyr)
+library(stringr)
+library(stringi)
+library(purrr)
 library(tidytext)  # for reorder_within and scale_x_reordered
 library(lubridate)
 library(janitor)
@@ -32,22 +35,192 @@ setwd("/home/ferrer/ohi_goc_prep/")
 ```
 
 
+# PART 1: Filter landings data and create skeleton for species key ------------------------------
+First we need to correctly clean and filter landings data so that we can append species info and extract species info for a key.
 
-```{r Join in sp key}
-
+## Filtering out key words from landing receipts:
+```{r Load in GoC landings data}
+Landings_GoC<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds"))
+# n = 3716415 obs.
 ```
 
+```{r Is aleta de aleta an issue? Short answer, no.}
+Landings_GoC %>%
+  rename(recorded_taxa_name = species_name) %>%
+  mutate(
+    aleta_count = stringi::stri_count_fixed(recorded_taxa_name, "ALETA")
+  ) %>%
+  count(aleta_count)
 
-```{r Export Landings_Cleaned as csv}
-write.csv(Landings_Cleaned, "/home/shares/ohi/", row.names = FALSE)
+# No, double aleta does not seem to be an issue...
 ```
 
+```{r Filter out keywords from recorded_taxa_name to get recorded_taxa_name_clean}
+# 1. Keyword list (excluding ALETA, handled separately) -----------------
+keyword_list <- c(
+  "S.C.", "S/C", "S",
+  "ENTERO", "ENTERA", "IND", "ENT",
+  "FRESCO", "FRESCA", "FCA", "FCO", "FC",
+  "ECO",
+  "CONG", "CONGELADO",
+  "VIVO", "VIVA", "VIVAS", "VIVITA",
+  "DE CULTIVO", "DE CULTIVO VIVO", "ABASTO RANCHO", "RANCHO",
+  "HUEVA DE",
+  "FILETE", "FILETE DE", "ECA", "FILETE DE ECO", "DESHUESADA", "CARNE", "CARNE DE",
+  "DESCABEZADO", "DES", "DSC", "DESC", "DESV", "DESVICERADO",
+  "CABEZA DE", "BUCHE", "BUCHE DE", "TRIPA DE", "COLAS DE", "MANOS DE", "MANOS",
+  "ANCAS DE", "ANCAS", "ANCA",
+  "PIEL DE ECA", "PIEL DE SECA", "PIEL DE", "PIEL",
+  "SECO DE", "SECA", "SECA DE", "SECO", "SECO DE",
+  "COCINERO", "COCIDO", "COCIDA", "COCIDAS", "ASADO",
+  # Remove ALETA from main keywords; handled separately
+  #"ALETA", "ALETA ECA DE", "ALETA FCA DE",
+  "DE ALTA MAR",
+  "CONCHA DE", "CONCHA",
+  "POLVO DE",
+  "CARNADA", "P/CARNADA",
+  "DE AGUA DULCE",
+  "MANTO", "MANTO DE", "PULPA DE", "PULPA FRESCA",
+  "PULPO DE", "TENTACULOS DE", "TUBO DE", "TUBO",
+  "NO APTO PARA EMPAQUE"
+)
+
+# Longest-first ordering
+keyword_list <- keyword_list[order(nchar(keyword_list), decreasing = TRUE)]
+
+# Escape regex meta-characters
+keyword_list_escaped <- stringi::stri_replace_all_regex(
+  keyword_list, "([.|(){}+*?^$\\[\\]\\\\])", "\\\\$1"
+)
+
+# Final regex
+keyword_pattern <- paste0(
+  "(?<![A-Za-z0-9])(",
+  paste(keyword_list_escaped, collapse = "|"),
+  ")(?![A-Za-z0-9])"
+)
+
+
+# 2. Special ALETA phrases (handled separately from other key words) -----------------
+
+special_aleta_adj <- c("BLANCA", "AMARILLA", "CORTA", "AZUL")
+
+remove_aleta_except_special <- function(x) {
+  stringi::stri_replace_all_regex(
+    x,
+    pattern = paste0("\\bALETA\\b(?!\\s+(?:", paste(special_aleta_adj, collapse = "|"), "))"),
+    replacement = "",
+    vectorize_all = FALSE
+  )
+}
+
+
+# 3. MAIN PIPELINE (optimized) -----------------
+
+Landings_GoC_Cleaned <- Landings_GoC %>%
+  
+  # Rename columns
+  rename(
+    recorded_taxa_name = species_name,
+    recorded_taxa_group = main_species_group
+  ) %>%
+  
+  # Extract keywords
+  mutate(
+    keywords_list = stringi::stri_extract_all_regex(recorded_taxa_name, keyword_pattern)
+  ) %>%
+  mutate(keywords_list = map(keywords_list, ~ { length(.x) <- 5; .x })) %>%
+  unnest_wider(keywords_list, names_sep = "_") %>%
+  rename_with(~ paste0("keywords_", 1:5), starts_with("keywords_list_")) %>%
+  
+  # Clean recorded_taxa_name
+  mutate(
+    recorded_taxa_name_clean = recorded_taxa_name %>%
+      remove_aleta_except_special() %>%                      # Remove ALETA unless special
+      stringi::stri_replace_all_regex(keyword_pattern, "") %>% # Remove other keywords
+      stringi::stri_replace_all_regex("\\b(Y|DE|P/)\\b", "") %>% # Remove standalone Y/DE/P/
+      stringi::stri_replace_all_regex("[.,/\\\\]+", " ") %>%      # Remove punctuation
+      str_squish()
+  ) %>%
+  
+  # Extract scientific name
+  mutate(
+    recorded_scientific_name = stringi::stri_extract_first_regex(recorded_taxa_name_clean, "\\(([^)]+)\\)") %>%
+      stringi::stri_replace_all_regex("\\(|\\)", ""),
+    scientific_name_recorded_T.F = !is.na(recorded_scientific_name),
+    recorded_scientific_name = if_else(
+      scientific_name_recorded_T.F,
+      stringi::stri_trans_totitle(recorded_scientific_name),
+      NA_character_
+    )
+  ) %>%
+  
+  # Extract common name
+  mutate(
+    common_name_clean = stringi::stri_trim_both(
+      stringi::stri_replace_first_regex(recorded_taxa_name_clean, "\\s*\\([^)]*\\)", "")
+    ),
+    common_name_clean = tolower(common_name_clean)
+  )
+
+
+# 4. REORDER COLUMNS -----------------
+
+Landings_GoC_Cleaned <- Landings_GoC_Cleaned %>%
+
+  select(
+    # General info
+    state, office_name, landing_site, landing_site_key, landing_site_primary, GoC, lat, long,
+    year, month,
+    receipt_date_fixed, period_start_fixed, period_end_fixed,
+    fleet, acuaculture_production, eu_rnpa, eu_name, vessel_rnpa, vessel_name,
+    
+    # Species info
+    recorded_taxa_group, recorded_taxa_name,
+    
+    # Cleaned / derived names
+    recorded_taxa_name_clean, recorded_scientific_name,
+    scientific_name_recorded_T.F, common_name_clean,
+    
+    # Keywords
+    keywords_1, keywords_2, keywords_3, keywords_4, keywords_5,
+    
+    # Landing details
+    landed_weight, live_weight, value
+ 
+  )
+
+# How many common names are there in this dataset?
+length(unique(Landings_GoC_Cleaned$common_name_clean))
+length(unique(Landings_GoC_Cleaned$recorded_taxa_group))
+# 734 common names (versus 973 with the less comprehensive keywords_list), over 57 taxonomic groups
+```
+
+```{r Check that this worked}
+TEST <- Landings_GoC_Cleaned %>%
+  filter(str_detect(recorded_taxa_name, "ATUN ALETA AMARILLA"))
+```
+# Yes, it seems to have worked!
+
+## Save Landings_GoC_Cleaned rds file
+```{r Save this dataframe - landings keywords & species for top groupings: Nov 10 2025}
+saveRDS(Landings_GoC_Cleaned, file="/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_wKeyWords_2000.present_Dec012025.rds")
+```
+
+```{r Skeleton of master key from Landings_GoC_Cleaned dataframe}
+Master_SpKey_Skeleton<- Landings_GoC_Cleaned %>% select(recorded_taxa_group, recorded_taxa_name_clean, common_name_clean, scientific_name_recorded_T.F, recorded_scientific_name) %>% distinct
+# 802 observations, 5 variables.
+```
+
+# PART 1 COMPLETE.
+
+# PART 2: Create MASTER SPECIES KEY: by merging the skeleton with keys from Mar, & Hem ------------------------------
 
 ```{r Other Species Keys}
 # Erica_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/general/Species_Keys/Erica_CONAPESCA_SpKey_Nov052025.csv")
 # # 600 obs of 17 variables
 
-Erica_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/CONAPESCA_SpeciesNames_OctNov2025/AllGoC_SpKey_Oct312025.csv")
+# AllGoC_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/CONAPESCA_SpeciesNames_OctNov2025/Outdated_SpKeys/AllGoC_SpKey_Oct312025.csv")
 # 1246 obs of 8 variables
 
 Hem_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/general/Species_Keys/Hem_CONAPESCA_SpKey_2018.csv")
@@ -90,360 +263,49 @@ Hem_SpKey_filtered <- Hem_SpKey_filtered %>%
 
 ```{r Merge}
 # merged_df1 <- stringdist_join(
-#   Landed_SpKey,
+#   Master_SpKey_Skeleton,
 #   Mar_SpKey_filtered,
-#   by = c("recorded_common_name" = "common_name_IHH"),
+#   by = c("common_name_clean" = "common_name_IHH"),
 #   method = "jw",          # Jaro-Winkler works well for name matching
 #   max_dist = 0.10,        # adjust as needed
 #   distance_col = "dist"   # keep the distance so you can inspect match quality
 # )
 
 merged_SpKey_0 <- left_join(
-  Landed_SpKey,
+  Master_SpKey_Skeleton,
   Mar_SpKey_filtered,
-  by = c("recorded_common_name" = "IHH_common_name")
+  by = c("common_name_clean" = "IHH_common_name")
 )
 
-merged_SpKey_main <- left_join(
+Master_SpKey <- left_join(
   merged_SpKey_0,
   Hem_SpKey_filtered,
-  by = c("recorded_common_name" = "Hem_common_name")
+  by = c("common_name_clean" = "Hem_common_name")
 )
 ```
 
-```{r COMPILED SPECIES KEY}
-write.csv(merged_SpKey_main, "/home/ferrer/ohi_goc_prep/general/Species_Keys/Reconciled_Master_SpKey_Nov302025.csv", row.names = FALSE)
+```{r MASTER SPECIES KEY}
+write.csv(Master_SpKey, "/home/ferrer/ohi_goc_prep/general/Species_Keys/Master_SpKey_Dec012025.csv", row.names = FALSE)
 ```
 
-# Merge landings with sp key ------------------------------
+# PART 2 COMPLETE.
 
-## Filtering out key words from landing receipts:
-```{r Load in landings and species data (if needed)}
-Landings_GoC<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds"))
-# n = 3716415 obs.
-
-merged_SpKey_main<- read.csv("/home/ferrer/ohi_goc_prep/general/Species_Keys/Reconciled_Master_SpKey_Nov302025.csv")
-# 802 obs. of 61 vars.
-```
-
-```{r Filter out keywords from recorded_taxa_name to get recorded_taxa_name_clean}
-#### Keyword List ####
-
-keyword_list <- c(
-  "S.C.", "S/C", "S",
-  "ENTERO", "ENTERA", "IND", "ENT",
-  "FRESCO", "FRESCA", "FCA", "FCO", "FC",
-  "ECO",
-  "CONG", "CONGELADO",
-  "VIVO", "VIVA", "VIVAS", "VIVITA",
-  "DE CULTIVO", "DE CULTIVO VIVO", "ABASTO RANCHO", "RANCHO",
-  "HUEVA DE",
-  "FILETE", "FILETE DE", "ECA", "FILETE DE ECO", "DESHUESADA", "CARNE", "CARNE DE",
-  "DESCABEZADO", "DES", "DSC", "DESC",  "DESV", "DESVICERADO",
-  "CABEZA DE", "BUCHE", "BUCHE DE", "TRIPA DE", "COLAS DE", "MANOS DE", "MANOS", "ANCAS DE", "ANCAS", "ANCA",
-  "PIEL DE ECA", "PIEL DE SECA", "PIEL DE", "PIEL",
-  "SECO DE", "SECA", "SECA DE", "SECO", "SECO DE",
-  "COCINERO", "COCIDO", "COCIDA", "COCIDAS", "ASADO",
-  "ALETA", "ALETA ECA DE", "ALETA FCA DE",
-  "DE ALTA MAR",
-  "CONCHA DE", "CONCHA",
-  "POLVO DE",
-  "CARNADA", "P/CARNADA",
-  "DE AGUA DULCE",
-  "MANTO", "MANTO DE", "PULPA DE", "PULPA FRESCA", "PULPO DE", "TENTACULOS DE", "TUBO DE", "TUBO",
-  "NO APTO PARA EMPAQUE"
-)
-
-# Sort by descending length to match multi-word keywords first
-keyword_list <- keyword_list[order(nchar(keyword_list), decreasing = TRUE)]
-
-
-#### Escape regex metacharacters ####
-
-escape_regex <- function(x) {
-  str_replace_all(x, "([.|(){}+*?^$\\[\\]\\\\])", "\\\\\\1")
-}
-
-keyword_list_escaped <- escape_regex(keyword_list)
-
-#### Create safe lookaround-based regex: ####
-#   This allows punctuation inside keywords (e.g., "S.C.")
-
-keyword_pattern <- paste0(
-  "(?<![A-Za-z0-9])(",
-  paste(keyword_list_escaped, collapse = "|"),
-  ")(?![A-Za-z0-9])"
-)
-
-
-#### Apply the extraction & cleaning ####
-
-Landings_Goc_Cleaned <- Landings_GoC %>%
-  
-  # 1. rename at the start
-  rename(recorded_taxa_name = species_name) %>%
-  
-  # 2. extract all keyword matches
-  mutate(
-    keywords = str_extract_all(recorded_taxa_name, keyword_pattern)
-  ) %>%
-  
-  # 3. force exactly 5 keywords per row (vectorized)
-  mutate(
-    keywords = lapply(keywords, function(x) { length(x) <- 5; x })
-  ) %>%
-  
-  # 4. unnest into 5 new columns
-  unnest_wider(keywords, names_sep = "_") %>%
-  
-  # 5. vectorized cleaning
-  mutate(
-    recorded_taxa_name_clean = recorded_taxa_name,
-    
-    # clean non-exception rows by removing keyword pattern
-    recorded_taxa_name_clean = if_else(
-      recorded_taxa_name %in% c(
-        "TIBURON ALETA BLANCA",
-        "BERRUGATA ALETA AMARILLA",
-        "CORVINA ALETA CORTA",
-        "CORVINA ALETA AMARILLA"
-      ),
-      recorded_taxa_name_clean,
-      str_remove_all(recorded_taxa_name_clean, keyword_pattern)
-    ),
-
-    # remove Y, DE, P/
-    recorded_taxa_name_clean = str_remove_all(recorded_taxa_name_clean, "\\bY\\b"),
-    recorded_taxa_name_clean = str_remove_all(recorded_taxa_name_clean, "\\bDE\\b"),
-    recorded_taxa_name_clean = str_remove_all(recorded_taxa_name_clean, "\\bP/\\b"),
-
-    # remove punctuation
-    recorded_taxa_name_clean = str_replace_all(recorded_taxa_name_clean, "[.,/\\\\]+", " "),
-
-    # collapse whitespace
-    recorded_taxa_name_clean = str_squish(recorded_taxa_name_clean)
-  )
-
-
-
-
-
-
-
-Landings_Goc_Cleaned %>% distinct(recorded_taxa_group, recorded_taxa_name_clean)
-
-# EXTRACT: scientific names from parentheses
-Landings_Goc_Cleaned$recorded_scientific_name <- sub(".*\\(([^)]+)\\).*", "\\1", Landings_Goc_Cleaned$recorded_taxa_name_clean)
-# Set NA if original string had no parentheses:
-Landings_Goc_Cleaned$recorded_scientific_name[!grepl("\\(", Landings_Goc_Cleaned$recorded_taxa_name_clean)] <- NA
-# Trim whitespace:
-Landings_Goc_Cleaned$recorded_scientific_name <- trimws(Landings_Goc_Cleaned$recorded_scientific_name)
-
-# CLARIFY: Make a column that tells the reader whether or not the scientific_name was recorded in the original record:
-Landings_Goc_Cleaned$scientific_name_recorded_T.F <- ifelse(
-  !is.na(Landings_Goc_Cleaned$recorded_scientific_name) & Landings_Goc_Cleaned$recorded_scientific_name != "",
-  T, F)
-
-# Convert scientific_name to proper binomial capitalization:
-capitalize_binomial <- function(x){
-  x <- tolower(x)                    # all lowercase
-  words <- strsplit(x, " ")[[1]]     # split words
-  if(length(words) >= 2){
-    words[1] <- paste0(toupper(substring(words[1],1,1)), substring(words[1],2))  # Genus capitalized
-    words[2] <- words[2]  # species lowercase
-    return(paste(words[1], words[2]))
-  } else {
-    return(x)
-  }
-}
-
-Landings_Goc_Cleaned$recorded_scientific_name <- sapply(Landings_Goc_Cleaned$recorded_scientific_name, function(x){
-  if(!is.na(x)) capitalize_binomial(x) else NA
-})
-
-
-# Make a column for recorded_common_name
-Landings_Goc_Cleaned <- Landings_Goc_Cleaned %>%
-  mutate(
-    recorded_common_name = str_trim(
-      str_remove(recorded_taxa_name_clean, "\\s*\\([^)]*\\)")
+# PART 3: Merge sp key with landings data ------------------------------
+```{r Merge landings with sp key}
+Landings_GoC_Cleaned_wSp <- Landings_GoC_Cleaned %>%
+  left_join(
+    Master_SpKey,
+    by = c(
+      "recorded_taxa_group",
+      "recorded_taxa_name_clean",
+      "recorded_scientific_name",
+      "scientific_name_recorded_T.F",
+      "common_name_clean"
     )
   )
-
-# Make recorded_common_name lowercase:
-Landings_Goc_Cleaned <- Landings_Goc_Cleaned %>%
-  mutate(recorded_common_name = tolower(recorded_common_name))
-
-length(unique(Landings_Goc_Cleaned$recorded_common_name))
-length(unique(Landings_Goc_Cleaned$recorded_taxa_group))
-# 797 unique names and 734 common names (versus 973 with the less comprehensive keywords_list), over 57 taxanomic groups
-```
-
-```{r Testing FASTER CLEANER option}
-library(dplyr)
-library(stringr)
-library(tidyr)
-library(purrr)
-
-#-------------------------------#
-# 1. KEYWORD LIST + REGEX
-#-------------------------------#
-
-keyword_list <- c(
-  "S.C.", "S/C", "S",
-  "ENTERO", "ENTERA", "IND", "ENT",
-  "FRESCO", "FRESCA", "FCA", "FCO", "FC",
-  "ECO",
-  "CONG", "CONGELADO",
-  "VIVO", "VIVA", "VIVAS", "VIVITA",
-  "DE CULTIVO", "DE CULTIVO VIVO", "ABASTO RANCHO", "RANCHO",
-  "HUEVA DE",
-  "FILETE", "FILETE DE", "ECA", "FILETE DE ECO", "DESHUESADA", "CARNE", "CARNE DE",
-  "DESCABEZADO", "DES", "DSC", "DESC", "DESV", "DESVICERADO",
-  "CABEZA DE", "BUCHE", "BUCHE DE", "TRIPA DE", "COLAS DE", "MANOS DE", "MANOS", "ANCAS DE", "ANCAS", "ANCA",
-  "PIEL DE ECA", "PIEL DE SECA", "PIEL DE", "PIEL",
-  "SECO DE", "SECA", "SECA DE", "SECO", "SECO DE",
-  "COCINERO", "COCIDO", "COCIDA", "COCIDAS", "ASADO",
-  "ALETA", "ALETA ECA DE", "ALETA FCA DE",
-  "DE ALTA MAR",
-  "CONCHA DE", "CONCHA",
-  "POLVO DE",
-  "CARNADA", "P/CARNADA",
-  "DE AGUA DULCE",
-  "MANTO", "MANTO DE", "PULPA DE", "PULPA FRESCA", "PULPO DE", "TENTACULOS DE", "TUBO DE", "TUBO",
-  "NO APTO PARA EMPAQUE"
-)
-
-# sort long-to-short so the longest keyword matches first
-keyword_list <- keyword_list[order(nchar(keyword_list), decreasing = TRUE)]
-
-# Escape regex meta-characters using stringi (faster)
-keyword_list_escaped <- stringi::stri_replace_all_regex(keyword_list, "([.|(){}+*?^$\\[\\]\\\\])", "\\\\$1")
-
-# Final compound regex
-keyword_pattern <- paste0(
-  "(?<![A-Za-z0-9])(",
-  paste(keyword_list_escaped, collapse = "|"),
-  ")(?![A-Za-z0-9])"
-)
-
-
-#-------------------------------#
-# 2. IDENTIFY SPECIAL CASES
-#-------------------------------#
-
-special_cases <- c(
-  "TIBURON ALETA BLANCA",
-  "BERRUGATA ALETA AMARILLA",
-  "CORVINA ALETA CORTA",
-  "CORVINA ALETA AMARILLA"
-)
-
-#-------------------------------#
-# 3. CLEANING PIPELINE
-#-------------------------------#
-
-Landings_GoC_Cleaned <- Landings_GoC %>%
-  rename(recorded_taxa_name = species_name) %>%
-  
-  # Extract keywords for all rows
-  mutate(
-    keywords_list = str_extract_all(recorded_taxa_name, keyword_pattern)
-  ) %>%
-  
-  # Pad each list to exactly 5 keywords
-  mutate(
-    keywords_list = map(keywords_list, ~ { length(.x) <- 5; .x })
-  ) %>%
-  
-  # Spread into separate columns
-  unnest_wider(keywords_list, names_sep = "_") %>%
-  rename_with(~ paste0("keywords_", 1:5), starts_with("keywords_list")) %>%
-  
-  # Clean recorded_taxa_name_clean
-  mutate(
-    recorded_taxa_name_clean = if_else(
-      recorded_taxa_name %in% special_cases,
-      recorded_taxa_name,
-      str_remove_all(recorded_taxa_name, keyword_pattern)
-    ),
-    
-    # Remove Y / DE / P/
-    recorded_taxa_name_clean = str_remove_all(recorded_taxa_name_clean, "\\b(Y|DE|P/)\\b"),
-    
-    # Remove punctuation
-    recorded_taxa_name_clean = str_replace_all(recorded_taxa_name_clean, "[.,/\\\\]+", " "),
-    
-    # Collapse whitespace
-    recorded_taxa_name_clean = str_squish(recorded_taxa_name_clean),
-    
-    # Extract scientific name
-    recorded_scientific_name = str_extract(recorded_taxa_name_clean, "\\(([^)]+)\\)") %>%
-      str_replace_all("\\(|\\)", ""),
-    
-    scientific_name_recorded_T.F = !is.na(recorded_scientific_name),
-    
-    # Capitalize scientific name
-    recorded_scientific_name = if_else(
-      scientific_name_recorded_T.F,
-      str_to_title(recorded_scientific_name),
-      NA_character_
-    ),
-    
-    # Extract common name
-    recorded_common_name = str_trim(str_remove(recorded_taxa_name_clean, "\\s*\\([^)]*\\)")),
-    recorded_common_name = str_to_lower(recorded_common_name)
-  )
-
-
-#-------------------------------#
-# 4. REORDER COLUMN NAMES
-#-------------------------------#
-
-Landings_GoC_Cleaned <- Landings_GoC_Cleaned %>%
-  select(
-    # General info
-    state, office_name, landing_site, landing_site_key, landing_site_primary, GoC, lat, long,
-    year, month,
-    receipt_date_fixed, period_start_fixed, period_end_fixed,
-    fleet, acuaculture_production, eu_rnpa, eu_name, vessel_rnpa, vessel_name,
-    
-    # Species info
-    main_species_group, recorded_taxa_name,
-    
-    # Cleaned / derived names
-    recorded_taxa_name_clean, recorded_scientific_name,
-    scientific_name_recorded_T.F, recorded_common_name,
-    
-    # Keywords
-    keywords_1, keywords_2, keywords_3, keywords_4, keywords_5,
-    
-    # Landing details
-    landed_weight, live_weight, value
- 
-  )
-
-
-# OUT OF CURIOUSITY:
-length(unique(Landings_GoC_Cleaned$recorded_common_name))
-length(unique(Landings_GoC_Cleaned$main_species_group))
-# 734 common names (versus 973 with the less comprehensive keywords_list), over 57 taxanomic groups
-```
-
-## Save Landings_GoC_Cleaned rds file
-```{r Save this dataframe - landings keywords & species for top groupings: Nov 10 2025}
-saveRDS(Landings_GoC_Cleaned, file="/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_wKeyWords_2000.present_UNDERCONSTRUCTION_Dec012025.rds")
-```
-
-```{r Merge landings with sp key}
-Landings_GoC_Cleaned_wSp <- left_join(
-  merged_SpKey_main,
-  Landings_GoC_Cleaned,
-  by = c("recorded_common_name")
-)
 ```
 
 ## Save Landings_GoC_Cleaned_wSp rds file
 ```{r Save this dataframe - landings keywords & species for top groupings: Nov 10 2025}
-saveRDS(Landings_GoC_Cleaned_wSp, file="/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_wKeyWords_2000.present_UNDERCONSTRUCTION_Dec012025.rds")
+saveRDS(Landings_GoC_Cleaned_wSp, file="/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_wSp_2000.present_UNDERCONSTRUCTION_Dec012025.rds")
 ```
