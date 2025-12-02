@@ -41,7 +41,7 @@ First we need to correctly clean and filter landings data so that we can append 
 ## Filtering out key words from landing receipts:
 ```{r Load in GoC landings data}
 Landings_GoC<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds"))
-# n = 3716415 obs.
+# n = 3716415 obs., this data is
 ```
 
 ```{r Is aleta de aleta an issue? Short answer, no.}
@@ -217,11 +217,11 @@ Master_SpKey_Skeleton<- Landings_GoC_Cleaned %>% select(recorded_taxa_group, rec
 # PART 2: Create MASTER SPECIES KEY: by merging the skeleton with keys from Mar, & Hem ------------------------------
 
 ```{r Other Species Keys}
-# Erica_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/general/Species_Keys/Erica_CONAPESCA_SpKey_Nov052025.csv")
-# # 600 obs of 17 variables
-
 # AllGoC_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/CONAPESCA_SpeciesNames_OctNov2025/Outdated_SpKeys/AllGoC_SpKey_Oct312025.csv")
 # 1246 obs of 8 variables
+
+Erica_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/general/Species_Keys/Erica_CONAPESCA_SpKey_IMPERFECT_Nov052025.csv")
+# # 600 obs of 17 variables
 
 Hem_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/general/Species_Keys/Hem_CONAPESCA_SpKey_2018.csv")
 # 8232 obs of 3 variables
@@ -230,7 +230,8 @@ Mar_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/general/Species_Keys/Mar_CONAPE
 # 443 obs of 30 variables
 ```
 
-```{r Prepare to merge}
+```{r Prepare species keys for merging}
+# MAR's KEY / THE IHH KEY
 Mar_SpKey <- Mar_SpKey %>%
   mutate(common_name = tolower(common_name))
 
@@ -241,17 +242,70 @@ Mar_SpKey_filtered <- Mar_SpKey_filtered %>%
          species, genus, family, order, class, functional_major_groups_sm) %>%
   rename_with(~ paste0("IHH_", .x))
 
+# HEM's KEY
 Hem_SpKey <- Hem_SpKey %>%
   mutate(common_name = tolower(common_name))
 
+# Fix the sharks...
 Hem_SpKey_filtered <- Hem_SpKey %>%
-  select(Hem_common_name= common_name, species)
+  mutate(
+    common_name = if_else(
+      common_name == "tiburon",   # exact match only
+      "tiburon se",
+      common_name
+    )
+  )
 
-Hem_SpKey_filtered<- Hem_SpKey_filtered %>% 
+# Fix the rockfishes...
+Hem_SpKey_filtered <- Hem_SpKey_filtered %>%
+  mutate(
+    common_name = if_else(
+      common_name == "rocote",   # exact match only
+      "rocote se",
+      common_name
+    )
+  )
+
+# Fix the grunts...
+Hem_SpKey_filtered <- Hem_SpKey_filtered %>%
+  mutate(
+    common_name = if_else(
+      common_name == "ronco",   # exact match only
+      "ronco se",
+      common_name
+    )
+  )
+
+Hem_SpKey_filtered<- Hem_SpKey_filtered %>%
+  select(Hem_common_name= common_name, species) %>% distinct
+
+Hem_SpKey_filtered <- Hem_SpKey_filtered %>%
+  mutate(
+    species = if_else(
+      str_detect(Hem_common_name, "\\bse\\b"),  # \\b ensures "se" is a whole word
+      "undetermined",
+      species
+    )
+  )
+
+# Fix the species de ornato...
+Hem_SpKey_filtered <- Hem_SpKey_filtered %>%
+  mutate(
+    species = if_else(
+      Hem_common_name == "especies de ornato",   # exact match only
+      "undetermined",
+      species
+    )
+  )
+
+Hem_SpKey_filtered<- Hem_SpKey_filtered %>%
+  select(Hem_common_name, species) %>%
   distinct() %>%
   group_by(Hem_common_name) %>%
   mutate(species_num = row_number()) %>%
   ungroup()
+
+# 1235 obs.
 
 Hem_SpKey_filtered <- Hem_SpKey_filtered %>%
   pivot_wider(
@@ -284,13 +338,263 @@ Master_SpKey <- left_join(
 )
 ```
 
-```{r MASTER SPECIES KEY}
-write.csv(Master_SpKey, "/home/ferrer/ohi_goc_prep/general/Species_Keys/Master_SpKey_Dec012025.csv", row.names = FALSE)
+```{r MASTER SPECIES KEY (not fully cleaned)}
+# write.csv(Master_SpKey, "/home/ferrer/ohi_goc_prep/general/Species_Keys/Master_SpKey_Dec012025.csv", row.names = FALSE)
 ```
 
 # PART 2 COMPLETE.
 
-# PART 3: Merge sp key with landings data ------------------------------
+# PART 3: Clean up and simplify the MASTER SPECIES KEY  ------------------------------
+```{r Simplify the master species key}
+# WHAT IS THE LOGIC?
+
+# If scientific_name_recorded_T.F == TRUE, then estimated_species_name = scientific_name_recorded and species_est_certainty = "virtually certain" and species_est_reasoning = "name was recorded in CONAPESCA".
+
+# If scientific_name_recorded_T.F == FALSE, then compare IHH_species to Hem_species_.
+
+# > If Hem_species_1 is not NA, IHH_species is not NA, and IHH_species is a fuzzy match to any of Hem_species_, then estimated_species_name = IHH_species, species_est_certainty = "high" and species_est_reasoning = "logical match in both keys".
+
+# > If Hem_species_1 is not NA, IHH_species is not NA, and IHH_species is NOT a fuzzy match to any of Hem_species_, then estimated_species_name = IHH_species, species_est_certainty = "low", and species_est_reasoning = "mismatch between keys".
+
+# > If Hem_species_1 is NA but IHH_species is not NA, then estimated_species_name = IHH_species, species_est_certainty = "high", and  = "match to IHH key".
+
+# > If Hem_species_1 is not NA but IHH_species is NA, then consider the species dictated by the rest of Hem's key: if Hem_species_2 is NA, then estimated_species_name = Hem_species_1, species_est_certainty = "high", and species_est_reasoning = "match to Hem's key"; but if Hem_species_2 is not NA, then estimated_species_name = "unknown", species_est_certainty = "medium", and species_est_reasoning = "conflicting matches in Hem's key and no data from IHH" 
+
+
+# APPLY THE LOGIC:
+
+# Hem species columns
+hem_cols <- paste0("Hem_species_", 1:20)
+
+# Compute estimated_species_name, species_est_certainty, and species_est_reasoning
+Master_SpKey_Cleaned <- Master_SpKey %>%
+  rowwise() %>%
+  mutate(
+    hem_values = list(na.omit(c_across(all_of(hem_cols)))),  # all non-NA Hem species
+    
+    # Determine if IHH_species matches any Hem_species_ fuzzily
+    ihh_matches_hem = if(!is.na(IHH_species) & length(hem_values) > 0) {
+      any(stringdist::stringdist(IHH_species, hem_values, method = "jw") < 0.15)
+    } else {
+      FALSE
+    },
+    
+    # Main estimation logic
+    estimated_species_name = case_when(
+      
+      scientific_name_recorded_T.F ~ recorded_scientific_name,  # Case 1
+      
+      !is.na(IHH_species) & length(hem_values) > 0 & ihh_matches_hem ~ IHH_species,  # Case 2
+      
+      !is.na(IHH_species) & length(hem_values) > 0 & !ihh_matches_hem ~ IHH_species, # Case 3
+      
+      !is.na(IHH_species) & length(hem_values) == 0 ~ IHH_species,                   # Case 4
+      
+      is.na(IHH_species) & length(hem_values) == 1 ~ hem_values[1],                  # Case 5a
+      
+      is.na(IHH_species) & length(hem_values) > 1 ~ "unknown",                       # Case 5b
+      
+      TRUE ~ "unknown"
+    ),
+    
+    species_est_certainty = case_when(
+      scientific_name_recorded_T.F ~ "virtually certain",       # Case 1
+      !is.na(IHH_species) & length(hem_values) > 0 & ihh_matches_hem ~ "high confidence",    # Case 2
+      !is.na(IHH_species) & length(hem_values) > 0 & !ihh_matches_hem ~ "low confidence",    # Case 3
+      !is.na(IHH_species) & length(hem_values) == 0 ~ "high confidence",                     # Case 4
+      is.na(IHH_species) & length(hem_values) == 1 ~ "high confidence",                       # Case 5a
+      is.na(IHH_species) & length(hem_values) > 1 ~ "medium confidence",                       # Case 5b
+      TRUE ~ "not applicable"
+    ),
+    
+    species_est_reasoning = case_when(
+      scientific_name_recorded_T.F ~ "name was recorded in CONAPESCA",
+      !is.na(IHH_species) & length(hem_values) > 0 & ihh_matches_hem ~ "logical match in both keys",
+      !is.na(IHH_species) & length(hem_values) > 0 & !ihh_matches_hem ~ "mismatch between keys",
+      !is.na(IHH_species) & length(hem_values) == 0 ~ "match to IHH key",
+      is.na(IHH_species) & length(hem_values) == 1 ~ "match to Hem's key",
+      is.na(IHH_species) & length(hem_values) > 1 ~ "conflicting matches in Hem's key and no data from IHH",
+      TRUE ~ "no data in keys"
+    )
+  ) %>%
+  ungroup() %>%
+  select(-hem_values, -ihh_matches_hem)  # remove temporary helper columns
+```
+
+```{r A few summary stats}
+sum(is.na(Master_SpKey_Cleaned$estimated_species_name)) # 0 rows without a species estimate
+sum(Master_SpKey_Cleaned$estimated_species_name=="unknown") # 241 species unknown
+
+sum(is.na(Master_SpKey_Cleaned$species_est_certainty)) # 0 rows without a species certainty estimate
+table(Master_SpKey_Cleaned$species_est_certainty) # 212 where the estimate is not applicable, 168 estimates of low confidence
+
+sum(is.na(Master_SpKey_Cleaned$species_est_reasoning)) # 0 rows without a reasoning
+table(Master_SpKey_Cleaned$species_est_reasoning) # 212 where we have no data to draw conclusions from, 168 estimates where there was a mismatch between keys
+```
+
+```{r Let's review those that are uncertain and clarify them if possible}
+Master_SpKey_Unknowns<- Master_SpKey_Cleaned %>% filter(species_est_certainty== "not applicable")
+
+# Okay, a few of these unknowns can probably be resolved with my key, which I would think is slightly less reliable than Mar's and Hem's. Use my key to resolve these unknowns and figure out the rest later. (NOTE TO SELF)
+
+# Prepare my key for use:
+Erica_SpKey_filtered<-  Erica_SpKey %>%
+  filter(is.na(recorded_scientific_name)) %>%
+  mutate(recorded_species_name_clean = tolower(recorded_species_name_clean)) %>%
+  rename(Erica_common_name = recorded_species_name_clean, recorded_taxa_group = main_species_group)
+
+Erica_SpKey_filtered<- Erica_SpKey_filtered %>% select(recorded_taxa_group, Erica_common_name, species_estimated, genus_estimated, family_estimated, source_of_estimate) %>% distinct
+# 222 obs., 6 vars.
+
+# Control against many-to-many matches by getting rid of rows in my key that are nearly identical
+Erica_SpKey_filtered <- Erica_SpKey_filtered %>%
+  group_by(recorded_taxa_group, Erica_common_name) %>%
+  slice(1) %>% # keep first match
+  ungroup()
+
+# Only add in my key info when IHH and Hem key info is missing: 
+Master_SpKey_Cleaned <- Master_SpKey_Cleaned %>%
+  # Separate unknowns from knowns
+  mutate(lookup_needed = estimated_species_name == "unknown") %>%
+  
+  # Left join only where lookup_needed is TRUE
+  left_join(
+    Erica_SpKey_filtered,
+    by = c("recorded_taxa_group", "common_name_clean" = "Erica_common_name")
+  ) %>%
+  
+  # Replace estimated_species_name only where it was unknown but a match exists
+  mutate(
+    estimated_species_name = if_else(
+      lookup_needed & !is.na(species_estimated),
+      species_estimated,
+      estimated_species_name
+    ),
+    # Optionally, update the certainty / reasoning
+    species_est_certainty = if_else(
+      lookup_needed & !is.na(species_estimated),
+      "medium confidence",
+      species_est_certainty
+    ),
+    species_est_reasoning = if_else(
+      lookup_needed & !is.na(species_estimated),
+      "match to Erica's key",
+      species_est_reasoning
+    )
+  ) %>%
+  
+  # Remove temporary and unnecessary columns
+  select(-lookup_needed, -species_estimated)
+
+# 802 obs. as expected.
+```
+
+```{r New summary stats}
+sum(Master_SpKey_Cleaned$estimated_species_name=="unknown") # 241 -> 228 species unknown
+
+table(Master_SpKey_Cleaned$species_est_certainty) # 212 -> 202 where the estimate is not applicable, 168 estimates of low confidence
+
+table(Master_SpKey_Cleaned$species_est_reasoning) # 202 where we have no data to draw conclusions from, 168 estimates where there was a mismatch between keys
+```
+
+```{r Now extract information about genus and family, where possible}
+# WHAT IS THE LOGIC?
+
+# If species is known:
+# → estimated_genus_name = first word of species
+
+# If species unknown but IHH_genus available:
+# → estimated_genus_name = IHH_genus
+
+# If both unavailable:
+# → estimated_genus_name = genus unknown
+
+# If IHH_family exists:
+# → estimated_family_name = IHH_family
+
+# Else if Erica_family_estimated exists:
+# → estimated_family_name = Erica_family_estimated
+
+# Else if Erica_SpKey gives exactly one family per larger taxonomic grouping
+# → estimated_family_name = Erica_family_estimated
+# → reasoning: “unique family match from Erica's key”
+
+# Else
+# → estimated_family_name = family unknown
+
+
+# APPLY THE LOGIC:
+# --- Build the Erica single-family lookup -------------------------------------
+
+Erica_SpKey_simple <- Erica_SpKey %>% 
+  select(
+    recorded_taxa_group = main_species_group, 
+    Erica_family_estimated = family_estimated
+  ) %>%
+  distinct() %>%
+  group_by(recorded_taxa_group) %>%
+  filter(n_distinct(Erica_family_estimated) == 1) %>%
+  ungroup()
+
+
+Master_SpKey_Cleaned <- Master_SpKey_Cleaned %>%
+  
+  # ----------------------- GENUS LOGIC ----------------------------------------
+  mutate(
+    estimated_genus_name = case_when(
+      !is.na(estimated_species_name) & estimated_species_name != "unknown" ~ 
+        word(estimated_species_name, 1),             # species known → genus = first word
+      !is.na(IHH_genus) ~ IHH_genus,                 # fallback: IHH genus
+      TRUE ~ NA_character_                           # final fallback: genus unknown
+    ),
+    
+    genus_est_reasoning = case_when(
+      !is.na(estimated_species_name) & estimated_species_name != "unknown" ~
+        "genus derived from known species",
+      !is.na(IHH_genus) ~
+        "genus derived from IHH key",
+      TRUE ~
+        "genus unknown"
+    )
+  ) %>%
+  
+  
+  # ----------------------- FAMILY LOGIC ---------------------------------------
+  left_join(Erica_SpKey_simple, by = "recorded_taxa_group") %>%
+  mutate(
+    estimated_family_name = case_when(
+      !is.na(IHH_family) ~ IHH_family,                         # 1. direct from IHH
+      !is.na(Erica_family_estimated) ~ Erica_family_estimated, # 2. unique Erica match
+      !is.na(estimated_genus_name) ~ 
+        "family missing but genus available",                 # 3. genus known but no family
+      TRUE ~ NA_character_                                     # 4. completely unknown
+    ),
+    
+    family_est_reasoning = case_when(
+      !is.na(IHH_family) ~ "family derived from IHH key",
+      !is.na(Erica_family_estimated) ~ "unique family match from Erica's key",
+      !is.na(estimated_genus_name) ~ "family unknown but genus available",
+      TRUE ~ "family unknown"
+    )
+  ) %>%
+  
+  # remove columns that aren't necessary
+  select(-Erica_family_estimated, -genus_estimated, -family_estimated, -source_of_estimate)
+```
+
+```{r final summary stats}
+table(TEST2$species_est_reasoning) # 202 no data
+table(TEST2$genus_est_reasoning) # 228 genus unknown
+table(TEST2$family_est_reasoning) # 213 family unknown
+```
+
+```{r Clean MASTER SPECIES KEY}
+write.csv(Master_SpKey_Cleaned, "/home/ferrer/ohi_goc_prep/general/Species_Keys/CleanedMaster_SpKey_Dec012025.csv", row.names = FALSE)
+```
+
+# PART 3 UNDER CONSTRUCTION.
+
+# PART 4: Merge the cleaned master sp key with landings data ------------------------------
 ```{r Merge landings with sp key}
 Landings_GoC_Cleaned_wSp <- Landings_GoC_Cleaned %>%
   left_join(
