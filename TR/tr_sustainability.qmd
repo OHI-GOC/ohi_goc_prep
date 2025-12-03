@@ -1,0 +1,336 @@
+---
+title: 'OHI GoC 2025: QUALITY Tourism & Recreation'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: inline
+---
+
+# TR Sustainability
+
+## Distintivo S
+
+```{r}
+library(tidyverse)
+library(here)
+library(janitor)
+```
+
+```{r}
+## read the pdfs in
+dist_S_2015_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/distintivo_S/tabulated_distintivo_S", "tabula-Directorio_Nacional_de_Empresas_DISTINTIVO_S_JUN_2015_VF.csv"), skip = 1)
+
+dist_S_2017_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/distintivo_S/tabulated_distintivo_S", "tabula-EMPRESAS_DISTINTIVO_S_JULIO_2017.csv"), skip = 1)
+
+dist_S_2023_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/distintivo_S/tabulated_distintivo_S", "tabula-Directorio_de_empresas_vigentes_Distintivo_S.csv"))
+```
+
+### Clean and join
+
+```{r}
+## 2015
+dist_S_2015 <- dist_S_2015_raw %>% 
+  janitor::clean_names()
+
+colnames(dist_S_2015) 
+# [1] "no"                             "nombre_comercial_de_la_empresa" "estado"                        
+# [4] "municipio_localidad"            "sitio_web" 
+
+## 2017
+dist_S_2017 <- dist_S_2017_raw %>% 
+  janitor::clean_names()
+
+colnames(dist_S_2017) 
+# [1] "no"                             "nombre_comercial_de_la_empresa" "estado"                        
+# [4] "localidad"
+
+## 2023
+dist_S_2023 <- dist_S_2023_raw %>% 
+  janitor::clean_names()
+
+colnames(dist_S_2023) 
+# [1] "no"                   "folio_del_distintivo" "nombre_comercial"     "ciudad"               "estado" 
+```
+
+Okay, it appears that the "no" column is not very helpful, because the hotels do not maintain their number over time. 
+
+The distinctive folio number is only available in 2023. 
+
+Let's prep them for join.
+
+```{r}
+## 2015
+dist_S_2015_join <- dist_S_2015 %>% 
+  rename(nombre_comercial = nombre_comercial_de_la_empresa,
+         localidad = municipio_localidad) %>% 
+  mutate(year_documented = "2015") %>% 
+  select(-no)
+
+## 2017
+dist_S_2017_join <- dist_S_2017 %>% 
+  rename(nombre_comercial = nombre_comercial_de_la_empresa) %>% 
+  mutate(year_documented = "2017") %>% 
+  select(-no)
+
+## 2023
+dist_S_2023_join <- dist_S_2023 %>% 
+  rename(localidad = ciudad) %>% 
+  mutate(year_documented = "2023") %>% 
+  select(-no)
+
+```
+
+```{r}
+## join them
+dist_S_all <- bind_rows(dist_S_2015_join,
+                        dist_S_2017_join,
+                        dist_S_2023_join)
+```
+
+### Geocode the hotels
+
+```{r}
+dist_S_goc_estados <- dist_S_all %>% 
+  filter(estado %in% c("Nayarit","Jalisco","Sonora","Baja California Sur","Baja  Calfornia Sur", "Baja California  Sur","Baja  California Sur","Sinaloa")) %>%  ## note: no baja california.
+  mutate(country = "Mexico")
+
+dist_S_goc_estados_geocode <- dist_S_goc_estados %>% 
+  tidygeocoder::geocode(city = localidad, country = country, state = estado) # to give each city a lat, long
+```
+
+Fix all lat/longs that tidygeocoder was not able to do.
+
+```{r}
+na_dist_S_goc_estados_geocode <- dist_S_goc_estados_geocode %>% 
+  filter(is.na(lat))
+
+unique(na_dist_S_goc_estados_geocode$nombre_comercial)
+
+# [1] "Palladium Vallarta" 20.7153, -105.2464    
+# [2] "Campo de Golf Litibú" https://www.rivieranayarit.com/activity/golf/litibu/  20.797847, -105.483116       
+# [3] "Hotel Sheraton Hacienda del Mar Resort & SPA" 22.914233, -109.837037 
+# [4] "Grand Velas Riviera Nayarit" 20.707216, -105.301422                 
+# [5] "IBEROSTAR SELECTION PLAYA MITA" 20.790676, -105.489015
+# [6] Gran Paladium Costa Mujeres Resort Nayarit 20.753902, -105.455937
+
+dist_S_goc_estados_geocode_fixed <- dist_S_goc_estados_geocode %>% 
+  mutate(
+    lat = case_when(
+      is.na(lat) & nombre_comercial == "Palladium Vallarta" ~ 20.7153,
+      is.na(lat) & nombre_comercial == "Campo de Golf Litibú" ~ 20.797847,
+      is.na(lat) & nombre_comercial == "Hotel Sheraton Hacienda del Mar Resort & SPA" ~ 22.914233,
+      is.na(lat) & nombre_comercial == "Grand Velas Riviera Nayarit" ~ 20.707216,
+      is.na(lat) & nombre_comercial == "IBEROSTAR SELECTION PLAYA MITA" ~ 20.790676,
+      is.na(lat) & nombre_comercial == "Gran Paladium Costa Mujeres Resort" ~ 20.790676,
+      TRUE ~ lat
+    ),
+    long = case_when(
+      is.na(long) & nombre_comercial == "Palladium Vallarta" ~ -105.2464,
+      is.na(long) & nombre_comercial == "Campo de Golf Litibú" ~ -105.483116,
+      is.na(long) & nombre_comercial == "Hotel Sheraton Hacienda del Mar Resort & SPA" ~ -109.837037,
+      is.na(long) & nombre_comercial == "Grand Velas Riviera Nayarit" ~ -105.301422,
+      is.na(long) & nombre_comercial == "IBEROSTAR SELECTION PLAYA MITA" ~ -105.489015,
+      is.na(long) & nombre_comercial == "Gran Paladium Costa Mujeres Resort" ~ -105.455937,
+      TRUE ~ long
+    )
+  )
+```
+
+
+```{r}
+dist_S_geocode_sf <- dist_S_goc_estados_geocode_fixed %>% 
+  st_as_sf(coords = c("long", "lat"),
+           crs = 4326, # WGS84
+           remove = FALSE)
+
+mapview(dist_S_geocode_sf, zcol = "year_documented")
+
+```
+
+
+### Number of certifications over time
+
+```{r}
+dist_S_presence <- dist_S_geocode_sf %>% 
+  distinct(nombre_comercial, year_documented) %>% 
+  mutate(present = 1) %>% 
+  tidyr::pivot_wider(
+    names_from = year_documented,
+    values_from = present,
+    values_fill = 0
+  )
+
+heat_df <- dist_S_presence %>% 
+  arrange(nombre_comercial) %>% 
+  mutate(id = row_number()) %>% 
+  pivot_longer(cols = c(`2015`,`2017`,`2023`),
+               names_to = "year",
+               values_to = "present")
+
+plot_ly(
+  heat_df,
+  x = ~year,
+  y = ~nombre_comercial,
+  z = ~present,
+  type = "heatmap",
+  colorscale = "Blues"
+) %>% 
+  layout(title = "Presence of Distintivo S Certification Over Time",
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Business"))
+```
+
+#### Standardize hotel names
+
+```{r}
+library(stringi)
+
+dist_S_all_clean <- dist_S_geocode_sf %>% 
+  mutate(
+    nombre_comercial_clean = nombre_comercial %>% 
+      str_to_lower() %>% 
+      str_squish() %>% 
+      stri_trans_general("Latin-ASCII") %>% # remove accents
+      str_replace_all("[^a-z0-9 ]", "") %>% # remove punctuation
+      str_replace_all("\\s+", " ") # normalize spaces
+  )
+
+dist_S_all_clean_2 <- dist_S_all_clean %>% 
+  mutate(
+    nombre_comercial_clean = nombre_comercial_clean %>% 
+      str_replace_all("\\b(hotel|resort|spa|suites|suite|all inclusive|the|grupo)\\b", "") %>% 
+      str_squish()
+  ) %>% 
+  arrange(desc(nombre_comercial_clean)) %>% 
+  group_by(nombre_comercial_clean) %>% 
+  fill(folio_del_distintivo, .direction = "up") %>% 
+  fill(sitio_web, .direction = "down") ## note that pueblo bonito mazatlan and emerald bay are two separate resorts.
+```
+
+
+### Current status score
+
+
+#### Classify OHI Rgn ID
+
+"https://www.gob.mx/presidencia/prensa/el-objetivo-para-turismo-en-el-plan-mexico-es-ser-el-5to-pais-mas-visitado-del-mundo-para-el-2030-presidenta-claudia-sheinbaum?idiom=es"
+
+To achieve the goal of being the fifth most visited country in the world by 2030, it is estimated that it is necessary to increase the number of tourists by three million each year, as well as increase:
+ 
+
+The economic impact of international tourists by 46 percent.
+Hotel rooms by 12 percent.
+The generation of tourism jobs by 27 percent.
+The tourism Gross Domestic Product (GDP) by 9 percent.
+Domestic tourism by 9.8 percent.
+*The number of service providers certified in sustainability by 31.5 percent.*
+The average expenditure per international tourist by 3.3 percent.
+The arrival of international visitors by 30 percent
+The increase in DNR revenue by 40.5 percent.
+
+```{r}
+library(sf)
+library(mapview)
+
+## first, join with OHI GoC Regions
+
+inland_10 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer","inland_10km_goc.shp"))
+dist_S_all_clean_2_trans <- st_transform(dist_S_all_clean_2, st_crs(inland_10))
+dist_S_goc_rgn <- st_intersection(dist_S_all_clean_2_trans, inland_10)
+
+mapview(dist_S_goc_rgn, zcol = "rgn_id") + mapview(inland_10, zcol = "rgn_id")
+
+st_write(dist_S_goc_rgn, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","distintivo_S_certified_10km.shp")) ## NOTE: we lose a hotel in culiacan which would fit into the 50km buffer if we so chose to do so. 
+```
+
+#### Counts by rgn
+
+```{r}
+dist_S_counts_by_rgn <- dist_S_goc_rgn %>% 
+  st_drop_geometry() %>% 
+  distinct(rgn_id, nombre_comercial_clean, year_documented) %>% 
+  group_by(rgn_id, year_documented) %>% 
+  summarise(n_hotels = n(), .groups = "drop")
+```
+
+
+#### plotly over time
+
+```{r}
+dist_S_counts_by_rgn <- dist_S_counts_by_rgn %>% 
+  mutate(year = as.numeric(year_documented))
+
+library(plotly)
+
+plot_ly(
+  dist_S_counts_by_rgn,
+  x = ~year,
+  y = ~n_hotels,
+  color = ~factor(rgn_id),
+  type = 'scatter',
+  mode = 'lines+markers'
+) %>% 
+  layout(
+    title = "Distintivo S Certified Hotels by GoC Region (2015–2023)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Number of Certified Hotels"),
+    legend = list(title = list(text = "Region ID"))
+  )
+
+```
+
+
+# Compare with DENUE Accommodations
+
+```{r}
+alojamientos_2019_2024_10km <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_alojamiento_temporal_y_preparación_alimentos_y_bebidas/int","alojamientos_2019_2024_goc_10km.shp"))
+
+library(stringi)
+
+alojamientos_2019_2024_10km_clean <- alojamientos_2019_2024_10km %>% 
+  mutate(
+    nombre_comercial_clean = nom_estab %>% 
+      str_to_lower() %>% 
+      str_squish() %>% 
+      stri_trans_general("Latin-ASCII") %>% # remove accents
+      str_replace_all("[^a-z0-9 ]", "") %>% # remove punctuation
+      str_replace_all("\\s+", " ") %>%  # normalize spaces
+      str_replace_all("\\b(hotel|resort|spa|suites|suite|all inclusive|the|grupo)\\b", "") %>% 
+      str_squish()
+  )
+
+all_hotels <- unique(alojamientos_2019_2024_10km_clean$nombre_comercial_clean)
+
+
+```
+
+```{r}
+dist_S_goc_10km <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","distintivo_S_certified_10km.shp"))
+
+dist_S_businesses <- unique(dist_S_goc_10km$nmbr_c_)
+print(dist_S_businesses)
+```
+
+```{r}
+setdiff(dist_S_businesses, all_hotels)
+##those not present in y (all_hotels) but are present in x:
+
+
+setdiff(all_hotels, dist_S_businesses)
+```
+
+

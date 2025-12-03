@@ -166,7 +166,7 @@ all_data_yearly <- all_data_clean %>%
   separate_wider_delim(., month_year, delim = "_anual_", names = c("type","year"))
 
 ## save into int
-write_csv(all_data_yearly, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/int","hotel_data_cleaned_yearly.csv"))
+write_csv(all_data_yearly, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int","hotel_data_cleaned_yearly.csv"))
 ```
 
 # OLD Domestic vs. International
@@ -252,6 +252,9 @@ mapview(dom_goc) # now each tourist center has associated region data
 
 # map of all goc tourist centers
 mapview(dom_goc, zcol = "rgn_id") + mapview(goc_poly, zcol = "rgn_id")
+
+# write it out
+st_write(dom_goc, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int","domestic_arrivals_sectur_goc.shp"))
 ```
 
 
@@ -411,6 +414,9 @@ mapview(int_goc) # now each tourist center has associated region data
 
 # map of all goc tourist centers
 mapview(int_goc, zcol = "rgn_id") + mapview(goc_poly, zcol = "rgn_id")
+
+# write it out
+st_write(int_goc, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int","international_arrivals_sectur_goc.shp"))
 ```
 
 The reference point could be a 30% increase in international tourist arrivals by 2030, which starting from 2024 is 5 years (since you would want to reach that goal at the end of 2029 to reach the target *by* 2030). <https://tourismanalytics.com/blog-posts/how-mexicos-forty-percent-tourism-growth-plan-aims-for-fifth-global-spot-by-2030-with-twenty-billion-dollar-investment-in-infrastructure-and-market-expansion>
@@ -518,6 +524,7 @@ htmlwidgets::saveWidget(int_arrivals_plot, here::here("TR/sectur_quantity_explor
 
 
 ### Merge
+
 
 ```{r}
 # join int_quantity_score and dom_quantity_score
@@ -977,4 +984,328 @@ htmlwidgets::saveWidget(int_arrivals_plot, here::here("TR/sectur_quantity_explor
 
 
 
-# NEXT STEPS: I need to join with goc_poly and assign the values within the regions to the entire region. 
+# GAPFILLED: Using DENUE employee data
+
+In the script `~TR/servicios_de_alojamiento.qmd`, I predicted missing tourist arrival data using a model that used the number of employees in hotels/accommodations to predict the total number of arrivals.  To apply it here, we will need to determine the proportion of arrivals that are international vs domestic out of the total in each state.  That way, we can apply it to the regions that have missing data.
+
+Essentially, we will determine for each state the proportion of domestic/total and international/total and just assume that same proportion for the regions we are estimating using the regression models.
+
+For now, we have only been using 2019 - 2024.  This can change as we update the DENUE cleaning function, but for now we will filter to those years.
+
+```{r}
+## first, we will read in the cleaned sectur data, and only select arrivals.  We want to find the total number of arrivals, int + dom, for every year and municipio.
+all_sectur_arrivals <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int","hotel_data_cleaned_yearly.csv")) %>% 
+  filter(metric %in% c("llegadas_de_turistas_residentes", "llegadas_de_turistas_no_residentes")) %>% # domestic and international arrivals
+  filter(category %in% "total_categorias")  %>% # since we do not care what star designation it is
+  filter(year %in% 2019:2024) %>% 
+  mutate(arrival_type = case_when(
+    metric == "llegadas_de_turistas_residentes" ~ "dom",
+    metric == "llegadas_de_turistas_no_residentes" ~ "int",
+    TRUE ~ NA
+  ))
+
+# summarize to find the total number of arrivals for every year and municipio
+all_sectur_arrivals_sum <- all_sectur_arrivals %>%
+  group_by(municipio, year) %>% 
+  summarize(total_arrivals = sum(value))
+
+# obtain the proportion of the total for each value.  Double check that for the same municipio, the proportion of the dom + the proportion of the int = 1. Then, assign them each to states.
+all_sectur_arrivals_w_prop <- left_join(all_sectur_arrivals, all_sectur_arrivals_sum, by = c("municipio","year")) %>%
+  mutate(prop_of_total = value/total_arrivals) %>% 
+  mutate(country = "Mexico") %>%  
+  mutate(estado = case_when(
+    municipio %in% c("cabo_san_lucas", "la_paz", "loreto", "san_jose_del_cabo", "zona_corredor_los_cabos") ~ "baja_california_sur",
+    municipio %in% c("san_felipe") ~ "baja_california",
+    municipio %in% c("guaymas", "hermosillo") ~ "sonora",
+    municipio %in% c("culiacan", "el_fuerte", "los_mochis", "mazatlan", "escuinapa", "el_rosario") ~ "sinaloa",
+    municipio %in% c("puerto_vallarta") ~ "jalisco",
+    TRUE ~ ""  # default case for any unmatched cities
+  ))  
+  
+```
+
+For now, we will average the proportion across the years 2019:2024 for every state. This is because in some states, notably Sonora, we have very little information on the numbers of arrivals throughout all years.  So we cannot obtain a number for the proportion of dom vs. int for every year for each state. 
+
+Note that Nayarit has no data at all from SECTUR, so I will assume it has the same proportions as Jalisco.  
+
+I will need to check in with Mel on all of this!!
+
+```{r}
+# summarize the average proportion of int and dom for every state.
+all_sectur_prop_by_state <- all_sectur_arrivals_w_prop %>% 
+  group_by(arrival_type, estado) %>% 
+  summarize(avg_prop = mean(prop_of_total, na.rm = TRUE))
+
+# pivot wider for easier use when using these proportions to estimate the number of arrivals international vs domestic.
+# all_sectur_prop_by_state_wide <- all_sectur_prop_by_state %>% 
+#   pivot_wider(
+#     names_from = arrival_type,
+#     values_from = avg_prop
+#   ) %>% 
+#   rename(avg_prop_dom = dom,
+#          avg_prop_int = int) 
+
+## save it!!
+write_csv(all_sectur_prop_by_state, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","sectur_avg_prop_by_state_2019_2024.csv"))
+```
+
+## Bring back arrivals that have been gapfilled
+
+```{r}
+arrivals_filled_by_DENUE_accommodation_employees <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","arrivals_filled_by_DENUE_accommodation_employees_2019_2024.csv"))
+
+gapfilled_total_arrivals <- arrivals_filled_by_DENUE_accommodation_employees %>%
+  mutate(country = "Mexico") %>% 
+  select(year = data_year, country, estado, municipio_clean, rgn_id, arrivals_merged, is_filled) 
+
+```
+
+```{r}
+## prep all sectur arrivals for a join with the gapfilled totals
+all_sectur_arrivals_prep_join <- all_sectur_arrivals %>% 
+  mutate(
+    municipio_clean = case_when(
+      municipio %in% c("cabo_san_lucas", "san_jose_del_cabo", "zona_corredor_los_cabos") ~ "los_cabos",
+      municipio == "los_mochis" ~ "ahome", # los mochis is a city within the municipality of ahome!!
+      municipio == "el_rosario" ~ "rosario",
+      municipio == "culiacan" ~ "culiacán",
+      municipio == "mazatlan" ~ "mazatlán",
+      TRUE ~ municipio
+    )
+  ) %>% 
+  # reaggregate with changes
+  group_by(year, municipio_clean, arrival_type) %>%
+  summarize(value = sum(value), .groups = "drop") %>% 
+  select(year, municipio_clean, arrival_type, raw_arrivals = value) # leave in "municipio" to double check at first
+
+## check!!
+setdiff(unique(all_sectur_arrivals_prep_join$municipio_clean), unique(gapfilled_total_arrivals$municipio_clean)) # character(0)
+setdiff(unique(gapfilled_total_arrivals$municipio_clean), unique(all_sectur_arrivals_prep_join$municipio_clean)) 
+
+#  [1] "acaponeta"               "angostura"               "bahía_de_banderas"      
+#  [4] "benito_juárez"           "cabo_corrientes"         "caborca"                
+#  [7] "cajeme"                  "comondú"                 "compostela"             
+# [10] "concordia"               "elota"                   "empalme"                
+# [13] "ensenada"                "etchojoa"                "guasave"                
+# [16] "huajicori"               "huatabampo"              "mascota"                
+# [19] "mocorito"                "mulegé"                  "navojoa"                
+# [22] "navolato"                "pitiquito"               "puerto_peñasco"         
+# [25] "rosamorada"              "ruíz"                    "salvador_alvarado"      
+# [28] "san_blas"                "san_ignacio"             "san_luis_río_colorado"  
+# [31] "san_pedro_lagunillas"    "san_quintín"             "san_sebastián_del_oeste"
+# [34] "santiago_ixcuintla"      "talpa_de_allende"        "tecuala"                
+# [37] "tepic"                   "tomatlán"                "tuxpan"                 
+# [40] "xalisco"  
+
+## makes sense, those were all the municipalities that were gapfilled using DENUE accommodation employees!!
+```
+
+
+```{r}
+## municipalities missing in SECTUR arrivals
+gapfilled_municipios <- setdiff(unique(gapfilled_total_arrivals$municipio_clean), unique(all_sectur_arrivals_prep_join$municipio_clean))
+
+## expand into dataframe with years 2019–2024 and arrival types int/dom
+gapfilled_municipios_df <- expand.grid(
+  municipio_clean = gapfilled_municipios,
+  year = 2019:2024,
+  arrival_type = c("int", "dom"),
+  KEEP.OUT.ATTRS = FALSE, # a logical indicating the "out.attrs" attribute should be computed and returned.
+  stringsAsFactors = FALSE # logical specifying if character vectors are converted to factors.
+)
+
+## join with the prepped sectur arrivals df
+gapfilled_municipios_and_sectur_arrivals_prep_join <- full_join(all_sectur_arrivals_prep_join, gapfilled_municipios_df, by = c("municipio_clean","year","arrival_type"))
+
+```
+
+Join the gapfilled totals with the raw int and dom values for arrivals:
+
+```{r}
+joined_gapfilled_and_raw_arrivals <- full_join(gapfilled_total_arrivals, gapfilled_municipios_and_sectur_arrivals_prep_join, by = c("year","municipio_clean"), relationship = "many-to-many")
+
+## check that the raw arrivals for int + dom add up to the "arrivals_merged" when "is_filled" = 0 (it was not predicted using DENUE employees for accommodations)
+## looks good!
+```
+
+Now, join this data frame with the avg proportions by state.
+
+```{r}
+all_sectur_prop_by_state <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","sectur_avg_prop_by_state_2019_2024.csv"))
+
+joined_gapfilled_arrivals_and_prop <- left_join(joined_gapfilled_and_raw_arrivals, all_sectur_prop_by_state, by = c("estado", "arrival_type")) %>% 
+  mutate(avg_prop = case_when(
+    estado == "nayarit" & arrival_type == "dom" ~ 0.64928457,
+    estado == "nayarit" & arrival_type == "int" ~ 0.35071543,
+    TRUE ~ avg_prop
+  )) # assume for now that nayarit has the save avg proportion as jalisco, though this is definitely not true.
+```
+
+Now we can actually estimate the number of international arrivals and domestic arrivals for all predicted total arrivals from DENUE data.
+
+```{r}
+estimated_int_dom_arrivals <- joined_gapfilled_arrivals_and_prop %>% 
+  mutate(estimated_arrivals = ifelse(is_filled == "1", avg_prop*arrivals_merged, raw_arrivals)) # if it was gapfilled, then estimate the number of int or dom arrivals by multiplying the average proportion of int or dom arrivals by state and the predicted total arrivals from the DENUE data. If they were not gapfilled, use the origianl int and dom arrival values.
+```
+
+
+### Plotly of arrivals
+
+```{r}
+library(plotly)
+
+### INT Arrivals over time ###
+estimated_int_arrivals <- estimated_int_dom_arrivals %>% 
+  filter(arrival_type %in% "int") %>% 
+  arrange(year)
+
+
+int_arrivals_plotly <- plotly::plot_ly(
+  estimated_int_arrivals, 
+  x = ~year, 
+  y = ~estimated_arrivals, 
+  color = ~municipio_clean, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "International arrivals by year and municipio",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Number of arrivals")
+  )
+int_arrivals_plotly
+```
+
+
+```{r}
+### DOM Arrivals ###
+estimated_dom_arrivals <- estimated_int_dom_arrivals %>% 
+  filter(arrival_type %in% "dom") %>% 
+  arrange(year)
+
+dom_arrivals_plotly <- plotly::plot_ly(
+  estimated_dom_arrivals, 
+  x = ~year, 
+  y = ~estimated_arrivals, 
+  color = ~municipio_clean, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "Domestic arrivals by year and municipio",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Number of arrivals")
+  )
+dom_arrivals_plotly
+
+```
+
+
+## Recalculate current status for international and domestic
+
+```{r}
+baseline_year <- 2024
+
+quantity_current_status <- estimated_int_dom_arrivals %>% 
+  mutate(year = as.numeric(year)) %>%
+  
+  # group by municipio + arrival type
+  group_by(municipio_clean, arrival_type) %>%
+  
+  mutate(
+    # baseline per municipio + type
+    baseline_arrivals = estimated_arrivals[year == baseline_year][1],
+
+    # target multiplier varies by type
+    target_multiplier = case_when(
+      arrival_type == "dom" ~ 1.098, # domestic +9.8%
+      arrival_type == "int" ~ 1.30,  # international +30%
+      TRUE ~ NA_real_
+    ),
+
+    # calculate targets
+    target_arrivals = baseline_arrivals * target_multiplier,
+
+    # CURRENT STATUS (0 to 100)
+    current_status = (estimated_arrivals / target_arrivals) * 100,
+
+    # absolute and % gap
+    gap_to_target = target_arrivals - estimated_arrivals,
+    gap_percentage = ((target_arrivals - estimated_arrivals) / estimated_arrivals) * 100
+  ) 
+
+    
+```
+
+### Current status plotlys
+
+International:
+
+```{r}
+library(plotly)
+
+int_quantity_current_status <- quantity_current_status %>% 
+  filter(arrival_type %in% "int") %>% 
+  arrange(year)
+
+## plot the score over time
+final_int_score_plotly <- plotly::plot_ly(
+  int_quantity_current_status, 
+  x = ~year, 
+  y = ~current_status, 
+  color = ~municipio_clean, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: Llegadas de turistas internacionales por municipio",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(int_quantity_current_status$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal 2030 (100/100)",
+    inherit = FALSE
+  )
+final_int_score_plotly
+
+htmlwidgets::saveWidget(final_int_score_plotly, here::here("TR/sectur_quantity_exploration_int","int_current_status_gapfilled_by_municipio_120125.html"), selfcontained = TRUE)
+```
+
+Domestic:
+
+```{r}
+library(plotly)
+
+dom_quantity_current_status <- quantity_current_status %>% 
+  filter(arrival_type %in% "dom") %>% 
+  arrange(year)
+
+## plot the score over time
+final_dom_score_plotly <- plotly::plot_ly(
+  dom_quantity_current_status, 
+  x = ~year, 
+  y = ~current_status, 
+  color = ~municipio_clean, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: Llegadas de turistas nacionales por municipio",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(dom_quantity_current_status$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal 2030 (100/100)",
+    inherit = FALSE
+  )
+final_dom_score_plotly
+
+htmlwidgets::saveWidget(final_dom_score_plotly, here::here("TR/sectur_quantity_exploration_int","dom_current_status_gapfilled_by_municipio_120125.html"), selfcontained = TRUE)
+```
+

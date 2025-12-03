@@ -1,0 +1,566 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+# Visualization
+library(ggplot2)
+library(plotly)
+library(htmlwidgets)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+
+# Stock Assessments from RAM ------------------------------
+
+```{r Mexico FAO Data}
+## FAO data, some of the zeros were originally reported as NA (so exercise caution there)
+harvest <- read_csv("https://raw.githubusercontent.com/OHI-Science/ohiprep_v2025/refs/heads/main/globalprep/mar/v2025/output/mar_harvest_tonnes.csv")
+mex_harvest <- filter(harvest, rgn_id == 135)
+mex_harvest <- filter(mex_harvest, year == 2017) %>% data.frame()
+
+# data from Seafood Watch (Monterey Bay)
+sustainability <- read_csv("https://raw.githubusercontent.com/OHI-Science/ohiprep_v2025/refs/heads/main/globalprep/mar/v2025/output/mar_sustainability.csv")
+mex_sust <- filter(sustainability, taxa_code %in% mex_harvest$taxa_code) %>%
+ filter(year==2025) %>% data.frame()
+
+# determine whether sustainability was gapfilled (if so, fairly low confidence, depending on method used and taxa)
+gf <- read_csv("https://raw.githubusercontent.com/OHI-Science/ohiprep_v2025/refs/heads/main/globalprep/mar/v2025/output/mar_sustainability_gf.csv")
+mex_gf <- filter(gf, taxa_code %in% mex_harvest$taxa_code) %>% data.frame()
+```
+
+
+# Load: Landings data with species info (December 2025) ------------------------------
+```{r Load in landings data with species info}
+Landings_GoC_Cleaned_wSp<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_wSp_2000.present_Dec012025.rds"))
+# 3716415 obs, 41 vars.
+```
+
+```{r How many records are appended with information about species, genus, family?}
+Landings_GoC_Cleaned_wSp %>%
+  pull(estimated_species_name) %>%
+  {c(n_na = sum(is.na(.)),
+      n_unknown = sum(. == "unknown", na.rm = TRUE),
+      n_NEI = sum(. == "NEI", na.rm = TRUE)
+    ) }
+# 1008085 (4186 + 210708 + 793191) out of 3716415 records (27%) for species are NA, "unknown", or "NEI"
+# Meaning we have species info for 73% of records.
+
+Landings_GoC_Cleaned_wSp %>%
+  pull(estimated_genus_name) %>%
+  {c(n_na = sum(is.na(.)),
+     n_unknown = sum(. == "unknown", na.rm = TRUE),
+     n_NEI = sum(. == "NEI", na.rm = TRUE)
+    ) }
+# 1008085 (214894 + 0 + 793191) out of 3716415 records (27%) for genus are NA, "unknown", or "NEI"
+# Meaning we have genus info for 73% of records.
+
+Landings_GoC_Cleaned_wSp %>%
+  pull(estimated_family_name) %>%
+  {c(n_na = sum(is.na(.)),
+     n_unknown = sum(. == "unknown", na.rm = TRUE),
+     n_NEI = sum(. == "NEI", na.rm = TRUE),
+     n_family_info_pending = sum(. == "family missing but genus available", na.rm = TRUE)
+    ) }
+# 352911 (192402 + 0 + 160509) out of 3716415 records (9%) for family are NA, "unknown", or "NEI". 29659 records have information about genus but family info pending.
+# Meaning we already have or can get family info for 91% of records.
+```
+
+
+# Estimating: CPUE over Time for General Groups (November 2025) ------------------------------
+```{r CPUE}
+CPUE_Landings_GoC<- Landings_GoC
+
+# Calculate the difference in days between period start and end:
+CPUE_Landings_GoC$days_fishing <- as.numeric(CPUE_Landings_GoC$period_end_fixed - CPUE_Landings_GoC$period_start_fixed) + 1
+
+# Kind of looks like sometimes 'landed weight' is 'live weight' and vice versa.
+CPUE_Landings_GoC$weight_kg_corrected<- c(NA)
+ii<- length(CPUE_Landings_GoC$weight_kg_corrected)
+
+CPUE_Landings_GoC$weight_kg_corrected <- ifelse(
+  CPUE_Landings_GoC$live_weight >= CPUE_Landings_GoC$landed_weight,
+  CPUE_Landings_GoC$live_weight,
+  CPUE_Landings_GoC$landed_weight
+)
+
+CPUE_Landings_filtered<- CPUE_Landings_GoC %>%
+  filter(!is.na(days_fishing) & days_fishing > 0 & live_weight > 0) %>%
+  mutate(CPUE_kg.day = weight_kg_corrected / days_fishing)
+# 3397596 obs.
+
+max(CPUE_Landings_filtered$CPUE_kg.day) #4500070
+min(CPUE_Landings_filtered$CPUE_kg.day) #0
+
+# In general, the receipts from early trips are a bit funky. Let's filter those out for now.
+CPUE_Landings_filtered<- CPUE_Landings_filtered %>%
+  filter(year >= 2005)
+# 2957910 obs.
+
+max(CPUE_Landings_filtered$CPUE_kg.day) #4500070
+min(CPUE_Landings_filtered$CPUE_kg.day) #0
+
+##### NOTES TO SELF:
+# - There is some funky stuff going on with date end and start. Come back to this.
+# - I am not sure what to do about the days with no recorded live weight. Exclude these for now.
+```
+
+
+
+# CMSY Stock Assesments ------------------------------
+
+
+# Landings and CPUE Trends ------------------------------
+```{r Estimate CPUE for GoC landings}
+Landings_GoC<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds"))
+# n = 3716415 obs.
+
+CPUE_Landings_GoC<- Landings_GoC
+
+# Calculate the difference in days between period start and end:
+CPUE_Landings_GoC$days_fishing <- as.numeric(CPUE_Landings_GoC$period_end_fixed - CPUE_Landings_GoC$period_start_fixed) + 1
+
+# Kind of looks like sometimes 'landed weight' is 'live weight' and vice versa.
+CPUE_Landings_GoC$weight_kg_corrected<- c(NA)
+ii<- length(CPUE_Landings_GoC$weight_kg_corrected)
+
+CPUE_Landings_GoC$weight_kg_corrected <- ifelse(
+  CPUE_Landings_GoC$live_weight >= CPUE_Landings_GoC$landed_weight,
+  CPUE_Landings_GoC$live_weight,
+  CPUE_Landings_GoC$landed_weight
+)
+
+CPUE_Landings_filtered<- CPUE_Landings_GoC %>%
+  filter(!is.na(days_fishing) & days_fishing > 0 & live_weight > 0) %>%
+  mutate(CPUE_kg.day = weight_kg_corrected / days_fishing)
+# 3397596 obs.
+
+max(CPUE_Landings_filtered$CPUE_kg.day) #4500070
+min(CPUE_Landings_filtered$CPUE_kg.day) #0
+
+# In general, the receipts from early trips are a bit funky. Let's filter those out for now.
+CPUE_Landings_filtered<- CPUE_Landings_filtered %>%
+  filter(year >= 2005)
+# 2957910 obs.
+
+max(CPUE_Landings_filtered$CPUE_kg.day) #4500070
+min(CPUE_Landings_filtered$CPUE_kg.day) #0
+
+##### NOTES TO SELF:
+# - There is some funky stuff going on with date end and start. Come back to this.
+# - I am not sure what to do about the days with no recorded live weight. Exclude these for now.
+```
+
+```{r Summarize Biommas and CPUE in the GoC for major groupings}
+unique(CPUE_Landings_filtered$main_species_group)
+colnames(CPUE_Landings_filtered)
+
+CPUE_summary <- CPUE_Landings_filtered %>%
+  filter(year >= 2014 & year < 2025) %>% # Optional: filter for only the last 10 years
+  select(year, state, main_species_group, days_fishing, weight_kg_corrected, value, CPUE_kg.day) %>%
+  group_by(year, state, main_species_group) %>%
+  summarise(
+    Total_Biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    Total_Days_Spent_Fishing = sum(days_fishing, na.rm= TRUE),
+    Avg_CPUE_kg.days = round(mean(CPUE_kg.day, na.rm= TRUE)),
+    Total_Value_mxn = sum(value, na.rm = TRUE),
+    n_Records = n(),
+    .groups = "drop"  # optional: ungroup after summarising
+  )  %>%
+  arrange(state, main_species_group, year)
+```
+
+```{r Plot Biomass and CPUE}
+#### PLOT BIOMASS & CPUE OVER TIME ####
+library(ggplot2)
+library(ggforce)
+
+#### State Colors ####
+state_colors <- c(
+  "BAJA CALIFORNIA" = "royalblue",
+  "BAJA CALIFORNIA SUR" = "skyblue",
+  "SONORA" = "orange",
+  "SINALOA" = "sienna1",
+  "NAYARIT" = "plum", 
+  "JALISCO" = "purple4"
+)
+
+# Count total number of pages
+num_pages <- n_pages(
+  ggplot(CPUE_summary %>% filter(year > 2010),
+         aes(x = year, y = Total_Biomass_kg, color = state)) +
+    geom_point(size = 2) +
+    geom_line(size = 0.5, alpha = 0.5) +
+    facet_wrap_paginate(~ main_species_group, scales = "free_y", ncol = 3, nrow = 3)
+)
+
+# BIOMASS PLOTS & SAVE:
+for (i in 1:num_pages) {
+  
+  plot_i <- CPUE_summary %>%
+    filter(year > 2010) %>%
+    ggplot(aes(x = year, y = Total_Biomass_kg, color = state)) +
+    geom_point(size = 2) +
+    geom_line(size = 0.5, alpha = 0.5) +
+    facet_wrap_paginate(~ main_species_group, scales = "free_y",
+                        ncol = 3, nrow = 3, page = i) +
+    labs(
+      title = "Biomass Over Time [per Taxonomic Grouping]",
+      subtitle = "Source: CONAPESCA data from J.C., cleaned & filtered (as of Nov 7)",
+      x = "Year",
+      y = "Biomass (kg)",
+      color = "State"
+    ) +
+    theme_bw() +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+      plot.subtitle = element_text(hjust = 0.5, size = 14)
+    ) +
+    scale_color_manual(values = state_colors, name = "State")
+  
+  # Save as PNG
+  # ggsave(
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/CONAPESCA_Biomass&CPUE_Nov2025/Biomass_Over_Time_Page_%02d.png", i),
+  #   plot = plot_i,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+}
+
+# CPUE PLOTS & SAVE:
+for (i in 1:num_pages) {
+  
+  plot_i <- CPUE_summary %>%
+    filter(year > 2010) %>%
+    ggplot(aes(x = year, y = Avg_CPUE_kg.days, color = state)) +
+    geom_point(size = 2) +
+    geom_line(size = 0.5, alpha = 0.5) +
+    facet_wrap_paginate(~ main_species_group, scales = "free_y",
+                        ncol = 3, nrow = 3, page = i) +
+    
+    labs(
+      title = "CPUE Over Time [per Taxonomic Grouping]",
+      subtitle = "Source: CONAPESCA data from J.C., cleaned & filtered (as of Nov 7)",
+      x = "Year",
+      y = "Average CPUE (kg/day)",
+      color = "State"
+    ) +
+    
+    theme_bw() +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 18),       # Center and bold title
+      plot.subtitle = element_text(hjust = 0.5, size = 12)                    # Center subtitle
+    ) +
+    scale_color_manual(values = state_colors, name = "State")
+  
+  # Save as PNG
+  # ggsave(
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/CONAPESCA_Biomass&CPUE_Nov2025/CPUE_Over_Time_Page_%02d.png", i),
+  #   plot = plot_i,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+}
+```
+
+```{r testing testing 1 2 3}
+# Pre-allocate list for storing plots
+plots <- vector("list", num_pages)
+
+for (i in 1:num_pages) {
+
+  # Create the plot for this page
+  plot_i <- CPUE_summary %>%
+    filter(year > 2010) %>%
+    ggplot(aes(x = year, y = Avg_CPUE_kg.days, color = state)) +
+    geom_point(size = 2) +
+    geom_line(size = 0.5, alpha = 0.5) +
+    facet_wrap_paginate(~ main_species_group,
+                        scales = "free_y",
+                        ncol = 3, nrow = 3, page = i) +
+    labs(
+      title = "CPUE Over Time [per Taxonomic Grouping]",
+      subtitle = "Source: CONAPESCA data from J.C., cleaned & filtered (as of Nov 7)",
+      x = "Year",
+      y = "Average CPUE (kg/day)",
+      color = "State"
+    ) +
+    theme_bw() +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+      plot.subtitle = element_text(hjust = 0.5, size = 12)
+    ) +
+    scale_color_manual(values = state_colors)
+
+  # Store plot in list for interactive viewing later
+  plots[[i]] <- plot_i
+
+  # Save PNG
+  # ggsave(
+  #   filename = sprintf(
+  #     "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/CONAPESCA_Biomass&CPUE_Nov2025/CPUE_Over_Time_Page_%02d.png",
+  #     i
+  #   ),
+  #   plot = plot_i,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+}
+
+print(plots[[1]])   # page 1
+print(plots[[3]])   # page 3
+```
+
+```{r Summarize Biomass and CPUE for all groupings}
+hist(CPUE_summary$Avg_CPUE_kg.days)
+
+CPUE_all_summary <- CPUE_Landings_filtered %>%
+  filter(year >= 2014 & year < 2025) %>% # Optional: filter for only the last 10 years
+  # RELEVANT FILTERS:
+  # filter(main_species_group != "SARDINA") %>%
+  # filter(main_species_group != "ANCHOVETA") %>%
+  filter(CPUE_kg.day < 20000) %>%
+  
+  select(year, state, days_fishing, weight_kg_corrected, value, CPUE_kg.day) %>%
+  group_by(year, state) %>%
+  summarise(
+    Total_Biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    Total_Days_Spent_Fishing = sum(days_fishing, na.rm= TRUE),
+    Avg_CPUE_kg.days = round(mean(CPUE_kg.day, na.rm= TRUE)),
+    Total_Value_mxn = sum(value, na.rm = TRUE),
+    n_Records = n(),
+    .groups = "drop"  # optional: ungroup after summarising
+  )  %>%
+  arrange(year, state)
+```
+
+```{r Plot CPUE and Biomass across all taxonomic groupings}
+## CPUE
+AllGroups_CPUE_plot <- CPUE_all_summary %>%
+  filter(year > 2010) %>%
+  ggplot(aes(x = year, y = Avg_CPUE_kg.days, color = state)) +
+  geom_point(size = 2) +
+  geom_line(size = 0.5, alpha = 0.5) +
+  
+  labs(
+    title = "CPUE Over Time [across all taxonomic groups]",
+    subtitle = "Source: CONAPESCA data from J.C., cleaned & filtered (as of Nov 13)",
+    x = "Year",
+    y = "Average CPUE (kg/day)",
+    color = "State"
+  ) +
+  theme_bw() +
+  geom_vline(xintercept = 2018, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = 2019, linetype = "dashed", color = "black") +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+    plot.subtitle = element_text(hjust = 0.5, size = 12)
+  ) +
+  scale_color_manual(values = state_colors)
+
+AllGroups_CPUE_plot
+
+# Save this plot
+# ggsave(AllGroups_CPUE_plot, filename = "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/CONAPESCA_Biomass&CPUE_Nov2025/AllGroups_CPUE_Over_Time_Nov132025.png",
+#   width = 12,
+#   height = 12,
+#   dpi = 300
+# )
+
+## BIOMASS
+AllGroups_Biomass_plot <- CPUE_all_summary %>%
+  filter(year > 2010) %>%
+  ggplot(aes(x = year, y = Total_Biomass_kg, color = state)) +
+  geom_point(size = 2) +
+  geom_line(size = 0.5, alpha = 0.5) +
+  
+  labs(
+    title = "Landings Over Time [across all taxonomic groups]",
+    subtitle = "Source: CONAPESCA data from J.C., cleaned & filtered (as of Nov 13)",
+    x = "Year",
+    y = "Total Biomass (kg)",
+    color = "State"
+  ) +
+  theme_bw() +
+  geom_vline(xintercept = 2018, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = 2019, linetype = "dashed", color = "black") +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+    plot.subtitle = element_text(hjust = 0.5, size = 12)
+  ) +
+  scale_color_manual(values = state_colors)
+
+AllGroups_Biomass_plot
+
+# Save this plot
+# ggsave(AllGroups_Biomass_plot, filename = "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/CONAPESCA_Biomass&CPUE_Nov2025/AllGroups_Biomass_Over_Time_Nov132025.png",
+#   width = 12,
+#   height = 12,
+#   dpi = 300
+# )
+```
+
+## Testing the effect of subsidy removal on Biomass & CPUE
+```{r Testing the effect of subsidy removal on Biomass & CPUE}
+CPUE_summary <- CPUE_summary %>%
+  mutate(
+    subsidy_period = case_when(
+      year < 2018 ~ "pre",
+      year > 2019 ~ "post",
+      TRUE ~ "in between"
+    )
+  )
+
+CPUE_Landings_filtered2 <- CPUE_Landings_filtered %>%
+  filter(year >= 2014 & year < 2025) %>%
+  mutate(
+    subsidy_period = case_when(
+      year < 2018 ~ "pre",
+      year > 2019 ~ "post",
+      TRUE ~ "in between"
+    )
+  )
+
+CPUE_Landings_filtered2 %>%
+  distinct(year, subsidy_period)
+# looks good, four years on either side
+
+## Mixed-effects linear model
+library(Matrix)
+library(lattice)
+# library(lme4) # does not work
+library(nlme)
+library(sjPlot)
+
+CPUE_Landings_filtered2$main_species_group <- factor(CPUE_Landings_filtered2$main_species_group)
+
+Biomass.SubsidyTest_mixedLM <- lme(
+  log10(weight_kg_corrected) ~ subsidy_period,       # fixed effect
+  random = ~1 | main_species_group/state,  # nested random intercept
+  data = CPUE_Landings_filtered2
+)
+
+summary(Biomass.SubsidyTest_mixedLM)
+
+CPUE.SubsidyTest_mixedLM <- lme(
+  # fixed effects of subsidy period and time
+  CPUE_kg.day ~ subsidy_period + year,
+  data = CPUE_Landings_filtered2,
+  random = list(
+    state = pdSymm(~ 1),   # random intercept + slope for year by state
+    main_species_group  = pdDiag(~ 1)       # random intercept for taxa
+  )
+)
+
+summary(CPUE.SubsidyTest_mixedLM)
+```
+
+
+```{r Biomass & CPUE of major taxa continued...}
+options(scipen = 999) # Force same numeric format; don't want scientific notation
+
+# Setting up the dataframe to compare to the C.N.P.
+CPUE_Landings_summarized <- CPUE_Landings_filtered %>%
+  filter(year %in% 2020:2024) %>%
+  select(state, main_species_group, year, CPUE_kg.day, weight_kg_corrected) %>%
+  group_by(state, main_species_group) %>%
+  summarize(
+    # First sum per year, then average across years 2020–2022
+    Baseline_Total_Catch_2020_2022 = mean(
+      tapply(weight_kg_corrected[year %in% 2020:2022],
+             year[year %in% 2020:2022],
+             sum, na.rm = TRUE)
+    ),
+    Total_Catch_2023 = sum(weight_kg_corrected[year == 2023], na.rm = TRUE),
+    Total_Catch_2024 = sum(weight_kg_corrected[year == 2024], na.rm = TRUE),
+    Avg_CPUE_2020_2022 = mean(CPUE_kg.day[year %in% 2020:2022], na.rm = TRUE),
+    Avg_CPUE_2023 = mean(CPUE_kg.day[year == 2023], na.rm = TRUE),
+    Avg_CPUE_2024 = mean(CPUE_kg.day[year == 2024], na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Define a threshold for suspiciously high values
+    qc_flag = Baseline_Total_Catch_2020_2022 * 3,
+    # Define a 30% margin of error around the baseline mean - SUBSTANTIALLY different
+    lowest_bound = Baseline_Total_Catch_2020_2022 * 0.70, # most extreme cases must come first
+    highest_bound = Baseline_Total_Catch_2020_2022 * 1.30,
+    # Define a 5% margin of error around the baseline mean
+    low_bound = Baseline_Total_Catch_2020_2022 * 0.95,
+    high_bound = Baseline_Total_Catch_2020_2022 * 1.05,
+
+    # 2023 comparison with margin of error
+    CatchCompare_2023_vs_Baseline = case_when(
+      Total_Catch_2023 > qc_flag ~ "qc flag: > 3x higher",
+      Total_Catch_2023 > highest_bound ~ "substantially higher",
+      Total_Catch_2023 < lowest_bound ~ "substantially lower",
+      Total_Catch_2023 > high_bound ~ "higher",
+      Total_Catch_2023 < low_bound ~ "lower",
+      TRUE ~ "similar"
+    ),
+
+    # 2024 comparison with margin of error
+    CatchCompare_2024_vs_Baseline = case_when(
+      Total_Catch_2024 > qc_flag ~ "qc flag: > 3x higher",
+      Total_Catch_2024 > highest_bound ~ "substantially higher",
+      Total_Catch_2024 < lowest_bound ~ "substantially lower",
+      Total_Catch_2024 > high_bound ~ "higher",
+      Total_Catch_2024 < low_bound ~ "lower",
+      TRUE ~ "similar"
+    )
+  ) %>%
+  select(-low_bound, -high_bound, -lowest_bound, -highest_bound, -qc_flag)   # remove helper columns if not needed
+
+# Add & re-arrange columns:
+CPUE_Landings_summarized$CNP_Recommendation<- NA
+
+CPUE_Landings_summarized <- CPUE_Landings_summarized %>%
+  select(state,
+         main_species_group,
+         CNP_Recommendation,
+         Baseline_Total_Catch_2020_2022,
+         Total_Catch_2023,
+         CatchCompare_2023_vs_Baseline,
+         Total_Catch_2024,
+         CatchCompare_2024_vs_Baseline,
+         Avg_CPUE_2020_2022,
+         Avg_CPUE_2023,
+         Avg_CPUE_2024,
+         everything())  # keeps any other columns after
+```
+
+```{r Write this as a CSV}
+write.csv(CPUE_Landings_summarized, "/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/TaxonLvl_Biomass&CPUE_vs_Baseline_Nov072025.csv", row.names = FALSE)
+```
+
+## Load in recommendations for the Carta Nacional Pesquera - UNDER CONSTRUCTION
+```{r Load in CNP data}
+
+```
