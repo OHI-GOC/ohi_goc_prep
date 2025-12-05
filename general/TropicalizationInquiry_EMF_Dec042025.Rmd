@@ -1,0 +1,236 @@
+---
+title: "Tropicalization Question"
+author: "Erica Ferrer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(stringi)
+library(purrr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(fuzzyjoin)
+library(rgbif)
+# Visualization
+library(ggplot2)
+library(plotly)
+library(htmlwidgets)
+
+
+setwd("/home/ferrer/ohi_goc_prep/")
+```
+
+## Use gbif to assign species ranges
+
+```{r CONAPESCA master key}
+CONAPESCA_Master_SpKey<- read_csv("/home/ferrer/ohi_goc_prep/general/Species_Keys/CleanedMaster_SpKey_Dec012025.csv")
+
+CONAPESCA_SpKey_filtered <- CONAPESCA_Master_SpKey %>%
+  filter(!is.na(estimated_species_name) & 
+         !estimated_species_name %in% c("NEI", "unknown"))
+
+CONAPESCA_SpKey_filtered<- CONAPESCA_SpKey_filtered %>% 
+  select(recorded_taxa_group, estimated_species_name, estimated_genus_name, estimated_family_name)
+# 476 obs., 4 vars.
+
+# COME BACK TO THIS - PURG
+Subset_species <- head(CONAPESCA_Master_SpKey, 20)
+Subset_species$estimated_species_name <- stringr::str_to_sentence(Subset_species$estimated_species_name)
+```
+
+```{r Read in CONAPESCA landings}
+GoC_CONAPESCA_data<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_wSp_2000.present_Dec012025.rds"))
+
+# 3716415 obs.
+```
+
+```{r Use gbif to assign species ranges}
+CONAPESCA_SpKey_filtered$SpRange_Lat.Min<- c(NA)
+CONAPESCA_SpKey_filtered$SpRange_Lat.Max<- c(NA)
+
+# Function to get latitudinal range from GBIF
+get_lat_range <- function(species_name) {
+
+  # If empty or NA
+  if (is.na(species_name) || species_name == "") return(c(NA, NA))
+
+  # Query GBIF taxonomy
+  bb <- name_backbone(name = species_name)
+
+  # If GBIF cannot match the name
+  if (is.null(bb$usageKey)) return(c(NA, NA))
+
+  # Extract GBIF key
+  key <- bb$usageKey
+
+  # Query GBIF occurrences (limit small for testing)
+  occ <- occ_search(
+    taxonKey = key,
+    hasCoordinate = TRUE,
+    limit = 300
+  )
+
+  # If no data returned
+  if (is.null(occ$data) || nrow(occ$data) == 0) return(c(NA, NA))
+
+  lat <- occ$data$decimalLatitude
+
+  return(c(min(lat, na.rm = TRUE), max(lat, na.rm = TRUE)))
+}
+
+# Apply to your species list
+lat_ranges <- map(CONAPESCA_SpKey_filtered$estimated_species_name, get_lat_range)
+
+# Convert list of pairs to two numeric vectors
+ranges_df <- do.call(rbind, lat_ranges)
+
+CONAPESCA_SpKey_filtered$SpRange_Lat.Min <- ranges_df[,1]
+CONAPESCA_SpKey_filtered$SpRange_Lat.Max <- ranges_df[,2]
+```
+
+```{r Find the latitudinal mid point of the range}
+# Find the latitudinal mid point of the range
+Subset_species <- Subset_species %>%
+  mutate(SpRange_Center = (SpRange_Lat.Min + SpRange_Lat.Max) / 2)
+
+Subset_species<- Subset_species %>% filter(!is.na(SpRange_Center))
+```
+
+```{r Add this info to the landings data}
+Sp_of_Interest<- Subset_species %>% filter(!is.na(estimated_species_name)) %>%
+  pull(estimated_species_name)
+
+Subset_landings<- GoC_CONAPESCA_data %>% filter(estimated_species_name %in% Sp_of_Interest)
+# 643471 obs.
+
+Subset_landings<- Subset_landings %>% select(year, month, state, 
+                                         office_name, landing_site, GoC, lat, long,
+                                         recorded_taxa_group, recorded_taxa_name_clean,
+                                         estimated_species_name, landed_weight, live_weight, value)
+
+Subset_species <- Subset_species %>% select(recorded_taxa_group, recorded_taxa_name_clean, estimated_species_name,
+                        SpRange_Lat.Min, SpRange_Lat.Max, SpRange_Center)
+
+# Merge landings data to range key data:
+Subset_landings_w_ranges <- left_join(
+  Subset_species,
+  Subset_landings,
+  by = c("recorded_taxa_group", "recorded_taxa_name_clean", "estimated_species_name")
+)
+```
+
+```{r Actual analysis}
+# Weighted average latitude per year
+lat_cog <- Subset_landings_w_ranges %>%
+  filter(!is.na(SpRange_Center) & !is.na(live_weight)) %>%  # keep valid rows
+  filter(state=="SINALOA") %>% # let's assume I'm only interested in landings in Sonora
+  group_by(year) %>%
+  summarise(
+    weighted_lat = sum(SpRange_Center * live_weight) / sum(live_weight),
+    total_landings = sum(live_weight)
+  ) %>%
+  arrange(year)
+
+
+ggplot(lat_cog, aes(x = year, y = weighted_lat)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  labs(
+    title = "Weighted Average Latitude of Catch Over Time",
+    x = "Year",
+    y = "Weighted Latitude"
+  ) +
+  theme_minimal()
+```
+
+```{r Download SST data}
+library(rerddap)
+library(raster)
+library(ncdf4)
+library(dplyr)
+
+# 1. Connect to the dataset
+info <- info("ncdcOisst21Agg_LonPM180")
+
+# 2. Set bounding box (Gulf of California)
+lat_range <- c(23, 33)
+lon_range <- c(-115, -105)
+
+# 3. Loop over years and request mean(time) for each year
+years <- 2000:2024
+sst_yearly_files <- list()
+
+for (yr in years) {
+  start <- paste0(yr, "-01-01")
+  end   <- paste0(yr, "-12-31")
+  
+  # Server computes the yearly mean
+  sst_year <- griddap(info,
+                      time = c(start, end),
+                      latitude = lat_range,
+                      longitude = lon_range,
+                      fields = "sst",
+                      fmt = "nc",
+                      url = "https://coastwatch.pfeg.noaa.gov/erddap/")
+  
+  sst_yearly_files[[as.character(yr)]] <- sst_year$summary$filename
+  cat("Downloaded yearly mean SST for", yr, "\n")
+}
+
+
+#### Save these SST files! ####
+# Make sure the remote directory exists
+dir.create("/home/shares/ohi/OHI_GOC/spatial/SST_ERDDAP/", showWarnings = FALSE, recursive = TRUE)
+
+# Copy the already-downloaded yearly SST files there
+for (yr in years) {
+  tmp_file <- sst_yearly_files[[as.character(yr)]]
+  remote_file <- paste0("/home/shares/ohi/OHI_GOC/spatial/SST_ERDDAP/SST_", yr, ".nc")
+  
+  file.copy(tmp_file, remote_file, overwrite = TRUE)
+  
+  # Update the list to point to the remote path
+  sst_yearly_files[[as.character(yr)]] <- remote_file
+  cat("Saved SST for year", yr, "to", remote_file, "\n")
+}
+
+
+
+# Example: read one year
+r <- raster(sst_yearly_files[[1]])
+plot(r)  # shows SST per grid cell
+
+r_stack <- stack(lapply(sst_yearly_files, raster))
+names(r_stack) <- years  # 2000, 2001, ..., 2024
+
+plot(r_stack[[5]])  # e.g., SST for 2004
+```
+
+```{r}
+
+```
+
+
+
