@@ -56,8 +56,11 @@ CONAPESCA_SpKey_filtered<- CONAPESCA_SpKey_filtered %>%
 # 476 obs., 4 vars.
 
 # COME BACK TO THIS - PURG
-Subset_species <- head(CONAPESCA_Master_SpKey, 20)
+Subset_species <- head(CONAPESCA_SpKey_filtered, 20)
 Subset_species$estimated_species_name <- stringr::str_to_sentence(Subset_species$estimated_species_name)
+
+Subset_species<- Subset_species %>% 
+  select(recorded_taxa_group, estimated_species_name, estimated_genus_name, estimated_family_name)
 ```
 
 ```{r Read in CONAPESCA landings}
@@ -67,8 +70,8 @@ GoC_CONAPESCA_data<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/
 ```
 
 ```{r Use gbif to assign species ranges}
-CONAPESCA_SpKey_filtered$SpRange_Lat.Min<- c(NA)
-CONAPESCA_SpKey_filtered$SpRange_Lat.Max<- c(NA)
+Subset_species$SpRange_Lat.Min<- c(NA)
+Subset_species$SpRange_Lat.Max<- c(NA)
 
 # Function to get latitudinal range from GBIF
 get_lat_range <- function(species_name) {
@@ -101,13 +104,18 @@ get_lat_range <- function(species_name) {
 }
 
 # Apply to your species list
-lat_ranges <- map(CONAPESCA_SpKey_filtered$estimated_species_name, get_lat_range)
+lat_ranges <- map(Subset_species$estimated_species_name, get_lat_range)
 
 # Convert list of pairs to two numeric vectors
 ranges_df <- do.call(rbind, lat_ranges)
 
-CONAPESCA_SpKey_filtered$SpRange_Lat.Min <- ranges_df[,1]
-CONAPESCA_SpKey_filtered$SpRange_Lat.Max <- ranges_df[,2]
+Subset_species$SpRange_Lat.Min <- ranges_df[,1]
+Subset_species$SpRange_Lat.Max <- ranges_df[,2]
+```
+
+```{r Save Subset_species if needed}
+# Save this CSV in case we need it:
+write_csv(Subset_species, "/home/ferrer/ohi_goc_prep/general/Tropicalization_Inquiry_EMF/SpSubset_PURG_Dec042025")
 ```
 
 ```{r Find the latitudinal mid point of the range}
@@ -123,21 +131,21 @@ Sp_of_Interest<- Subset_species %>% filter(!is.na(estimated_species_name)) %>%
   pull(estimated_species_name)
 
 Subset_landings<- GoC_CONAPESCA_data %>% filter(estimated_species_name %in% Sp_of_Interest)
-# 643471 obs.
+# 803810 obs.
 
 Subset_landings<- Subset_landings %>% select(year, month, state, 
                                          office_name, landing_site, GoC, lat, long,
-                                         recorded_taxa_group, recorded_taxa_name_clean,
-                                         estimated_species_name, landed_weight, live_weight, value)
+                                         recorded_taxa_group, estimated_species_name, 
+                                         landed_weight, live_weight, value)
 
-Subset_species <- Subset_species %>% select(recorded_taxa_group, recorded_taxa_name_clean, estimated_species_name,
+Subset_species <- Subset_species %>% select(recorded_taxa_group, estimated_species_name,
                         SpRange_Lat.Min, SpRange_Lat.Max, SpRange_Center)
 
 # Merge landings data to range key data:
 Subset_landings_w_ranges <- left_join(
   Subset_species,
   Subset_landings,
-  by = c("recorded_taxa_group", "recorded_taxa_name_clean", "estimated_species_name")
+  by = c("recorded_taxa_group", "estimated_species_name")
 )
 ```
 
@@ -145,7 +153,7 @@ Subset_landings_w_ranges <- left_join(
 # Weighted average latitude per year
 lat_cog <- Subset_landings_w_ranges %>%
   filter(!is.na(SpRange_Center) & !is.na(live_weight)) %>%  # keep valid rows
-  filter(state=="SINALOA") %>% # let's assume I'm only interested in landings in Sonora
+  filter(state=="SONORA") %>% # let's assume I'm only interested in landings in Sonora
   group_by(year) %>%
   summarise(
     weighted_lat = sum(SpRange_Center * live_weight) / sum(live_weight),
@@ -215,9 +223,9 @@ for (yr in years) {
   sst_yearly_files[[as.character(yr)]] <- remote_file
   cat("Saved SST for year", yr, "to", remote_file, "\n")
 }
+```
 
-
-
+```{r Read and extract SST by lat-long}
 # Example: read one year
 r <- raster(sst_yearly_files[[1]])
 plot(r)  # shows SST per grid cell
@@ -226,9 +234,108 @@ r_stack <- stack(lapply(sst_yearly_files, raster))
 names(r_stack) <- years  # 2000, 2001, ..., 2024
 
 plot(r_stack[[5]])  # e.g., SST for 2004
+
+sst_points <- rasterToPoints(r_stack)
+# Columns: long, lat, SST_2000, SST_2001, ..., SST_2024
+head(sst_points)
+
+# Function to get SST for a single row
+get_sst_for_catch <- function(lat, long, year){
+  layer <- which(names(r_stack) == as.character(year))
+  if(length(layer) == 0) return(NA)  # year not in raster stack
+  extract(r_stack[[layer]], matrix(c(long, lat), ncol=2))
+}
 ```
 
-```{r}
+```{r Add SST to landings data}
+library(terra)
+
+# Step 1: Convert each RasterLayer individually
+r_list <- lapply(1:nlayers(r_stack), function(i) {
+  r <- r_stack[[i]]
+  values(r) <- as.numeric(values(r))  # ensure numeric
+  rast(r)
+})
+
+# Step 2: Stack into a single SpatRaster
+r_stack_terra <- rast(r_list)
+
+# Assuming r_stack_terra is a SpatRaster from previous step
+names(r_stack_terra) <- 2000:(2000 + nlyr(r_stack_terra) - 1)
+
+# Inspect
+r_stack_terra
+
+# Extract SST for all layers
+# We'll match each row by year
+Subset_landings_w_ranges$SST <- NA_real_
+# Convert:
+Subset_landings_w_ranges$long <- as.numeric(Subset_landings_w_ranges$long)
+
+# Prepare coordinates as SpatVector
+coords <- vect(Subset_landings_w_ranges[, c("long", "lat")],
+               geom = c("long","lat"), 
+               crs = crs(r_stack_terra))
+
+# Prepare a numeric vector for layer indices
+years_in_raster <- 2000:(2000 + nlyr(r_stack_terra) - 1)
+
+# Initialize SST column
+Subset_landings_w_ranges$SST <- NA_real_
+
+for (yr in unique(Subset_landings_w_ranges$year)) {
+  idx <- which(Subset_landings_w_ranges$year == yr)
+  if (length(idx) == 0) next
+
+  # Match year to layer index
+  layer_idx <- which(years_in_raster == yr)
+  if (length(layer_idx) == 0) next  # skip if year not found
+
+  sst_layer <- r_stack_terra[[layer_idx]]
+  Subset_landings_w_ranges$SST[idx] <- terra::extract(sst_layer, coords[idx, ])[,2]
+}
+
+
+# Check
+head(Subset_landings_w_ranges$SST)
+```
+
+```{r Plot}
+# Example: weighted SST per year
+sst_yearly <- Subset_landings_w_ranges %>%
+  filter(!is.na(SpRange_Center) & !is.na(live_weight) & !is.na(SST)) %>%
+  filter(state=="SONORA") %>%
+  group_by(year) %>%
+  summarise(weighted_SST = sum(SST * live_weight) / sum(live_weight))
+
+# Merge with weighted latitude
+lat_cog <- lat_cog %>%
+  left_join(sst_yearly, by = "year")
+
+# Determine scaling factor for secondary axis
+# We want SST to roughly match the latitude scale on the plot
+# e.g., scale factor = max(weighted_lat) / max(weighted_SST)
+scale_factor <- mean(lat_cog$weighted_lat, na.rm = TRUE) / mean(lat_cog$weighted_SST, na.rm = TRUE)
+
+# Plot
+ggplot(lat_cog, aes(x = year)) +
+  geom_line(aes(y = weighted_lat), color = "blue", size = 1) +
+  geom_point(aes(y = weighted_lat), color = "blue", size = 2) +
+  geom_line(aes(y = weighted_SST * scale_factor), color = "red", size = 1) +
+  geom_point(aes(y = weighted_SST * scale_factor), color = "red", size = 2) +
+  scale_y_continuous(
+    name = "Latitudinal Centroid of Total Catch (weighted by landings)",
+    sec.axis = sec_axis(~ . / scale_factor, name = "SST (°C; scaled)")
+  ) +
+  labs(
+    title = "Latitudinal Centroid of Catch vs Temp Over Time",
+    x = "Year"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title.y.left = element_text(color = "blue"),
+    axis.title.y.right = element_text(color = "red")
+  )
 
 ```
 
