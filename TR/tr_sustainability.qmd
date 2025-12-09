@@ -294,7 +294,7 @@ plot_ly(
 ```
 
 
-# Compare with DENUE Accommodations
+## Compare with DENUE Accommodations
 
 ```{r}
 alojamientos_2019_2024_10km <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_alojamiento_temporal_y_preparación_alimentos_y_bebidas/int","alojamientos_2019_2024_goc_10km.shp"))
@@ -332,5 +332,318 @@ setdiff(dist_S_businesses, all_hotels)
 
 setdiff(all_hotels, dist_S_businesses)
 ```
+
+# CONANP fees over time
+
+```{r}
+library(tidyverse)
+library(here)
+library(janitor)
+```
+
+
+Read in the fees over time for protected areas.  
+
+This data is directly from CONANP: it was tabulated using tabula.  The original pdfs are located at `~/home/shares/ohi/OHI_GOC/_raw_data/CONANP/d2025`.  See this issue comment for more details: <https://github.com/OHI-GOC/OHI_GOC_issues/issues/13#issuecomment-3598113291>
+
+
+```{r}
+raw_ingresos_conanp <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONANP/d2025/tabula","tabula-RECAUDACION_INAI 340008300023725 2012-2024.csv"))
+
+clean_ingresos_conanp <- raw_ingresos_conanp %>% 
+  fill(region_area_natural_protegida, .direction = "down") %>% # come back to this and check that it makes sense.
+  mutate(ent_fed_clean = case_when(
+     ent_fed == "B C" ~ "baja_california",
+     ent_fed == "B C S"~ "baja_california_sur", 
+     ent_fed == "BC Y BCS" ~ "mix_baja", # all are pacific side <https://descubreanp.conanp.gob.mx/en/conanp/ANP?suri=77>
+     ent_fed == "SON" ~ "sonora",
+     ent_fed %in% c("SIN", "SIN.") ~ "sinaloa",  
+     ent_fed == "NAY." ~ "nayarit",
+     ent_fed == "MICH." ~ "michoacan",
+     ent_fed == "JAL." ~ "jalisco",
+     ent_fed == "JAL/COL"~"jalisco_colima", # too deep inland <https://descubreanp.conanp.gob.mx/es/conanp/ANP?suri=174>
+     ent_fed == "ZAC."~ "zacatecas",
+     ent_fed == "MEX/MICH" ~ "mex_michoacan",
+     ent_fed == "COL." ~ "colima",
+     TRUE ~ NA_character_
+  )) %>% 
+  mutate(region_area_natural_protegida = stringr::str_to_lower(region_area_natural_protegida),
+         region_area_natural_protegida_clean = stringr::str_replace_all(region_area_natural_protegida, " ", "_"),
+         region_area_natural_protegida_clean = stringr::str_replace_all(region_area_natural_protegida, "\\.", "")) %>% 
+  select(region_area_natural_protegida_clean, ent_fed_clean, articulo, ingresos_2012:total)
+```
+
+
+```{r}
+clean_ingresos_conanp_goc <- clean_ingresos_conanp %>% 
+  filter(ent_fed_clean %in% c("baja_california_sur","baja_california","sonora","sinaloa","nayarit","jalisco")) %>% 
+  filter(!region_area_natural_protegida_clean %in% c("islas de la bahia de chamela (islas la pajarera, cocinas, mamut, colorada, san pedro, san agustin, san andres y negrita, y los islotes los anegados, novillas, mosca y submarino)","islas de la bahia de chamela (islas la pajarera, cocinas, mamut,\ncolorada, san pedro, san agustin, san andres y negrita, y los islotes\nlos anegados, novillas, mosca y submarino)","la primavera","zicuiran infiernillo","sierra de manantlan","sierra de quila","chamela cuixmala","playa mismaloya","playa cuitzmala","playa el tecuan","playa teopa"))
+## pacifico mexicano profundo: "no visitation due to the characteristics of the ANP" <https://descubreanp.conanp.gob.mx/swb/conanp/ANP?suri=119> ### playa mismaloya is just outside the ohi regions
+
+all_possible_goc_protected_areas <- clean_ingresos_conanp_goc %>% 
+  select(region_area_natural_protegida_clean, ent_fed_clean) %>% 
+  distinct(region_area_natural_protegida_clean, ent_fed_clean) %>% 
+  write_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/conanp_int","all_possible_goc_protected_areas_OG.csv"))
+
+###NOTE: there is an issue with Islas Marias!!! The numbers are incorrect and were not registered correctly in the tabulated data!!!!!
+```
+
+Read in the list of GoC protected areas (manually searched):
+
+```{r}
+library(tidygeocoder)
+library(dplyr)
+
+list_goc_protected_areas <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/conanp_int","all_possible_goc_protected_areas_UPDATE_120825.csv")) %>% 
+  filter(coastal_goc %in% c("yes", "almost")) %>% 
+  mutate(country = "Mexico") 
+
+# %>% 
+#   tidygeocoder::geocode(city = region_area_natural_protegida_clean, country = country, state = ent_fed_clean)
+
+list_goc_protected_areas <- read_csv(
+  here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/conanp_int",
+             "all_possible_goc_protected_areas_UPDATE_120825.csv")
+) %>%
+  filter(coastal_goc %in% c("yes", "almost")) %>%
+  mutate(country = "Mexico") 
+
+vector_goc_protected_areas <- unique(list_goc_protected_areas$region_area_natural_protegida_clean)
+
+# %>%
+#   tidygeocoder::geocode(
+#     address = region_area_natural_protegida_clean,
+#     method = "osm",
+#     lat = latitude,
+#     long = longitude,
+#     limit = 1
+#   )
+```
+
+Read in polygons for anpmx:
+
+```{r}
+library(sf)
+library(mapview)
+
+anpmx <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONANP/anpmx", "anpmx.shp"))
+mapview(anpmx) # yup, these are the same as the pdf!!!
+```
+
+```{r}
+normalize_name <- function(x) {
+  x |>
+    str_to_lower() |>                            # lowercase
+    stringi::stri_trans_general("Latin-ASCII") |> # remove accents
+    str_replace_all("[[:punct:]]", " ") |>        # remove punctuation
+    str_replace_all("\\s+", " ") |>               # collapse whitespace
+    str_trim()                                    # trim ends
+}
+
+anpmx_clean <- anpmx %>%
+  janitor::clean_names() %>% 
+  mutate(nombre_clean = normalize_name(nombre))
+
+apmx_clean_goc <- anpmx_clean %>% 
+  filter(nombre_clean %in% vector_goc_protected_areas)
+
+inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
+marine_ohi <- st_read(here::here("spatial/marine_ohi","marine_ohi.shp")) 
+
+st_crs(inland_50) == st_crs(marine_ohi) ## TRUE
+
+land_and_water_ohi_rgns <- st_union(inland_50, marine_ohi)
+
+land_and_water_ohi_rgns_union <- land_and_water_ohi_rgns %>% 
+  select(geometry) %>% 
+  st_union(.)
+
+
+
+mapview(land_and_water_ohi_rgns, zcol = "rgn_id")
+
+```
+
+Limit to only GoC Protected areas:
+
+```{r}
+st_crs(anpmx_clean) == st_crs(inland_50)
+
+ampmx_clean_transformed <- st_transform(anpmx_clean, st_crs(inland_50))
+st_crs(ampmx_clean_transformed) == st_crs(inland_50)
+
+anpmx_inland_goc <- st_intersection(ampmx_clean_transformed, inland_50)
+mapview(anpmx_inland_goc)
+
+anpmx_marine_goc <- st_intersection(ampmx_clean_transformed, marine_ohi)
+mapview(anpmx_marine_goc)
+
+anpmx_all_goc <- bind_rows(anpmx_inland_goc, anpmx_marine_goc) %>% 
+  select(nombre_clean, geometry) %>% 
+  group_by(nombre_clean) %>% 
+  summarise(geometry = st_union(geometry), .groups = "drop")
+  
+mapview(anpmx_all_goc)
+
+## now join with ohi regions again....
+goc_ohi_rgns <- st_read(here::here("spatial/ohi_regions","goc_ohi_rgns.shp")) %>% 
+  select(rgn_id, geometry)
+mapview(goc_ohi_rgns)
+
+anpmx_all_goc_rgns <- st_intersection(anpmx_all_goc, goc_ohi_rgns)
+mapview(anpmx_all_goc_rgns, zcol = "rgn_id")
+```
+
+
+## Filter protected areas to those that are in the GoC
+
+
+```{r}
+list_goc_protected_areas <- read_csv(
+  here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/conanp_int",
+             "all_possible_goc_protected_areas_UPDATE_120825.csv")
+) %>%
+  filter(coastal_goc %in% c("yes", "almost")) %>%
+  mutate(country = "Mexico") 
+
+vector_goc_protected_areas <- unique(list_goc_protected_areas$region_area_natural_protegida_clean)
+
+
+pivot_longer_ingresos_conanp <- pivot_longer(
+  data = clean_ingresos_conanp,
+  cols = ingresos_2012:ingresos_2024,
+  names_to = "name",
+  values_to = "value"
+) %>% 
+  rename(total_2012_2024 = "total") %>% 
+  mutate(year = str_replace(name, "ingresos_", "")) %>% 
+  filter(region_area_natural_protegida_clean %in% vector_goc_protected_areas)
+```
+
+### Assign OHI Regions
+
+Because some polygons for the protected areas span multiple regions, at first I thought I needed to figure out a proportion of fees to each area.  But each area is managed by a specific state, which fits into the OHI GoC regions.  
+
+But, according to the legal provision governing fees (e.g. “Artículo 198” for marine/coastal protected areas, and “Artículo 198 A” for terrestrial ones): the income from those fees “se destinarán a la Comisión Nacional de Áreas Naturales Protegidas, para la conservación y aprovechamiento sustentable de las Áreas Naturales Protegidas.” <https://www.conanp.gob.mx/acciones/articulo_198.php>
+
+And, some studies have shown that very little actually goes back into the management of the protected areas, but instead more to the admin of the Secretaria de Hacienda y Credito Publico (SHCP).  <https://nossamexico.com/cuidar-lo-que-importa-las-areas-naturales-protegidas-y-el-cobro-de-derechos-un-analisis-desde-el-noroeste-de-mexico/>
+
+Regardless, we can still assume that the fees are collected at the state level and sent to the federal CONANP agency.  This still in some ways impacts the ability for the protected areas to be managed.  So, I will do a case_when() based on the state to assign regions.
+
+
+```{r}
+## assign ohi goc regions based on the state handling fee collections.
+ohi_rgn_ingresos_conanp <- pivot_longer_ingresos_conanp %>% 
+  mutate(rgn_id = case_when(
+    ent_fed_clean == "baja_california" ~ "Region_2", # not Region_1 because if you look at the `anpmx_all_goc` we see that none of the protected areas in that area are actually managed, or have the federal entity, of Baja California.  Even the islas del golfo are managed by Guaymas.
+    ent_fed_clean == "baja_california_sur" ~ "Region_4", # before el vizcaino because that is the only one in Region 3.
+    region_area_natural_protegida_clean %in% c("nopolo") ~ "Region_4",
+    region_area_natural_protegida_clean %in% c("el vizcaino") ~ "Region_3",
+    region_area_natural_protegida_clean %in% c("alto golfo de california y delta del rio colorado", "el pinacate y gran desierto de altar") ~ "Region_5",
+    region_area_natural_protegida_clean %in% c("isla de san pedro martir") ~ "Region_6",
+    region_area_natural_protegida_clean %in% c("islas del golfo de california, guaymas") ~ "Region_7",
+    ent_fed_clean == "sinaloa" ~ "Region_8",
+    region_area_natural_protegida_clean %in% c("islas del golfo de california, zona sur, sinaloa","playa ceuta") ~ "Region_8",
+    ent_fed_clean == "nayarit" ~ "Region_9",
+    region_area_natural_protegida_clean %in% c("cuenca alimentadora del distrito nacional de riego 043 estado de", "isla isabel","islas marias","islas marietas") ~ "Region_9",
+  )) %>% 
+  filter(region_area_natural_protegida_clean != "sierra de alamos rio cuchujaqui")
+
+## i personally think that sierra de alamos rio cuchujaqui is too far inland, but I know we have other things that far inland.... we can reassess later, but right now I am DROPPING it because it just looks much too removed from the Gulf (representative species etc) <https://descubreanp.conanp.gob.mx/es/conanp/ANP?suri=150>
+```
+
+## Sum by GoC Rgn
+
+```{r}
+sum_ingresos_conanp_goc <- ohi_rgn_ingresos_conanp %>% 
+  group_by(year, rgn_id) %>% 
+  summarize(annual_collection_pesos = sum(value, na.rm = TRUE))
+
+```
+
+Now, let's make the current status:
+
+For each year, it will be the amount of fees collected divided by the average amount from years 2012 to 2022, as a way to determine if it has been stable.
+
+(current year of fees collected) / (avg fees collected for that region from 2012 - 2022) * 100
+
+Where it should be equal or more than that historical average to get a score of 100.
+
+```{r}
+## calc reference (historical) average per region, 2012-2022
+ref_avg_ingresos <- sum_ingresos_conanp_goc %>% 
+  filter(year >= 2012, year <= 2022) %>% 
+  group_by(rgn_id) %>% 
+  summarize(ref_avg_pesos = mean(annual_collection_pesos, na.rm = TRUE)) %>% 
+  ungroup()
+
+## join to full dataset
+status_ingresos <- sum_ingresos_conanp_goc %>% 
+  left_join(ref_avg_ingresos, by = "rgn_id") %>% 
+  mutate(
+    current_status_raw = (annual_collection_pesos / ref_avg_pesos) * 100,
+    current_status = as.numeric(pmin(current_status_raw, 100)), # cap at 100
+    year = as.numeric(year)
+  ) %>% 
+  ungroup() %>% 
+  arrange(rgn_id, year)
+
+write_csv(status_ingresos, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/conanp_int","status_ingresos_120825.csv"))
+
+```
+
+Plotly of current status over time:
+
+```{r}
+library(plotly)
+
+plot_ly(
+  data = status_ingresos,
+  x = ~year,
+  y = ~current_status,
+  split = ~rgn_id,
+  color = ~rgn_id,
+  type = "scatter", 
+  mode = "lines"
+) %>%
+  layout(
+    title = "CONANP fee collection status over time (relative to average fees from 2012-2022)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Status (0 to 100)", range = c(0, 110)),
+    legend = list(title = list(text = "OHI GoC Region"))
+  ) %>% 
+  add_lines(
+    x = range(status_ingresos$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+
+plot_ly(
+  data = status_ingresos,
+  x = ~year,
+  y = ~current_status_raw,
+  split = ~rgn_id,
+  color = ~rgn_id,
+  type = "scatter", 
+  mode = "lines"
+) %>%
+  layout(
+    title = "CONANP fee collection status over time (relative to average fees from 2012-2022)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Status (0 to 100)", range = c(0, 1062.01)),
+    legend = list(title = list(text = "OHI GoC Region"))
+  ) %>% 
+  add_lines(
+    x = range(status_ingresos$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+
+```
+
 
 
