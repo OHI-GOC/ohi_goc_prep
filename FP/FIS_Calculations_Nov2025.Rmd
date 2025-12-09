@@ -21,6 +21,9 @@ library(dplyr)
 library(tidytext)  # for reorder_within and scale_x_reordered
 library(lubridate)
 library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
 # Visualization
 library(ggplot2)
 library(ggforce)
@@ -50,83 +53,101 @@ JaliscoKey <- JaliscoKey %>%
     lat  = as.numeric(lat)
   )
 
-# MERGE THESE WORKING KEYS FOR NOW:
-RegionKey_working <- bind_rows(BajaSonoraKey, JaliscoKey)
-# 1199 obs., 9 vars.
+JaliscoKey_clean <- JaliscoKey %>%
+  # If you want to normalize state names first
+  mutate(state = toupper(state)) %>%
+  
+  # Remove any rows where landing_site is NA (can cause matching issues later)
+  filter(!is.na(landing_site)) %>%
+  
+  # Keep only one row per landing_site_key; if duplicate keys exist, keep first
+  group_by(landing_site_key) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup() %>%
+  
+  # Optional: also deduplicate by landing_site if there are rows with NA landing_site_key
+  group_by(landing_site) %>%
+  slice(1) %>%
+  ungroup()
 
-RegionKey_working <- RegionKey_working %>%
-  mutate(
-    state_key = if_else(
-      is.na(state),
-      "NAYARIT|JALISCO",   # permitted states when unknown
-      state
-    )
-  )
+# NOTE TO SELF: Come back to this! The Jalisco key is imperfect, but we'll have to fix this in the new year.
+# Identify rows that were removed in the deduplication of JaliscoKey
+removed_rows <- anti_join(JaliscoKey, JaliscoKey_clean, 
+                          by = c("landing_site_key", "landing_site"))
 
-RegionKey_expanded <- RegionKey_working %>%
-  separate_rows(state_key, sep = "\\|")
+
+#### MERGE THESE WORKING KEYS FOR NOW: ####
+RegionKey_working <- bind_rows(BajaSonoraKey, JaliscoKey_clean) %>%
+  filter(!is.na(landing_site)) %>%  # remove the NA from this dataframe as this will create a many-to-many matching issue later on
+  mutate(long = as.numeric(long))
+# 1176 obs., 9 vars.
+
+RegionKey_working <- RegionKey_working %>% mutate(long = as.numeric(long))
 
 RegionKey_temporary<- read_csv(here("/home/ferrer/ohi_goc_prep/general/RegionKey_UNDERCONSTRUCTION_Dec02024.csv"))
 
-rm(BajaSonoraKey, JaliscoKey)
+rm(JaliscoKey, removed_rows)
 ```
+
 # Load: Landings data with species info (December 2025) ------------------------------
 ```{r Load in landings data with species info}
 Landings_GoC_Cleaned_wSp<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_wSp_2000.present_Dec012025.rds"))
 # 3716415 obs, 41 vars.
 
-Landings_GoC_Cleaned_wSp <- Landings_GoC_Cleaned_wSp %>%
-  mutate(
-    join_key = paste(state, landing_site, sep = "_")
-  )
-# 3716415 obs, 42 vars.
+Landings_GoC_Cleaned_wSp <- Landings_GoC_Cleaned_wSp %>% 
+  select(-lat, -long) # remove lat, long for now to do the merge
 
-table(Landings_GoC_Cleaned_wSp$GoC)
+Landings_GoC <- Landings_GoC_Cleaned_wSp %>%
+  left_join(
+    RegionKey_working %>%
+      select(-landing_site_key),
+    by = c("state", "landing_site")
+  )
+# 3716415 obs, 45 vars.
+
+# A few quick checks:
+table(Landings_GoC$GoC)
 # All in the GoC or not otherwise noted.
+table(Landings_GoC$state)
+table(Landings_GoC_Cleaned_wSp$state)
+table(Landings_GoC$OHI_rgn)
+# Excellent, completely keyed for now. Erica - Dec 9 2025
 ```
 
 ```{r Add OHI region to landings w species}
-Landings_GoC_Cleaned_wSp <- Landings_GoC_Cleaned_wSp %>%
-  left_join(
-    RegionKey_expanded %>%
-      select(-lat, -long, -GulfCal, -landing_site_key, -state),
-    by = c("state" = "state_key", "landing_site")
-  )
-# 3716415 obs, 44 vars. as expected! (Many-to-many join issue, 3737864 observations...)
+Landings_GoC <- Landings_GoC %>%
+  mutate(Region_pick = if_else(!is.na(OHI_rgn), OHI_rgn, state))
+# 3716415 obs, 46 vars. as expected!
 
-Landings_GoC_Cleaned_wSp <- Landings_GoC_Cleaned_wSp %>%
-  mutate(Region_pick = if_else(!is.na(OHI_rgn), OHI_rgn, state)) %>%
-  select(-OHI_rgn)
-# 3716415 obs, 44 vars. as expected!
-
-Landings_GoC_Cleaned_wSp <- Landings_GoC_Cleaned_wSp %>%
+Landings_GoC <- Landings_GoC %>%
   left_join(
     RegionKey_temporary %>%
       select(-Region_Name_Proposed),  # remove this column for now
     by = c("Region_pick" = "Region_Mel_or_CONAPESCA")
   )
-# 3716415 obs, 45 vars. as expected!
+# 3716415 obs, 47 vars. as expected!
 
-subset<- Landings_GoC_Cleaned_wSp %>% filter(is.na(OHI_Region_No))
-# 170587 obs., 45 vars.
+subset<- Landings_GoC %>% filter(is.na(OHI_Region_No))
+table(subset$state)
+# 156952 obs., 47 vars.
 # Only Jalisco entries are not keyed. This makes sense. These are parts of Jalisco that either aren't in Region 9 or we can't be totally sure they are in Region 9.
 
-Landings_GoC_Cleaned_wSp<- Landings_GoC_Cleaned_wSp %>% filter(!is.na(OHI_Region_No)) 
+Landings_GoC<- Landings_GoC %>% filter(!is.na(OHI_Region_No)) 
+# 3559463 obs., 47 vars.
 ```
 
 ```{r Landed weight correction}
-# Kind of looks like sometimes 'landed weight' is 'live weight' and vice versa. Fix this.
-
-Landings_GoC_Cleaned_wSp$weight_kg_corrected <- ifelse(
-  Landings_GoC_Cleaned_wSp$live_weight >= Landings_GoC_Cleaned_wSp$landed_weight,
-  Landings_GoC_Cleaned_wSp$live_weight,
-  Landings_GoC_Cleaned_wSp$landed_weight
+# Kind of looks like sometimes 'landed weight' is 'live weight' and vice versa. Fix this:
+Landings_GoC$weight_kg_corrected <- ifelse(
+  Landings_GoC$live_weight >= Landings_GoC$landed_weight,
+  Landings_GoC$live_weight,
+  Landings_GoC$landed_weight
 )
 ```
 
 ```{r Filtering out things we don't care about}
-colnames(Landings_GoC_Cleaned_wSp)
-table(Landings_GoC_Cleaned_wSp$acuaculture_production)
+colnames(Landings_GoC)
+table(Landings_GoC$acuaculture_production)
 
 #### Filter out aquaculture landings ####
 aquaculture_keywords<- c(
@@ -134,7 +155,7 @@ aquaculture_keywords<- c(
 )
 
 # Flag aquaculture rows:
-Landings_GoC_Cleaned_wSp <- Landings_GoC_Cleaned_wSp %>%
+Landings_GoC <- Landings_GoC %>%
   mutate(
     aquaculture_flag = (
       coalesce(tolower(acuaculture_production) == "yes", FALSE) |
@@ -142,8 +163,8 @@ Landings_GoC_Cleaned_wSp <- Landings_GoC_Cleaned_wSp %>%
     )
   )
 
-table(Landings_GoC_Cleaned_wSp$aquaculture_flag)
-# 116059 observations explicitly flagged as aquaculture
+table(Landings_GoC$aquaculture_flag)
+# 115988 observations explicitly flagged as aquaculture
 
 #### Filter out freshwater landings ####
 freshwater_keywords<- c(
@@ -158,37 +179,45 @@ freshwater_taxa<- c(
 )
 
 # Flag freshwater rows:
-Landings_GoC_Cleaned_wSp <- Landings_GoC_Cleaned_wSp %>%
+Landings_GoC <- Landings_GoC %>%
   mutate(
     freshwater_flag = coalesce(
       (common_name_clean %in% freshwater_taxa) |
       (rowSums(across(keywords_1:keywords_5, ~ .x %in% freshwater_keywords), na.rm = TRUE) > 0) |
-      (habitat == "freshwater"),
+      (habitat == "freshwater") |
+      (IHH_functional_major_groups_sm =="Freshwater fishes"),
       FALSE
     )
   )
 
-table(Landings_GoC_Cleaned_wSp$freshwater_flag)
-# 232960 observations explicitly flagged as freshwater landings (either based on the taxa, keyword, or landing site)
+table(Landings_GoC$freshwater_flag)
+# 286013 observations explicitly flagged as freshwater landings (either based on the taxa, keyword, or landing site)
 
 #### Now filter out freshwater & aquaculture landings from main landings ####
-Landings_GoC_Fresh.Aquaculture <- Landings_GoC_Cleaned_wSp %>%
+Landings_GoC_Fresh.Aquaculture <- Landings_GoC %>%
   filter(aquaculture_flag | freshwater_flag)
 # filter out the records that are  definitely aquaculture or freshwater
-# 343842 obs., 49 vars
+# 396343 obs., 50 vars
 
-Landings_GoC_NoAquaculture <- Landings_GoC_Cleaned_wSp %>%
+Landings_GoC_NoAquaculture <- Landings_GoC %>%
   filter(!(aquaculture_flag | freshwater_flag))
-# 3223435 obs., 49 vars
+# 3163120 obs., 50 vars
+```
+
+```{r CREATE A MARICULTURE DATAFRAM}
+#### CREATE A MARICULTURE DATAFRAME: ####
+Landings_GoC_Mariculture <- Landings_GoC %>%
+  filter(aquaculture_flag & !freshwater_flag)
+# filter out the records that are  definitely aquaculture or freshwater
+# 110330 obs., 50 vars
+```
+
+```{r Save the FIS and MAR dataframes as of Dec 09 2025}
+saveRDS(Landings_GoC_NoAquaculture, "/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds")
+saveRDS(Landings_GoC_Mariculture, "/home/shares/ohi/OHI_GOC/goal_prep/fp/mar/v2025/int/GOC_MAR.landings_CLEAN_as.of.Dec092025.rds")
 ```
 
 ```{r Top Mariculture Sp.}
-#### CREATE A MARICULTURE DATAFRAME: ####
-Landings_GoC_Mariculture <- Landings_GoC_Cleaned_wSp %>%
-  filter(aquaculture_flag & !freshwater_flag)
-# filter out the records that are  definitely aquaculture or freshwater
-# 110882 obs., 49 vars
-
 table(Landings_GoC_Mariculture$common_name_clean)
 
 Landings_GoC_Mariculture_Summary<- Landings_GoC_Mariculture %>% 
@@ -217,44 +246,44 @@ Landings_GoC_TopMariculture_Summary<- Landings_GoC_Mariculture %>%
 ```
 
 ```{r Save Landings_GoC_TopMariculture_Summary to find MAR sustainability scores}
-write.csv(Landings_GoC_TopMariculture_Summary, "/home/ferrer/ohi_goc_prep/FP/MAR/v2025/GOC_Mariculture_TopCatches_2014.2024_Dec082025.csv")
+# write.csv(Landings_GoC_TopMariculture_Summary, "/home/ferrer/ohi_goc_prep/FP/MAR/v2025/GOC_Mariculture_TopCatches_2014.2024_Dec082025.csv")
 ```
 
 # SUMMARY STATS ABOUT OUR DATA: return to this later.
 ```{r How much of biomass includes information about species, genus, family?}
-Landings_GoC_Cleaned_wSp %>%
+Landings_GoC %>%
   pull(estimated_species_name) %>%
   {c(n_na = sum(is.na(.)),
       n_unknown = sum(. == "unknown", na.rm = TRUE),
       n_NEI = sum(. == "NEI", na.rm = TRUE)
     ) }
-# 1008085 (4186 + 210708 + 793191) out of 3716415 records (27%) for species are NA, "unknown", or "NEI"
+# 1008085 (1839 + 205110 + 765582) out of 3559463 records (27%) for species are NA, "unknown", or "NEI"
 # Meaning we have species info for 73% of records.
 
-Landings_GoC_Cleaned_wSp %>%
+Landings_GoC %>%
   pull(estimated_genus_name) %>%
   {c(n_na = sum(is.na(.)),
      n_unknown = sum(. == "unknown", na.rm = TRUE),
      n_NEI = sum(. == "NEI", na.rm = TRUE)
     ) }
-# 1008085 (214894 + 0 + 793191) out of 3716415 records (27%) for genus are NA, "unknown", or "NEI"
+# 1008085 (206949 + 0 + 765582) out of 3559463 records (27%) for genus are NA, "unknown", or "NEI"
 # Meaning we have genus info for 73% of records.
 
-Landings_GoC_Cleaned_wSp %>%
+Landings_GoC %>%
   pull(estimated_family_name) %>%
   {c(n_na = sum(is.na(.)),
      n_unknown = sum(. == "unknown", na.rm = TRUE),
      n_NEI = sum(. == "NEI", na.rm = TRUE),
      n_family_info_pending = sum(. == "family missing but genus available", na.rm = TRUE)
     ) }
-# 352911 (192402 + 0 + 160509) out of 3716415 records (9%) for family are NA, "unknown", or "NEI". 29659 records have information about genus but family info pending.
+# 336348 (185825 + 0 + 150523) out of 3559463 records (9%) for family are NA, "unknown", or "NEI". 29438 (~1%) records have information about genus but family info pending.
 # Meaning we already have or can get family info for 91% of records.
 ```
 
 # SCORE A: CPUE Estimates (per major marine group) ------------------------------
 ```{r CPUE calculations (rowwise)}
 GoC_Landings_for_CPUE<- Landings_GoC_NoAquaculture
-# 3223435 obs., 49 vars.
+# 3163120 obs., 50 vars.
 
 # Calculate the difference in days between period start and end:
 GoC_Landings_for_CPUE$days_fishing <- as.numeric(GoC_Landings_for_CPUE$period_end_fixed - GoC_Landings_for_CPUE$period_start_fixed) + 1
@@ -262,15 +291,15 @@ GoC_Landings_for_CPUE$days_fishing <- as.numeric(GoC_Landings_for_CPUE$period_en
 GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE %>%
   filter(!is.na(days_fishing) & days_fishing > 0 & live_weight > 0) %>%
   mutate(CPUE_kg.day = weight_kg_corrected / days_fishing)
-# 2988373 obs., 50 vars.
+# 2931534 obs., 52 vars.
 
 max(GoC_Landings_for_CPUE$CPUE_kg.day) #288000
 min(GoC_Landings_for_CPUE$CPUE_kg.day) #0.00125
 
-# In general, the receipts from early trips are a bit funky. Let's filter those out for now.
+# In general, the receipts from early trips are a bit funky. Let's filter those out for now. Filter >= 2003
 GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE %>%
   filter(year >= 2003)
-# 2790070 obs.
+# 2736299 obs.
 
 max(GoC_Landings_for_CPUE$CPUE_kg.day) #1,400,000
 min(GoC_Landings_for_CPUE$CPUE_kg.day) #0.00125
@@ -282,7 +311,7 @@ min(GoC_Landings_for_CPUE$CPUE_kg.day) #0.00125
 
 ```{r Let's explore the landings for which IHH_major_group equals NA}
 TEST<- GoC_Landings_for_CPUE %>% filter(is.na(IHH_functional_major_groups_sm))
-# 187583 out of 2862286 records contain no IHH_functional_major_groups_sm = ~6-7% of landing records.
+# 180324 out of 2787363 total records contain no IHH_functional_major_groups_sm (this equate to about ~6-7% of records).
 
 TEST2<- TEST %>% 
   select(recorded_taxa_group, recorded_taxa_name_clean, common_name_clean, keywords_1:keywords_5) %>% 
@@ -370,7 +399,7 @@ OHI_CPUE_Scores <- CPUE_Table %>%
 ```
 
 ```{r Save this CPUE data table}
-write.csv(OHI_CPUE_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_FIRSTDRAFT_Dec082025.csv", row.names = FALSE)
+write.csv(OHI_CPUE_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_FIRSTDRAFT_Dec092025.csv", row.names = FALSE)
 ```
 
 ```{r Plot CPUE over time}
@@ -393,9 +422,9 @@ Region_colors <- c(
   "sienna1",
   "plum",
   "purple4",
-  "forestgreen",
+  "aquamarine3",
   "gold2",
-  "firebrick2"
+  "tomato"
 )
 
 Regions_of_Interest <- c(
@@ -404,7 +433,7 @@ Regions_of_Interest <- c(
   "Region_7", "Region_8", "Region_9"
 )
 
-OHI_avgCPUE_overTime <- OHI_CPUE_Scores %>%
+OHI_CPUEscore_overTime <- OHI_CPUE_Scores %>%
   filter(OHI_Region %in% Regions_of_Interest) %>%
   ggplot(aes(
     x = Year,
@@ -415,7 +444,9 @@ OHI_avgCPUE_overTime <- OHI_CPUE_Scores %>%
   geom_point(size = 2) +
   facet_wrap(~ OHI_Region, scales = "fixed") +
   geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  
   scale_color_manual(values = Region_colors) +
+  
   labs(
     title = "FIS - Regional CPUE Scores (2014–2024) relative to Baseline (2003–2013)",
     y = "CPUE Scores (Ratio of CPUE_present to CPUE_baseline capped at 1)",
@@ -429,16 +460,165 @@ OHI_avgCPUE_overTime <- OHI_CPUE_Scores %>%
     plot.title = element_text(size = 18, face = "bold")
   )
 
+OHI_CPUEscore_overTime
   
+  # # Save as PNG
+  # ggsave(
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUE_Scores_overTime_Dec092025.png"),
+  #   plot = OHI_CPUEscore_overTime,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+
+```
+
+## Take a closer look at CPUE per Region and per Taxa:
+```{r Plot CPUE over all years 2003-2024}
+CPUE_AllYears <- GoC_Landings_for_CPUE %>%
+  filter(year >= 2003, year <= 2024) %>%
+  filter(!is.na(OHI_Region_No)) %>%
+  group_by(OHI_Region_No, year, IHH_functional_major_groups_sm) %>%
+  summarise(
+    Total_Biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    Total_Value_mxn = sum(value, na.rm = TRUE),
+    Total_Days = sum(days_fishing, na.rm = TRUE),
+    Avg_CPUE = mean(CPUE_kg.day, na.rm = TRUE),
+    n_records = n(),
+    .groups = "drop"
+  )
+
+Taxa_colors <- c("darkblue", "royalblue", "skyblue", "orange", "sienna1", "plum", "purple4", "aquamarine3", "gold2", "tomato", "grey")
+
+Region_colors <- c("royalblue", "skyblue", "orange", "sienna1", "plum", "purple4", "aquamarine3", "gold2", "tomato")
+
+Regions_of_Interest <- c(
+  "Region_1", "Region_2", "Region_3",
+  "Region_4", "Region_5", "Region_6",
+  "Region_7", "Region_8", "Region_9"
+)
+
+
+# PLOT 1: CPUE overTime per Region, facet by Taxa
+CPUE_overTime_byRegion_perTaxa<- CPUE_AllYears %>%
+  filter(OHI_Region_No %in% Regions_of_Interest) %>%
+  ggplot(
+       aes(x = year, 
+           y = Avg_CPUE, 
+           group = OHI_Region_No, 
+           color = OHI_Region_No)) +
+  geom_line(size = 1) +                # lines connecting the points
+  facet_wrap(~ IHH_functional_major_groups_sm, scales = "free_y") +  # facet by region
+  labs(
+    title = "Average CPUE Over Time by Functional Group",
+    x = "Year",
+    y = "Avg CPUE (kg/day)",
+    color = "Functional Group"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_color_manual(values = Taxa_colors) +  # nice palette
+  geom_vline(xintercept = 2013, linetype= "solid", color = "grey5")
+
+CPUE_overTime_byRegion_perTaxa
+
+  # # Save as PNG
+  # ggsave(
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_overTime_byRegion_perTaxa_Dec092025.png"),
+  #   plot = CPUE_overTime_byRegion_perTaxa,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+
+
+# PLOT 2: CPUE overTime per Taxa, facet by Region
+CPUE_overTime_byRegion_perTaxa<- CPUE_AllYears %>%
+  filter(OHI_Region_No %in% Regions_of_Interest) %>%
+  ggplot(
+       aes(x = year, 
+           y = Avg_CPUE, 
+           group = IHH_functional_major_groups_sm, 
+           color = IHH_functional_major_groups_sm)) +
+  geom_line(size = 1) +                # lines connecting the points
+  facet_wrap(~ OHI_Region_No, scales = "free_y") +  # facet by region
+  labs(
+    title = "Average CPUE Over Time by Functional Group",
+    x = "Year",
+    y = "Avg CPUE (kg/day)",
+    color = "Functional Group"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_color_manual(values = Taxa_colors) +  # nice palette
+  geom_vline(xintercept = 2013, linetype= "solid", color = "grey5")
+
+CPUE_overTime_byTaxa_perRegion
+
+  # # Save as PNG
+  # ggsave(
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_overTime_byTaxa_perRegion_Dec092025.png"),
+  #   plot = CPUE_overTime_byTaxa,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+
+
+# PLOT 3: CPUE overTime per Taxa, facet by Region - normalized 0 to 1
+CPUE_overTime_byTaxa_perTaxa_normalized<- CPUE_AllYears %>%
+  filter(OHI_Region_No %in% Regions_of_Interest) %>%
+  # Normalize Avg_CPUE per functional group across all years
+  group_by(IHH_functional_major_groups_sm) %>%
+  mutate(Avg_CPUE_norm = (Avg_CPUE - min(Avg_CPUE, na.rm = TRUE)) /
+                            (max(Avg_CPUE, na.rm = TRUE) - min(Avg_CPUE, na.rm = TRUE))) %>%
+  ungroup() %>%
+  ggplot(aes(
+    x = year, 
+    y = Avg_CPUE_norm, 
+    group = IHH_functional_major_groups_sm, 
+    color = IHH_functional_major_groups_sm
+  )) +
+  geom_line(size = 1) +
+  facet_wrap(~ OHI_Region_No, scales = "free_y") +
+  labs(
+    title = "Normalized CPUE Over Time by Functional Group",
+    x = "Year",
+    y = "Normalized CPUE (0-1)",
+    color = "Functional Group"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_color_manual(values = Taxa_colors) +
+  geom_vline(xintercept = 2013, linetype = "solid", color = "grey5")
+
+CPUE_overTime_byTaxa_perRegion_normalized
+
   # Save as PNG
   ggsave(
-    filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_avgCPUE_overTime.png"),
-    plot = OHI_avgCPUE_overTime,
+    filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_overTime_byTaxa_perRegion_normalized_Dec092025.png"),
+    plot = CPUE_overTime_byTaxa_normalized,
     width = 12,
     height = 12,
     dpi = 300
   )
+```
 
+```{r Take a closer look at CPUE per Region and per Taxa}
+subset<- GoC_Landings_for_CPUE %>% 
+  filter(OHI_Region_No == "Region_7" & is.na(IHH_functional_major_groups_sm))
+
+table(subset$recorded_taxa_name)
+table(subset$recorded_taxa_group)
 ```
 
 
