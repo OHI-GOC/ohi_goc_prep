@@ -24,7 +24,7 @@ editor_options:
 
 ## Rate of Return
 
-Working on this.
+Not possible unfortunately. Lack of data availability.
 
 ## Service Establishments
 
@@ -64,6 +64,14 @@ mapview(banos_publicos_goc, zcol = "descripcion_del_sector_economico")
 ## Crime
 
 ### Read in SESNSP GoC data
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+```
+
 
 ```{r}
 sesnsp_goc_10km <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/ss/int","sesnsp_goc_municipios_10km.shp")) ## need to fix the names / make a document describing the abbreviations!!
@@ -298,4 +306,221 @@ tr_qual_crime_score_filled_sf_2025 <- tr_qual_crime_score_filled_sf %>%
 mapview(tr_qual_crime_score_filled_sf_2025, zcol = "current_status")
 ```
 
+### UPDATE: only including crime that directly impacts tourists, now at 50km not 10km!!
 
+#### Read in SESNSP GoC data
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+```
+
+
+```{r}
+sesnsp_goc_50km <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/ss/int","sesnsp_goc_municipios_50km.shp")) ## need to fix the names / make a document describing the abbreviations!!
+
+unique(sesnsp_goc_50km$rgn_id) # for 50km: [1] "Region_1" "Region_3" "Region_4" "Region_5" "Region_7" "Region_8" "Region_9"
+
+mapview(sesnsp_goc_50km)
+```
+
+#### Updated TR crimes
+
+Conceptual rule: “included if it plausibly alters safety, cleanliness, aesthetics, or atmosphere in spaces tourists visit, which in turn affects visit quality."
+
+```{r}
+# vector of subtypes I want to keep for TR quality
+updated_tr_qual_crime_subtypes <- c(
+  "Daño a la propiedad",
+  "Extorsión",
+  "Fraude",
+  "Otros delitos contra el patrimonio",
+  "Otros robos",
+  "Robo a casa habitación",
+  "Robo a institución bancaria",
+  "Robo a negocio",
+  "Robo a transeúnte en espacio abierto al público",
+  "Robo a transeúnte en vía pública",
+  "Robo a transportista",
+  "Robo de autopartes",
+  "Robo de maquinaria",
+  "Robo de vehículo automotor",
+  "Robo en transporte individual",
+  "Robo en transporte público colectivo",
+  "Robo en transporte público individual",
+  "Violencia de género en todas sus modalidades distinta a la violencia familiar",
+  "Abuso sexual",
+  "Acoso sexual",
+  "Hostigamiento sexual",
+  "Otros delitos que atentan contra la libertad y la seguridad sexual",
+  "Violación equiparada",
+  "Violación simple",
+  "Corrupción de menores",
+  "Otros delitos contra la sociedad",
+  "Trata de personas",
+  "Feminicidio",
+  "Homicidio doloso",
+  "Lesiones dolosas",
+  "Otros delitos que atentan contra la vida y la integridad corporal",
+  "Otros delitos que atentan contra la libertad personal",
+  "Rapto",
+  "Secuestro",
+  "Tráfico de menores",
+  "Amenazas",
+  "Contra el medio ambiente",
+  "Narcomenudeo"
+)
+
+#### those that were dropped:
+# c(
+#   "Delitos cometidos por servidores públicos",
+#   "Evasión de presos",
+#   "Otros delitos del Fuero Común"
+# )
+
+
+
+# filter sesnsp_goc by those subtypes
+sesnsp_goc_tr_qual <- sesnsp_goc_50km %>%
+  filter(sbtp_d_ %in% updated_tr_qual_crime_subtypes)
+
+unique(sesnsp_goc_tr_qual$rgn_id) # [1] "Region_1" "Region_3" "Region_4" "Region_5" "Region_7" "Region_8" "Region_9"
+```
+
+#### Summarize the number of crimes by year and region (assuming that all crimes are weighted equally)
+
+```{r}
+sesnsp_goc_tr_qual_sum <- sesnsp_goc_tr_qual %>% 
+  st_drop_geometry() %>% 
+  group_by(ano, rgn_id) %>% 
+  summarise(number_crimes = sum(annl_tt))
+
+unique(sesnsp_goc_tr_qual_sum$rgn_id) # [1] "Region_3" "Region_4" "Region_5" "Region_7" "Region_8" "Region_9" "Region_1"
+```
+
+#### Divide by coastal population in each region
+
+##### NOTE: NEED TO UPDATE...
+
+1. We will have to update this because we eventually want to use 2015, 2020, and 2025 census data for population, not just static 2020.
+2. I think maybe we should use the population per municipality (instead of population per OHI Region).  Because for some regions there are multiple municipios in the region that have data collected for them, versus some only have one or two.  
+
+```{r}
+coastal_50km_pop <- read_csv(here::here("general/OHI_rgn_population_50km.csv")) 
+
+coastal_50km_pop_sumrgn9 <- coastal_50km_pop %>% 
+  group_by(rgn_id) %>% 
+  summarize(rgn_population_50km = sum(population_50km_2020))
+
+sesnsp_goc_tr_sum_percapita <- left_join(sesnsp_goc_tr_qual_sum, coastal_50km_pop_sumrgn9, by = "rgn_id")
+
+sesnsp_goc_tr_crimes_percapita <- sesnsp_goc_tr_sum_percapita %>% 
+  group_by(ano, rgn_id) %>% 
+  mutate(tr_crimes_percapita = (number_crimes / rgn_population_50km)) %>% 
+  ungroup()
+```
+
+#### Prelim Scores
+
+```{r}
+max_tr_crime_percapita_allrgns <- max(sesnsp_goc_tr_crimes_percapita$tr_crimes_percapita, na.rm = TRUE)
+
+tr_qual_crime_score_alt <- sesnsp_goc_tr_crimes_percapita %>%
+  mutate(
+    current_status = (1 - (tr_crimes_percapita / max_tr_crime_percapita_allrgns)) * 100
+  ) 
+
+write_csv(tr_qual_crime_score_alt, here::here("TR/tr_quality_int","tr_qual_crime_score_120925.csv"))
+```
+
+#### Plotly
+
+```{r}
+library(plotly)
+
+## TR quality crime index score over time
+tr_qual_crime_plotly <- plotly::plot_ly(
+  tr_qual_crime_score_alt,
+  x = ~ano, 
+  y = ~current_status, 
+  color = ~rgn_id,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS: Índice de delitos per cápita que afectan la calidad turística por región",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Score (out of 100)"),
+    legend = list(title = list(text = "Región"))
+  ) %>%
+  add_lines(
+    x = range(tr_qual_crime_score_alt$ano), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (0 crimes = 100/100)",
+    inherit = FALSE
+  )
+
+tr_qual_crime_plotly
+```
+
+### Assuming that when there is no data, that the score is 100...only for regions that have data at some point.
+
+If there are no municipios in that OHI region then they should not be gapfilled like this.
+
+```{r}
+## fill in regions missing any values with 100 since the summarize may have dropped any regions with 0.
+
+## for rgn 2 (which has no DOCUMENTED crimes from sesnsp, but definitely crime to some degree...... <https://bahiadelosangeles.org/safety.html>)
+region_2_na <- tibble(
+  ano = 2015:2025,
+  rgn_id = "Region_2"
+) %>%
+  mutate(current_status = NA_real_)
+
+tr_qual_crime_score_filled <- tr_qual_crime_score_alt %>% 
+  select(ano, rgn_id, current_status) %>%
+  complete(ano, rgn_id, fill = list(current_status = 100)) %>%   # only rgn 1 and rgn 2 needed to be filled.
+  bind_rows(region_2_na)
+
+tr_qual_crime_plotly_filled <- plot_ly(
+  tr_qual_crime_score_filled,
+  x = ~ano,
+  y = ~current_status,
+  color = ~rgn_id,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS: Índice de delitos que afectan la calidad turística por región",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Score (out of 100)"),
+    legend = list(title = list(text = "Región"))
+  ) %>%
+  add_lines(
+    x = range(tr_qual_crime_score_filled$ano),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (0 crimes = 100/100)",
+    inherit = FALSE
+  )
+
+tr_qual_crime_plotly_filled
+```
+
+```{r}
+# bring back geometry
+inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
+
+tr_qual_crime_score_filled_sf <- inland_50 %>%
+  left_join(tr_qual_crime_score_filled, by = "rgn_id")
+
+# st_write(tr_qual_crime_score_filled_sf, here::here("TR/tr_quality_int","tr_qual_crime_score_filled_sf.shp"))
+
+tr_qual_crime_score_filled_sf_2025 <- tr_qual_crime_score_filled_sf %>% 
+  filter(ano %in% "2025")
+
+mapview(tr_qual_crime_score_filled_sf_2025, zcol = "current_status")
+```
