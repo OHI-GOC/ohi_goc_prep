@@ -33,6 +33,7 @@ library(lubridate)
 library(janitor)
 library(fuzzyjoin)
 library(rgbif)
+library(future.apply)
 # Visualization
 library(ggplot2)
 library(plotly)
@@ -69,7 +70,7 @@ GoC_CONAPESCA_data<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/
 # 3716415 obs.
 ```
 
-```{r Use gbif to assign species ranges}
+```{r Use gbif to assign ranges to SUBSET of species}
 Subset_species$SpRange_Lat.Min<- c(NA)
 Subset_species$SpRange_Lat.Max<- c(NA)
 
@@ -113,9 +114,42 @@ Subset_species$SpRange_Lat.Min <- ranges_df[,1]
 Subset_species$SpRange_Lat.Max <- ranges_df[,2]
 ```
 
+```{r Use gbif to assign species ranges to ALL OF CONAPESCA data}
+CONAPESCA_SpKey_filtered$SpRange_Lat.Min<- c(NA)
+CONAPESCA_SpKey_filtered$SpRange_Lat.Max<- c(NA)
+
+plan(multisession, workers = 2)  # only 2 cores to avoid throttling
+
+species_list <- CONAPESCA_SpKey_filtered$estimated_species_name
+#species_list <- Subset_species$estimated_species_name
+
+lat_ranges_list <- future_lapply(
+  species_list, 
+  function(sp) {
+    tryCatch({
+      get_lat_range_safe(sp, limit = 300)
+    }, error = function(e) {
+      message("Error for species ", sp, ": ", e$message)
+      return(c(NA_real_, NA_real_))
+    })
+  },
+  future.seed = TRUE  # ensures reproducible results
+)
+
+# Combine safely
+lat_ranges_df <- do.call(rbind, lat_ranges_list)
+colnames(lat_ranges_df) <- c("SpRange_Lat.Min", "SpRange_Lat.Max")
+
+# Attach to your main dataframe
+#Subset_species <- cbind(Subset_species, lat_ranges_df)
+CONAPESCA_SpKey_filtered <- cbind(CONAPESCA_SpKey_filtered, lat_ranges_df)
+```
+
 ```{r Save Subset_species if needed}
 # Save this CSV in case we need it:
 write_csv(Subset_species, "/home/ferrer/ohi_goc_prep/general/Tropicalization_Inquiry_EMF/SpSubset_PURG_Dec042025")
+
+write_csv(CONAPESCA_SpKey_filtered, "/home/ferrer/ohi_goc_prep/general/Tropicalization_Inquiry_EMF/SpGBIF_Info_Dec042025")
 ```
 
 ```{r Find the latitudinal mid point of the range}
@@ -315,7 +349,7 @@ lat_cog <- lat_cog %>%
 # Determine scaling factor for secondary axis
 # We want SST to roughly match the latitude scale on the plot
 # e.g., scale factor = max(weighted_lat) / max(weighted_SST)
-scale_factor <- mean(lat_cog$weighted_lat, na.rm = TRUE) / mean(lat_cog$weighted_SST, na.rm = TRUE)
+scale_factor <- max(lat_cog$weighted_lat, na.rm = TRUE) / max(lat_cog$weighted_SST, na.rm = TRUE)
 
 # Plot
 ggplot(lat_cog, aes(x = year)) +
