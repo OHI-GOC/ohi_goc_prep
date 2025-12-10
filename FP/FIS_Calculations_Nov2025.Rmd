@@ -774,45 +774,48 @@ sum(is.na(GoC_Landings_for_CMSY$OHI_Region_No))
 ```
 
 ```{r Mitigate genera key issues}
-# Mitigate genera key issues:
 # NOTE TO SELF: Clean this up in the new year. This is a band aid solution to larger key issues.
-GenusKey <- GoC_Landings_for_CMSY %>%
-  group_by(estimated_genus_name) %>%
-  arrange(desc(IHH_functional_major_groups_sm != "OTRAS" & !is.na(IHH_functional_major_groups_sm))) %>%
-  slice(1) %>%  # pick the first row per genus (preferred row comes first)
-  ungroup() %>%
-  select(IHH_functional_major_groups_sm, recorded_taxa_group, estimated_genus_name)
 
-GenusKey <- GenusKey %>% 
-  mutate(Major_Functional_Group = IHH_functional_major_groups_sm)
+#### GENUS KEY ####
+# NOTE TO SELF: Return to this when needed
+GenusKey <- GoC_Landings_for_CMSY %>%
+  select(recorded_taxa_group, estimated_genus_name) %>%
+  distinct(recorded_taxa_group, estimated_genus_name, .keep_all = TRUE)
 
 GenusKey <- GenusKey %>%
+  group_by(estimated_genus_name) %>%
   mutate(
-    Major_Functional_Group = case_when(
-      is.na(Major_Functional_Group) & recorded_taxa_group == "SARDINA" ~ "Pelagic marine fishes",
-      is.na(Major_Functional_Group) & recorded_taxa_group == "CAMARON" ~ "Shrimps, prawns",
-      is.na(Major_Functional_Group) & recorded_taxa_group == "ALGAS" ~ "Marine algae",
-      TRUE ~ Major_Functional_Group  # keep existing values
+    estimated_taxa_group = case_when(
+      
+      # If only one category exists for this genus:
+      n_distinct(recorded_taxa_group) == 1 ~ recorded_taxa_group,
+      
+      # If multiple groups and OTRAS is present → take non-OTRAS
+      n_distinct(recorded_taxa_group) > 1 &
+        "OTRAS" %in% recorded_taxa_group ~
+        recorded_taxa_group[recorded_taxa_group != "OTRAS"][1],
+      
+      # Multiple groups, none are OTRAS → choose the first one
+      TRUE ~ recorded_taxa_group[1]
     )
   ) %>%
-  select(-IHH_functional_major_groups_sm, -recorded_taxa_group)
+  ungroup()
 
+unique(GenusKey$estimated_genus_name)
+
+# MERGE this key to the larger dataset
 GoC_Landings_for_CMSY <- left_join(
   GoC_Landings_for_CMSY,
   GenusKey,
-  by = c("estimated_genus_name")
+  by = c("recorded_taxa_group", "estimated_genus_name")
 )
-# 2225315 obs., 52 vars. as expected!
+# 2225315 obs., 53 vars. as expected!
 
+# A few quick sanity checks:
 subset<- GoC_Landings_for_CMSY %>% filter(is.na(Major_Functional_Group))
-table(GoC_Landings_for_CMSY$estimated_genus_name)
-
-
-#### PRIORS GENUS KEY ####
-# NOTE TO SELF: Return to this when needed
-Priors_GenusKey <- GoC_Landings_for_CMSY %>%
-  select(recorded_taxa_group, estimated_genus_name) %>%
-  distinct(recorded_taxa_group, estimated_genus_name, .keep_all = TRUE)
+sum(is.na(GoC_Landings_for_CMSY$Major_Functional_Group))
+table(GoC_Landings_for_CMSY$estimated_taxa_group)
+sum(is.na(GoC_Landings_for_CMSY$estimated_taxa_group))
 ```
 
 ```{r Summary table}
@@ -831,11 +834,11 @@ TotalLandings_AnnualSummary_byGenus <- GoC_Landings_for_CMSY %>%
     n_Records = n(),
     .groups = "drop"  # optional: ungroup after summarising
   )
-# 2401 obs., 5 vars.
+# 2401 obs., 4 vars.
 
 TotalLandings_AnnualSummary_byGenus <- GoC_Landings_for_CMSY %>%
-  select(year, Major_Functional_Group, estimated_genus_name, weight_kg_corrected) %>%
-  group_by(year, Major_Functional_Group, estimated_genus_name) %>%
+  select(year, Major_Functional_Group, estimated_taxa_group, estimated_genus_name, weight_kg_corrected) %>%
+  group_by(year, Major_Functional_Group, estimated_taxa_group, estimated_genus_name) %>%
   summarise(
     Total_Landed_Biomass = sum(weight_kg_corrected, na.rm = TRUE),
     n_Records = n(),
@@ -857,11 +860,255 @@ File1_df<- TotalLandings_AnnualSummary_byGenus
 # Re-name column
 colnames(File1_df)[colnames(File1_df) == "estimated_genus_name"] <- "Stock"
 colnames(File1_df)[colnames(File1_df) == "year"] <- "Year"
+
+# Finally, and just for now, filter out data from 2025
+# NOTE TO SELF: Come back to this in subsequent updates, once we have full data for 2025.
+File1_df<- File1_df %>% filter(Year<2025)
 ```
 
 ## SAVE FILE 1
 ```{r SAVE FILE 1}
 write.csv(File1_df, "~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Input_Files/File1_Dec092025.csv", row.names = FALSE)
+```
+
+# Create FILE 2 - Metadata & Model Priors
+```{r Create File 2 based on File 1}
+# STEP 1:
+# Which taxa (stocks) do we want to account for in our File 2?
+Stock_names<- unique(File1_df$Stock)
+# 98 unique genera / stocks
+
+## Read in the column names of File 2 from Ferrer et al. (2022) CSV file
+headers <- names(read.csv("FIS/v2025/OHI_CMSY_Scores/Instructional_Files/CMSY_File2_BluePrint_Dec092025.csv", nrows = 1))
+
+## Create an empty dataframe with the same headers
+File2_df <- data.frame(matrix(ncol = length(headers), nrow = 0))
+colnames(File2_df) <- headers
+
+## Add Stock_names to the 'Stock' column
+File2_df <- File2_df[1:length(Stock_names), ]  # Expand rows
+File2_df$Stock <- Stock_names
+
+## Reset rownames / the index column
+rownames(File2_df) <- NULL
+
+
+# STEP 2: TRIME AND RENAME AS NECESSARY
+# Trim some of the columns off this file: only if necessary.
+
+# Re-name columns: only if necessary.
+# colnames(File2_df)[colnames(File2_df) == "Keep"] <- "Yes_Run"
+# colnames(File2_df)[colnames(File2_df) == "stb.low"] <- "st_b.low"
+# colnames(File2_df)[colnames(File2_df) == "stb.hi"] <- "st_b.hi"
+
+
+# STEP 3: FILL AS NECESSARY
+# Fill in some of the columns off this file:
+File2_df$Region <- c("GOC")
+File2_df$Class <- c("TBD")
+File2_df$Source <- c("JC_data")
+File2_df$btype <- c("None")
+File2_df$force.cmsy <- c("TRUE")
+
+
+# STEP 4:
+# For species with less than 10 years of data, do not keep (Sufficient_No_Years = 0)
+StockYears_per_Taxa <- File1_df %>%
+  group_by(Stock) %>%
+  summarise(n_Stock_Years = n_distinct(Year), .groups = "drop")
+
+StockYears_per_Taxa <- StockYears_per_Taxa %>%
+  mutate(Sufficient_No_Years = ifelse(n_Stock_Years < 10, 0, 1))
+
+# How many stocks will we be keeping based on number of years?
+table(StockYears_per_Taxa$Sufficient_No_Years)
+# All of them, which makes sense since we already applied this filter above.
+
+##  Add this information to the File 2 dataframe: join StockYears_per_Taxa to File2_df by "Stock", bringing in the filled Sufficient_No_Years column
+File2_df <- File2_df %>%
+  select(-Sufficient_No_Years) %>%  # Remove empty column to avoid duplicates
+  left_join(
+    StockYears_per_Taxa %>% select(Stock, Sufficient_No_Years),
+    by = "Stock"
+  )
+
+# STEP 5: ADD IN THE GENUS KEY INFO
+GenusKey_distinct<- GenusKey %>% 
+  select(estimated_genus_name, estimated_taxa_group) %>%
+  distinct()
+
+File2_df <- File2_df %>%
+  left_join(
+    GenusKey_distinct,
+    by = c("Stock"="estimated_genus_name")
+  )
+
+# STEP 6:
+# Re-order columns: only if necessary.
+```
+
+## SAVE FILE 2 BLUE PRINT
+```{r SAVE FILE 2 UNDER CONSTRUCTION}
+write.csv(File2_df, "~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Input_Files/File2_UNDER_CONSTRUCTION_Dec092025.csv", row.names = FALSE)
+```
+NEXT STEPS: Fill in the rest of file 2, namely the model priors, using the ancillary files shared with me by Alfredo (Ferrer et al., 2022)
+NOTE TO SELF: These model priors are likely to change in the new year but will do for now.
+
+Did some work offline on my local machine (not available for viewing here... yet). This work will help fill out File 2.
+
+```{r Read in additional files to complete file 2}
+# Read in file if necessary:
+#File2_df <- read.csv("~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Input_Files/File2_UNDER_CONSTRUCTION_Dec092025.csv")
+
+## Additional files needed to file in the metadata
+Priors_Pristine.Biomass <- read.csv("~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Model_Priors/Priors_StartingBiomass_fromFAOdata_DRAFT_Dec092025.csv")
+Priors_Int.Year <- read.csv("~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Model_Priors/Priors_IntermediateYears_DRAFT_Dec092025.csv")
+Priors_IntEnd.Conditions <- read.csv("~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Model_Priors/Priors_IntEndConditions_DRAFT_Dec092025.csv")
+Priors_Resilience <- read.csv("~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Model_Priors/Priors_ResilienceValues_DRAFT_Dec092025.csv")
+Priors_Resilience <- Priors_Resilience %>% select(-ScientificName)
+# Common_Names <- read.csv("Stock and Common Names_Oct 23 2025.csv")
+```
+
+```{r lowercase_function}
+to_lower_df <- function(df) {
+  df %>% mutate(across(where(is.character), tolower))
+}
+```
+
+```{r Stitch these dataframes together to create complete File2_df}
+File2_df        <- to_lower_df(File2_df)
+Priors_Pristine.Biomass  <- to_lower_df(Priors_Pristine.Biomass)
+Priors_Int.Year <- to_lower_df(Priors_Int.Year)
+Priors_Resilience <- to_lower_df(Priors_Resilience)
+
+## MERGE: PRISTINE BIOMASS PRIORS
+File2_df_merged <- File2_df %>% 
+  left_join(
+    Priors_Pristine.Biomass %>% select(estimated_taxa_group, st_b.low, st_b.hi),
+    by = "estimated_taxa_group",
+    suffix = c(".file2", ".priors")
+  ) %>%
+  mutate(
+    st_b.low = coalesce(st_b.low.file2, st_b.low.priors),
+    st_b.hi  = coalesce(st_b.hi.file2,  st_b.hi.priors)
+  ) %>% 
+  select(-ends_with(".file2"), -ends_with(".priors"))
+
+# NOTE TO SELF: Our priors for pristine biomass, and the FAO timeseries that underly them, are fairly sparse as in missing several major taxonomic groups (like sardine). Return to this in the new year.
+
+## MERGE: INT YEAR PRIORS
+File2_df_merged <- File2_df_merged %>%
+  left_join(
+    Priors_Int.Year %>% 
+      select(estimated_taxa_group, int_yr, StartYear, EndYear),
+    by = "estimated_taxa_group",
+    suffix = c(".file2", ".priors")
+  ) %>%
+  mutate(
+    int_yr               = coalesce(int_yr.file2,               int_yr.priors),
+    StartYear            = coalesce(StartYear.file2,            StartYear.priors),
+    EndYear              = coalesce(EndYear.file2,              EndYear.priors)) %>%
+  select(-ends_with(".file2"), -ends_with(".priors"))
+
+## MERGE: INT END CONDITIONS PRIORS
+# NOTE TO SELF: Based on the naming conventions within this file I actually think these are the priors for intermediate and ending biomass. I'll circle back to this and iron out the true meaning and utility of these particular priors in the new year.
+# Join and fill missing values
+File2_df_merged <- File2_df_merged %>%
+  left_join(
+    Priors_IntEnd.Conditions,
+    by = "estimated_taxa_group",
+    suffix = c("", ".priors")
+  ) %>%
+  mutate(
+    int_b.low  = coalesce(int_b.low, int_b.low.priors),
+    int_b.hi   = coalesce(int_b.hi, int_b.hi.priors),
+    end_b.low  = coalesce(end_b.low, end_b.low.priors),
+    end_b.hi = coalesce(end_b.hi, end_b.hi.priors)
+  ) %>%
+  select(-ends_with(".priors"))
+
+
+## MERGE: RESILIENCE PRIORS
+File2_df_merged <- File2_df_merged %>%
+  left_join(
+    Priors_Resilience %>% select(estimated_taxa_group, Resilience, Resilience_Source),
+    by = "estimated_taxa_group",
+    suffix = c(".file2", ".priors")
+  ) %>%
+  mutate(
+    Resilience = coalesce(Resilience.file2, Resilience.priors)
+  ) %>%
+  select(-Resilience.file2, -Resilience.priors)
+```
+
+```{r Finally, lets clean up File 2 before saving and running CMSY}
+File2_df_merged<- File2_df_merged %>% 
+  select(Region, Stock, Landings_Datasource=Source, 
+         StartYear, EndYear, int_yr, 
+         Flim, Fpa, Blim, Bpa, Bmsy, B40,
+         FMSY, MSY, MSYBtrigger, M,
+         Fofl, last_F,
+         q.start, q.end,
+         st_b.low, st_b.hi, 
+         int_b.low, int_b.hi, end_b.low, end_b.hi,
+         r.low, r.hi, 
+         Resilience, Resilience_Source,
+         Yes_Run, Comment)
+
+# Fill in the Yes_Run column based on model priors:
+File2_df_merged <- File2_df_merged %>%
+  mutate(
+    Yes_Run = if_else(
+      is.na(Resilience) | is.na(int_b.low) | is.na(st_b.low) | is.na(end_b.low),
+      0,
+      1
+    ),
+    Comment = if_else(
+      Yes_Run == 0,
+      "Incomplete model priors",
+      NA_character_
+    )
+  )
+
+sum(File2_df_merged$Yes_Run==1)
+# 38 stocks to run!
+```
+
+```{r SAVE FILE 2 COMPLETE}
+write.csv(File2_df_merged, "~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Input_Files/File2_Dec092025.csv", row.names = FALSE)
+```
+
+
+```{r How much of FP will these CMSY stocks account for?}
+Landings_CMSY_TEST <- Landings_GoC_NoFresh.NoMariculture %>%
+  mutate(estimated_genus_name = tolower(estimated_genus_name))
+
+CMSY_Stocks <- File2_df_merged %>%
+  filter(Yes_Run == 1) %>%
+  pull(Stock) %>%
+  unique()
+
+CMSY_Stocks_hypothetical <- c(
+  CMSY_Stocks, 
+  "sardinops", 
+  "opisthonema", 
+  "sarda",
+  "scomber"
+)
+
+# Calculate total from genera landings identified in the CMSY exercise:
+# NOTE TO SELF: Come back to this. Find priors for these four taxa! They represent a huge component of total landings.
+Landings_CMSY_summary <- Landings_CMSY_TEST %>%
+  filter(year %in% 2015:2024) %>%           # only last 10 years
+  mutate(is_CMSY = estimated_genus_name %in% CMSY_Stocks_hypothetical) %>%  # flag CMSY genera
+  summarise(
+    total_landings = sum(weight_kg_corrected, na.rm = TRUE),                # total landings
+    CMSY_landings  = sum(weight_kg_corrected[is_CMSY], na.rm = TRUE)       # landings from CMSY genera
+  ) %>%
+  mutate(percent_CMSY = 100 * CMSY_landings / total_landings)    # percentage
+  
+Landings_CMSY_summary
+# If I can sort out priors for these four extra txa, CMSY could account for ~50% of all GoC landings in the last five years.
 ```
 
 
