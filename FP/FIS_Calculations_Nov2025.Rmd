@@ -290,8 +290,8 @@ Landings_GoC %>%
 # SCORE A: CPUE Estimates (per major marine group) ------------------------------
 ```{r CPUE calculations (rowwise)}
 # Load file, only if needed:
-# GoC_Landings_for_CPUE<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
-GoC_Landings_for_CPUE<- Landings_GoC_NoFresh.NoMariculture
+GoC_Landings_for_CPUE<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
+# GoC_Landings_for_CPUE<- Landings_GoC_NoFresh.NoMariculture
 # 3163120 obs., 50 vars.
 
 # Calculate the difference in days between period start and end:
@@ -344,10 +344,6 @@ CPUE_baseline <- GoC_Landings_for_CPUE %>%
     .groups = "drop"
   )
 
-# Quick aside: how much of percent catch do the NAs account for?
-subset<- CPUE_recent %>% filter(is.na(IHH_functional_major_groups_sm))
-# Again, alot of these NAs can be accounted for with further species key work.
-
 # STEP 2:CALCULATE CPUE VALUES FOR RECENT YEARS, 2014-2024 -----
 CPUE_recent <- GoC_Landings_for_CPUE %>%
   filter(year >= 2014, year <= 2024) %>%
@@ -361,6 +357,10 @@ CPUE_recent <- GoC_Landings_for_CPUE %>%
     n_records = n(),
     .groups = "drop"
   )
+
+# Quick aside: how much of percent catch do the NAs account for?
+subset<- CPUE_recent %>% filter(is.na(IHH_functional_major_groups_sm))
+# Again, alot of these NAs can be accounted for with further species key work.
 
 # STEP 3: COMPUTE PERCENT BIOMASS FOR RECENT YEARS -----
 CPUE_recent <- CPUE_recent %>%
@@ -412,7 +412,7 @@ OHI_CPUE_Scores <- CPUE_Table %>%
 ```
 
 ```{r Save this CPUE data table}
-write.csv(OHI_CPUE_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_FIRSTDRAFT_Dec092025.csv", row.names = FALSE)
+write.csv(OHI_CPUE_Scores, , row.names = FALSE)
 ```
 
 ```{r Plot CPUE Scores over time}
@@ -678,8 +678,8 @@ FILE 2: Create a file with OHI_Region, Stock, Group = Name, English Name, Scient
 # Create FILE 1 - Timeseries
 ```{r File 1 - Stock Timeseries (JC data)}
 # Load file, only if needed:
-# GoC_Landings_for_CMSY<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
-GoC_Landings_for_CMSY<- Landings_GoC_NoFresh.NoMariculture
+GoC_Landings_for_CMSY<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
+# GoC_Landings_for_CMSY<- Landings_GoC_NoFresh.NoMariculture
 # 3163120 obs., 50 vars.
 ```
 
@@ -777,36 +777,70 @@ sum(is.na(GoC_Landings_for_CMSY$OHI_Region_No))
 # NOTE TO SELF: Clean this up in the new year. This is a band aid solution to larger key issues.
 
 #### GENUS KEY ####
-# NOTE TO SELF: Return to this when needed
+# NOTE TO SELF: Return to this when needed (Dec 09 2025). Returned the next day, Dec 10 2025.
 GenusKey <- GoC_Landings_for_CMSY %>%
-  select(recorded_taxa_group, estimated_genus_name) %>%
-  distinct(recorded_taxa_group, estimated_genus_name, .keep_all = TRUE)
+  select(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm) %>%
+  distinct(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm, .keep_all = TRUE)
+# 161 obs.
 
+# See the issue here? One genus could be associated with multiple recorded_taxa_groups. We need the unique combination of estimated_genus_name & recorded_taxa_group to key out the larger dataset. But, in the end, we'll want to be able to group by ESTIMATED_taxa_group to avoid issues of splitting the catch from a single genus across two larger groups.
+
+# ---- Stage 1: Assign within-genus functional groups ----
 GenusKey <- GenusKey %>%
   group_by(estimated_genus_name) %>%
   mutate(
-    estimated_taxa_group = case_when(
-      
-      # If only one category exists for this genus:
-      n_distinct(recorded_taxa_group) == 1 ~ recorded_taxa_group,
-      
-      # If multiple groups and OTRAS is present → take non-OTRAS
-      n_distinct(recorded_taxa_group) > 1 &
-        "OTRAS" %in% recorded_taxa_group ~
-        recorded_taxa_group[recorded_taxa_group != "OTRAS"][1],
-      
-      # Multiple groups, none are OTRAS → choose the first one
-      TRUE ~ recorded_taxa_group[1]
+    # Helper values
+    n_func = n_distinct(IHH_functional_major_groups_sm, na.rm = TRUE),
+    first_non_na_func = IHH_functional_major_groups_sm[!is.na(IHH_functional_major_groups_sm)][1],
+    first_func = IHH_functional_major_groups_sm[1],
+
+    # Main assignment
+    Major_Functional_Group = case_when(
+      n_func == 1 ~ IHH_functional_major_groups_sm,
+      !is.na(first_non_na_func) ~ first_non_na_func,
+      TRUE ~ first_func            # fallback if all NA
     )
   ) %>%
-  ungroup()
+  ungroup() %>%
+  select(-n_func, -first_non_na_func, -first_func)
+
+# ---- Stage 2: Patch NA values based on shared recorded_taxa_group ----
+GenusKey <- GenusKey %>%
+  group_by(recorded_taxa_group) %>%
+  mutate(
+    # find any non-NA functional groups from same recorded_taxa_group
+    group_level_func = Major_Functional_Group[!is.na(Major_Functional_Group)][1],
+
+    # apply rule
+    Major_Functional_Group = if_else(
+      is.na(Major_Functional_Group) & !is.na(group_level_func),
+      group_level_func,
+      Major_Functional_Group
+    )
+  ) %>%
+  ungroup() %>%
+  select(-group_level_func)
 
 unique(GenusKey$estimated_genus_name)
+# 98 unique genera.
+
+# Final patches for Algae, Peto, and "sharks":
+GenusKey <- GenusKey %>%
+  mutate(
+    Major_Functional_Group = case_when(
+      
+      recorded_taxa_group == "ALGAS"   ~ "Marine algae",
+      recorded_taxa_group == "PETO"    ~ "Sharks",
+      recorded_taxa_group == "TIBURON" ~ "Sharks",
+      
+      TRUE ~ Major_Functional_Group
+    )
+  )
 
 # MERGE this key to the larger dataset
 GoC_Landings_for_CMSY <- left_join(
   GoC_Landings_for_CMSY,
-  GenusKey,
+  GenusKey %>%,
   by = c("recorded_taxa_group", "estimated_genus_name")
 )
 # 2225315 obs., 53 vars. as expected!
@@ -837,7 +871,7 @@ TotalLandings_AnnualSummary_byGenus <- GoC_Landings_for_CMSY %>%
 # 2401 obs., 4 vars.
 
 TotalLandings_AnnualSummary_byGenus <- GoC_Landings_for_CMSY %>%
-  select(year, Major_Functional_Group, estimated_taxa_group, estimated_genus_name, weight_kg_corrected) %>%
+  select(year, Major_Functional_Group = IHH_functional_major_groups_sm, estimated_taxa_group, estimated_genus_name, weight_kg_corrected) %>%
   group_by(year, Major_Functional_Group, estimated_taxa_group, estimated_genus_name) %>%
   summarise(
     Total_Landed_Biomass = sum(weight_kg_corrected, na.rm = TRUE),
@@ -1073,6 +1107,11 @@ File2_df_merged <- File2_df_merged %>%
 
 sum(File2_df_merged$Yes_Run==1)
 # 38 stocks to run!
+
+# NOTES ON NAMING, Dec 10 2025:
+# Need a btype column = None
+# Need a force.cmsy column = TRUE
+# StartYear and EndYear must actually align with file one time series.
 ```
 
 ```{r How much of FP will these CMSY stocks account for?}
@@ -1143,12 +1182,28 @@ Landings_CMSY_summary <- Landings_CMSY_TEST %>%
 Landings_CMSY_summary
 # If I can sort out priors for these four extra txa, CMSY could account for ~50% of all GoC landings in the last five years.
 ```
+# RAN CMSY ON PERSONAL MACHINE. Here are the finals from that analysis:
+```{r CMSY Outputs}
+CMSY_Timeseries<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Output_Files/CMSY_Assessment_Timeseries_Dec102025.csv")
+ 
+OHI_CMSY_Scores<- CMSY_Timeseries %>% select(stock, yr, 
+                                             B, B.Bmsy, lcl.B.Bmsy, ucl.B.Bmsy,
+                                             F.Fmsy, lcl.F.Fmsy, ucl.F.Fmsy)
+
+OHI_CMSY_Scores <- Landings_GoC_Cleaned_wSp %>%
+  left_join(
+    RegionKey_working %>%
+      select(-landing_site_key),
+    by = c("state", "landing_site")
+  )
+```
 
 
 # SCORE B, PICK 3: Catch vs Carta Nacional Pesquera Baseline - UNDER CONSTRUCTION ------------------------------
 ## Load in recommendations for the Carta Nacional Pesquera
 ```{r Load in CNP data}
-
+CNP_data<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/CNP_2023_recommendations_clean.csv")
+~/ohi_goc_prep/FP/
 ```
 
 ```{r Catch compare to CNP}
@@ -1225,4 +1280,32 @@ CPUE_Landings_summarized <- CPUE_Landings_summarized %>%
 
 ```{r Write this as a CSV}
 
+```
+
+#### Merge the Indicator dataframes
+
+```{r Load the indicator dataframes as necessary}
+# Read in datafiles as necessary:
+OHI_CPUE_Scores <- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_FIRSTDRAFT_Dec092025.csv")
+
+OHI_CMSY_Scores
+
+Master_SpKey<- read.csv("/home/ferrer/ohi_goc_prep/general/CONAPESCA_Keys/Species_Keys/CleanedMaster_SpKey_Dec012025.csv")
+
+CMSY_SpKey<- Master_SpKey
+CMSY_SpKey$estimated_genus_name<- tolower(CMSY_SpKey$estimated_genus_name)
+
+CMSY_SpKey<- CMSY_SpKey %>%
+  select(IHH_functional_major_groups_sm, recorded_taxa_group, estimated_genus_name) %>% 
+  distinct()
+```
+
+```{r Merge the Indicator dataframes}
+# Merge:
+Landings_GoC <- Landings_GoC_Cleaned_wSp %>%
+  left_join(
+    RegionKey_working %>%
+      select(-landing_site_key),
+    by = c("state", "landing_site")
+  )
 ```
