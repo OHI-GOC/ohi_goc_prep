@@ -93,7 +93,7 @@ rm(JaliscoKey, removed_rows)
 
 # Load: Landings data with species info (December 2025) ------------------------------
 ```{r Load in landings data with species info}
-Landings_GoC_Cleaned_wSp<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_wSp_2000.present_Dec012025.rds"))
+Landings_GoC_Cleaned_wSp<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/juan_carlos/GoC_Landings_wSp_2000.present_Dec012025.rds"))
 # 3716415 obs, 41 vars.
 
 Landings_GoC_Cleaned_wSp <- Landings_GoC_Cleaned_wSp %>% 
@@ -209,6 +209,230 @@ sum(is.na(Landings_GoC_NoFresh.NoMariculture$OHI_Region_No))
 table(Landings_GoC_NoFresh.NoMariculture$OHI_Region_No)
 # Seems like all entries have an OHI region number...
 ```
+NOTE TO SELF: There could still be some freshwater species hiding in here. For example, the "MOJARRA" general category is mixed freshwater and marine demersal fish.
+
+
+```{r FIXING MAJOR FUNCTIONAL GROUPS!! PENDING}
+# NOTE TO SELF: Return to this when needed (Dec 09 2025). Returned the next day, Dec 10 2025.
+Genus_MajorGroup_Key_ALL <- Landings_GoC_NoFresh.NoMariculture %>%
+  select(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm) %>%
+  distinct(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm, .keep_all = TRUE)
+# 367 obs., 3 vars.
+
+# See the issue here? One genus could be associated with multiple recorded_taxa_groups. We need the unique combination of estimated_genus_name & recorded_taxa_group to key out the larger dataset. But, in the end, we'll want to be able to group by ESTIMATED_taxa_group to avoid issues of splitting the catch from a single genus across two larger functional groups.
+
+# ---- Create Major_Functional_Group values based IHH major functional groups assigned to recorded_taxa_group ----
+
+# Step 1: Assign one Major_Functional_Group per recorded_taxa_group, respecting that a few of the categories (like "OTRAS") are inherently different.
+skip_groups <- c("OTRAS", "ESPECIE GENERICA", "FAUNA", "ORNATO", "NEI")
+
+Genus_MajorGroup_Key_ALL$Assignment_for_Major_Functional_Group = NA_character_  # initialize flag column
+
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  group_by(recorded_taxa_group) %>%
+  mutate(
+    
+    # Most frequent non-NA value for IHH_functional_major_groups within the recorded_taxa_group
+    group_major = {
+      x <- IHH_functional_major_groups_sm
+      x <- x[!is.na(x) & x != ""]
+      if (length(x) == 0) NA_character_ else {
+        tbl <- table(x)
+        names(tbl)[which.max(tbl)]
+      }
+    },
+    
+    # Assign only to non-skipped groups
+    Major_Functional_Group = if_else(
+      !(recorded_taxa_group %in% skip_groups),
+      group_major,
+      NA_character_
+    ),
+      Assignment_for_Major_Functional_Group = if_else(
+      !(recorded_taxa_group %in% skip_groups) & is.na(Assignment_for_Major_Functional_Group),
+      "Assigned_Step_1: based on recorded_taxa_group and IHH_functional_major_groups",
+      Assignment_for_Major_Functional_Group
+    )
+  ) %>%
+  ungroup() %>%
+  select(-group_major)
+
+# Put Assignment_for_Major_Functional_Group column at the end:
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  relocate(Assignment_for_Major_Functional_Group, .after = last_col())
+
+
+# Step 2: Genus-level assignment (ignores cases where genus = NA or NEI)
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  group_by(estimated_genus_name) %>%
+  mutate(
+
+    # ---- Determine genus_major ONLY IF genus is real (not NA, not NEI) ----
+    genus_major = {
+      genus_value <- cur_group()$estimated_genus_name   # single value
+
+      if (!is.na(genus_value) && genus_value != "NEI") {
+
+        x <- c(Major_Functional_Group, IHH_functional_major_groups_sm)
+        x <- x[!is.na(x) & x != ""]
+        if (length(x) == 0) NA_character_ else {
+          tbl <- table(x)
+          names(tbl)[which.max(tbl)]
+        }
+
+      } else {
+        # genus is NA or NEI → cannot derive functional group
+        NA_character_
+      }
+    },
+
+    Major_Functional_Group = case_when(
+
+      # ---- CASE 1: genus is NA or NEI → leave unchanged ----
+      (is.na(estimated_genus_name) | estimated_genus_name == "NEI") ~ Major_Functional_Group,
+
+      # ---- CASE 2: non-skip groups with missing FG → fill from genus_major ----
+      !(recorded_taxa_group %in% skip_groups) &
+        is.na(Major_Functional_Group) ~ genus_major,
+
+      # ---- CASE 3: skip groups → fill *only* from genus_major ----
+      recorded_taxa_group %in% skip_groups ~ genus_major,
+
+      # ---- CASE 4: keep original ----
+      TRUE ~ Major_Functional_Group
+    ),
+      Assignment_for_Major_Functional_Group = case_when(
+      ((!(recorded_taxa_group %in% skip_groups) & is.na(Assignment_for_Major_Functional_Group) & !is.na(Major_Functional_Group)) |
+       (recorded_taxa_group %in% skip_groups & is.na(Assignment_for_Major_Functional_Group) & !is.na(Major_Functional_Group))) ~ "Assigned_Step_2: based on genus (that has been keyed elsewhere)",
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  ) %>%
+  ungroup() %>%
+  select(-genus_major)
+  
+
+# Step 3: Enforce genus-level consistency for Major_Functional_Group (ignores cases where genus = NA or NEI; assign "OTRAS" that have a verified genus)
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  group_by(estimated_genus_name) %>%
+  mutate(
+    new_value = if (
+      !is.na(cur_group()$estimated_genus_name) &&
+      cur_group()$estimated_genus_name != "NEI" &&
+      n() > 1
+    ) {
+      x <- Major_Functional_Group[!is.na(Major_Functional_Group) & Major_Functional_Group != ""]
+      if(length(x) == 0) Major_Functional_Group else names(which.max(table(x))) 
+    } else {
+      Major_Functional_Group
+    },
+    Assignment_for_Major_Functional_Group = if_else(
+      Major_Functional_Group != new_value & !is.na(new_value),
+      "Assigned_Step_3: forced consistency across the genus",
+      Assignment_for_Major_Functional_Group
+    ),
+    Major_Functional_Group = new_value
+  ) %>%
+  ungroup() %>%
+  select(-new_value)
+  
+
+# Step 4: Manual patches for specific taxonomic groups (and two typos)
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  mutate(
+    Major_Functional_Group = case_when(
+      estimated_genus_name == "Sphoeriodes" ~ "Marine fishes NEI", # Pressumably, is a typo of "Sphoeroides"
+      estimated_genus_name == "Lujtanus" ~ "Demersal marine fishes", # Pressumably, is a typo of "Lutjanus"
+      recorded_taxa_group == "MOJARRA" ~ "Marine fishes NEI",
+      recorded_taxa_group == "ANCHOVETA" ~ "Pelagic marine fishes",
+      recorded_taxa_group == "PECES ORNATO" ~ "Marine fishes NEI",
+      recorded_taxa_group %in% c("ALGAS", "SARGAZO") ~ "Marine algae",
+      recorded_taxa_group %in% c("PEPINO DE MAR", "ERIZO") ~ "Other marine invertebrates",
+      recorded_taxa_group %in% c("PETO", "TIBURON", "CAZON") ~ "Sharks",
+      TRUE ~ Major_Functional_Group
+    ),
+     Assignment_for_Major_Functional_Group = case_when(
+      (estimated_genus_name == "Sphoeriodes" |
+       estimated_genus_name == "Lujtanus" |
+       recorded_taxa_group %in% c("MOJARRA", "ANCHOVETA", "PECES ORNATO", "ALGAS", "SARGAZO",
+                                  "PEPINO DE MAR", "ERIZO", "PETO", "TIBURON", "CAZON")) ~ "Assigned_Step_4: manual patch",
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  )
+
+
+# Step 5: If Major_Functional_Group is NA then Assignment_for_Major_Functional_Group= "could not be assigned"
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  mutate(
+    Assignment_for_Major_Functional_Group = if_else(
+      is.na(Major_Functional_Group),
+      "Alert: Major_Functional_Group could not be assigned (at present)",
+      Assignment_for_Major_Functional_Group
+    )
+  )
+
+
+# Step 6: Assign estimated_taxa_group by looking at the most common recorded_taxa_group for each genus
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  group_by(estimated_genus_name) %>%
+  mutate(
+    # Step 1: calculate mode of recorded_taxa_group within the genus
+    genus_mode_group = if (!is.na(cur_group()$estimated_genus_name[1]) &&
+                           cur_group()$estimated_genus_name[1] != "NEI") {
+      tbl <- table(recorded_taxa_group)
+      names(tbl)[which.max(tbl)]
+    } else {
+      NA_character_
+    },
+    
+    # Step 2: assign estimated_taxa_group
+    estimated_taxa_group = if_else(
+      !is.na(genus_mode_group) & recorded_taxa_group != genus_mode_group,
+      genus_mode_group,          # use mode for genus when recorded_taxa_group differs
+      recorded_taxa_group        # otherwise keep recorded_taxa_group
+    )
+  ) %>%
+  ungroup() %>%
+  select(-genus_mode_group)
+
+
+# Step 7: A couple of manual patches for specific taxa where we actually lost info due to "OTRAS" (e.g., Lutjanus and "Lujtanus, & Oligoplites)
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  mutate(
+    estimated_taxa_group = case_when(
+      estimated_genus_name %in% c("Lutjanus", "Lujtanus") ~ "GUACHINANGO",
+      estimated_genus_name %in% c("Oligoplites") ~ "SARDINA",
+      estimated_genus_name %in% c("Pseudobatos") ~ "RAYA Y SIMILARES",
+      estimated_genus_name %in% c("Scomberomorus") ~ "SIERRA",
+      estimated_genus_name %in% c("Selene") ~ "RONCO",
+      estimated_genus_name %in% c("Trachinotus") ~ "PAMPANO",
+      TRUE ~ estimated_taxa_group
+    )
+  )
+
+
+# Step 8: Rearrange for ease of reading:
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  select(
+    recorded_taxa_group,
+    estimated_taxa_group,
+    estimated_genus_name,
+    IHH_functional_major_groups_sm,
+    Major_Functional_Group,
+    Assignment_for_Major_Functional_Group
+  )
+    
+# 367 obs., 6 vars.
+```
+
+#### SAVE GENUS TO MAJOR_FUNCTIONAL_GROUP KEY
+```{r Save this key!}
+Genus_MajorGroup_Key<- Genus_MajorGroup_Key_ALL %>% 
+  select(recorded_taxa_group, estimated_genus_name, estimated_taxa_group, Major_Functional_Group) %>%
+  distinct()
+
+write.csv(Genus_MajorGroup_Key, "~/ohi_goc_prep/general/CONAPESCA_Keys/Genus_to_MajorGroup_Key_Dec112025.csv", row.names = FALSE)
+```
+
 
 ```{r CREATE A MARICULTURE DATAFRAM}
 #### CREATE A MARICULTURE DATAFRAME: ####
@@ -290,33 +514,73 @@ Landings_GoC %>%
 # SCORE A: CPUE Estimates (per major marine group) ------------------------------
 ```{r CPUE calculations (rowwise)}
 # Load file, only if needed:
-GoC_Landings_for_CPUE<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
+GoC_Landings_for_CPUE_original<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
+GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE_original
 # GoC_Landings_for_CPUE<- Landings_GoC_NoFresh.NoMariculture
 # 3163120 obs., 50 vars.
 
 # Calculate the difference in days between period start and end:
 GoC_Landings_for_CPUE$days_fishing <- as.numeric(GoC_Landings_for_CPUE$period_end_fixed - GoC_Landings_for_CPUE$period_start_fixed) + 1
+# 3163120 obs., 51 vars.
 
+# Estimate CPUE per trip:
 GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE %>%
-  filter(!is.na(days_fishing) & days_fishing > 0 & live_weight > 0) %>%
   mutate(CPUE_kg.day = weight_kg_corrected / days_fishing)
-# 2931534 obs., 52 vars.
+# 3163120 obs., 52 vars.
 
-max(GoC_Landings_for_CPUE$CPUE_kg.day) #288000
-min(GoC_Landings_for_CPUE$CPUE_kg.day) #0.00125
-
-# In general, the receipts from early trips are a bit funky. Let's filter those out for now. Filter >= 2003
+# General filtering:
+# In general, the receipts from early trips are a bit funky. Let's filter out trips before 2003 (n= 267072 records).
 GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE %>%
   filter(year >= 2003)
-# 2736299 obs.
+# 2896048 obs., 52 vars.
 
-max(GoC_Landings_for_CPUE$CPUE_kg.day) #1,400,000
+# Let's also filter out any records that did not have a receipt start and end date, and records where live weight was < or = 0 (n= 159749 records).
+GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE %>%
+  filter(!is.na(days_fishing) & days_fishing > 0 & live_weight > 0)
+# 2736299 obs., 52 vars.
+
+max(GoC_Landings_for_CPUE$CPUE_kg.day) # 1400000 (Oysters in Baja, no landing site), followed by tuna in Sinaloa
 min(GoC_Landings_for_CPUE$CPUE_kg.day) #0.00125
 
+subset<- GoC_Landings_for_CPUE %>% filter(CPUE_kg.day >= 288000)
+unique(subset$estimated_genus_name)
+
 ##### NOTE TO SELF:
-# - There is some funky stuff going on with date end and start. Come back to this.
+# - There is some funky stuff going on with SOME of the end and start dates. Come back to this in the new year.
 # - I am not sure what to do about the days with no record of live weight. Exclude these for now.
 ```
+
+```{r Exploratory: Plot CPUE per trip}
+# PLOT CPUE PER TRIP:
+
+CPUE_PerTrip_Distribution<- GoC_Landings_for_CPUE %>% 
+  filter(year >= 2003, year <= 2013) %>%
+ 
+  ggplot(aes(x = seq_along(CPUE_kg.day), y = CPUE_kg.day)) +
+  geom_point(color = "steelblue", alpha = 0.6, size = 2) +
+  geom_hline(yintercept = mean(GoC_Landings_for_CPUE$CPUE_kg.day, na.rm = TRUE),
+             color = "red", linetype = "dashed", linewidth = 1) +
+  labs(
+    x = "# of observations",
+    y = "CPUE (kg/day)",
+    title = "CPUE Distribution"
+  ) +
+  
+  theme_minimal(base_size = 14)
+
+CPUE_PerTrip_Distribution
+
+  # # Save as PNG
+  ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/Distribution_of_CPUEperTrip_2003.2013_Dec112025.png"),
+    plot = CPUE_PerTrip_Distribution,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+```
+
+
 
 ```{r Let's explore the landings for which IHH_major_group equals NA}
 # TEST<- GoC_Landings_for_CPUE %>% filter(is.na(IHH_functional_major_groups_sm))
@@ -332,35 +596,59 @@ min(GoC_Landings_for_CPUE$CPUE_kg.day) #0.00125
 ```
 NOTE TO SELF: Interesting. Most things could probably be grouped to the IHH group level with a little bit of extra leg work... COME BACK TO THIS IN THE NEW YEAR.
 
-```{r Estimate CPUE for each taxonomic group per region per year versus "historic" baseline}
+```{r Re-assigning CPUE major groups based on new key}
+Genus_MajorGroup_Key<- read.csv("~/ohi_goc_prep/general/CONAPESCA_Keys/Genus_to_MajorGroup_Key_Dec112025.csv")
+# 326 obs., 4 vars.
+
+GoC_Landings_for_CPUE <- GoC_Landings_for_CPUE %>%
+  left_join(Genus_MajorGroup_Key,
+            by = c("recorded_taxa_group", "estimated_genus_name"))
+# 2736299 obs., 54 vars. as expected!
+```
+
+```{r Estimate CPUE for each Major Functional Group per region per year versus "historic" baseline}
+# Turn off scientific notation:
+options(scipen = 999)
+
 # STEP 1: ESTABLISH CPUE BASELINE VALUES, 2003-2013 -----
-# where baseline equals CPUE average from 2003-2013
+# Where "baseline" equals the average Group-level CPUE from 2003-2013
 CPUE_baseline <- GoC_Landings_for_CPUE %>%
   filter(year >= 2003, year <= 2013) %>%
   filter(!is.na(OHI_Region_No)) %>%
-  group_by(OHI_Region_No, IHH_functional_major_groups_sm) %>%
+  group_by(OHI_Region_No, Major_Functional_Group) %>%
   summarise(
-    CPUE_baseline = mean(CPUE_kg.day, na.rm = TRUE),
+    OLD_CPUE_2003.2013 = mean(CPUE_kg.day, na.rm = TRUE),
+    NEW_CPUE_2003.2013 = sum(weight_kg_corrected) / sum(days_fishing),
     .groups = "drop"
   )
+
+# CPUE_baseline <- CPUE_baseline %>%
+#   mutate(
+#     Percent_Diff = (NEW_CPUE_2003.2013 - OLD_CPUE_2003.2013) / OLD_CPUE_2003.2013
+#   )
+#
+# # NOTE TO SELF: Save this table to show to Mel, can delete later -
+# write.csv(CPUE_baseline, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_MethodsIllustration_PURG_Dec112025.csv", row.names = FALSE)
+
 
 # STEP 2: CALCULATE CPUE VALUES FOR RECENT YEARS, 2014-2024 -----
 CPUE_recent <- GoC_Landings_for_CPUE %>%
   filter(year >= 2014, year <= 2024) %>%
   filter(!is.na(OHI_Region_No)) %>%
-  group_by(year, OHI_Region_No, IHH_functional_major_groups_sm) %>%
+  group_by(year, OHI_Region_No, Major_Functional_Group) %>%
   summarise(
-    Total_Biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),
-    Total_Value_mxn = sum(value, na.rm = TRUE),
-    Total_Days = sum(days_fishing, na.rm = TRUE),
-    Avg_CPUE = mean(CPUE_kg.day, na.rm = TRUE),
+    Total_Biomass_kg = sum(weight_kg_corrected),
+    Total_Days = sum(days_fishing),
+    OLD_mean_CPUE.recent = mean(CPUE_kg.day, na.rm = TRUE),
+    NEW_mean_CPUE.recent = ifelse(Total_Days > 0, Total_Biomass_kg / Total_Days, NA_real_),
+    Total_Value_mxn = sum(value, na.rm = TRUE),  # keep na.rm just in case value has NAs
     n_records = n(),
     .groups = "drop"
   )
 
-# Quick aside: how much of percent catch do the NAs account for?
-subset<- CPUE_recent %>% filter(is.na(IHH_functional_major_groups_sm))
-# Again, alot of these NAs can be accounted for with further species key work.
+# # NOTE TO SELF: Save this table to show to Mel, can delete later -
+# write.csv(CPUE_recent, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_MethodsIllustration2_PURG_Dec112025.csv", row.names = FALSE)
+
 
 # STEP 3: COMPUTE PERCENT BIOMASS FOR RECENT YEARS -----
 CPUE_recent <- CPUE_recent %>%
@@ -371,12 +659,19 @@ CPUE_recent <- CPUE_recent %>%
   ) %>%
   ungroup()
 
+
+# Quick aside: how much of percent catch do the NAs account for?
+subset<- CPUE_recent %>% filter(is.na(Major_Functional_Group))
+# In only a handful of cases do NAs account for the majority of annual catch - primarily in Region 5.
+# And again, alot of these NAs can be accounted for with further species key work.
+
+
 # STEP 4: MERGE BASELINE TO PRESENT DATA -----
 CPUE_Table <- CPUE_recent %>%
   left_join(CPUE_baseline,
-            by = c("OHI_Region_No", "IHH_functional_major_groups_sm")) %>%
+            by = c("OHI_Region_No", "Major_Functional_Group")) %>%
   mutate(
-    CPUE_ratio = Avg_CPUE / CPUE_baseline  # Score = CPUEpresent / CPUE_baseline
+    RatioCPUE_Recent.Baseline = NEW_mean_CPUE.recent / NEW_CPUE_2003.2013  # Score = CPUEpresent / CPUE_2003.2013
   )
 
 # STEP 5: DESIRED TABLE -----
@@ -384,36 +679,36 @@ CPUE_Table <- CPUE_Table %>%
   transmute(
     OHI_Region = OHI_Region_No,
     Year = year,
-    IHH_Taxonomic_Group = IHH_functional_major_groups_sm,
-    CPUEpresent_vs_CPUEbaseline = round(CPUE_ratio, 3),
+    Major_Functional_Group = Major_Functional_Group,
+    RatioCPUE_Recent.Baseline = round(RatioCPUE_Recent.Baseline, 3),
     Total_Landings_kg = round(Total_Biomass_kg, 1),
     Taxa_per_Total_Catch = round(pct_of_total_biomass, 2)
   ) %>%
-  arrange(OHI_Region, Year, IHH_Taxonomic_Group)
+  arrange(OHI_Region, Year, Major_Functional_Group)
 
 # STEP 5B: CAP CPUE AT A MAX OF 1 per GROUP
 CPUE_Table <- CPUE_Table %>%
   mutate(
-    CPUEpres_vs_CPUEbase_CORRECTED = if_else(
-      CPUEpresent_vs_CPUEbaseline > 1,
+    RatioCPUE_Recent.Baseline_CAPPED = if_else(
+      RatioCPUE_Recent.Baseline > 1,
       1,
-      CPUEpresent_vs_CPUEbaseline
+      RatioCPUE_Recent.Baseline
     )
   )
 
 # STEP 6: OHI CPUE SCORES PER REGION PER YEAR -----
 OHI_CPUE_Scores <- CPUE_Table %>%
-  mutate(TaxaProp = Taxa_per_Total_Catch/100) %>%     # IF your % values are 0–100; if 0–1 then skip this line
+  mutate(TaxaProp = Taxa_per_Total_Catch/100) %>%     # IF % values are 0–100; if 0–1 then skip this line
   group_by(Year, OHI_Region) %>%
   summarise(
-    weighted_CPUE_acrossAllGroups = sum(CPUEpres_vs_CPUEbase_CORRECTED * TaxaProp, na.rm = TRUE)
+    weighted_CPUE_acrossAllGroups = sum(RatioCPUE_Recent.Baseline_CAPPED * TaxaProp, na.rm = TRUE)
   ) %>%
   ungroup()
 ```
 
 # SAVE: OHI CPUE SCORES PER REGION PER YEAR
 ```{r Save this CPUE data table}
-# write.csv(OHI_CPUE_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_FIRSTDRAFT_Dec092025.csv")
+# write.csv(OHI_CPUE_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_SECONDDRAFT_Dec12025.csv")
 ```
 
 ```{r Plot CPUE Scores over time}
@@ -463,7 +758,7 @@ OHI_CPUEscores_overTime <- OHI_CPUE_Scores %>%
   
   labs(
     title = "FIS - Regional CPUE Scores (2014–2024) relative to Baseline (2003–2013)",
-    y = "CPUE Scores (Ratio of CPUE_present to CPUE_baseline capped at 1)",
+    y = "CPUE Scores (Ratio of CPUE_present to CPUE_2003.2013 capped at 1)",
     x = "Year"
   ) +
   ylim(0, 1.25) +
@@ -644,10 +939,14 @@ table(subset$recorded_taxa_name)
 table(subset$recorded_taxa_group)
 ```
 
+# SCORE B
+# PICK 1: RAM Stock Assessment - UNDER CONSTRUCTION ------------------------------
+```{r}
+RAM_data<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/formal_assessments.csv")
+```
 
-# SCORE B, PICK 1: RAM Stock Assessment - UNDER CONSTRUCTION ------------------------------
 
-# SCORE B, PICK 2: CMSY Stock Assesments - UNDER CONSTRUCTION ------------------------------
+# PICK 2: CMSY Stock Assesments - UNDER CONSTRUCTION ------------------------------
 Must run CMSY on personal machine. Can generate the main files here though. 
 
 ```{r Review the CMSY protocol developed by Ferrer et al. (2021)}
@@ -1342,7 +1641,7 @@ write.csv(OHI_CMSY_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scor
 ```
 
 ```{r Plot WEIGHTED BBMSY Scores over time}
-#### PLOT CPUE OVER TIME ####
+#### PLOT B/Bmsy OVER TIME ####
 
 #### State Colors ####
 state_colors <- c(
@@ -1418,13 +1717,11 @@ OHI_BBMSYscores_overTime
 
 
 
-# SCORE B, PICK 3: Catch vs Carta Nacional Pesquera Baseline - UNDER CONSTRUCTION ------------------------------
+# PICK 3: Catch vs Carta Nacional Pesquera Baseline - UNDER CONSTRUCTION ------------------------------
 ## Load in recommendations for the Carta Nacional Pesquera
 ```{r Load in CNP data}
 CNP_data<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/CNP_2023_recommendations_clean.csv")
-~/ohi_goc_prep/FP/
 ```
-
 
 ```{r Catch compare to CNP}
 options(scipen = 999) # Force same numeric format; don't want scientific notation
@@ -1502,14 +1799,14 @@ CPUE_Landings_summarized <- CPUE_Landings_summarized %>%
 
 ```
 
-#### Merge the indicator dataframes
+
+#### OHI SCORES: Merge the indicator dataframes
 
 ```{r Load the indicator dataframes as necessary}
 # Read in datafiles as necessary:
-OHI_CPUE_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_FIRSTDRAFT_Dec092025.csv")
+OHI_CPUE_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_SECONDDRAFT_Dec12025.csv")
 
-OHI_CMSY_Scores<- read.csv("") # PENDING
-
+OHI_CMSY_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/OHI_WeightedBBMSYScores_FIRSTDRAFT_Dec102025.csv") # 
 
 ```
 
@@ -1523,6 +1820,6 @@ OHI_Scores_df <- OHI_CPUE_Scores %>%
   select(-total_catch_kg, -weighted_BBmsy_acrossAllStocks)
 
 # SAVE THIS DATAFRAME FOR NOW AS AN EXAMPLE - Dec 10 2025:
-write.csv(OHI_Scores_df, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_FISscores_UNDERCONSTRUCTION_Dec102025.csv")
+# write.csv(OHI_Scores_df, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_FIS_Scores/OHI_FISscores_UNDERCONSTRUCTION_Dec112025.csv")
 ```
 
