@@ -550,6 +550,36 @@ unique(subset$estimated_genus_name)
 # - I am not sure what to do about the days with no record of live weight. Exclude these for now.
 ```
 
+```{r Exploratory: Plot CPUE per trip}
+# PLOT CPUE PER TRIP:
+
+CPUE_PerTrip_Distribution<- GoC_Landings_for_CPUE %>% 
+  filter(year >= 2003, year <= 2013) %>%
+ 
+  ggplot(aes(x = seq_along(CPUE_kg.day), y = CPUE_kg.day)) +
+  geom_point(color = "steelblue", alpha = 0.6, size = 2) +
+  geom_hline(yintercept = mean(GoC_Landings_for_CPUE$CPUE_kg.day, na.rm = TRUE),
+             color = "red", linetype = "dashed", linewidth = 1) +
+  labs(
+    x = "# of observations",
+    y = "CPUE (kg/day)",
+    title = "CPUE Distribution"
+  ) +
+  
+  theme_minimal(base_size = 14)
+
+CPUE_PerTrip_Distribution
+
+  # # Save as PNG
+  ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/Distribution_of_CPUEperTrip_2003.2013_Dec112025.png"),
+    plot = CPUE_PerTrip_Distribution,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+```
+
 
 
 ```{r Let's explore the landings for which IHH_major_group equals NA}
@@ -577,6 +607,9 @@ GoC_Landings_for_CPUE <- GoC_Landings_for_CPUE %>%
 ```
 
 ```{r Estimate CPUE for each Major Functional Group per region per year versus "historic" baseline}
+# Turn off scientific notation:
+options(scipen = 999)
+
 # STEP 1: ESTABLISH CPUE BASELINE VALUES, 2003-2013 -----
 # Where "baseline" equals the average Group-level CPUE from 2003-2013
 CPUE_baseline <- GoC_Landings_for_CPUE %>%
@@ -602,19 +635,20 @@ CPUE_baseline <- GoC_Landings_for_CPUE %>%
 CPUE_recent <- GoC_Landings_for_CPUE %>%
   filter(year >= 2014, year <= 2024) %>%
   filter(!is.na(OHI_Region_No)) %>%
-  group_by(year, OHI_Region_No, IHH_functional_major_groups_sm) %>%
+  group_by(year, OHI_Region_No, Major_Functional_Group) %>%
   summarise(
-    Total_Biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),
-    Total_Value_mxn = sum(value, na.rm = TRUE),
-    Total_Days = sum(days_fishing, na.rm = TRUE),
-    Avg_CPUE = mean(CPUE_kg.day, na.rm = TRUE),
+    Total_Biomass_kg = sum(weight_kg_corrected),
+    Total_Days = sum(days_fishing),
+    OLD_mean_CPUE.recent = mean(CPUE_kg.day, na.rm = TRUE),
+    NEW_mean_CPUE.recent = ifelse(Total_Days > 0, Total_Biomass_kg / Total_Days, NA_real_),
+    Total_Value_mxn = sum(value, na.rm = TRUE),  # keep na.rm just in case value has NAs
     n_records = n(),
     .groups = "drop"
   )
 
-# Quick aside: how much of percent catch do the NAs account for?
-subset<- CPUE_recent %>% filter(is.na(IHH_functional_major_groups_sm))
-# Again, alot of these NAs can be accounted for with further species key work.
+# # NOTE TO SELF: Save this table to show to Mel, can delete later -
+# write.csv(CPUE_recent, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_MethodsIllustration2_PURG_Dec112025.csv", row.names = FALSE)
+
 
 # STEP 3: COMPUTE PERCENT BIOMASS FOR RECENT YEARS -----
 CPUE_recent <- CPUE_recent %>%
@@ -625,12 +659,19 @@ CPUE_recent <- CPUE_recent %>%
   ) %>%
   ungroup()
 
+
+# Quick aside: how much of percent catch do the NAs account for?
+subset<- CPUE_recent %>% filter(is.na(Major_Functional_Group))
+# In only a handful of cases do NAs account for the majority of annual catch - primarily in Region 5.
+# And again, alot of these NAs can be accounted for with further species key work.
+
+
 # STEP 4: MERGE BASELINE TO PRESENT DATA -----
 CPUE_Table <- CPUE_recent %>%
   left_join(CPUE_baseline,
-            by = c("OHI_Region_No", "IHH_functional_major_groups_sm")) %>%
+            by = c("OHI_Region_No", "Major_Functional_Group")) %>%
   mutate(
-    CPUE_ratio = Avg_CPUE / CPUE_2003.2013  # Score = CPUEpresent / CPUE_2003.2013
+    RatioCPUE_Recent.Baseline = NEW_mean_CPUE.recent / NEW_CPUE_2003.2013  # Score = CPUEpresent / CPUE_2003.2013
   )
 
 # STEP 5: DESIRED TABLE -----
@@ -638,36 +679,36 @@ CPUE_Table <- CPUE_Table %>%
   transmute(
     OHI_Region = OHI_Region_No,
     Year = year,
-    IHH_Taxonomic_Group = IHH_functional_major_groups_sm,
-    CPUEpresent_vs_CPUEbaseline = round(CPUE_ratio, 3),
+    Major_Functional_Group = Major_Functional_Group,
+    RatioCPUE_Recent.Baseline = round(RatioCPUE_Recent.Baseline, 3),
     Total_Landings_kg = round(Total_Biomass_kg, 1),
     Taxa_per_Total_Catch = round(pct_of_total_biomass, 2)
   ) %>%
-  arrange(OHI_Region, Year, IHH_Taxonomic_Group)
+  arrange(OHI_Region, Year, Major_Functional_Group)
 
 # STEP 5B: CAP CPUE AT A MAX OF 1 per GROUP
 CPUE_Table <- CPUE_Table %>%
   mutate(
-    CPUEpres_vs_CPUEbase_CORRECTED = if_else(
-      CPUEpresent_vs_CPUEbaseline > 1,
+    RatioCPUE_Recent.Baseline_CAPPED = if_else(
+      RatioCPUE_Recent.Baseline > 1,
       1,
-      CPUEpresent_vs_CPUEbaseline
+      RatioCPUE_Recent.Baseline
     )
   )
 
 # STEP 6: OHI CPUE SCORES PER REGION PER YEAR -----
 OHI_CPUE_Scores <- CPUE_Table %>%
-  mutate(TaxaProp = Taxa_per_Total_Catch/100) %>%     # IF your % values are 0–100; if 0–1 then skip this line
+  mutate(TaxaProp = Taxa_per_Total_Catch/100) %>%     # IF % values are 0–100; if 0–1 then skip this line
   group_by(Year, OHI_Region) %>%
   summarise(
-    weighted_CPUE_acrossAllGroups = sum(CPUEpres_vs_CPUEbase_CORRECTED * TaxaProp, na.rm = TRUE)
+    weighted_CPUE_acrossAllGroups = sum(RatioCPUE_Recent.Baseline_CAPPED * TaxaProp, na.rm = TRUE)
   ) %>%
   ungroup()
 ```
 
 # SAVE: OHI CPUE SCORES PER REGION PER YEAR
 ```{r Save this CPUE data table}
-# write.csv(OHI_CPUE_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_FIRSTDRAFT_Dec092025.csv")
+# write.csv(OHI_CPUE_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_SECONDDRAFT_Dec12025.csv")
 ```
 
 ```{r Plot CPUE Scores over time}
@@ -1760,9 +1801,9 @@ CPUE_Landings_summarized <- CPUE_Landings_summarized %>%
 
 ```{r Load the indicator dataframes as necessary}
 # Read in datafiles as necessary:
-OHI_CPUE_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_FIRSTDRAFT_Dec092025.csv")
+OHI_CPUE_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_SECONDDRAFT_Dec112025.csv")
 
-OHI_CMSY_Scores<- read.csv("") # PENDING
+OHI_CMSY_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/OHI_WeightedBBMSYScores_FIRSTDRAFT_Dec102025.csv") # 
 
 ```
 
