@@ -24,6 +24,7 @@ library(janitor)
 library(stringi)
 library(stringr)
 library(data.table)
+library(zoo) # used for gapfilling RAM data.
 # Visualization
 library(ggplot2)
 library(ggforce)
@@ -940,14 +941,124 @@ table(subset$recorded_taxa_name)
 table(subset$recorded_taxa_group)
 ```
 
-# SCORE B
-# PICK 1: RAM Stock Assessment - UNDER CONSTRUCTION ------------------------------
-```{r}
-RAM_data<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/formal_assessments.csv")
+# SCORE B ------------------------------
+# >> PICK 1: RAM Stock Assessment <<
+```{r Load in RAM and formal assessment data}
+RAM_data_original<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/formal_assessments.csv")
+table(RAM_data_original$year)
+# 195 obs., 17 vars.
+```
+```{r Separate Genus from scientific_name}
+RAM_data_cleaned<- RAM_data_original
+
+RAM_data_cleaned <- RAM_data_cleaned %>%
+  separate(scientificname, into = c("Genus", "Species"), sep = " ", remove = FALSE)
+# Okay, looks good!
+# 195 obs., 19 vars.
+```
+
+```{r Basic filtering & correcting}
+# Keep Stock (genus-species in this case) only if it has post-2019 data
+RAM_data_cleaned <- RAM_data_cleaned %>%
+  group_by(Genus, Species) %>%
+  filter(any(year >= 2019)) %>%
+  select(year, assessyear, areaname, 
+         commonname, scientificname, Genus, Species, 
+         ram_bmsy, source) %>%
+  ungroup()
+# 181 obs., 9 vars.
+
+# Correct the non_numeric values:
+RAM_data_cleaned$RAM_BBmsy_numeric <- as.numeric(gsub("[^0-9.]", "", RAM_data_cleaned$ram_bmsy))
+```
+
+```{r Gapfill RAM data using the zoo package}
+RAM_data_gapfilled <- RAM_data_cleaned %>%
+  group_by(Genus, Species, areaname) %>%
+  complete(year = 2019:2024) %>%
+  ungroup()
+# 256 obs., 10 vars.
+
+# Gapfilling - INTERPOLATION between years with data (using the zoo package):
+RAM_data_gapfilled <- RAM_data_gapfilled %>%
+  # --- identify each stock correctly ---
+  group_by(Genus, Species, areaname) %>%
+  
+  # --- add missing years WITHOUT removing any original rows ---
+  complete(year = full_seq(c(year, 2019:2024), 1)) %>%
+  # ^ This safely adds 2019–2024 and any intermediate years, 
+  #   never removes rows
+  
+  # --- fill descriptors (stock metadata) ---
+  fill(commonname, scientificname, source, assessyear, .direction = "downup") %>%
+  
+  arrange(year, .by_group = TRUE) %>%
+  
+  # --- interpolate only RAM_BBmsy_numeric ---
+  mutate(
+    RAM_BBmsy_gapfilled = zoo::na.approx(RAM_BBmsy_numeric, x = year, na.rm = FALSE)
+  ) %>%
+  
+  ungroup()
+# 347 obs., 11 vars.
+
+# Gapfilling - EXTRAPOLATION beyond years with data (using the zoo package):
+RAM_data_gapfilled <- RAM_data_gapfilled %>%
+  group_by(Genus, Species, areaname) %>%
+  arrange(year, .by_group = TRUE) %>%
+  mutate(
+    RAM_BBmsy_gapfilled = zoo::na.approx(
+      RAM_BBmsy_numeric,
+      x = year,
+      na.rm = FALSE,
+      rule = 2   # allow linear extrapolation outside observed years
+    )
+  ) %>%
+  ungroup()
+# 347 obs., 11 vars.
+
+# Sanity check: do gapfilled values always match numeric values when they exist?
+# Example vectors
+numeric_BBmsy_values<- RAM_data_gapfilled$RAM_BBmsy_numeric
+gapfilled_BBmsy_values <- RAM_data_gapfilled$RAM_BBmsy_gapfilled
+
+# Logical check: TRUE wherever BBmsy_numeric is NA or matches RAM_BBmsy_gapfilled
+check <- ifelse(!is.na(numeric_BBmsy_values), gapfilled_BBmsy_values == numeric_BBmsy_values, TRUE)
+
+# Are all original values preserved?
+all(check)
+# Yes!
+
+# Finally, a "RAM_BBmsy_Pick" column and "Pick_Source" column that tell which BBmsy value to work with and where that datapoint came from, a formal assessment value or a gapfilled value:
+RAM_data_gapfilled <- RAM_data_gapfilled %>%
+  mutate(
+    RAM_BBmsy_Pick = ifelse(!is.na(RAM_BBmsy_numeric), RAM_BBmsy_numeric, RAM_BBmsy_gapfilled),
+    Pick_Source    = ifelse(!is.na(RAM_BBmsy_numeric), "Direct from formal assessment (RAM or other)", "gapfilled from formal assessment")
+  )
+# 347 obs., 13 vars.
+```
+
+```{r BBmsy cap at 1}
+# Caps values for RAM_BBmsy_Pick at 1 & filters out 2025 data:
+RAM_data_gapfilled<- RAM_data_gapfilled %>%
+  filter(year <= 2024) %>%
+  mutate(Formal_BBmsy_capped = pmin(RAM_BBmsy_Pick, 1)) %>%
+  select(Year= year, Area= areaname, CommonName= commonname,
+         ScientificName= scientificname, Genus, Species,
+         FormalAssessment_Source = source, FormalAssessment_Years= assessyear,
+         Formal_BBmsy= ram_bmsy, Formal_BBmsy_numeric= RAM_BBmsy_numeric,
+         Formal_BBmsy_gapfilled = RAM_BBmsy_gapfilled,
+         Formal_BBmsy_Pick = RAM_BBmsy_Pick, Formal_BBmsy_capped,
+         Formal_BBmsy_Pick_Source = Pick_Source)
+# 346 obs., 14 vars.
+```
+
+```{r Save this dataframe}
+write.csv(RAM_data_gapfilled,"~/ohi_goc_prep/FP/FIS/v2025/OHI_StockStatus_Scores/OHI_RAM_Scores/Gapfilled_RAMdata_Dec122025.csv", row.names = FALSE)
 ```
 
 
-# PICK 2: CMSY Stock Assesments - UNDER CONSTRUCTION ------------------------------
+# >> PICK 2: CMSY Stock Assesments <<
 Must run CMSY on personal machine. Can generate the main files here though. 
 
 ```{r Review the CMSY protocol developed by Ferrer et al. (2021)}
@@ -1539,7 +1650,7 @@ Landings_CMSY_summary
 # If I can sort out priors for these four extra txa, CMSY could account for ~50% of all GoC landings in the last five years.
 ```
 
-# >> RAN CMSY ON PERSONAL MACHINE. << Here are the outputs from that analysis:
+# RAN CMSY ON PERSONAL MACHINE. Here are the outputs from that analysis:
 
 ```{r Load in CMSY asessment results}
 # Actual B/Bmsy output from CMSY:
@@ -1626,7 +1737,8 @@ CMSY_Scores<- CMSYstocks_RegionalLandings_Summary %>% select(yr, OHI_Region_No, 
 ```
 
 
-# PICK 3: Catch vs Carta Nacional Pesquera Baseline - UNDER CONSTRUCTION ------------------------------
+# >> PICK 3: Catch vs Carta Nacional Pesquera Baseline <<
+
 ## Load in recommendations for the Carta Nacional Pesquera
 ```{r Load in Carta data}
 Carta_data_original<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/CNP_2023_recommendations_clean.csv")
@@ -1674,7 +1786,7 @@ Carta_Key <- Carta_Key %>%
 Carta_Key <- Carta_data %>%
   group_by(OHI_region, Genus) %>%
   summarise(
-    ## ---- STATUS ----
+    ## ---- CARTA STATUS ----
     status = {
       s <- status[!is.na(status)]
       if (length(s) == 0) NA_character_
@@ -1696,7 +1808,7 @@ Carta_Key <- Carta_data %>%
     },
 
 
-    ## ---- CONTROL ----
+    ## ---- CARTA CONTROL ----
     control = {
       c <- control[!is.na(control)]
       if (length(c) == 0) NA_character_ else c[1]
@@ -1710,7 +1822,7 @@ Carta_Key <- Carta_data %>%
     },
 
 
-    ## ---- NOTES ----
+    ## ---- CARTA NOTES ----
     notes = {
       n <- notes[!is.na(notes) & notes != ""]
       if (length(n) == 0) NA_character_ else n[1]
@@ -1900,7 +2012,7 @@ unique(Carta_Scores$estimated_genus_name)
 ```
 
 
-# OHI SCORES: Merge the indicator dataframes
+# OHI SCORES: Merge the indicator dataframes  ------------------------------
 
 ```{r Load the indicator dataframes as necessary}
 # Read in datafiles as necessary:
@@ -1978,28 +2090,29 @@ StockStatus_Scores <- StockStatus_Scores %>%
 ```{r Weighted B/Bmsy}
 StockStatus_Scores_weighted <- StockStatus_Scores %>%
   group_by(Year, OHI_Region) %>%
+#  filter(Stock_Status_score is not NA)
   summarize(
     
-    # Weighted average for Stock_Status_score using total_catch_kg as weights
-    weighted_StockStatus = sum(StockStatus_capped * Annual_Catch_kg, na.rm = TRUE) / sum(Annual_Catch_kg, na.rm = TRUE),
-    
-    # Total catch per region-year (optional)
-    Annual_Catch_kg = sum(Annual_Catch_kg, na.rm = TRUE),
-    
-    # Number of unique stocks (genera) that went into the calculation:
-    n_stocks = n_distinct(stock_genus),
-    
-    .groups = "drop"
-  ) %>%
-  
-  # Cap the weighted_StockStatus at 1
-  mutate(
-    weighted_StockStatus_capped = pmin(weighted_StockStatus, 1)
-  ) %>%
+  #   # Weighted average for Stock_Status_score using total_catch_kg as weights
+  #   weighted_StockStatus = sum(StockStatus_capped * Annual_Catch_kg, na.rm = TRUE) / sum(Annual_Catch_kg, na.rm = TRUE),
+  #   
+  #   # Total catch per region-year (optional)
+  #   Annual_Catch_kg = sum(Annual_Catch_kg, na.rm = TRUE),
+  #   
+  #   # Number of unique stocks (genera) that went into the calculation:
+  #   n_stocks = n_distinct(stock_genus),
+  #   
+  #   .groups = "drop"
+  # ) %>%
+  # 
+  # # Cap the weighted_StockStatus at 1
+  # mutate(
+  #   weighted_StockStatus_capped = pmin(weighted_StockStatus, 1)
+  # ) %>%
+    # Slot in Mel's code here for weighted catches (over "historic" period) ...
   
   select(Year, OHI_Region, Annual_Catch_kg, n_stocks, weighted_StockStatus, weighted_StockStatus_capped)
 ```
-
 ```{r Save this dataframe}
 write.csv(StockStatus_Scores_weighted, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_FIS_Scores/FIS_StockStatus_WeightedScores_UNDERCONSTRUCTION_Dec112025.csv", row.names = FALSE)
 ```
