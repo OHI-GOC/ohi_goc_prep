@@ -24,6 +24,7 @@ library(janitor)
 library(stringi)
 library(stringr)
 library(data.table)
+library(zoo) # used for gapfilling RAM data.
 # Visualization
 library(ggplot2)
 library(ggforce)
@@ -212,7 +213,7 @@ table(Landings_GoC_NoFresh.NoMariculture$OHI_Region_No)
 NOTE TO SELF: There could still be some freshwater species hiding in here. For example, the "MOJARRA" general category is mixed freshwater and marine demersal fish.
 
 
-```{r FIXING MAJOR FUNCTIONAL GROUPS!! PENDING}
+```{r FIXING MAJOR FUNCTIONAL GROUPS}
 # NOTE TO SELF: Return to this when needed (Dec 09 2025). Returned the next day, Dec 10 2025.
 Genus_MajorGroup_Key_ALL <- Landings_GoC_NoFresh.NoMariculture %>%
   select(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm) %>%
@@ -477,7 +478,7 @@ Landings_GoC_TopMariculture_Summary<- Landings_GoC_Mariculture %>%
 ```
 
 ```{r Save Landings_GoC_TopMariculture_Summary to find MAR sustainability scores}
-# write.csv(Landings_GoC_TopMariculture_Summary, "/home/ferrer/ohi_goc_prep/FP/MAR/v2025/GOC_Mariculture_TopCatches_2014.2024_Dec082025.csv")
+# write.csv(Landings_GoC_TopMariculture_Summary, "/home/ferrer/ohi_goc_prep/FP/MAR/v2025/GOC_Mariculture_TopCatches_2014.2024_Dec082025.csv", row.names = FALSE)
 ```
 
 # SUMMARY STATS ABOUT OUR DATA: return to this later.
@@ -512,13 +513,15 @@ Landings_GoC %>%
 ```
 
 # SCORE A: CPUE Estimates (per major marine group) ------------------------------
-```{r CPUE calculations (rowwise)}
+```{r Load data as necessary}
 # Load file, only if needed:
 GoC_Landings_for_CPUE_original<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
 GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE_original
 # GoC_Landings_for_CPUE<- Landings_GoC_NoFresh.NoMariculture
 # 3163120 obs., 50 vars.
+```
 
+```{r CPUE calculations}
 # Calculate the difference in days between period start and end:
 GoC_Landings_for_CPUE$days_fishing <- as.numeric(GoC_Landings_for_CPUE$period_end_fixed - GoC_Landings_for_CPUE$period_start_fixed) + 1
 # 3163120 obs., 51 vars.
@@ -534,10 +537,10 @@ GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE %>%
   filter(year >= 2003)
 # 2896048 obs., 52 vars.
 
-# Let's also filter out any records that did not have a receipt start and end date, and records where live weight was < or = 0 (n= 159749 records).
+# Let's also filter out any records that did not have a receipt start and end date, and records where live weight was < or = 0 (n= 126955 records).
 GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE %>%
-  filter(!is.na(days_fishing) & days_fishing > 0 & live_weight > 0)
-# 2736299 obs., 52 vars.
+  filter(!is.na(days_fishing) & days_fishing > 0 & weight_kg_corrected > 0)
+# 2769093 obs., 52 vars.
 
 max(GoC_Landings_for_CPUE$CPUE_kg.day) # 1400000 (Oysters in Baja, no landing site), followed by tuna in Sinaloa
 min(GoC_Landings_for_CPUE$CPUE_kg.day) #0.00125
@@ -570,7 +573,7 @@ CPUE_PerTrip_Distribution<- GoC_Landings_for_CPUE %>%
 
 CPUE_PerTrip_Distribution
 
-  # # Save as PNG
+  # Save as PNG
   ggsave(
     filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/Distribution_of_CPUEperTrip_2003.2013_Dec112025.png"),
     plot = CPUE_PerTrip_Distribution,
@@ -579,8 +582,6 @@ CPUE_PerTrip_Distribution
     dpi = 300
   )
 ```
-
-
 
 ```{r Let's explore the landings for which IHH_major_group equals NA}
 # TEST<- GoC_Landings_for_CPUE %>% filter(is.na(IHH_functional_major_groups_sm))
@@ -603,7 +604,7 @@ Genus_MajorGroup_Key<- read.csv("~/ohi_goc_prep/general/CONAPESCA_Keys/Genus_to_
 GoC_Landings_for_CPUE <- GoC_Landings_for_CPUE %>%
   left_join(Genus_MajorGroup_Key,
             by = c("recorded_taxa_group", "estimated_genus_name"))
-# 2736299 obs., 54 vars. as expected!
+# 2769093 obs., 54 vars. as expected!
 ```
 
 ```{r Estimate CPUE for each Major Functional Group per region per year versus "historic" baseline}
@@ -626,7 +627,7 @@ CPUE_baseline <- GoC_Landings_for_CPUE %>%
 #   mutate(
 #     Percent_Diff = (NEW_CPUE_2003.2013 - OLD_CPUE_2003.2013) / OLD_CPUE_2003.2013
 #   )
-#
+# 
 # # NOTE TO SELF: Save this table to show to Mel, can delete later -
 # write.csv(CPUE_baseline, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_MethodsIllustration_PURG_Dec112025.csv", row.names = FALSE)
 
@@ -662,8 +663,8 @@ CPUE_recent <- CPUE_recent %>%
 
 # Quick aside: how much of percent catch do the NAs account for?
 subset<- CPUE_recent %>% filter(is.na(Major_Functional_Group))
-# In only a handful of cases do NAs account for the majority of annual catch - primarily in Region 5.
-# And again, alot of these NAs can be accounted for with further species key work.
+# In only a handful of cases do NAs account for the *majority* of annual catch - primarily in Region 5.
+# And again, a lot of these NAs can be accounted for with further species key work.
 
 
 # STEP 4: MERGE BASELINE TO PRESENT DATA -----
@@ -686,7 +687,8 @@ CPUE_Table <- CPUE_Table %>%
   ) %>%
   arrange(OHI_Region, Year, Major_Functional_Group)
 
-# STEP 5B: CAP CPUE AT A MAX OF 1 per GROUP
+
+# STEP 6: CAP CPUE AT A MAX OF 1 per GROUP
 CPUE_Table <- CPUE_Table %>%
   mutate(
     RatioCPUE_Recent.Baseline_CAPPED = if_else(
@@ -696,7 +698,7 @@ CPUE_Table <- CPUE_Table %>%
     )
   )
 
-# STEP 6: OHI CPUE SCORES PER REGION PER YEAR -----
+# STEP 7: OHI CPUE SCORES PER REGION PER YEAR -----
 OHI_CPUE_Scores <- CPUE_Table %>%
   mutate(TaxaProp = Taxa_per_Total_Catch/100) %>%     # IF % values are 0–100; if 0–1 then skip this line
   group_by(Year, OHI_Region) %>%
@@ -708,7 +710,7 @@ OHI_CPUE_Scores <- CPUE_Table %>%
 
 # SAVE: OHI CPUE SCORES PER REGION PER YEAR
 ```{r Save this CPUE data table}
-# write.csv(OHI_CPUE_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_SECONDDRAFT_Dec12025.csv")
+# write.csv(OHI_CPUE_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_SECONDDRAFT_Dec12025.csv", row.names = FALSE)
 ```
 
 ```{r Plot CPUE Scores over time}
@@ -746,7 +748,7 @@ OHI_CPUEscores_overTime <- OHI_CPUE_Scores %>%
   filter(OHI_Region %in% Regions_of_Interest) %>%
   ggplot(aes(
     x = Year,
-    y = Mean_relative.CPUE_AllGroups,
+    y = weighted_CPUE_acrossAllGroups,
     color = OHI_Region
   )) +
   geom_line(linewidth = 1) +
@@ -773,7 +775,7 @@ OHI_CPUEscores_overTime
   
   # # Save as PNG
   # ggsave(
-  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_overTime_Dec092025.png"),
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_overTime_Dec112025.png"),
   #   plot = OHI_CPUEscores_overTime,
   #   width = 12,
   #   height = 12,
@@ -782,12 +784,12 @@ OHI_CPUEscores_overTime
 
 ```
 
-## Take a closer look at CPUE per Region and per Taxa:
+## Take a closer look at CPUE per Region and per Major_Functional_Group:
 ```{r Plot CPUE over all years 2003-2024}
 CPUE_AllYears <- GoC_Landings_for_CPUE %>%
   filter(year >= 2003, year <= 2024) %>%
   filter(!is.na(OHI_Region_No)) %>%
-  group_by(OHI_Region_No, year, IHH_functional_major_groups_sm) %>%
+  group_by(OHI_Region_No, year, Major_Functional_Group) %>%
   summarise(
     Total_Biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),
     Total_Value_mxn = sum(value, na.rm = TRUE),
@@ -808,7 +810,7 @@ Regions_of_Interest <- c(
 )
 
 
-# PLOT 1: CPUE overTime per Region, facet by Taxa
+# PLOT 1: CPUE overTime per Region, facet by Major_Functional_Group
 CPUE_overTime_byRegion_perTaxa<- CPUE_AllYears %>%
   filter(OHI_Region_No %in% Regions_of_Interest) %>%
   ggplot(
@@ -817,7 +819,7 @@ CPUE_overTime_byRegion_perTaxa<- CPUE_AllYears %>%
            group = OHI_Region_No, 
            color = OHI_Region_No)) +
   geom_line(size = 1) +                # lines connecting the points
-  facet_wrap(~ IHH_functional_major_groups_sm, scales = "free_y") +  # facet by region
+  facet_wrap(~ Major_Functional_Group, scales = "free_y") +  # facet by region
   labs(
     title = "Average CPUE Over Time by Functional Group",
     x = "Year",
@@ -844,14 +846,14 @@ CPUE_overTime_byRegion_perTaxa
   # )
 
 
-# PLOT 2: CPUE overTime per Taxa, facet by Region
+# PLOT 2: CPUE overTime per Major_Functional_Group, facet by Region
 CPUE_overTime_byRegion_perTaxa<- CPUE_AllYears %>%
   filter(OHI_Region_No %in% Regions_of_Interest) %>%
   ggplot(
        aes(x = year, 
            y = Avg_CPUE, 
-           group = IHH_functional_major_groups_sm, 
-           color = IHH_functional_major_groups_sm)) +
+           group = Major_Functional_Group, 
+           color = Major_Functional_Group)) +
   geom_line(size = 1) +                # lines connecting the points
   facet_wrap(~ OHI_Region_No, scales = "free_y") +  # facet by region
   labs(
@@ -868,7 +870,7 @@ CPUE_overTime_byRegion_perTaxa<- CPUE_AllYears %>%
   scale_color_manual(values = Taxa_colors) +  # nice palette
   geom_vline(xintercept = 2013, linetype= "solid", color = "grey5")
 
-CPUE_overTime_byTaxa_perRegion
+CPUE_overTime_byRegion_perTaxa
 
   # # Save as PNG
   # ggsave(
@@ -880,19 +882,19 @@ CPUE_overTime_byTaxa_perRegion
   # )
 
 
-# PLOT 3: CPUE overTime per Taxa, facet by Region - normalized 0 to 1
-CPUE_overTime_byTaxa_perTaxa_normalized<- CPUE_AllYears %>%
+# PLOT 3: CPUE overTime per Major_Functional_Group, facet by Region - normalized 0 to 1
+CPUE_overTime_byRegion_perTaxa_normalized<- CPUE_AllYears %>%
   filter(OHI_Region_No %in% Regions_of_Interest) %>%
   # Normalize Avg_CPUE per functional group across all years
-  group_by(IHH_functional_major_groups_sm) %>%
+  group_by(Major_Functional_Group) %>%
   mutate(Avg_CPUE_norm = (Avg_CPUE - min(Avg_CPUE, na.rm = TRUE)) /
                             (max(Avg_CPUE, na.rm = TRUE) - min(Avg_CPUE, na.rm = TRUE))) %>%
   ungroup() %>%
   ggplot(aes(
     x = year, 
     y = Avg_CPUE_norm, 
-    group = IHH_functional_major_groups_sm, 
-    color = IHH_functional_major_groups_sm
+    group = Major_Functional_Group, 
+    color = Major_Functional_Group
   )) +
   geom_line(size = 1) +
   facet_wrap(~ OHI_Region_No, scales = "free_y") +
@@ -910,7 +912,7 @@ CPUE_overTime_byTaxa_perTaxa_normalized<- CPUE_AllYears %>%
   scale_color_manual(values = Taxa_colors) +
   geom_vline(xintercept = 2013, linetype = "solid", color = "grey5")
 
-CPUE_overTime_byTaxa_perRegion_normalized
+CPUE_overTime_byRegion_perTaxa_normalized
 
   # Save as PNG
   # ggsave(
@@ -939,14 +941,124 @@ table(subset$recorded_taxa_name)
 table(subset$recorded_taxa_group)
 ```
 
-# SCORE B
-# PICK 1: RAM Stock Assessment - UNDER CONSTRUCTION ------------------------------
-```{r}
-RAM_data<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/formal_assessments.csv")
+# SCORE B ------------------------------
+# >> PICK 1: RAM Stock Assessment <<
+```{r Load in RAM and formal assessment data}
+RAM_data_original<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/formal_assessments.csv")
+table(RAM_data_original$year)
+# 195 obs., 17 vars.
+```
+```{r Separate Genus from scientific_name}
+RAM_data_cleaned<- RAM_data_original
+
+RAM_data_cleaned <- RAM_data_cleaned %>%
+  separate(scientificname, into = c("Genus", "Species"), sep = " ", remove = FALSE)
+# Okay, looks good!
+# 195 obs., 19 vars.
+```
+
+```{r Basic filtering & correcting}
+# Keep Stock (genus-species in this case) only if it has post-2019 data
+RAM_data_cleaned <- RAM_data_cleaned %>%
+  group_by(Genus, Species) %>%
+  filter(any(year >= 2019)) %>%
+  select(year, assessyear, areaname, 
+         commonname, scientificname, Genus, Species, 
+         ram_bmsy, source) %>%
+  ungroup()
+# 181 obs., 9 vars.
+
+# Correct the non_numeric values:
+RAM_data_cleaned$RAM_BBmsy_numeric <- as.numeric(gsub("[^0-9.]", "", RAM_data_cleaned$ram_bmsy))
+```
+
+```{r Gapfill RAM data using the zoo package}
+RAM_data_gapfilled <- RAM_data_cleaned %>%
+  group_by(Genus, Species, areaname) %>%
+  complete(year = 2019:2024) %>%
+  ungroup()
+# 256 obs., 10 vars.
+
+# Gapfilling - INTERPOLATION between years with data (using the zoo package):
+RAM_data_gapfilled <- RAM_data_gapfilled %>%
+  # --- identify each stock correctly ---
+  group_by(Genus, Species, areaname) %>%
+  
+  # --- add missing years WITHOUT removing any original rows ---
+  complete(year = full_seq(c(year, 2019:2024), 1)) %>%
+  # ^ This safely adds 2019–2024 and any intermediate years, 
+  #   never removes rows
+  
+  # --- fill descriptors (stock metadata) ---
+  fill(commonname, scientificname, source, assessyear, .direction = "downup") %>%
+  
+  arrange(year, .by_group = TRUE) %>%
+  
+  # --- interpolate only RAM_BBmsy_numeric ---
+  mutate(
+    RAM_BBmsy_gapfilled = zoo::na.approx(RAM_BBmsy_numeric, x = year, na.rm = FALSE)
+  ) %>%
+  
+  ungroup()
+# 347 obs., 11 vars.
+
+# Gapfilling - EXTRAPOLATION beyond years with data (using the zoo package):
+RAM_data_gapfilled <- RAM_data_gapfilled %>%
+  group_by(Genus, Species, areaname) %>%
+  arrange(year, .by_group = TRUE) %>%
+  mutate(
+    RAM_BBmsy_gapfilled = zoo::na.approx(
+      RAM_BBmsy_numeric,
+      x = year,
+      na.rm = FALSE,
+      rule = 2   # allow linear extrapolation outside observed years
+    )
+  ) %>%
+  ungroup()
+# 347 obs., 11 vars.
+
+# Sanity check: do gapfilled values always match numeric values when they exist?
+# Example vectors
+numeric_BBmsy_values<- RAM_data_gapfilled$RAM_BBmsy_numeric
+gapfilled_BBmsy_values <- RAM_data_gapfilled$RAM_BBmsy_gapfilled
+
+# Logical check: TRUE wherever BBmsy_numeric is NA or matches RAM_BBmsy_gapfilled
+check <- ifelse(!is.na(numeric_BBmsy_values), gapfilled_BBmsy_values == numeric_BBmsy_values, TRUE)
+
+# Are all original values preserved?
+all(check)
+# Yes!
+
+# Finally, a "RAM_BBmsy_Pick" column and "Pick_Source" column that tell which BBmsy value to work with and where that datapoint came from, a formal assessment value or a gapfilled value:
+RAM_data_gapfilled <- RAM_data_gapfilled %>%
+  mutate(
+    RAM_BBmsy_Pick = ifelse(!is.na(RAM_BBmsy_numeric), RAM_BBmsy_numeric, RAM_BBmsy_gapfilled),
+    Pick_Source    = ifelse(!is.na(RAM_BBmsy_numeric), "Direct from formal assessment (RAM or other)", "gapfilled from formal assessment")
+  )
+# 347 obs., 13 vars.
+```
+
+```{r BBmsy cap at 1}
+# Caps values for RAM_BBmsy_Pick at 1 & filters out 2025 data:
+RAM_data_gapfilled<- RAM_data_gapfilled %>%
+  filter(year <= 2024) %>%
+  mutate(Formal_BBmsy_capped = pmin(RAM_BBmsy_Pick, 1)) %>%
+  select(Year= year, Area= areaname, CommonName= commonname,
+         ScientificName= scientificname, Genus, Species,
+         FormalAssessment_Source = source, FormalAssessment_Years= assessyear,
+         Formal_BBmsy= ram_bmsy, Formal_BBmsy_numeric= RAM_BBmsy_numeric,
+         Formal_BBmsy_gapfilled = RAM_BBmsy_gapfilled,
+         Formal_BBmsy_Pick = RAM_BBmsy_Pick, Formal_BBmsy_capped,
+         Formal_BBmsy_Pick_Source = Pick_Source)
+# 346 obs., 14 vars.
+```
+
+```{r Save this dataframe}
+write.csv(RAM_data_gapfilled,"~/ohi_goc_prep/FP/FIS/v2025/OHI_StockStatus_Scores/OHI_RAM_Scores/Gapfilled_RAMdata_Dec122025.csv", row.names = FALSE)
 ```
 
 
-# PICK 2: CMSY Stock Assesments - UNDER CONSTRUCTION ------------------------------
+# >> PICK 2: CMSY Stock Assesments <<
 Must run CMSY on personal machine. Can generate the main files here though. 
 
 ```{r Review the CMSY protocol developed by Ferrer et al. (2021)}
@@ -1613,35 +1725,439 @@ CMSYstocks_RegionalLandings_Summary <- CMSYstocks_RegionalLandings_Summary %>%
 ```{r Now filter to create the final dataframe}
 colnames(CMSYstocks_RegionalLandings_Summary)
 
-OHI_CMSY_Scores<- CMSYstocks_RegionalLandings_Summary %>% select(yr, OHI_Region_No, stock,
-                                                                 total_catch_kg, B, B.Bmsy, lcl.B.Bmsy, ucl.B.Bmsy,
-                                                                 F.Fmsy, lcl.F.Fmsy, ucl.F.Fmsy)
+CMSY_Scores<- CMSYstocks_RegionalLandings_Summary %>% select(yr, OHI_Region_No, stock,
+                                                             total_catch_kg, B, B.Bmsy, lcl.B.Bmsy,
+                                                             ucl.B.Bmsy,
+                                                             F.Fmsy, lcl.F.Fmsy, ucl.F.Fmsy)
+```
 
-OHI_CMSY_Scores <- OHI_CMSY_Scores %>%
-  group_by(yr, OHI_Region_No) %>%
-  summarize(
-    # Weighted average of B/Bmsy using total_catch_kg as weights
-    weighted_BBmsy_acrossAllStocks = sum(B.Bmsy * total_catch_kg, na.rm = TRUE) / sum(total_catch_kg, na.rm = TRUE),
-    
-    # Total catch per region-year (optional)
-    total_catch_kg = sum(total_catch_kg, na.rm = TRUE),
-    
+# SAVE: SAVE B/BMSY SCORES PER GENUS PER REGION PER YEAR
+```{r Save this dataframe}
+# write.csv(CMSY_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/OHI_CMSY.BBmsyScores_SECONDDRAFT_Dec112025.csv")
+```
+
+
+# >> PICK 3: Catch vs Carta Nacional Pesquera Baseline <<
+
+## Load in recommendations for the Carta Nacional Pesquera
+```{r Load in Carta data}
+Carta_data_original<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/CNP_2023_recommendations_clean.csv")
+Carta_data<- Carta_data_original
+```
+
+```{r Separate Genus from scientific_name}
+Carta_data <- Carta_data %>%
+  separate(scientific_name, into = c("Genus", "Species"), sep = " ", remove = FALSE)
+# Okay, looks good!
+# Now we can try to patch in other info...
+```
+
+```{r Assigning Carta major groups based on new key}
+Genus_MajorGroup_Key<- read.csv("~/ohi_goc_prep/general/CONAPESCA_Keys/Genus_to_MajorGroup_Key_Dec112025.csv")
+# 326 obs., 4 vars.
+
+Genus_MajorGroup_Key<- Genus_MajorGroup_Key %>% 
+  select(estimated_genus_name, estimated_taxa_group, Major_Functional_Group) %>%
+  distinct()
+# 288 obs., 3 vars.
+
+Genus_MajorGroup_Key <- Genus_MajorGroup_Key %>%
+  filter(!is.na(estimated_genus_name) & estimated_genus_name != "NEI")
+
+Carta_data <- Carta_data %>%
+  left_join(
+    Genus_MajorGroup_Key,
+    by = c("Genus" = "estimated_genus_name")
+  )
+# 1008 obs., 13 vars. As expected!
+```
+
+```{r Make a CARTA CONTROL KEY}
+Carta_Key<- Carta_data %>% 
+  select(OHI_region, Genus, status, control, notes)
+# 1008 obs., 5 vars.
+
+Carta_Key <- Carta_Key %>%
+  select(OHI_region, Genus, status, control, notes) %>%
+  distinct()
+# 544 obs., 5 vars.
+
+# Make some assumptions at the genus level:
+Carta_Key <- Carta_data %>%
+  group_by(OHI_region, Genus) %>%
+  summarise(
+    ## ---- CARTA STATUS ----
+    status = {
+      s <- status[!is.na(status)]
+      if (length(s) == 0) NA_character_
+      else if ("deteriorating" %in% s) "deteriorating"
+      else if ("improving" %in% s) "improving"
+      else s[1]
+    },
+
+    alternative_status = {
+      s <- status[!is.na(status)]
+      primary <- {
+        if ("deteriorating" %in% s) "deteriorating"
+        else if ("improving" %in% s) "improving"
+        else if (length(s) > 0) s[1]
+        else NA_character_
+      }
+      alts <- s[s != primary]
+      if (length(alts) == 0) NA_character_ else paste(unique(alts), collapse = "; ")
+    },
+
+
+    ## ---- CARTA CONTROL ----
+    control = {
+      c <- control[!is.na(control)]
+      if (length(c) == 0) NA_character_ else c[1]
+    },
+
+    alternative_control = {
+      c <- control[!is.na(control)]
+      primary <- if (length(c) > 0) c[1] else NA_character_
+      alts <- c[c != primary]
+      if (length(alts) == 0) NA_character_ else paste(unique(alts), collapse = "; ")
+    },
+
+
+    ## ---- CARTA NOTES ----
+    notes = {
+      n <- notes[!is.na(notes) & notes != ""]
+      if (length(n) == 0) NA_character_ else n[1]
+    },
+
+    alternative_notes = {
+      n <- notes[!is.na(notes) & notes != ""]
+      primary <- if (length(n) > 0) n[1] else NA_character_
+      alts <- n[n != primary]
+      if (length(alts) == 0) NA_character_ else paste(unique(alts), collapse = " | ")
+    },
+
     .groups = "drop"
   ) %>%
-  # Cap the weighted B/Bmsy at 1
+  
+  ## ---- REORDER COLUMNS (put all "alternative_*" at the end) ----
+  select(
+    OHI_region,
+    Genus,
+    status,
+    control,
+    notes,
+    alternative_status,
+    alternative_control,
+    alternative_notes
+  )
+# 504 obs., 5 vars.
+# Importantly, there don't seem to be any competing management suggestions when we aggregate at the genus level (versus the species level)
+
+Carta_Key <- Carta_Key %>%
+  select(Genus, OHI_region, status, control, notes) %>% 
+  arrange(Genus, OHI_region)
+
+Carta_Key <- Carta_Key %>%
   mutate(
-    weighted_BBmsy_acrossAllStocks_capped = pmin(weighted_BBmsy_acrossAllStocks, 1)
+    Genus      = tolower(Genus),
+    OHI_region = tolower(OHI_region)
+  )
+```
+
+## SAVE the CARTA KEY
+```{r SAVE the Carta Key}
+# write.csv(Carta_Key, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_Carta_Scores/OHI_CartaKey_Dec112025.csv", row.names = FALSE)
+```
+
+```{r Load in data as necessary}
+# Load landings file, if needed:
+Carta_Key<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_StockStatus_Scores/Carta_Scores/OHI_CartaKey_Dec112025.csv")
+# 504 obs., 5 vars.
+
+# GoC_Landings_for_Carta<- Landings_GoC_NoFresh.NoMariculture
+GoC_Landings_for_Carta_original<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
+GoC_Landings_for_Carta<- GoC_Landings_for_Carta_original
+# 3163120 obs., 50 vars.
+```
+
+```{r General filtering}
+# In general, the receipts from early trips are a bit funky. Let's filter out trips before 2003 (n= 267072 records).
+GoC_Landings_for_Carta<- GoC_Landings_for_Carta %>%
+  filter(year >= 2003)
+# 2896048 obs., 50 vars.
+
+# Let's also filter out any records where weight_kg_corrected is < or = 0 (n= 156 records).
+GoC_Landings_for_Carta<- GoC_Landings_for_Carta %>%
+  filter(weight_kg_corrected > 0)
+# 2895892 obs., 50 vars.
+
+sum(is.na(GoC_Landings_for_Carta$weight_kg_corrected))
+```
+
+```{r Summarize these data by Year Region and Genus with a 2018-2022 reference period}
+Carta_Landings_summary <- GoC_Landings_for_Carta %>%
+  group_by(year, OHI_Region_No, estimated_genus_name) %>%
+  summarize(
+    Annual_Catch_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    .groups = "drop"
   ) %>%
-  select(Year= yr, OHI_Region = OHI_Region_No, total_catch_kg, weighted_BBmsy_acrossAllStocks, weighted_BBmsy_acrossAllStocks_capped)
+  group_by(OHI_Region_No, estimated_genus_name) %>%
+  mutate(
+    Avg_Catch_Ref2018.22 = mean(
+      Annual_Catch_kg[year %in% 2018:2022],
+      na.rm = TRUE
+    ),
+    n_years_Ref2018.22 = sum(year %in% 2018:2022)
+  ) %>%
+  ungroup() %>%
+  arrange(OHI_Region_No, estimated_genus_name, year)
+
+# Make lowercase:
+Carta_Landings_summary <- Carta_Landings_summary %>%
+  mutate(
+    estimated_genus_name = tolower(estimated_genus_name),
+    OHI_Region_No       = tolower(OHI_Region_No)
+  )
+# 12241 obs., 4 vars.
 ```
 
-# SAVE: WEIGHTED CMSY-B/BMSY SCORES PER REGION PER YEAR
+```{r Merge in Key Data}
+# Merge:
+Carta_Scores <- Carta_Landings_summary %>%
+  left_join(
+    Carta_Key,
+    by = c("estimated_genus_name" = "Genus",
+           "OHI_Region_No"       = "OHI_region")
+  ) %>%
+  arrange(OHI_Region_No, estimated_genus_name, year)
+# 12241 obs., 9 vars. as expected! Good!
+```
+
+```{r Calculate Stock_Status scores based on C_current versus C_ref}
+# But first, check what combinations there are in the Carta_Key between stock "status" and "control" recommendation. We're looking for weird logical mismatches such as stock is doing poorly but control says keep fishing:
+Carta_Scores %>%
+  count(status, control, name = "n")
+# There are 6 possible combinations: (NA, NA) (maximally harvested, no increase) (unclear, NA) (deteriorating, decrease)	(deteriorating	no increase) (development potential	increase)
+
+tolerance <- 0.10 # How similar is C_current versus C_ref? If C_current is within 10% of C_ref, then functionally equal.
+
+Carta_Scores <- Carta_Scores %>%
+  mutate(
+    approx_equal = abs(Annual_Catch_kg - Avg_Catch_Ref2018.22) <=
+      tolerance * Avg_Catch_Ref2018.22,
+
+    Stock_Status = case_when(
+
+      # ── Scenario 1: Maximally harvested ─────────────────────────
+      status == "maximally harvested" &
+        control == "no increase" &
+        approx_equal ~
+        1,
+
+      status == "maximally harvested" &
+        control == "no increase" &
+        Annual_Catch_kg > Avg_Catch_Ref2018.22 ~
+        Avg_Catch_Ref2018.22 / Annual_Catch_kg,
+
+      status == "maximally harvested" &
+        control == "no increase" &
+        Annual_Catch_kg < Avg_Catch_Ref2018.22 ~
+        1,
+
+      # ── Scenario 2: Stock deteriorating ─────────────────────────
+      status == "deteriorating" &
+        control %in% c("decrease", "no increase") &
+        approx_equal ~
+        0.5,
+
+      status == "deteriorating" &
+        control %in% c("decrease", "no increase") &
+        Annual_Catch_kg > Avg_Catch_Ref2018.22 ~
+        (Avg_Catch_Ref2018.22 / Annual_Catch_kg) * 0.5,
+
+      status == "deteriorating" &
+        control %in% c("decrease", "no increase") &
+        Annual_Catch_kg < Avg_Catch_Ref2018.22 ~
+        0.5 + 0.5 * (
+          (Avg_Catch_Ref2018.22 - Annual_Catch_kg) /
+          Avg_Catch_Ref2018.22
+        ),
+
+      # ── Scenario 3: Development potential ───────────────────────
+      status == "development potential" ~
+        1,
+
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  select(-approx_equal)
+# 12241 obs., 10 vars.
+
+# Filter out years before 2018 and 2025
+Carta_Scores<- Carta_Scores %>% filter(year >= 2018 & year <= 2024)
+# 4310 obs., 9 vars.
+
+# Now filter only those genera that have some actual scores:
+Carta_Scores<- Carta_Scores %>%
+  group_by(estimated_genus_name) %>%
+  filter(any(!is.na(Stock_Status))) %>%
+  ungroup()
+# 1267 obs., 10 vars.
+
+unique(Carta_Scores$estimated_genus_name)
+# 33 genera
+
+mean(Carta_Scores$Stock_Status, na.rm=TRUE)
+```
+
+
+#### SAVE THE CARTA SCORES DATAFRAME
+```{r Write this as a CSV}
+write.csv(Carta_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_StockStatus_Scores/Carta_Scores/OHI_CartaScores_overTime_Dec162025.csv", row.names = FALSE)
+```
+
+
+# OHI SCORES: Merge the indicator dataframes  ------------------------------
+
+```{r Load the indicator dataframes as necessary}
+# Read in datafiles as necessary:
+OHI_CPUE_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_SECONDDRAFT_Dec12025.csv")
+OHI_CPUE_Scores<- OHI_CPUE_Scores %>% select(-X)
+# 131 obs., 3 vars.
+
+CMSY_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/OHI_CMSY.BBmsyScores_SECONDDRAFT_Dec112025.csv")
+CMSY_Scores<- CMSY_Scores %>% select(-X)
+# 2171 obs., 11 vars.
+
+Carta_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_Carta_Scores/OHI_CartaScores_overTime_Dec112025.csv")
+# 1093 obs., 9 vars.
+```
+
+```{r Create Stock Status Dataframe}
+# Merge CMSY_Scores and Carta_Scores by genus, year, and region:
+# lowercase to make sure matching works
+CMSY_Scores <- CMSY_Scores %>%
+  mutate(OHI_Region_No = tolower(OHI_Region_No))
+        
+StockStatus_Scores <- full_join(
+  CMSY_Scores,
+  Carta_Scores,
+  by = c("yr" = "year",
+         "OHI_Region_No",
+         "stock" = "estimated_genus_name")
+)
+# 2636 obs., 17 vars.
+```
+
+```{r Out of curiosity are there genera for which there is no CMSY score but there is a CNP score?}
+# Filter for rows where B/Bmsy is missing but CNP_score exists
+genera_with_CNP_only <- StockStatus_Scores %>%
+  filter(is.na(B.Bmsy) & !is.na(CNP_score)) %>%
+  arrange(OHI_Region_No, stock, yr)
+
+unique(genera_with_CNP_only$stock)
+unique(Carta_Scores$estimated_genus_name)
+# Neat! Information about 17 additional stocks!
+#  [1] "argopecten"         "chione"             "galeorhinus"        "haliotis"          
+#  [5] "hoplopagrus"        "panopea"            "rhizoprionodon"     "strongylocentrotus"
+#  [9] "megapitaria"        "negaprion"          "octopus"            "thunnus"           
+# [13] "sphoeroides"        "callinectes"        "dosinia"            "panulirus"         
+# [17] "macrobrachium"      
+
+unique(CMSY_Scores$stock)
+unique(Carta_Scores$estimated_genus_name)
+```
+
+```{r Assign Stock Status 'Pick' column}
+StockStatus_Scores$RAM_BBmsy<- c(NA)
+
+StockStatus_Scores<- StockStatus_Scores %>%
+  select(OHI_Region = OHI_Region_No, Year = yr, stock_genus = stock, 
+         Annual_Catch_kg = total_catch_kg, B_est = B,
+         BBmsy_low = lcl.B.Bmsy, BBmsy_hi = ucl.B.Bmsy,
+         FFmsy = F.Fmsy, FFmsy_low = lcl.F.Fmsy, FFmsy_hi = ucl.F.Fmsy,
+         CatchTrend = Catch_t2_vs_Catch_t1, Carta_Status = status, Carta_Control = control,
+         RAM_BBmsy, BBmsy = B.Bmsy, CNP_score)
+
+# A hierarchy of which score to pick!
+StockStatus_Scores <- StockStatus_Scores %>%
+  mutate(
+    StockStatus_Pick = case_when(
+      !is.na(RAM_BBmsy) ~ RAM_BBmsy,
+      !is.na(BBmsy)    ~ BBmsy,
+      !is.na(CNP_score)     ~ CNP_score,
+      TRUE              ~ NA_real_
+    ),
+    StockStatus_capped = pmin(StockStatus_Pick, 1)  # caps values at 1
+  )
+```
+
+
+## GEOMETRIC MEAN!!
+
+```{r Weights and geometric mean}
+# Calculate the proportion of catch each stock contributed to its regional total during that 20-year reference period.
+
+weights_data <- status_data %>%
+filter(year > 1990 & year < 2010) %>%
+group_by(stock_id, region_id) %>%
+mutate(StockCatch = sum(catch)) %>% # total tonnes across all years for each stock and region
+ungroup() %>%
+group_by(region_id) %>%
+mutate(TotalCatch = sum(catch)) %>% # total tonnes catch across all years and stocks for each region
+ungroup() %>%
+mutate(wprop = StockCatch / TotalCatch) %>% # proportion of catch each stock contributed to the total catch
+distinct(stock_id, region_id, wprop)
+
+
+status_data <- left_join(status_data, weights_data, by = region_id) %>%
+group_by(region_id, year) %>%
+summarize(status = prod(score ^ wprop)) %>% # <-- This is the geometric mean part.
+ungroup()
+```
+
+
+
+
+
+
+
+
+
+
+
+## WEIGHTED CMSY-B/BMSY SCORES PER REGION PER YEAR
+```{r Weighted B/Bmsy}
+StockStatus_Scores_weighted <- StockStatus_Scores %>%
+  group_by(Year, OHI_Region) %>%
+#  filter(Stock_Status_score is not NA)
+  summarize(
+    
+  #   # Weighted average for Stock_Status_score using total_catch_kg as weights
+  #   weighted_StockStatus = sum(StockStatus_capped * Annual_Catch_kg, na.rm = TRUE) / sum(Annual_Catch_kg, na.rm = TRUE),
+  #   
+  #   # Total catch per region-year (optional)
+  #   Annual_Catch_kg = sum(Annual_Catch_kg, na.rm = TRUE),
+  #   
+  #   # Number of unique stocks (genera) that went into the calculation:
+  #   n_stocks = n_distinct(stock_genus),
+  #   
+  #   .groups = "drop"
+  # ) %>%
+  # 
+  # # Cap the weighted_StockStatus at 1
+  # mutate(
+  #   weighted_StockStatus_capped = pmin(weighted_StockStatus, 1)
+  # ) %>%
+    # Slot in Mel's code here for weighted catches (over "historic" period) ...
+  
+  select(Year, OHI_Region, Annual_Catch_kg, n_stocks, weighted_StockStatus, weighted_StockStatus_capped)
+```
 ```{r Save this dataframe}
-write.csv(OHI_CMSY_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/OHI_WeightedBBMSYScores_FIRSTDRAFT_Dec102025.csv")
+write.csv(StockStatus_Scores_weighted, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_FIS_Scores/FIS_StockStatus_WeightedScores_UNDERCONSTRUCTION_Dec112025.csv", row.names = FALSE)
 ```
 
-```{r Plot WEIGHTED BBMSY Scores over time}
-#### PLOT B/Bmsy OVER TIME ####
+```{r Plot weighted_StockStatus over time}
+#### PLOT weighted_StockStatus OVER TIME ####
 
 #### State Colors ####
 state_colors <- c(
@@ -1671,23 +2187,23 @@ Regions_of_Interest <- c(
   "Region_7", "Region_8", "Region_9"
 )
 
-OHI_BBMSYscores_overTime <- OHI_CMSY_Scores %>%
+Regions_of_Interest<- tolower(Regions_of_Interest)
+
+weighted_StockStatus_overTime <- StockStatus_Scores_weighted %>%
   filter(OHI_Region %in% Regions_of_Interest) %>%
   ggplot(aes(
     x = Year,
-    y = weighted_BBmsy_capped,
+    y = weighted_StockStatus_capped,
     color = OHI_Region
   )) +
   geom_line(linewidth = 1) +
   geom_point(size = 2) +
   facet_wrap(~ OHI_Region, scales = "fixed") +
   geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
-  
   scale_color_manual(values = Region_colors) +
-  
   labs(
-    title = "FIS - Regional Weighted B/Bmsy Scores (2014–2024) capped at 1",
-    y = "B/Bmsy Scores (stock status weighted by total landings)",
+    title = "FIS - Regional Stock_Status Scores, capped at 1 (2014–2024)",
+    y = "Stock_Status Scores (0-1, weighted by total landings)",
     x = "Year"
   ) +
   ylim(0, 1.25) +
@@ -1698,12 +2214,12 @@ OHI_BBMSYscores_overTime <- OHI_CMSY_Scores %>%
     plot.title = element_text(size = 18, face = "bold")
   )
 
-OHI_BBMSYscores_overTime
+weighted_StockStatus_overTime
   
   # Save as PNG
   # ggsave(
-  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/OHI_WeightedBBmsyScores_overTime_Dec102025.png"),
-  #   plot = OHI_BBMSYscores_overTime,
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_FIS_Scores/OHI_StockScores_overTime_Dec112025.png"),
+  #   plot = weighted_StockStatus_overTime,
   #   width = 12,
   #   height = 12,
   #   dpi = 300
@@ -1711,115 +2227,81 @@ OHI_BBMSYscores_overTime
 
 ```
 
-
-
-
-
-
-
-# PICK 3: Catch vs Carta Nacional Pesquera Baseline - UNDER CONSTRUCTION ------------------------------
-## Load in recommendations for the Carta Nacional Pesquera
-```{r Load in CNP data}
-CNP_data<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/CNP_2023_recommendations_clean.csv")
-```
-
-```{r Catch compare to CNP}
-options(scipen = 999) # Force same numeric format; don't want scientific notation
-
-# Setting up the dataframe to compare to the C.N.P.
-CPUE_Landings_summarized <- CPUE_Landings_filtered %>%
-  filter(year %in% 2020:2024) %>%
-  select(state, main_species_group, year, CPUE_kg.day, weight_kg_corrected) %>%
-  group_by(state, main_species_group) %>%
-  summarize(
-    # First sum per year, then average across years 2020–2022
-    Baseline_Total_Catch_2020_2022 = mean(
-      tapply(weight_kg_corrected[year %in% 2020:2022],
-             year[year %in% 2020:2022],
-             sum, na.rm = TRUE)
-    ),
-    Total_Catch_2023 = sum(weight_kg_corrected[year == 2023], na.rm = TRUE),
-    Total_Catch_2024 = sum(weight_kg_corrected[year == 2024], na.rm = TRUE),
-    Avg_CPUE_2020_2022 = mean(CPUE_kg.day[year %in% 2020:2022], na.rm = TRUE),
-    Avg_CPUE_2023 = mean(CPUE_kg.day[year == 2023], na.rm = TRUE),
-    Avg_CPUE_2024 = mean(CPUE_kg.day[year == 2024], na.rm = TRUE)
-  ) %>%
-  ungroup() %>%
-  mutate(
-    # Define a threshold for suspiciously high values
-    qc_flag = Baseline_Total_Catch_2020_2022 * 3,
-    # Define a 30% margin of error around the baseline mean - SUBSTANTIALLY different
-    lowest_bound = Baseline_Total_Catch_2020_2022 * 0.70, # most extreme cases must come first
-    highest_bound = Baseline_Total_Catch_2020_2022 * 1.30,
-    # Define a 5% margin of error around the baseline mean
-    low_bound = Baseline_Total_Catch_2020_2022 * 0.95,
-    high_bound = Baseline_Total_Catch_2020_2022 * 1.05,
-
-    # 2023 comparison with margin of error
-    CatchCompare_2023_vs_Baseline = case_when(
-      Total_Catch_2023 > qc_flag ~ "qc flag: > 3x higher",
-      Total_Catch_2023 > highest_bound ~ "substantially higher",
-      Total_Catch_2023 < lowest_bound ~ "substantially lower",
-      Total_Catch_2023 > high_bound ~ "higher",
-      Total_Catch_2023 < low_bound ~ "lower",
-      TRUE ~ "similar"
-    ),
-
-    # 2024 comparison with margin of error
-    CatchCompare_2024_vs_Baseline = case_when(
-      Total_Catch_2024 > qc_flag ~ "qc flag: > 3x higher",
-      Total_Catch_2024 > highest_bound ~ "substantially higher",
-      Total_Catch_2024 < lowest_bound ~ "substantially lower",
-      Total_Catch_2024 > high_bound ~ "higher",
-      Total_Catch_2024 < low_bound ~ "lower",
-      TRUE ~ "similar"
-    )
-  ) %>%
-  select(-low_bound, -high_bound, -lowest_bound, -highest_bound, -qc_flag)   # remove helper columns if not needed
-
-# Add & re-arrange columns:
-CPUE_Landings_summarized$CNP_Recommendation<- NA
-
-CPUE_Landings_summarized <- CPUE_Landings_summarized %>%
-  select(state,
-         main_species_group,
-         CNP_Recommendation,
-         Baseline_Total_Catch_2020_2022,
-         Total_Catch_2023,
-         CatchCompare_2023_vs_Baseline,
-         Total_Catch_2024,
-         CatchCompare_2024_vs_Baseline,
-         Avg_CPUE_2020_2022,
-         Avg_CPUE_2023,
-         Avg_CPUE_2024,
-         everything())  # keeps any other columns after
-```
-
-```{r Write this as a CSV}
-
-```
-
-
-#### OHI SCORES: Merge the indicator dataframes
-
-```{r Load the indicator dataframes as necessary}
-# Read in datafiles as necessary:
-OHI_CPUE_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/OHI_CPUEScores_SECONDDRAFT_Dec12025.csv")
-
-OHI_CMSY_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/OHI_WeightedBBMSYScores_FIRSTDRAFT_Dec102025.csv") # 
-
-```
-
-```{r Merge the Indicator dataframes}
+```{r Merge ALL dataframes for final OHI Score}
 # Merge:
-OHI_Scores_df <- OHI_CPUE_Scores %>%
-  left_join(
-    OHI_CMSY_Scores,
-    by = c("Year", "OHI_Region")
-  ) %>%
-  select(-total_catch_kg, -weighted_BBmsy_acrossAllStocks)
+# lowercase to make sure matching works
+OHI_CPUE_Scores <- OHI_CPUE_Scores %>%
+  mutate(OHI_Region = tolower(OHI_Region))
 
-# SAVE THIS DATAFRAME FOR NOW AS AN EXAMPLE - Dec 10 2025:
-# write.csv(OHI_Scores_df, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_FIS_Scores/OHI_FISscores_UNDERCONSTRUCTION_Dec112025.csv")
+OHI_Scores_df <- OHI_CPUE_Scores %>%
+  full_join(
+    StockStatus_Scores_weighted,
+    by = c("Year", "OHI_Region")
+  )
+
+OHI_Scores_df <- OHI_Scores_df %>%
+  mutate(FIS_Score = rowMeans(cbind(weighted_CPUE_acrossAllGroups, weighted_StockStatus_capped), na.rm = TRUE))
+
+# SAVE THIS DATAFRAME FOR NOW AS AN EXAMPLE - Dec 11 2025:
+# write.csv(OHI_Scores_df, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_FIS_Scores/OHI_FISscores_UNDERCONSTRUCTION_Dec112025.csv", row.names = FALSE)
+```
+
+```{r Graph FIS scores per region over time}
+weighted_StockStatus_overTime <- StockStatus_Scores_weighted %>%
+  filter(OHI_Region %in% Regions_of_Interest) %>%
+  ggplot(aes(
+    x = Year,
+    y = weighted_StockStatus_capped,
+    color = OHI_Region
+  )) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ OHI_Region, scales = "fixed") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  scale_color_manual(values = Region_colors) +
+  labs(
+    title = "FIS - Regional Stock_Status Scores, capped at 1 (2014–2024)",
+    y = "Stock_Status Scores (0-1, weighted by total landings)",
+    x = "Year"
+  ) +
+  ylim(0, 1.25) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold")
+  )
+
+weighted_StockStatus_overTime
+
+
+FIS_Scores_overTime<- OHI_Scores_df %>%
+  filter(OHI_Region %in% Regions_of_Interest) %>%
+  
+  ggplot(aes(x = Year, y = FIS_Score, color = OHI_Region)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ OHI_Region, scales = "fixed") +
+  
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  
+  labs(
+    title = "FIS Scores per Region Over Time",
+    x = "Year",
+    y = "FIS Score (0–1)"
+  ) +
+  
+  ylim(0.50, 1.25) +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+FIS_Scores_overTime
 ```
 
