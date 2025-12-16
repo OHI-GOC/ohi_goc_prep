@@ -56,41 +56,213 @@ for (s in shp_files) {
     str_remove("\\.shp$")
 
   message("Reading in: ", obj_name)
-  obj_data <- st_read(s, quiet = TRUE)
+  obj_data <- st_read(s, options = "ENCODING=LATIN1", quiet = TRUE)
   assign(obj_name, obj_data, envir = .GlobalEnv)
 }
 
 ```
+
 ```{r}
-# all combined datasets in a named list
-culture_combined_list <- list(
-  museums = museums_2019_2024_goc_50km,
-  historical_sites = historical_sites_2019_2024_goc_50km,
-  nature_heritage = nature_heritage_2019_2024_goc_50km,
-  nautical_services = marine_tourism_2019_2024_goc_50km
-  # recreation_other = recreation_other_2019_2024_goc_50km
-)
-
-culture_combined_df <- bind_rows(culture_combined_list)
-
-culture_counts_df <- culture_counts %>% 
-  st_drop_geometry()
-
-culture_counts_plotly <- plot_ly(culture_counts_df,
-        x = ~data_year,
-        y = ~n,
-        color = ~category,
-        type = 'scatter',
-        mode = 'lines+markers') %>%
-  layout(
-    title = "DENUE observations by year (50km buffer)",
-    xaxis = list(title = "Data year"),
-    yaxis = list(title = "Total observations"),
-    legend = list(title=list(text="Recreation type"))
-  )
-culture_counts_plotly
+# # all combined datasets in a named list
+# culture_combined_list <- list(
+#   museums = museums_2019_2024_goc_50km,
+#   historical_sites = historical_sites_2019_2024_goc_50km,
+#   nature_heritage = nature_heritage_2019_2024_goc_50km,
+#   nautical_services = marine_tourism_2019_2024_goc_50km
+#   # recreation_other = recreation_other_2019_2024_goc_50km
+# )
+# 
+# culture_combined_df <- bind_rows(culture_combined_list)
+# 
+# culture_counts_df <- culture_counts %>% 
+#   st_drop_geometry()
+# 
+# culture_counts_plotly <- plot_ly(culture_counts_df,
+#         x = ~data_year,
+#         y = ~n,
+#         color = ~category,
+#         type = 'scatter',
+#         mode = 'lines+markers') %>%
+#   layout(
+#     title = "DENUE observations by year (50km buffer)",
+#     xaxis = list(title = "Data year"),
+#     yaxis = list(title = "Total observations"),
+#     legend = list(title=list(text="Recreation type"))
+#   )
+# culture_counts_plotly
 ```
 
+
+```{r}
+culture_gulf_50km <- bind_rows(historical_sites_2019_2024_goc_50km, marine_tourism_2019_2024_goc_50km, museums_2019_2024_goc_50km, nature_heritage_2019_2024_goc_50km, recreation_other_2019_2024_goc_50km)
+
+
+culture_gulf_50km_clean <- culture_gulf_50km %>% 
+  st_drop_geometry() %>% 
+  mutate(nombre_act = nombre_act %>% 
+           str_replace_all("<fa>", "ú") %>%
+           str_replace_all("<e1>", "á") %>%
+           str_replace_all("<ed>", "í") %>%
+           str_replace_all("<f1>", "ñ") %>%
+           str_replace_all("<e9>", "é"),
+         
+         municipio = municipio %>%
+           str_replace_all("<fa>", "ú") %>%
+           str_replace_all("<e1>", "á") %>%
+           str_replace_all("<ed>", "í") %>%
+           str_replace_all("<f1>", "ñ") %>%
+           str_replace_all("<e9>", "é")
+  ) %>% 
+  mutate(municipio_clean = municipio %>% 
+           str_to_lower() %>%
+           str_replace_all(" ", "_"),
+         municipio_clean = case_when(
+           municipio == "San Ignacio Río Muerto" ~ "cajeme",
+           municipio == "Bácum" ~ "cajeme",
+           municipio == "Mexicali" ~ "san_luis_río_colorado",
+           municipio == "Sinaloa" ~ "guasave",
+           municipio == "Santa María del Oro" ~ "san_pedro_lagunillas",
+           TRUE ~ municipio_clean
+           )) %>% 
+  mutate(
+    employees_estimated = case_when(
+      per_ocu == "0 a 5 personas" ~ 3,
+      per_ocu == "6 a 10 personas" ~ 8,
+      per_ocu == "11 a 30 personas" ~ 20.5,
+      per_ocu == "31 a 50 personas" ~ 40.5,
+      per_ocu == "51 a 100 personas" ~ 75.5,
+      per_ocu == "101 a 250 personas" ~ 175.5,
+      per_ocu %in% c("251 y m<e1>s personas", "251 y más personas") ~ 300,
+      TRUE ~ NA_real_
+    )
+  ) %>% 
+  group_by(municipio_clean, data_year, rgn_id) %>% 
+  summarize(agg_employees = sum(employees_estimated)) %>% 
+  ungroup()
+```
+
+Now, join with tourist arrivals. 
+
+```{r}
+arrivals_filled_by_DENUE_accommodation_employees <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","arrivals_filled_by_DENUE_accommodation_employees_2019_2024.csv"))
+
+gapfilled_total_arrivals <- arrivals_filled_by_DENUE_accommodation_employees %>%
+  mutate(country = "Mexico") %>% 
+  select(data_year, municipio_clean, arrivals_merged, is_filled) 
+
+joined_arrivals_culture_estab_employees <- left_join(culture_gulf_50km_clean, gapfilled_total_arrivals, by = c("data_year","municipio_clean"))
+```
+
+```{r}
+culture_agg_by_rgn_emp_arr <- joined_arrivals_culture_estab_employees %>% 
+  select(rgn_id, data_year, agg_employees, arrivals_merged) %>% 
+  group_by(rgn_id, data_year) %>% 
+  summarize(rgn_agg_emp = sum(agg_employees),
+            rgn_agg_arr = sum(arrivals_merged)) 
+
+culture_activity_emp_percap_tourist <- culture_agg_by_rgn_emp_arr %>% 
+  group_by(rgn_id, data_year) %>% 
+  mutate(emp_per_tourist = rgn_agg_emp / rgn_agg_arr) %>% 
+  ungroup()
+
+## plot the emp/tourist over time
+culture_gulf_emp_per_tourist_plotly <- plotly::plot_ly(
+  culture_activity_emp_percap_tourist, 
+  x = ~data_year, 
+  y = ~emp_per_tourist, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Culture & Gulf-related establishment employee per capita tourist arrival",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "emp_per_tourist")
+  ) 
+culture_gulf_emp_per_tourist_plotly
+
+```
+
+Now let's actually calculate current status for each region and year. The reference point is the 90th quantile?
+
+current status = emp_per_tourist (current) / emp_per_tourist (90th quantile of all regions and years)
+
+Where every region and year is compared to the highest.
+
+```{r}
+## find the 90th quantile
+culture_activity_emp_percap_tourist_cs <- culture_activity_emp_percap_tourist %>% 
+  mutate(percap_90th = quantile(emp_per_tourist, probs = 0.9),
+         current_status = (emp_per_tourist / percap_90th) * 100) %>% 
+  mutate(score = ifelse(current_status > 100, 100, current_status))
+
+write_csv(culture_activity_emp_percap_tourist_cs, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality","tr_quality_culture_current_status_121225.csv"))
+```
+
+
+```{r}
+library(plotly)
+
+## plot the score over time
+culture_quantile_score_plotly <- plotly::plot_ly(
+  culture_activity_emp_percap_tourist_cs, 
+  x = ~data_year, 
+  y = ~score, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: Culture & Gulf-related activity availability -- employees in service establishments per tourist arrival, scaled to the 90th quantile",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(culture_activity_emp_percap_tourist_cs$data_year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal 2030 (100/100)",
+    inherit = FALSE
+  )
+culture_quantile_score_plotly
+
+```
+Using regional-specific 2019 reference:
+
+```{r}
+hist_culture_activity_emp_percap_tourist_cs <- culture_activity_emp_percap_tourist %>% 
+  group_by(rgn_id) %>% 
+  mutate(hist_ref = emp_per_tourist[data_year == 2019],
+         current_status = (emp_per_tourist / hist_ref) * 100) %>% 
+  mutate(score = ifelse(current_status > 100, 100, current_status))
+```
+
+```{r}
+
+## plot the score over time
+culture_hist_score_plotly <- plotly::plot_ly(
+  hist_culture_activity_emp_percap_tourist_cs, 
+  x = ~data_year, 
+  y = ~score, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: Culture & Gulf-related activity availability -- employees in service establishments per tourist arrival, reference of 2019",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(hist_culture_activity_emp_percap_tourist_cs$data_year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal 2030 (100/100)",
+    inherit = FALSE
+  )
+culture_hist_score_plotly
+
+```
 
 ### Food and drink establishments
 
@@ -133,7 +305,53 @@ For now, let's include all of the types of food and drink service establishments
 comida_bebidas_50km <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_alojamiento_temporal_y_preparación_alimentos_y_bebidas/int","update_comida_bebidas_2019_2024_goc_50km.shp"))
 
 
+comida_bebidas_50km_clean <- comida_bebidas_50km %>% 
+  st_drop_geometry() %>% 
+  mutate(nombre_act = nombre_act %>% 
+           str_replace_all("<fa>", "ú") %>%
+           str_replace_all("<e1>", "á") %>%
+           str_replace_all("<ed>", "í") %>%
+           str_replace_all("<f1>", "ñ") %>%
+           str_replace_all("<e9>", "é"),
+         
+         municipio = municipio %>%
+           str_replace_all("<fa>", "ú") %>%
+           str_replace_all("<e1>", "á") %>%
+           str_replace_all("<ed>", "í") %>%
+           str_replace_all("<f1>", "ñ") %>%
+           str_replace_all("<e9>", "é")
+  ) %>% 
+  mutate(municipio_clean = municipio %>% 
+           str_to_lower() %>%
+           str_replace_all(" ", "_"),
+         municipio_clean = case_when(
+           municipio == "San Ignacio Río Muerto" ~ "cajeme",
+           municipio == "Bácum" ~ "cajeme",
+           municipio == "Mexicali" ~ "san_luis_río_colorado",
+           municipio == "Sinaloa" ~ "guasave",
+           municipio == "Santa María del Oro" ~ "san_pedro_lagunillas",
+           TRUE ~ municipio_clean
+           )) %>% 
+  mutate(
+    employees_estimated = case_when(
+      per_ocu == "0 a 5 personas" ~ 3,
+      per_ocu == "6 a 10 personas" ~ 8,
+      per_ocu == "11 a 30 personas" ~ 20.5,
+      per_ocu == "31 a 50 personas" ~ 40.5,
+      per_ocu == "51 a 100 personas" ~ 75.5,
+      per_ocu == "101 a 250 personas" ~ 175.5,
+      per_ocu %in% c("251 y m<e1>s personas", "251 y más personas") ~ 300,
+      TRUE ~ NA_real_
+    )
+  ) %>% 
+  group_by(municipio_clean, data_year, rgn_id) %>% 
+  summarize(agg_employees = sum(employees_estimated)) %>% 
+  ungroup()
+```
 
+
+
+```{r}
 comida_bebidas_50km_df <- all_comida_bebidas_50km %>% 
   st_drop_geometry() %>% 
   group_by(data_year, municipio) %>% 
@@ -154,66 +372,181 @@ food_drink_plotly <- plot_ly(comida_bebidas_50km_df,
 food_drink_plotly
 ```
 
+Now, join with tourist arrivals. 
+
 ```{r}
-all_recreation_establishments_50km <- bind_rows(culture_combined_df, comida_bebidas_50km)
-# 199296 + 914
-# [1] 200210, great!
+arrivals_filled_by_DENUE_accommodation_employees <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","arrivals_filled_by_DENUE_accommodation_employees_2019_2024.csv"))
 
-unique(all_recreation_establishments_50km$nombre_act)
-unique(all_recreation_establishments_50km$municipio)
+gapfilled_total_arrivals <- arrivals_filled_by_DENUE_accommodation_employees %>%
+  mutate(country = "Mexico") %>% 
+  select(data_year, municipio_clean, arrivals_merged, is_filled) 
 
+joined_arrivals_food_bev_estab_employees <- left_join(comida_bebidas_50km_clean, gapfilled_total_arrivals, by = c("data_year","municipio_clean"))
+```
 
-all_recreation_establishments_50km_clean <- all_recreation_establishments_50km %>% 
-  mutate(nombre_act = nombre_act %>% 
-           str_replace_all("<f3>", "ó") %>% 
-           str_replace_all("<ed>", "í"),
-         
-         municipio = municipio %>%
-           str_replace_all("Bah<ed>a", "Bahía") %>%
-           str_replace_all("Ju<e1>rez", "Juárez") %>%
-           str_replace_all("Culiac<e1>n", "Culiacán") %>%
-           str_replace_all("Mazatl<e1>n", "Mazatlán") %>%
-           str_replace_all("Muleg<e9>", "Mulegé") %>%
-           str_replace_all("Pe<f1>asco", "Peñasco") %>%
-           str_replace_all("R<ed>o", "Río") %>%
-           str_replace_all("Ru<ed>z", "Ruíz") %>%
-           str_replace_all("Quint<ed>n", "Quintín") %>%
-           str_replace_all("Comond<fa>", "Comondú") %>%
-           str_replace_all("Sebasti<e1>n", "Sebastián") %>%
-           str_replace_all("Tomatl<e1>n", "Tomatlán") %>%
-           str_replace_all("B<e1>cum", "Bácum") %>%
-           str_replace_all("Mar<ed>a", "María") %>%
-           str_replace_all("<fa>", "ú") %>%
-           str_replace_all("<e1>", "á") %>%
-           str_replace_all("<ed>", "í") %>%
-           str_replace_all("<f1>", "ñ") %>%
-           str_replace_all("<e9>", "é")
-  )
+```{r}
+food_bev_agg_by_rgn_emp_arr <- joined_arrivals_food_bev_estab_employees %>% 
+  select(rgn_id, data_year, agg_employees, arrivals_merged) %>% 
+  group_by(rgn_id, data_year) %>% 
+  summarize(rgn_agg_emp = sum(agg_employees),
+            rgn_agg_arr = sum(arrivals_merged)) 
 
-unique(all_recreation_establishments_50km_clean$nombre_act) # good!
-unique(all_recreation_establishments_50km_clean$municipio) # good!
+food_bev_activity_emp_percap_tourist <- food_bev_agg_by_rgn_emp_arr %>% 
+  group_by(rgn_id, data_year) %>% 
+  mutate(emp_per_tourist = rgn_agg_emp / rgn_agg_arr) %>% 
+  ungroup()
+
+## plot the emp/tourist over time
+food_bev_emp_per_tourist_plotly <- plotly::plot_ly(
+  food_bev_activity_emp_percap_tourist, 
+  x = ~data_year, 
+  y = ~emp_per_tourist, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Food & beverage establishment employee per capita tourist arrival",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "emp_per_tourist")
+  ) 
+food_bev_emp_per_tourist_plotly
 
 ```
-### Current status
 
-Now, address the employees!
+ow let's actually caluclate current status for each region and year. The reference point is the 90th quantile?
 
-*This is what the per_ocu variable description says in the metadata:*
-"This includes personnel directly employed by the company and external personnel supplied by another company, who worked for the economic unit, under its direction and control, and who covered at least one-third of the workday. This may include permanent staff, paid temporary staff, or unpaid temporary staff.
-Economic units are classified by employee size ranges, which allows for the identification of the size of Economic Units based on the number of personnel they employ; that is, according to their total workforce. For the purposes of the Directory, Economic Units are grouped into employee size ranges or strata, based on the total number of employees reported by each unit, as shown in the following table.
-Number of Employees
-1 = 0 to 5
-2 = 6 to 10
-3 = 11 to 30
-4 = 31 to 50
-5 = 51 to 100
-6 = 101 to 250
-7 = 251 and above" 
+current status = emp_per_tourist (current) / emp_per_tourist (90th quantile of all regions and years)
 
-So, we will take the midpoint of each range.
+Where every region and year is compared to the highest 
 
 ```{r}
-all_rec_estab_50km_clean_perocu <- all_recreation_establishments_50km_clean %>% 
+## find the 90th quantile
+food_bev_activity_emp_percap_tourist_cs <- food_bev_activity_emp_percap_tourist %>% 
+  mutate(percap_90th = quantile(emp_per_tourist, probs = 0.9),
+         current_status = (emp_per_tourist / percap_90th) * 100) %>% 
+  mutate(score = ifelse(current_status > 100, 100, current_status))
+
+write_csv(food_bev_activity_emp_percap_tourist_cs, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality","tr_quality_food_bev_current_status_quantile_121125.csv"))
+```
+
+
+```{r}
+library(plotly)
+
+## plot the score over time
+food_bev_quantile_score_plotly <- plotly::plot_ly(
+  food_bev_activity_emp_percap_tourist_cs, 
+  x = ~data_year, 
+  y = ~score, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: Food & beverage activity availability -- employees in service establishments per tourist arrival, scaled to the 90th quantile",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(food_bev_activity_emp_percap_tourist_cs$data_year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal 2030 (100/100)",
+    inherit = FALSE
+  )
+food_bev_quantile_score_plotly
+
+```
+Using regional-specific 2019 reference:
+
+```{r}
+hist_food_bev_activity_emp_percap_tourist_cs <- food_bev_activity_emp_percap_tourist %>% 
+  group_by(rgn_id) %>% 
+  mutate(hist_ref = emp_per_tourist[data_year == 2019],
+         current_status = (emp_per_tourist / hist_ref) * 100) %>% 
+  mutate(score = ifelse(current_status > 100, 100, current_status))
+```
+
+```{r}
+
+## plot the score over time
+food_bev_hist_score_plotly <- plotly::plot_ly(
+  hist_food_bev_activity_emp_percap_tourist_cs, 
+  x = ~data_year, 
+  y = ~score, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: Food & beverage activity availability -- employees in service establishments per tourist arrival, reference of 2019",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(hist_food_bev_activity_emp_percap_tourist_cs$data_year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal 2030 (100/100)",
+    inherit = FALSE
+  )
+food_bev_hist_score_plotly
+
+```
+
+
+
+
+### Other recreation service establishments!
+
+recreacion_categorias <- c(
+  "Centros de acondicionamiento físico del sector privado",
+  "Centros de acondicionamiento físico del sector público",
+  "Clubes deportivos del sector privado",
+  "Clubes deportivos del sector público",
+  "Equipos deportivos profesionales",
+  "Deportistas profesionales",
+  "Clubes o ligas de aficionados",
+  "Campos de golf",
+  "Artistas, escritores y técnicos independientes",
+  "Compañías de danza del sector privado",
+  "Compañías de teatro del sector público",
+  "Compañías de teatro del sector privado",
+  "Grupos musicales del sector público",
+  "Cantantes y grupos musicales del sector privado",
+  "Otras compañías y grupos de espectáculos artísticos del sector privado",
+  "Parques de diversiones y temáticos del sector privado",
+  "Parques de diversiones y temáticos del sector público",
+  "Parques acuáticos y balnearios del sector privado",
+  "Parques acuáticos y balnearios del sector público",
+  "Billares",
+  "Casas de juegos electrónicos",
+  "Boliches",
+  "Otros servicios recreativos prestados por el sector privado",
+  "Otros servicios recreativos prestados por el sector público",
+  "Venta de billetes de lotería, pronósticos deportivos y otros boletos de sorteo",
+  "Otros juegos de azar",
+  "Casinos"
+)
+
+
+```{r}
+other_rec_50km <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_esparcimiento_culturales_y_deportivos_servicios_recreativos/int/recreation_other_2019_2024_goc_50km.shp"))
+
+other_rec_50km_clean <- other_rec_50km %>% 
+  st_drop_geometry() %>% 
+  mutate(municipio_clean = municipio %>% 
+           str_to_lower() %>%
+           str_replace_all(" ", "_"),
+         municipio_clean = case_when(
+           municipio == "San Ignacio Río Muerto" ~ "cajeme",
+           municipio == "Bácum" ~ "cajeme",
+           municipio == "Mexicali" ~ "san_luis_río_colorado",
+           municipio == "Sinaloa" ~ "guasave",
+           municipio == "Santa María del Oro" ~ "san_pedro_lagunillas",
+           TRUE ~ municipio_clean
+           )) %>% 
   mutate(
     employees_estimated = case_when(
       per_ocu == "0 a 5 personas" ~ 3,
@@ -225,134 +558,11 @@ all_rec_estab_50km_clean_perocu <- all_recreation_establishments_50km_clean %>%
       per_ocu %in% c("251 y m<e1>s personas", "251 y más personas") ~ 300,
       TRUE ~ NA_real_
     )
-  )
-```
-
-Make sure each municipality has a region associated with it:
-
-```{r}
-denue_rec_rgn <- all_rec_estab_50km_clean_perocu %>% 
-  st_drop_geometry() %>%
-  select(municipio, rgn_id) %>% 
-  distinct()
-
-dups_rec <- denue_rec_rgn %>% 
-  group_by(municipio) %>% 
-  summarise(dups = sum(n())) %>% 
-  filter(dups > 1)
-unique(dups_rec$municipio) ## [1] "Comondú"        "Hermosillo"     "Puerto Peñasco" "San Felipe"  
-
-### Okay, I am going to assign each one by a case_when to Regions that these municipalities typically are... for now.
-denue_rec_rgn_fix <- denue_rec_rgn %>% 
-  mutate(rgn_id = case_when(
-    municipio == "Comondú" ~ "Region_3",
-    municipio == "Puerto Peñasco" ~ "Region_5",
-    municipio == "San Felipe" ~ "Region_1",
-    municipio == "Hermosillo" ~ "Region_6",
-    TRUE ~ rgn_id
-  )) ## no more duplicates!!!!! Save this for later.
-  # distinct() %>%
-  # group_by(municipio) %>%
-  # summarise(dups = sum(n())) %>%
-  # filter(dups > 1)
-
-write_csv(denue_rec_rgn_fix, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/int_activites","ohi_rgn_assign_for_municipio.csv"))
-```
-
-Okay, now let's aggregate and join regions back in.
-
-```{r}
-agg_rec_employees_per_munic <- all_rec_estab_50km_clean_perocu %>% 
-  st_drop_geometry() %>% 
-  select(entidad, municipio, data_year, nom_estab, employees_estimated) %>% 
-  mutate(municipio_clean = municipio %>% 
-           str_to_lower() %>%
-           str_replace_all(" ", "_"),
-         municipio_clean = case_when(
-           municipio == "San Ignacio Río Muerto" ~ "cajeme",
-           municipio == "Bácum" ~ "cajeme",
-           municipio == "Mexicali" ~ "san_luis_río_colorado",
-           municipio == "Sinaloa" ~ "guasave",
-           municipio == "Santa María del Oro" ~ "san_pedro_lagunillas",
-           TRUE ~ municipio_clean
-           )) %>% 
-  left_join(., denue_rec_rgn_fix, by = "municipio") %>% 
+  ) %>% 
   group_by(municipio_clean, data_year, rgn_id) %>% 
   summarize(agg_employees = sum(employees_estimated)) %>% 
   ungroup()
-
-library(plotly)
-
-agg_rec_employees_per_munic_plot <- agg_rec_employees_per_munic %>% 
-  arrange(data_year)
-
-## plot the employees over time
-activity_employees_plotly <- plotly::plot_ly(
-  agg_rec_employees_per_munic_plot, 
-  x = ~data_year, 
-  y = ~agg_employees, 
-  color = ~municipio_clean, 
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "Activity service establishment employment over time",
-    xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "Number of employees (estimated from binned data)")
-  ) 
-activity_employees_plotly
 ```
-
-
-UPDATE 12/11/25: This has been fixed.  It was an encoding issue, that was only affecting 2023!! It looks like for all other years, it was in latin1, but in 2023 it was already in UTF-8.
-
-<!-- WOW.  There is a massive decrease in employment in 2023 ?!?!?!?! -->
-
-<!-- Let's look at total number of establishments over time... -->
-
-```{r}
-agg_rec_businesses_per_munic <- all_rec_estab_50km_clean_perocu %>% 
-  st_drop_geometry() %>% 
-  select(entidad, municipio, data_year, nom_estab, employees_estimated) %>% 
-  mutate(municipio_clean = municipio %>% 
-           str_to_lower() %>%
-           str_replace_all(" ", "_"),
-         municipio_clean = case_when(
-           municipio == "San Ignacio Río Muerto" ~ "cajeme",
-           municipio == "Bácum" ~ "cajeme",
-           municipio == "Mexicali" ~ "san_luis_río_colorado",
-           municipio == "Sinaloa" ~ "guasave",
-           municipio == "Santa María del Oro" ~ "san_pedro_lagunillas",
-           TRUE ~ municipio_clean
-           )) %>% 
-  left_join(., denue_rec_rgn_fix, by = "municipio") %>% 
-  group_by(municipio_clean, data_year, rgn_id) %>% 
-  summarize(total_businesses = n()) %>% 
-  ungroup()
-
-agg_rec_businesses_per_munic_plot <- agg_rec_businesses_per_munic %>% 
-  arrange(data_year)
-
-## plot the businesses over time
-activity_businesses_plotly <- plotly::plot_ly(
-  agg_rec_businesses_per_munic_plot, 
-  x = ~data_year, 
-  y = ~total_businesses, 
-  color = ~municipio_clean, 
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "Activity service establishments over time",
-    xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "Number of businesses")
-  ) 
-activity_businesses_plotly
-```
-
-
-#### join with arrivals
-
 
 Now, join with tourist arrivals. 
 
@@ -363,62 +573,100 @@ gapfilled_total_arrivals <- arrivals_filled_by_DENUE_accommodation_employees %>%
   mutate(country = "Mexico") %>% 
   select(data_year, municipio_clean, arrivals_merged, is_filled) 
 
-joined_arrivals_rec_estab_employees <- left_join(agg_rec_employees_per_munic, gapfilled_total_arrivals, by = c("data_year","municipio_clean"))
+joined_arrivals_other_rec_estab_employees <- left_join(other_rec_50km_clean, gapfilled_total_arrivals, by = c("data_year","municipio_clean")) %>% 
+  filter(municipio_clean != "jala")
 ```
 
-Now let's divide the number of employees by the number of tourist arrivals per year and region. 
-
 ```{r}
-agg_by_rgn_emp_arr <- joined_arrivals_rec_estab_employees %>% 
+other_rec_agg_by_rgn_emp_arr <- joined_arrivals_other_rec_estab_employees %>% 
   select(rgn_id, data_year, agg_employees, arrivals_merged) %>% 
   group_by(rgn_id, data_year) %>% 
   summarize(rgn_agg_emp = sum(agg_employees),
             rgn_agg_arr = sum(arrivals_merged)) 
 
-activity_emp_percap_tourist <- agg_by_rgn_emp_arr %>% 
+other_rec_activity_emp_percap_tourist <- other_rec_agg_by_rgn_emp_arr %>% 
   group_by(rgn_id, data_year) %>% 
   mutate(emp_per_tourist = rgn_agg_emp / rgn_agg_arr) %>% 
   ungroup()
 
-## san ignacio is not the same as san ignacio rio muerto.  That and bacum are closest to the municipio "Cajeme".  Will go back to add that change to municipio_clean.
+## plot the emp/tourist over time
+other_rec_gulf_emp_per_tourist_plotly <- plotly::plot_ly(
+  other_rec_activity_emp_percap_tourist, 
+  x = ~data_year, 
+  y = ~emp_per_tourist, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Other recreational establishment employee per capita tourist arrival",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "emp_per_tourist")
+  ) 
+other_rec_gulf_emp_per_tourist_plotly
+
 ```
 
-Now let's actually caluclate current status for each region and year. The reference point is the 90th quantile?
+Now let's actually calculate current status for each region and year. The reference point is the 90th quantile?
 
 current status = emp_per_tourist (current) / emp_per_tourist (90th quantile of all regions and years)
 
-Where every region and year is compared to the highest 
+Where every region and year is compared to the highest.
 
 ```{r}
 ## find the 90th quantile
-activity_emp_percap_tourist_cs <- activity_emp_percap_tourist %>% 
+other_rec_activity_emp_percap_tourist_cs <- other_rec_activity_emp_percap_tourist %>% 
   mutate(percap_90th = quantile(emp_per_tourist, probs = 0.9),
          current_status = (emp_per_tourist / percap_90th) * 100) %>% 
   mutate(score = ifelse(current_status > 100, 100, current_status))
 
-write_csv(activity_emp_percap_tourist_cs, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality","tr_quality_activities_current_status_121125.csv"))
+write_csv(other_rec_activity_emp_percap_tourist_cs, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality","tr_quality_other_rec_current_status_121225.csv"))
+```
+
+
+```{r}
+library(plotly)
+
+## plot the score over time
+other_rec_quantile_score_plotly <- plotly::plot_ly(
+  other_rec_activity_emp_percap_tourist_cs, 
+  x = ~data_year, 
+  y = ~score, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: Other recreation activity availability -- employees in service establishments per tourist arrival, scaled to the 90th quantile",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(other_rec_activity_emp_percap_tourist_cs$data_year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal 2030 (100/100)",
+    inherit = FALSE
+  )
+other_rec_quantile_score_plotly
+
 ```
 
 Using regional-specific 2019 reference:
 
 ```{r}
-hist_activity_emp_percap_tourist_cs <- activity_emp_percap_tourist %>% 
+hist_other_rec_activity_emp_percap_tourist_cs <- other_rec_activity_emp_percap_tourist %>% 
   group_by(rgn_id) %>% 
   mutate(hist_ref = emp_per_tourist[data_year == 2019],
          current_status = (emp_per_tourist / hist_ref) * 100) %>% 
   mutate(score = ifelse(current_status > 100, 100, current_status))
 ```
 
-
-
-### plotlys
-
 ```{r}
-library(plotly)
 
 ## plot the score over time
-final_score_plotly <- plotly::plot_ly(
-  activity_emp_percap_tourist_cs, 
+other_rec_hist_score_plotly <- plotly::plot_ly(
+  hist_other_rec_activity_emp_percap_tourist_cs, 
   x = ~data_year, 
   y = ~score, 
   color = ~rgn_id, 
@@ -426,106 +674,67 @@ final_score_plotly <- plotly::plot_ly(
   mode = "lines+markers"
 ) %>% 
   layout(
-    title = "CURRENT STATUS: Tourism activity availability -- employees in service establishments per tourist arrival, scaled to the 90th quantile",
+    title = "CURRENT STATUS: Other recreation activity availability -- employees in service establishments per tourist arrival, reference of 2019",
     xaxis = list(title = "Año // Year"),
     yaxis = list(title = "Puntaje // Percent (out of 100)")
   ) %>%
   add_lines(
-    x = range(activity_emp_percap_tourist_cs$data_year), 
+    x = range(hist_other_rec_activity_emp_percap_tourist_cs$data_year), 
     y = c(100, 100),
     line = list(color = "black", width = 2, dash = "dash"),
     name = "Meta // Goal 2030 (100/100)",
     inherit = FALSE
   )
-final_score_plotly
-
-## plot the score over time
-final_score_plotly <- plotly::plot_ly(
-  activity_emp_percap_tourist_cs, 
-  x = ~data_year, 
-  y = ~current_status, 
-  color = ~rgn_id, 
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "CURRENT STATUS: Tourism activity availability -- employees in service establishments per tourist arrival, scaled to the 90th quantile",
-    xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines(
-    x = range(activity_emp_percap_tourist_cs$data_year), 
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal 2030 (100/100)",
-    inherit = FALSE
-  )
-final_score_plotly
+other_rec_hist_score_plotly
 
 ```
 
+### Merging all activities
+
+Quality = avg(crime/coastal pop + activities)
+activities = avg(2/6 * food&drink emp / tourist arrivals + 3/6 * cultural&gulf-related / tourist arrivals + 1/6 * other_recreational / tourist arrivals)
 
 ```{r}
-library(plotly)
+food_bev_current_status <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality","tr_quality_food_bev_current_status_121125.csv")) %>% 
+  mutate(activity_type = "food_bev")
 
-## plot the score over time
-hist_final_score_plotly <- plotly::plot_ly(
-  hist_activity_emp_percap_tourist_cs, 
-  x = ~data_year, 
-  y = ~score, 
-  color = ~rgn_id, 
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "CURRENT STATUS: Tourism activity availability -- employees in service establishments per tourist arrival, 2019 reference point",
-    xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines(
-    x = range(activity_emp_percap_tourist_cs$data_year), 
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal 2030 (100/100)",
-    inherit = FALSE
-  )
-hist_final_score_plotly
+culture_current_status <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality","tr_quality_culture_current_status_121225.csv")) %>% 
+  mutate(activity_type = "culture")
 
-## plot the score over time
-hist_final_score_plotly <- plotly::plot_ly(
-  hist_activity_emp_percap_tourist_cs, 
-  x = ~data_year, 
-  y = ~current_status, 
-  color = ~rgn_id, 
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "CURRENT STATUS: Tourism activity availability -- employees in service establishments per tourist arrival, 2019 reference point",
-    xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines(
-    x = range(activity_emp_percap_tourist_cs$data_year), 
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal 2030 (100/100)",
-    inherit = FALSE
-  )
-hist_final_score_plotly
-
+other_rec_current_status <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality","tr_quality_other_rec_current_status_121225.csv")) %>% 
+  mutate(activity_type = "other_rec")
 ```
 
+```{r}
+merge_activites <- bind_rows(food_bev_current_status, culture_current_status, other_rec_current_status) %>% 
+  select(rgn_id, year = data_year, score, activity_type) %>% 
+  pivot_wider(
+    names_from = activity_type,
+    values_from = score
+  )
 
+score_merge_activites <- score_merge_activites %>%
+  mutate(
+    final_score =
+      (2/6) * food_bev +
+      (3/6) * culture +
+      (1/6) * other_rec
+  )
 
+write_csv(score_merge_activites, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality","final_activity_avg_score_121625.csv"))
 
+# score_merge_activites_alt <- score_merge_activites %>%
+#   rowwise() %>%
+#   mutate(
+#     final_score_2 = weighted.mean(
+#       c(food_bev, culture, other_rec),
+#       w = c(2/6, 3/6, 1/6),
+#       na.rm = TRUE
+#     )
+#   ) %>%
+#   ungroup() ### the exact same as the first method, and the first way is simpler!!
 
-
-
-
-
-
-
+```
 
 ## Public bathroom availability
 
