@@ -1865,12 +1865,12 @@ Carta_Key <- Carta_Key %>%
 
 ## SAVE the CARTA KEY
 ```{r SAVE the Carta Key}
-write.csv(Carta_Key, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_Carta_Scores/OHI_CartaKey_Dec112025.csv", row.names = FALSE)
+# write.csv(Carta_Key, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_Carta_Scores/OHI_CartaKey_Dec112025.csv", row.names = FALSE)
 ```
 
 ```{r Load in data as necessary}
 # Load landings file, if needed:
-Carta_Key<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_Carta_Scores/OHI_CartaKey_Dec112025.csv")
+Carta_Key<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_StockStatus_Scores/Carta_Scores/OHI_CartaKey_Dec112025.csv")
 # 504 obs., 5 vars.
 
 # GoC_Landings_for_Carta<- Landings_GoC_NoFresh.NoMariculture
@@ -1893,16 +1893,25 @@ GoC_Landings_for_Carta<- GoC_Landings_for_Carta %>%
 sum(is.na(GoC_Landings_for_Carta$weight_kg_corrected))
 ```
 
-```{r Summarize these data by Year Region and Genus}
+```{r Summarize these data by Year Region and Genus with a 2018-2022 reference period}
 Carta_Landings_summary <- GoC_Landings_for_Carta %>%
-  select(year, OHI_Region_No, estimated_genus_name, weight_kg_corrected) %>%
   group_by(year, OHI_Region_No, estimated_genus_name) %>%
   summarize(
     Annual_Catch_kg = sum(weight_kg_corrected, na.rm = TRUE),
     .groups = "drop"
   ) %>%
-  arrange(year, OHI_Region_No, estimated_genus_name)
+  group_by(OHI_Region_No, estimated_genus_name) %>%
+  mutate(
+    Avg_Catch_Ref2018.22 = mean(
+      Annual_Catch_kg[year %in% 2018:2022],
+      na.rm = TRUE
+    ),
+    n_years_Ref2018.22 = sum(year %in% 2018:2022)
+  ) %>%
+  ungroup() %>%
+  arrange(OHI_Region_No, estimated_genus_name, year)
 
+# Make lowercase:
 Carta_Landings_summary <- Carta_Landings_summary %>%
   mutate(
     estimated_genus_name = tolower(estimated_genus_name),
@@ -1920,133 +1929,90 @@ Carta_Scores <- Carta_Landings_summary %>%
            "OHI_Region_No"       = "OHI_region")
   ) %>%
   arrange(OHI_Region_No, estimated_genus_name, year)
-# 12241 obs., 7 vars. as expected! Good!
+# 12241 obs., 9 vars. as expected! Good!
 ```
 
-```{r Evaluate if catch is increasing}
-# Compare catch today versus catch last year and compare to the C.N.P. recommendations:
-Carta_Scores <- Carta_Scores %>%
-  group_by(OHI_Region_No, estimated_genus_name) %>%
-  arrange(year, .by_group = TRUE) %>%
-  mutate(
-    previous_catch = lag(Annual_Catch_kg),
-    Catch_t2_vs_Catch_t1 = case_when(
-      is.na(Annual_Catch_kg) | is.na(previous_catch) ~ NA_character_,
-      Annual_Catch_kg > previous_catch * 1.2 ~ "increased",  # >20% increase
-      Annual_Catch_kg < previous_catch * 0.8 ~ "decreased",  # >20% decrease
-      TRUE ~ "similar"                                       # within ±10%
-    )
-  ) %>%
-  select(-previous_catch) %>%
-  ungroup()
-# 12241 obs., 8 vars.
+```{r Calculate Stock_Status scores based on C_current versus C_ref}
+# But first, check what combinations there are in the Carta_Key between stock "status" and "control" recommendation. We're looking for weird logical mismatches such as stock is doing poorly but control says keep fishing:
+Carta_Scores %>%
+  count(status, control, name = "n")
+# There are 6 possible combinations: (NA, NA) (maximally harvested, no increase) (unclear, NA) (deteriorating, decrease)	(deteriorating	no increase) (development potential	increase)
 
-# Filter for entries between 2019 and 2024
-# NOTE TO SELF: I assume that the Carta recommendations change over time and therefore it does not seem reasonable to evaluate carta scores for more than the last 3-5 years or so
-# Filter out information for 2025, since the year is not over yet (and therefore landings data are incomplete).
-Carta_Scores<- Carta_Scores %>%
-  filter(year>= 2019 & year <= 2024) %>% 
-  select(year, OHI_Region_No, estimated_genus_name, status, Annual_Catch_kg, 
-         Catch_t2_vs_Catch_t1, control, notes)
-# 3725 obs., 8 vars.
-```
+tolerance <- 0.10 # How similar is C_current versus C_ref? If C_current is within 10% of C_ref, then functionally equal.
 
-```{r Assign numeric values based on information in the CARTA}
 Carta_Scores <- Carta_Scores %>%
   mutate(
-    CNP_score = case_when(
-      is.na(Annual_Catch_kg) ~ NA_real_,  # catch is NA → CNP_score = NA
-      
-      # Status = deteriorating
-      status == "deteriorating" & Catch_t2_vs_Catch_t1 == "similar"   ~ 0.5,
-      status == "deteriorating" & Catch_t2_vs_Catch_t1 == "increased" ~ 0.4,
-      status == "deteriorating" & Catch_t2_vs_Catch_t1 == "decreased" ~ 0.6,
-      
-      # Status = unclear or NA, control = decrease
-      (status == "unclear"| is.na(status)) & control == "decrease" & Catch_t2_vs_Catch_t1 == "similar"   ~ 0.6,
-      (status == "unclear"| is.na(status)) & control == "decrease" & Catch_t2_vs_Catch_t1 == "increased" ~ 0.5,
-      (status == "unclear"| is.na(status)) & control == "decrease" & Catch_t2_vs_Catch_t1 == "decreased" ~ 0.7,
-      
-      # Status = maximally harvested
-      status == "maximally harvested" & Catch_t2_vs_Catch_t1 == "similar"   ~ 0.7,
-      status == "maximally harvested" & Catch_t2_vs_Catch_t1 == "decreased" ~ 0.8,
-      status == "maximally harvested" & Catch_t2_vs_Catch_t1 == "increased" ~ 0.6,
-      
-      # Status = unclear or NA, control = no increase
-      (status == "unclear"| is.na(status)) & control =="no increase" & Catch_t2_vs_Catch_t1 =="similar"   ~ 0.6,
-      (status == "unclear"| is.na(status)) & control =="no increase" & Catch_t2_vs_Catch_t1 =="decreased" ~ 0.7,
-      (status == "unclear"| is.na(status)) & control =="no increase" & Catch_t2_vs_Catch_t1 =="increased" ~ 0.5,
-      
-      # Status = development potential
-      status == "development potential" & Catch_t2_vs_Catch_t1 == "similar"   ~ 1.0,
-      status == "development potential" & Catch_t2_vs_Catch_t1 == "decreased" ~ 1.0,
-      status == "development potential" & Catch_t2_vs_Catch_t1 == "increased" ~ 0.9,
-      
-      # Status = unclear or NA, control = increase
-      (status == "unclear"| is.na(status)) & control == "increase" & Catch_t2_vs_Catch_t1 == "similar"   ~ 0.9,
-      (status == "unclear"| is.na(status)) & control == "increase" & Catch_t2_vs_Catch_t1 == "decreased" ~ 0.9,
-      (status == "unclear"| is.na(status)) & control == "increase" & Catch_t2_vs_Catch_t1 == "increased" ~ 0.8,
-      
-      # Catch_t2_vs_Catch_t1 unknown or missing control
+    approx_equal = abs(Annual_Catch_kg - Avg_Catch_Ref2018.22) <=
+      tolerance * Avg_Catch_Ref2018.22,
+
+    Stock_Status = case_when(
+
+      # ── Scenario 1: Maximally harvested ─────────────────────────
+      status == "maximally harvested" &
+        control == "no increase" &
+        approx_equal ~
+        1,
+
+      status == "maximally harvested" &
+        control == "no increase" &
+        Annual_Catch_kg > Avg_Catch_Ref2018.22 ~
+        Avg_Catch_Ref2018.22 / Annual_Catch_kg,
+
+      status == "maximally harvested" &
+        control == "no increase" &
+        Annual_Catch_kg < Avg_Catch_Ref2018.22 ~
+        1,
+
+      # ── Scenario 2: Stock deteriorating ─────────────────────────
+      status == "deteriorating" &
+        control %in% c("decrease", "no increase") &
+        approx_equal ~
+        0.5,
+
+      status == "deteriorating" &
+        control %in% c("decrease", "no increase") &
+        Annual_Catch_kg > Avg_Catch_Ref2018.22 ~
+        (Avg_Catch_Ref2018.22 / Annual_Catch_kg) * 0.5,
+
+      status == "deteriorating" &
+        control %in% c("decrease", "no increase") &
+        Annual_Catch_kg < Avg_Catch_Ref2018.22 ~
+        0.5 + 0.5 * (
+          (Avg_Catch_Ref2018.22 - Annual_Catch_kg) /
+          Avg_Catch_Ref2018.22
+        ),
+
+      # ── Scenario 3: Development potential ───────────────────────
+      status == "development potential" ~
+        1,
+
       TRUE ~ NA_real_
     )
-  )
-# 3725 obs., 9 vars.
-```
+  ) %>%
+  select(-approx_equal)
+# 12241 obs., 10 vars.
 
+# Filter out years before 2018 and 2025
+Carta_Scores<- Carta_Scores %>% filter(year >= 2018 & year <= 2024)
+# 4310 obs., 9 vars.
 
-Scenario 1:
-status: maximally harvested
-management: no increase
-
-when current catch (Ccurrent) <= reference catch (Cref)
-Stock status (SS) = 1
-
-when current catch (Ccurrent) > reference catch (Cref)
-SS = Cref/Ccurrent
-
-5% overcatch = 1/1.05 = 0.95
-100% overcatch = 1/2 = 0.5
-
-One issue with this is that the score can never go to zero. So we might want to set a limit such that >=3x overcatch is 0 (and the values between 0 and 3 overcatch scale between 1 and 0).
-
-Scenario 2:
-status: deteriorating
-management: decrease (I think this is the only option I allowed in this scenario).
-
-If status = deteriorating & catch = stayed the same, then CNP_score = 0.5
-
-if Ccurrent > Cref
-SS = Cref/Ccur * 0.5 (the 0.5 caps the max score)
-
-10% overcatch = 0.5* 1/1.1 = 0.45
-50% overcatch = 0.5 * 1/1.5 = 0.33
-Once again we can add a limit where a certain level of fishery relative to the reference drops the score to 0 (vs. infinite is what equals zero above).
-
-if Ccurrent < Cref
-SS = 0.5 + 0.5x((Cref - Ccurr)/Cref)
-
-such that
-Ccurrent = Cref = 0.5
-50% reduction in catch = 0.75
-0 catch = 1
-
-
-```{r FILTER}
 # Now filter only those genera that have some actual scores:
 Carta_Scores<- Carta_Scores %>%
   group_by(estimated_genus_name) %>%
-  filter(any(!is.na(CNP_score))) %>%
+  filter(any(!is.na(Stock_Status))) %>%
   ungroup()
-# 1093 obs., 9 vars.
+# 1267 obs., 10 vars.
 
 unique(Carta_Scores$estimated_genus_name)
-# 32 genera
+# 33 genera
+
+mean(Carta_Scores$Stock_Status, na.rm=TRUE)
 ```
+
 
 #### SAVE THE CARTA SCORES DATAFRAME
 ```{r Write this as a CSV}
-# write.csv(Carta_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_Carta_Scores/OHI_CartaScores_overTime_Dec112025.csv", row.names = FALSE)
+write.csv(Carta_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_StockStatus_Scores/Carta_Scores/OHI_CartaScores_overTime_Dec162025.csv", row.names = FALSE)
 ```
 
 
@@ -2100,6 +2066,7 @@ unique(Carta_Scores$estimated_genus_name)
 unique(CMSY_Scores$stock)
 unique(Carta_Scores$estimated_genus_name)
 ```
+
 ```{r Assign Stock Status 'Pick' column}
 StockStatus_Scores$RAM_BBmsy<- c(NA)
 
@@ -2123,6 +2090,40 @@ StockStatus_Scores <- StockStatus_Scores %>%
     StockStatus_capped = pmin(StockStatus_Pick, 1)  # caps values at 1
   )
 ```
+
+
+## GEOMETRIC MEAN!!
+
+```{r Weights and geometric mean}
+# Calculate the proportion of catch each stock contributed to its regional total during that 20-year reference period.
+
+weights_data <- status_data %>%
+filter(year > 1990 & year < 2010) %>%
+group_by(stock_id, region_id) %>%
+mutate(StockCatch = sum(catch)) %>% # total tonnes across all years for each stock and region
+ungroup() %>%
+group_by(region_id) %>%
+mutate(TotalCatch = sum(catch)) %>% # total tonnes catch across all years and stocks for each region
+ungroup() %>%
+mutate(wprop = StockCatch / TotalCatch) %>% # proportion of catch each stock contributed to the total catch
+distinct(stock_id, region_id, wprop)
+
+
+status_data <- left_join(status_data, weights_data, by = region_id) %>%
+group_by(region_id, year) %>%
+summarize(status = prod(score ^ wprop)) %>% # <-- This is the geometric mean part.
+ungroup()
+```
+
+
+
+
+
+
+
+
+
+
 
 ## WEIGHTED CMSY-B/BMSY SCORES PER REGION PER YEAR
 ```{r Weighted B/Bmsy}
