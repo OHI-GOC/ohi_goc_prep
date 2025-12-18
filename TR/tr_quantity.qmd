@@ -1384,13 +1384,93 @@ Let's aggregate all tourism arrivals by region and type.
 estimated_int_dom_arrivals_ohirgn <- estimated_int_dom_arrivals_rgn %>% 
   group_by(rgn_id, arrival_type, year) %>% 
   summarize(agg_tourist_arrivals = sum(estimated_arrivals, na.rm = TRUE))
+```
 
+##### Dom viz
+
+```{r}
+last_3yrs <- c(2022, 2023, 2024)
+
+trend_last3_slope <- estimated_int_dom_arrivals_ohirgn %>%
+  st_drop_geometry() %>% 
+  filter(year %in% last_3yrs) %>%
+  group_by(rgn_id, arrival_type) %>%
+  summarise(
+    slope_per_year = coef(lm(agg_tourist_arrivals ~ year))[2],
+    .groups = "drop"
+  )
+
+trend_last3_pct <- estimated_int_dom_arrivals_ohirgn %>%
+  st_drop_geometry() %>% 
+  filter(year %in% last_3yrs) %>%
+  group_by(rgn_id, arrival_type) %>%
+  summarise(
+    arrivals_2022 = agg_tourist_arrivals[year == 2022],
+    arrivals_2024 = agg_tourist_arrivals[year == 2024],
+    pct_change_3yr = (arrivals_2024 - arrivals_2022) / arrivals_2022 * 100,
+    .groups = "drop"
+  ) 
+
+dom_trend_last3yrs <- full_join(trend_last3_pct, trend_last3_slope) %>% 
+  filter(arrival_type == "dom") %>% 
+  mutate(target_arrivals = arrivals_2024 * 1.098,
+         proj_arrivals_2030 = arrivals_2024 + (6 * slope_per_year),
+         on_track = ifelse(proj_arrivals_2030 >= target_arrivals, 1, 0))
+write_csv(dom_trend_last3yrs, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_viz","dom_trend_last3yrs_arrivals_121725.csv"))
+
+#### join with ohi rgn polygons
+ohi <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine") %>% 
+  select(rgn_id)
+
+dom_trend_last3yrs_ohigns <- full_join(dom_trend_last3yrs, ohi, by = "rgn_id") %>% 
+  st_as_sf()
+
+mapview(dom_trend_last3yrs_ohigns, 
+        zcol = "pct_change_3yr",
+        col.regions = colorRampPalette(c("darkred", "#d2d226", "darkgreen")),
+        layer.name = "Percent change of domestic arrivals (2022-2024)",
+        legend = TRUE)
+
+########################################
+
+### across the gulf:
+trend_overall <- estimated_int_dom_arrivals_ohirgn %>%
+  st_drop_geometry() %>% 
+  filter(year %in% last_3yrs) %>%
+  group_by(arrival_type, year) %>%
+  summarise(
+    total_arrivals = sum(agg_tourist_arrivals, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+trend_overall_slope <- trend_overall %>%
+  group_by(arrival_type) %>%
+  summarise(
+    slope_per_year = coef(lm(total_arrivals ~ year))[2]
+  )
+
+trend_overall_pct_change <- trend_overall %>%
+  group_by(arrival_type) %>%
+  summarise(
+    pct_change_3yr =
+      (total_arrivals[year == 2024] - total_arrivals[year == 2022]) /
+      total_arrivals[year == 2022] * 100
+  )
+
+dom_trend_goc <- full_join(trend_overall_slope, trend_overall_pct_change) %>% 
+  filter(arrival_type == "dom")
+write_csv(dom_trend_goc, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_viz","dom_trend_goc_arrivals_121725.csv"))
+```
+
+
+```{r}
 #### for visualizations: see the proportion of int vs dom for each rgn
 prop_dom_by_rgn <- estimated_int_dom_arrivals_ohirgn %>% 
   group_by(rgn_id, year) %>% 
-  mutate(state_agg_arr = sum(agg_tourist_arrivals)) %>% 
+  mutate(rgn_agg_arr = sum(agg_tourist_arrivals)) %>% 
   ungroup() %>% 
-  mutate(prop_state_total = agg_tourist_arrivals / state_agg_arr) %>% 
+  mutate(prop_rgn_total = agg_tourist_arrivals / rgn_agg_arr) %>% 
   filter(year == 2024) %>% 
   filter(arrival_type == "dom") %>% 
   st_drop_geometry()
@@ -1407,8 +1487,23 @@ prop_dom_arrivals_ohigns <- full_join(prop_dom_by_rgn, ohi, by = "rgn_id") %>%
 mapview(prop_dom_arrivals_ohigns, 
         zcol = "prop_state_total",
         col.regions = colorRampPalette(c("#096b91", "#a057ce")),
-        layer.name = "Proportion of Statewide Domestic Arrivals (2024)",
+        layer.name = "Proportion of Regionwide Domestic Arrivals (2024)",
         legend = TRUE)
+
+#### prop of total goc
+prop_dom_all <- estimated_int_dom_arrivals_ohirgn %>% 
+  filter(year == 2024) %>% 
+  st_drop_geometry() %>% 
+  group_by(year) %>% 
+  mutate(all_agg_arr = sum(agg_tourist_arrivals)) %>% 
+  ungroup() %>% 
+  group_by(arrival_type, year) %>% 
+  mutate(total_type_by_yr = sum(agg_tourist_arrivals)) %>% 
+  ungroup() %>% 
+  select(-c(rgn_id, agg_tourist_arrivals)) %>% 
+  distinct() %>% 
+  mutate(prop_dom_total = total_type_by_yr / all_agg_arr) %>% 
+  filter(arrival_type == "dom")
 ```
 
 
