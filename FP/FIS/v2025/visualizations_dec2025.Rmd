@@ -1,0 +1,455 @@
+---
+title: "OHI `r format(Sys.Date(), '%Y')`: Food Provision/Fisheries, Preparing RAM B/Bmsy data"
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+output: 
+  html_document:
+    code_folding: show
+    toc: true
+    toc_depth: 1
+    toc_float: yes
+    number_sections: false
+    theme: cerulean
+    highlight: haddock
+    includes: 
+      in_header: '../../../workflow/templates/ohi_hdr.html'
+pdf_document:
+  toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+# Summary
+
+This script produces three visualizations:
+
+1. CPUE over time using regional color scheme
+2. Stock status (B/Bmsy) over time using regional color scheme
+3. One map color coded by state (ggplot) using regional color scheme
+4. FIS scores using rainbow color scheme
+
+```{r}
+library(sf)
+library(ggplot2)
+library(rnaturalearth)
+library(dplyr)
+library(tidyverse)
+library(here)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+score_colors <- c('#8a0032', '#A50026', '#A50026', '#D73027', '#F46D43', '#FDAE61', '#FEE090', '#FEE090', '#ABD9E9', '#4575B4', '#313695')
+
+ohi <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+
+ohi <- ohi %>%
+  mutate(rgn_id = factor(rgn_id, levels = names(rgn_colors)))
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+```
+
+## CPUE
+
+```{r}
+cpue_over_time <- read_csv(here::here("FP/FIS/v2025/OHI_CPUE_Scores","FIS_CPUEScores_WeightedMean_Dec12025.csv")) %>% 
+  select(-1) %>% 
+  filter(!OHI_Region %in% c("Region_4_5_6_Sonora_TBD","Region_3_4_BCS_TBD","Region_1_2_Baja_TBD")) %>% 
+  rename(rgn_id = OHI_Region,
+         weighted_CPUE = weighted_CPUE_acrossAllGroups,
+         year = Year)
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+cpue_over_time %>% 
+  ggplot(aes(x = year, y = weighted_CPUE, color = rgn_id)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1) +
+  scale_color_manual(values = rgn_colors, 
+    labels = rgn_labels, name = "OHI region") +
+  scale_x_continuous(breaks = seq(min(cpue_over_time$year), max(cpue_over_time$year), by = 1)) +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+  labs(
+    x = "Year",
+    y = "Weighted CPUE",
+    color = "OHI region"
+  ) +
+  theme_minimal(base_family = "Calibri") +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position  = "right",
+    legend.title     = element_text(size = 11),
+    legend.text      = element_text(size = 9),
+    axis.title       = element_text(size = 12),
+    axis.text        = element_text(size = 10)
+  )
+```
+
+Easier to read:
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+cpue_over_time %>%
+  filter(year %in% 2018:2024) %>% 
+  ggplot(aes(x = year, y = weighted_CPUE, color = rgn_id)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1) +
+  scale_color_manual(values = rgn_colors, name = "OHI region") +
+  scale_x_continuous(
+    breaks = seq(min(cpue_over_time$year), max(cpue_over_time$year), by = 1)
+  ) +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+  labs(
+    x = " ",
+    y = "Weighted CPUE",
+    color = "OHI region"
+  ) +
+  facet_wrap(~ rgn_id, ncol = 3, labeller = as_labeller(rgn_labels)) +
+  theme_minimal(base_family = "Calibri") +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position  = "none",
+    strip.text       = element_text(size = 11),
+    axis.title       = element_text(size = 12),
+    axis.text.x      = element_text(size = 9, angle = 45, hjust = 1),
+    axis.text.y      = element_text(size = 10)
+  )
+
+```
+
+
+
+## Stock status
+
+```{r}
+stock_status_over_time <- read_csv(here::here("FP/FIS/v2025/OHI_StockStatus_Scores","FIS_StockStatusScores_GeoMean_Dec162025.csv")) %>% 
+  filter(!OHI_Region %in% c("region_4_5_6_sonora_tbd","region_3_4_bcs_tbd","region_1_2_baja_tbd")) %>% 
+  rename(rgn_id = OHI_Region,
+         stock_status = GeoMean_StockStatus,
+         year = Year) %>% 
+  filter(!is.na(rgn_id)) %>% 
+  mutate(rgn_id = recode(rgn_id,
+    "region_1" = "Region_1",
+    "region_2" = "Region_2",
+    "region_3" = "Region_3",
+    "region_4" = "Region_4",
+    "region_5" = "Region_5",
+    "region_6" = "Region_6",
+    "region_7" = "Region_7",
+    "region_8" = "Region_8",
+    "region_9" = "Region_9"
+  ))
+```
+
+
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+stock_status_over_time %>%  
+  ggplot(aes(x = year, y = stock_status, color = rgn_id)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1) +
+  scale_color_manual(values = rgn_colors, name = "") +
+  scale_x_continuous(breaks = seq(min(stock_status_over_time$year), max(stock_status_over_time$year), by = 1)) +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+  labs(
+    x = "Year",
+    y = "Stock Status",
+    color = "OHI region"
+  ) +
+  theme_minimal(base_family = "Calibri") +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position  = "right",
+    legend.title     = element_text(size = 11),
+    legend.text      = element_text(size = 9),
+    axis.title       = element_text(size = 12),
+    axis.text        = element_text(size = 10)
+  )
+```
+
+Easier to read:
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+stock_status_over_time %>% 
+  ggplot(aes(x = year, y = stock_status, color = rgn_id)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1) +
+  scale_color_manual(values = rgn_colors, name = "") +
+  scale_x_continuous(
+    breaks = seq(min(stock_status_over_time$year), max(stock_status_over_time$year), by = 1)
+  ) +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+  labs(
+    x = "",
+    y = "Stock Status",
+    color = "OHI region"
+  ) +
+  facet_wrap(~ rgn_id, ncol = 3, labeller = as_labeller(rgn_labels)) +
+  theme_minimal(base_family = "Calibri") +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position  = "none",
+    strip.text       = element_text(size = 11),
+    axis.title       = element_text(size = 12),
+    axis.text.x      = element_text(size = 9, angle = 45, hjust = 1),
+    axis.text.y      = element_text(size = 10)
+  )
+
+```
+
+
+
+## FIS overall scores
+
+```{r}
+library(sf)
+library(ggplot2)
+library(rnaturalearth)
+library(dplyr)
+library(ggspatial)
+
+bbox_lcc <- st_as_sfc(st_bbox(ohi)) |> st_buffer(20000)
+
+land <- ne_countries(scale = "medium", returnclass = "sf") |>
+  filter(admin %in% c("Mexico","United States of America")) |>
+  st_transform(st_crs(ohi)) |>
+  st_crop(st_bbox(bbox_lcc))
+
+states <- ne_states(country = "Mexico", returnclass = "sf") |>
+  st_transform(st_crs(ohi))
+
+
+#### join with ohi rgn polygons
+ohi <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine") %>% 
+  select(rgn_id)
+
+fis_scores <-  read_csv(here::here("FP/FIS/v2025/OHI_FIS_Scores","FIS_Scores_2018.2024_FIRSTDRAFT_Dec172025.csv")) %>% 
+  rename(rgn_id = OHI_Region,
+         score = FIS_Score_Scale100,
+         year = Year) %>% 
+  mutate(rgn_id = recode(rgn_id,
+    "region_1" = "Region_1",
+    "region_2" = "Region_2",
+    "region_3" = "Region_3",
+    "region_4" = "Region_4",
+    "region_5" = "Region_5",
+    "region_6" = "Region_6",
+    "region_7" = "Region_7",
+    "region_8" = "Region_8",
+    "region_9" = "Region_9"
+  ))
+
+fis_scores_ohigns <- full_join(fis_scores, ohi, by = "rgn_id") %>% 
+  st_as_sf()
+
+# original bbox
+bbox_limits <- st_bbox(fis_scores_ohigns)
+
+# add e.g. 25 km padding (units are meters in your LCC CRS)
+pad <- 25000
+
+bbox_padded <- bbox_limits
+bbox_padded["xmin"] <- bbox_limits["xmin"] - pad
+bbox_padded["xmax"] <- bbox_limits["xmax"] + pad
+bbox_padded["ymin"] <- bbox_limits["ymin"] - pad
+bbox_padded["ymax"] <- bbox_limits["ymax"] + pad
+
+fis_scores_map <- ggplot() +
+  # OHI rgns, filled by continuous score
+  geom_sf(
+    data = fis_scores_ohigns,
+    aes(fill = score),
+    color = "black",
+    linewidth = 0.1,
+    alpha = 0.7
+  ) +
+  # state borders
+  geom_sf(
+    data = states,
+    fill = "#d6cac0",
+    color = "black",
+    linewidth = 0.1
+  ) +
+  # contin palette for scores
+  scale_fill_gradientn(
+    colours = score_colors,
+    limits  = c(0, 100),
+    name    = "Fisheries\ncurrent status"
+  ) +
+  # crop to padded bounding box
+  coord_sf(
+    xlim = c(bbox_padded["xmin"], bbox_padded["xmax"]),
+    ylim = c(bbox_padded["ymin"], bbox_padded["ymax"]),
+    expand = FALSE
+  ) +
+  theme(
+    text = element_text(family = "Calibri"),
+    legend.title = element_text(family = "Calibri", size = 12),
+    legend.text  = element_text(family = "Calibri", size = 10)
+  ) +
+  annotation_scale(
+    location = "bl",
+    width_hint = 0.25,
+    bar_cols = c("#b3a89e", "white"),
+    text_cex = 1
+  ) +
+  annotation_north_arrow(
+    location = "bl",
+    which_north = "true",
+    pad_x = unit(0.0, "in"),
+    pad_y = unit(0.3, "in"),
+    style = north_arrow_fancy_orienteering
+  ) +
+  theme_void() +
+  theme(
+    text = element_text(family = "Calibri"),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA),
+    legend.position  = "right",
+    legend.key.height = unit(0.8, "cm"),
+    legend.key.width = unit(0.5, "cm"),
+    legend.title = element_text(size = 12),
+    legend.text  = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
+fis_scores_map
+```
+
+
+## State-colored map
+
+```{r}
+ohi_estados <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine") %>% 
+  group_by(estado) %>%
+  summarise(do_union = TRUE) %>%   # dissolve polygons within each estado
+  ungroup()
+
+state_colors <- c(
+  "Baja_California" = "#e57a66",
+  "Baja_California_Sur" = "#dcaa38",
+  "Sonora" = "#98a25a",
+  "Sinaloa" = "#627391",
+  "Nayarit" = "#8d61a9"
+)
+
+
+library(sf)
+library(ggplot2)
+library(rnaturalearth)
+library(dplyr)
+
+
+state_labels <- c(
+  "Baja_California" = "Baja California",
+  "Baja_California_Sur" = "Baja California Sur",
+  "Sonora" = "Sonora",
+  "Sinaloa" = "Sinaloa",
+  "Nayarit" = "Nayarit & Jalisco"
+)
+
+# make sure rgn_id is a factor and levels match the color vector
+ohi_estados <- ohi_estados %>%
+  mutate(estado = factor(estado, levels = names(state_colors)))
+
+bbox_limits  <- st_bbox(ohi_estados)
+pad          <- 25000   # adjust (CRS units, likely meters)
+bbox_padded  <- bbox_limits
+bbox_padded["xmin"] <- bbox_limits["xmin"] - pad
+bbox_padded["xmax"] <- bbox_limits["xmax"] + pad
+bbox_padded["ymin"] <- bbox_limits["ymin"] - pad
+bbox_padded["ymax"] <- bbox_limits["ymax"] + pad
+
+gg_ohi <- ggplot() +
+  geom_sf(
+    data = ohi_estados,
+    aes(fill = estado),
+    color = "black",
+    linewidth = 0.1,
+    alpha = 0.7
+  ) +
+  geom_sf(
+    data = states,
+    fill = "#d6cac0",
+    color = "black",
+    linewidth = 0.1
+  ) +
+  scale_fill_manual(
+    values = state_colors,
+    labels = state_labels,
+    name   = " "
+  ) +
+  coord_sf(
+    xlim   = c(bbox_padded["xmin"], bbox_padded["xmax"]),
+    ylim   = c(bbox_padded["ymin"], bbox_padded["ymax"]),
+    expand = FALSE
+  ) +
+  theme(
+    text         = element_text(family = "Calibri"),
+    legend.title = element_text(family = "Calibri", size = 12),
+    legend.text  = element_text(family = "Calibri", size = 10)
+  ) +
+  annotation_scale(
+    location   = "bl",
+    width_hint = 0.25,
+    bar_cols   = c("#b3a89e", "white"),
+    text_cex   = 1
+  ) +
+  annotation_north_arrow(
+    location  = "bl",
+    which_north = "true",
+    pad_x     = unit(0.0, "in"),
+    pad_y     = unit(0.3, "in"),
+    style     = north_arrow_fancy_orienteering
+  ) +
+  theme_void() +
+  theme(
+    text             = element_text(family = "Calibri"),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA),
+    legend.position  = "right",
+    legend.key.height = unit(0.8, "cm"),
+    legend.key.width  = unit(0.5, "cm"),
+    legend.title      = element_text(size = 12),
+    legend.text       = element_text(size = 10),
+    plot.margin       = margin(10, 10, 10, 10)
+  )
+
+gg_ohi
+```
+
+
