@@ -345,10 +345,11 @@ sf_sp_2015_goc <- sp_2015_goc %>%
            crs = 4326, # WGS84
            remove = FALSE)
 
+inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
 sf_sp_2015_goc_trans <- st_transform(sf_sp_2015_goc, st_crs(inland_50))
 sf_sp_2015_goc_50km <- st_intersection(sf_sp_2015_goc_trans, inland_50)
 
-mapview(sf_sp_2015_goc_50km)
+# mapview(sf_sp_2015_goc_50km)
 
 sf_sp_2015_goc_50km_clean <- sf_sp_2015_goc_50km %>% 
   mutate(
@@ -375,10 +376,11 @@ sf_sp_2015_goc_50km_clean <- sf_sp_2015_goc_50km %>%
   )
 
 large_hotels_2015 <- sf_sp_2015_goc_50km_clean %>% 
-  filter(employees_estimated >= 226.1447) %>% 
+  filter(employees_estimated >= 70) %>% 
   group_by(rgn_id) %>% 
   summarize(total_large_hotels = n()) %>% 
-  st_drop_geometry()
+  st_drop_geometry() %>% 
+  mutate(data_year = 2015)
 ```
 
 
@@ -428,10 +430,11 @@ sf_sp_2017_goc_50km_clean <- sf_sp_2017_goc_50km %>%
   )
 
 large_hotels_2017 <- sf_sp_2017_goc_50km_clean %>% 
-  filter(employees_estimated >= 226.1447) %>% 
+  filter(employees_estimated >= 70) %>% # avg = 226.1447, avg - 1sd = 226.1447 - 104.3152 = 121.8295 ... very conservatively, we are including the "51 a 100 personas" as a large hotel.
   group_by(rgn_id) %>% 
   summarize(total_large_hotels = n()) %>% 
-  st_drop_geometry()
+  st_drop_geometry() %>% 
+  mutate(data_year = 2017)
 ```
 
 
@@ -478,20 +481,35 @@ Find the avg size of the hotels that have already been able to obtain dist. S, a
 ```{r}
 # across all regions:
 size_join_denue_alojamientos_dist_s <- join_denue_alojamientos_dist_s %>% 
-  summarize(avg_employees_dist_s = mean(employees_estimated),
-            sd = sd(employees_estimated))
+  summarize(
+    avg_employees_dist_s = mean(employees_estimated, na.rm = TRUE),
+    sd = sd(employees_estimated, na.rm = TRUE),
+    n = sum(!is.na(employees_estimated)),
+    se = sd / sqrt(n)
+  )
 
 ```
 
-For now, filter out to only all the hotels that are that size or larger. 
+For now, filter out to only all the DENUE hotels that are that size or larger. 
 
 ```{r}
+missing_regions <- expand.grid(
+  rgn_id = c("Region_1", "Region_2", "Region_3"),
+  data_year = c(2015, 2017, 2023),
+  total_large_hotels = 0
+) 
+
 large_hotels_denue <- alojamientos_2019_2024_50km_clean %>% 
-  filter(employees_estimated >= 226.1447) %>% 
+  filter(data_year %in% 2023) %>% 
+  filter(employees_estimated >= 70) %>% 
   group_by(rgn_id, data_year) %>% 
   summarize(total_large_hotels = n()) %>% 
   st_drop_geometry() %>% 
-  bind_rows(large_hotels_2015_2017)
+  bind_rows(large_hotels_2015_2017) %>% 
+  bind_rows(missing_regions) %>% # makes sure that every region is represented here.
+  group_by(rgn_id, data_year) %>% 
+  summarize(total_large_hotels = sum(total_large_hotels))
+
 ```
 
 Now, summarize the number of hotels per rgn with dist. S: 
@@ -507,8 +525,7 @@ joined_distS_vs_large_hotels <- full_join(sum_dist_S_goc_50km, large_hotels_denu
 
 ## regions that have large hotels but no distintivo S:
 joined_distS_vs_large_hotels_fix <- joined_distS_vs_large_hotels %>% 
-  mutate(total_dist_s = ifelse(is.na(total_dist_s) & data_year %in% c(2015, 2017, 2023), 0, total_dist_s)) %>% 
-  filter(!is.na(total_dist_s))
+  mutate(total_dist_s = ifelse(is.na(total_dist_s) & data_year %in% c(2015, 2017, 2023), 0, total_dist_s)) # to show that for those regions and years, there were no dist. S certified hotels.
 ```
 
 ## Current Status
@@ -516,28 +533,27 @@ joined_distS_vs_large_hotels_fix <- joined_distS_vs_large_hotels %>%
 ```{r}
 dist_S_current_status <- joined_distS_vs_large_hotels_fix %>% 
   mutate(current_status = (total_dist_s / total_large_hotels) * 100) %>% 
+  mutate(current_status = ifelse(total_dist_s == 0 & total_large_hotels == 0, 100, current_status)) %>%  # because if there are no large hotels to get certified, then they should get a 100% (for now).
+  select(rgn_id, data_year, total_dist_s, total_large_hotels, current_status)
+
+dist_S_current_status_final <- dist_S_current_status %>% 
   select(rgn_id, data_year, current_status) %>% 
   ungroup()
 
-missing_regions <- expand.grid(
-  rgn_id = c("Region_1", "Region_2", "Region_3"),
-  data_year = c(2015, 2017, 2023),
-  current_status = 100
-) 
+# write_csv(dist_S_current_status_final, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_121225.csv"))
+write_csv(dist_S_current_status_final, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_010726.csv"))
 
-dist_S_current_status_final <- bind_rows(
-  dist_S_current_status,
-  missing_regions
-) %>% 
-  arrange(data_year)
+dist_S_cs_final <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_010726.csv"))
+dist_S_cs_old <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_121225.csv"))
 
-write_csv(dist_S_current_status_final, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_121225.csv"))
-
-dist_S_cs_final <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_121225.csv"))
+# avg_2023_dist2 <- dist_S_cs_final %>% ## because of Region_1,2,3 it is not representative to do an average because there are no large hotels in those rgns.
+#   filter(data_year == 2023) %>% 
+#   summarize(pct_large_hotels_goc = mean(current_status))
 
 avg_2023_dist2 <- dist_S_cs_final %>% 
-  filter(data_year == 2023) %>% 
-  summarize(pct_large_hotels_goc = mean(current_status))
+  filter(!rgn_id %in% c("Region_1", "Region_2", "Region_3")) %>% 
+  filter(data_year == 2023) %>%
+  summarize(pct_large_hotels_goc = mean(current_status)) # now seems more accurate.  Only ~8.26%
 ```
 
 
@@ -565,7 +581,7 @@ dist_S_current_status_gapfilled_interpolated <- dist_S_current_status_complete %
   ) %>%
   ungroup()
 
-write_csv(dist_S_current_status_gapfilled_interpolated, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_interpolated_121625.csv"))
+write_csv(dist_S_current_status_gapfilled_interpolated, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_interpolated_010726.csv"))
 
 # dist_S_current_status_gapfilled_lm <- dist_S_current_status_complete %>% ## lm feels unstable because we only have three points for each rgn_id.  Let's stick to interpolation here.
 #   group_by(rgn_id) %>% 
@@ -581,6 +597,8 @@ write_csv(dist_S_current_status_gapfilled_interpolated, here::here("/home/shares
 #       score_lm),
 #     is_gapfilled = ifelse(is.na(current_status), 1, 0)
 #   )
+
+library(plotly)
 
 ## plot the score over time
 dist_S_current_status_gapfilled_interpolated_plotly <- plotly::plot_ly(
