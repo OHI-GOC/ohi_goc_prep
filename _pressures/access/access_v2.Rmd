@@ -1,0 +1,293 @@
+---
+title: "Untitled"
+output: html_document
+date: "2026-01-06"
+---
+
+Determining access for each beach based on presence of:
+1. Malecon
+2. Parking
+3. Road access
+4. Bus access
+5. Beach entry: paths and no blockages
+
+```{r setup, include=FALSE}
+# --- Packages ---
+library(sf)
+library(dplyr)
+library(osmdata)
+library(mapview)
+library(units)
+library(here)
+library(tidyverse)
+
+get_overpass_url() 
+set_overpass_url("https://overpass-api.de/api/interpreter") # Ensure using a reliable mirror
+options(osmdata_timeout = 300)
+
+```
+
+## OSM function
+```{r}
+
+
+osm_get <- function(bbox, key, value = NULL, 
+                    return = c("points", "lines", "polygons", "multilines", "multipolygons"), 
+                    timeout = 180) {
+  
+  # Ensure necessary packages are present
+  if (!requireNamespace("osmdata", quietly = TRUE)) stop("Package 'osmdata' required.")
+  if (!requireNamespace("sf", quietly = TRUE)) stop("Package 'sf' required.")
+
+  # Build and execute query
+  q <- osmdata::opq(bbox = bbox, timeout = timeout) |> 
+    osmdata::add_osm_feature(key = key, value = value)
+  
+  res <- osmdata::osmdata_sf(q)
+  
+  # Map internal names to your preferred output names
+  out <- list(
+    points         = res$osm_points,
+    lines          = res$osm_lines,
+    polygons       = res$osm_polygons,
+    multilines     = res$osm_multilines,
+    multipolygons  = res$osm_multipolygons
+  )
+  
+  # Select requested geometries
+  requested <- match.arg(return, choices = names(out), several.ok = TRUE)
+  final_out <- out[requested]
+  
+  # Drop NULL entries (where OSM had no data for that type)
+  final_out <- Filter(Negate(is.null), final_out)
+  
+  return(final_out)
+}
+
+# For getting Gulf of Mexico states
+
+##bb <- getbb("Sinaloa, Mexico")  # matrix [lon_min lon_max; lat_min lat_max]
+#bb <- st_as_sfc(st_bbox(c(xmin=bb[1,1], ymin=bb[2,1], xmax=bb[1,2], ymax=bb[2,2]), crs = 4326))
+
+bb1 <- st_as_sfc(st_bbox(c(xmin = -115.5, ymin = 20.4, xmax = -104.9, ymax = 32), 
+                      crs = st_crs(4326)))
+bb <- st_transform(bb1, crs = 6365) # Mexicos general CRS
+mapview(st_sf(bb1))
+
+
+```
+
+
+# Gather the data
+
+inegi road data
+3.2.1 Road Network (Red Vial)
+A terrestrial transport route intended for vehicular and/or pedestrian traffic. It is a linear element designed to represent vehicular circulation and features a junction-type element at each end. Road Network elements may contain a series of attributes that distinguish them from others, such as type of roadway, official name, traffic direction, etc. (see 3.3 Attribute Tables).
+
+The network is composed of highways, dirt roads (unpaved), paved roads and trails, streets, avenues, and general roadways in urban and rural localities, as well as vehicular transition elements such as U-turns, interchanges, and roundabouts. Any addition to the attributes of a Road Network element—such as a restriction or an alternative name—may require the line to be cut or segmented into two or more parts.
+
+Field Name,Data Type,Description (English),Domain / Constraints,Length
+Id_Red,Integer,Road network identifier,,
+Tipo_Vial,String,Type of roadway,Catalogo_Tipo_Vial,16
+Nombre,String,Roadway name,,254
+Codigo,String,Highway number,,5
+Cond_Pav,String,Type of driving surface,Catalogo_Cond_Pav,14
+Recubri,String,Driving surface material,Catalogo_Recubri,10
+Carriles,String,Number of vehicle lanes,"1..n, N/A",3
+Estatus,String,Routing service status,Catalogo_Estatus,13
+Condicion,String,Roadway condition,Catalogo_Condicion,26
+Nivel,Integer,Data to distinguish elevation levels,-3...5,
+Peaje,String,Payment for transit rights (Toll),Catalogo_Peaje,2
+Administra,String,Administration,Catalogo_Administra,11
+Jurisdi,String,Jurisdiction,Catalogo_Jurisdi,13
+Circula,String,Direction of vehicle circulation,Catalogo_Sentido,25
+Escala_Vis,Integer,Visualization scale,1..5,
+Velocidad,String,Speed for routing,"10..110, N/A",3
+Union_Ini,Integer,Initial junction identifier,,
+Union_Fin,Integer,Final junction identifier,,
+Longitud,Double,Length in meters,,
+Ancho,Double,Highway or roadway width,,
+Fecha_Act,String,Update date,,19
+Calirepr,String,Position qualifier,Catalogo_Calirepr,10
+
+3.2.6 Point of Interest (Sitio de interés)
+A location where services and places of interest are situated. Many services are particularly relevant to the highway theme, such as recreation, maintenance, emergency services, customs, and various minor retail services. Services may be related to a Road Network element or to junctions to describe information necessary for vehicular access. Services can be further characterized by attributes.
+
+For this version of the product, relevant services along the highway network that serve as connections to other modes of transport—such as airports and seaports—are considered, as well as toll plazas (caseta de cobro) on toll roads to estimate travel costs, fuel stations, and others such as phytosanitary and zoosanitary inspection stations, in addition to tourist attractions.
+
+Note: These sites are placed based on network coverage. Therefore, in urban areas where only main thoroughfares are included, the recording of these points is conditioned upon their proximity to the network lines. Once all urban roadways are incorporated, the remaining sites will be included.
+Field Name,Data Type,Description (English),Domain / Constraints,Length
+Id_Loc,Integer,Unique locality identifier,,
+Tipo,String,Locality type,Catalogo_Tipo_Localidad,6
+Nombre,String,Official designation,,254
+Cve_Geo,String,Geostatistical code,,15
+Fecha_Act,String,Update date,,19
+Calirepr,String,Position qualifier,Catalogo_Calirepr,10
+
+
+3.2.9 Locality (Localidad)
+A place occupied by one or more buildings used as dwellings, which may or may not be inhabited; this place is recognized by a name given by legal provision or custom. Localities are represented by a point feature, which can spatially connect with one or more Road Network elements to identify origins or destinations for route determination. The types of localities in this project are classified as urban and rural.
+
+Field Name,Data Type,Description (English),Domain / Constraints,Length
+Id_Loc,Integer,Unique locality identifier,,
+Tipo,String,Locality type,Catalogo_Tipo_Localidad,6
+Nombre,String,Official designation,,254
+Cve_Geo,String,Geostatistical code,,15
+Fecha_Act,String,Update date,,19
+Calirepr,String,Position qualifier,Catalogo_Calirepr,10
+
+
+```{r}
+## main cities/towns
+cities <- st_read( "/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_localities/inegi_boundaries_pop.shp") %>% st_transform(crs=4326)
+
+## beaches
+coastline <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_coastline/conjunto_de_datos_2024/conjunto_de_datos/lc_rep_mex_v_2024.shp") 
+#beach <-  coastline %>% filter(SUBTIPO %in% c("Playa") & TIPO=="Continental") %>%
+#  st_transform(crs=4326)
+#beach$ID_Beach <- 1:nrow(beach)
+#st_write(beach, here("_pressures/access/data/beach.shp"))
+beach <- st_read(here("_pressures/access/data/beach.shp"))
+
+## malecon
+#malecon <- osm_get(bb1, key="highway",                    value=c("footway","path","steps","pedestrian","cycleway", "living_street", "sidewalk"), return = "polygons")
+#malecon_p <- malecon$polygons
+#malecon_p <- malecon_p %>%
+#  select(osm_id, name, highway)
+#mapview(malecon_p, color="red")
+#plot(st_geometry(malecon_p))
+#st_write(malecon_p, here("_pressures/access/data/malecon_osm_Jan7_2025.shp"))
+malecon <- st_read(here("_pressures/access/data/malecon_osm_Jan7_2025.shp")) 
+
+## paths
+#paths <- osm_get(bb1, key="highway",                    value=c("footway","path","steps","pedestrian","cycleway", "living_street", "sidewalk"), return = "lines")
+#paths_l <- paths$lines %>%
+#  select(osm_id, name, bicycle, foot, highway, horse, motor_vehicle, motorcar, surface)
+#mapview(paths_l)
+#st_write(paths_l, here("_pressures/access/data/paths_osm_Jan7_2025.shp"))
+paths <- st_read(here("_pressures/access/data/paths_osm_Jan7_2025.shp"))
+
+## parking
+#parking <- osm_get(bb1, key="amenity", value=c("parking", "parking_space"),
+#                       return = "polygons")
+#parking <- parking$polygons %>% 
+#  select(osm_id)
+#st_write(parking, here("_pressures/access/data/parking_osm_Jan7_2025.shp"))
+#mapview(parking)
+parking <- st_read(here("_pressures/access/data/parking_osm_Jan7_2025.shp")) %>%
+  mutate(osm_id = 1)
+
+## Roads
+roads <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_roads/794551132166_s/conjunto_de_datos/red_vial.shp") %>% st_transform(crs=4326)
+
+#site data
+site <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_roads/794551132166_s/conjunto_de_datos/sitio_de_interes.shp") %>% st_transform(crs=4326)
+mapview(site)
+
+#Muelle o Embarcadero: Pier, Dock, or Jetty
+#Puerto: Port / Harbor
+#Central Camionera: Bus Terminal / Main Bus Station (data is very incomplete, probably not useful)
+#Área de Descanso: Rest Area (almost no data)
+#Estacionamiento Abierto: Open Parking Lot (almost no data here)
+
+port_pier <- filter(site, CLASE %in% c("Puerto", "Muelle o Embarcadero"))
+
+bus <- filter(site, CLASE %in% c("Central Camionera"))
+
+#rest_area <-   filter(site, CLASE %in% c("Área de Descanso")) # not much here.
+
+
+
+```
+
+# Go city by city and state by state
+
+General function to accomplish this with the above laters clipped by region.
+```{r}
+area_id <- "25 012 0001"
+area <- filter(cities, id %in% area_id)
+
+area_mal <- st_crop(malecon, area)
+area_paths <- st_crop(paths, area)
+area_parking <- st_crop(parking, area)
+area_roads <- st_crop(roads, area)
+area_bus <- st_crop(bus, area)
+
+mapview(area, color="green", alpha.regions = 0.1) +
+mapview(area_mal, color="red") +
+mapview(area_paths, color="red") +
+mapview(area_parking, color="purple") +
+mapview(area_roads, color="orange") + 
+mapview(beach, color="blue") 
+
+
+mapview(beach, color="blue") + mapview(cities)
+mapview(beach, color="blue") + mapview(paths, color="orange") + mapview(roads, color="red")
+
+```
+
+## map of Mazatlan
+```{r}
+maz <- read_csv(here("_pressures/access/data/beach_access.csv")) %>%
+  rename(ID_Beach = ID_beach)
+maz_beach <- filter(beach, ID_Beach %in% maz$ID_Beach) %>%
+  left_join(maz) %>%
+  mutate(accessibility_score = as.numeric(accessibility_score))
+
+map_final <- 
+mapview(area, color="green", alpha.regions = 0.1) +
+mapview(area_mal, color="red") +
+mapview(area_paths, color="red") +
+mapview(area_parking, col.regions = "purple", color = "purple", layer.name = "Parking") +
+mapview(area_roads, color="orange") + 
+#mapview(beach, color="blue") +
+mapview(maz_beach, 
+          zcol = "accessibility_score", 
+          lwd = 4,                       # Make lines thicker so they are easier to see
+          layer.name = "Beach Accessibility Score")
+
+mapshot(map_final, url = "_pressures/access/output/Mazatlan_Accessibility_Map.html")
+
+library(leaflet)
+
+vals <- maz_beach$accessibility_score
+pal <- colorRampPalette(c("#d7191c", "#fdae61", "#a6d96a", "#1a9641"))
+
+pal_func <- colorNumeric(
+  palette = pal(11),
+  domain = c(0, 10)   # full numeric range
+)
+
+# Leaflet map for line features
+leaflet(maz_beach) %>%
+  addTiles() %>%
+  addPolylines(
+    color = ~pal_func(accessibility_score),
+    weight = 8,
+    opacity = 1
+  ) %>%
+  addLegend(
+    "bottomright",
+    pal = pal_func,
+    values = c(0, 10),
+    title = "Accessibility Score",
+    labFormat = labelFormat(digits = 0),
+    opacity = 1
+  )
+```
+
+## Example of getting a state
+```{r}
+
+# 1) Get a bounding box for Mazatlán (from OpenStreetMap)
+bb <- getbb("Sinaloa, Mexico")  # matrix [lon_min lon_max; lat_min lat_max]
+bb <- getbb("Sinaloa, Mexico")  # matrix [lon_min lon_max; lat_min lat_max]
+
+bb_poly <- st_as_sfc(st_bbox(c(xmin=bb[1,1], ymin=bb[2,1], xmax=bb[1,2], ymax=bb[2,2]), crs = 4326))
+
+# 2) Read only the attribute table first (optional, helps you inspect fields)
+# roads <- st_read(".../red_vial.shp")  # you already did this
+
+# 3) Make sure the bbox is in the same CRS as your roads
+bb_poly_tr <- st_transform(bb_poly, st_crs(roads))
+mapview(bb_poly_tr)
