@@ -21,3 +21,211 @@ editor_options:
 ---
 
 # LIV: Number of Jobs from the Censos Economicos (CE)
+
+For 2024, Ensenada needs to be dropped.  See difference between before the municipality San Quintín was made in 2020 and after.
+
+```{r}
+library(sf)
+
+municipio_codigo_sf <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/land_admin_boundaries", "mex_admin2_joined_w_municipio_codigos.shp"))
+mapview(municipio_codigo_sf) # before 2020
+
+## AFTER 2020: <https://commons.wikimedia.org/wiki/File:Municipios_Baja_California.png>
+```
+
+
+## Save subset of job *number* metrics
+
+Reminder:
+* The number of jobs, *H000A*;
+* The employer contributions to social security schemes *J300A*,
+* Other social benefits *J400A*;
+* Total revenue from the supply of goods and services (millions of pesos) *M000A*; and
+* Total revenue (millions of pesos) *A800A*
+
+The longer description of H000A: "Personnel employed by the company. This includes personnel hired directly by the company, whether permanent, temporary, or unpaid, unionized or non-unionized, who worked during the reference year for the economic unit, subject to its management and control, covering at least one-third of the working hours of the unit. Includes: personnel who worked outside the economic unit under its labor and legal control; pieceworkers; striking workers; persons on sick leave, vacation, or temporary leave. Excludes: pensioners and retirees; personnel on unlimited leave and personnel who worked exclusively for fees or commissions without receiving a base salary; as well as personnel from companies hired to provide services such as cleaning, gardening, or security, among others."
+
+```{r}
+ce_cleaned_totals_per_yr_municipio_activity <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_cleaned_totals_per_yr_municipio_activity.csv")) %>% 
+  filter(!(municipio == "ENSENADA" & ano_censal == "2024"))
+
+ce_job_totals <- ce_cleaned_totals_per_yr_municipio_activity %>% 
+  select(-c("a800a","m000a", "j400a","j300a"))
+```
+
+Aggregating all the activities per municipio:
+```{r}
+total_jobs_per_municipio <- ce_job_totals %>% 
+  group_by(ano_censal, municipio, rgn_id) %>% 
+  summarize(jobs_per_mun = sum(h000a, na.rm = TRUE), # double check this.
+            ue_per_mun = sum(ue, na.rm = TRUE)) # I do not think that UE (economic units) are a good way of tracking over time, because you may have increasing or decreasing jobs despite a stagnant number of UEs.  And there is very unlikely a relationship between number of jobs and number of UEs.  But, we could look into that in order to gapfill 2019 and 2024 which has gaps due to confidentiality...
+```
+
+Aggregating the number of jobs for each region:
+```{r}
+total_jobs_per_rgn <- total_jobs_per_municipio %>% 
+  group_by(ano_censal, rgn_id) %>% 
+  summarize(total_jobs = sum(jobs_per_mun, na.rm = TRUE),
+            total_ue = sum(ue_per_mun, na.rm = TRUE))
+```
+
+Aggregating instead by region, keeping activities separate:
+```{r}
+total_jobs_per_rgn_and_activity <- ce_job_totals %>% 
+  group_by(ano_censal, rgn_id, sector_marino_propuesto) %>% # not using codigo, notas_breve, because those are too specific
+  summarize(jobs_per_act = sum(h000a, na.rm = TRUE), 
+            ue_per_act = sum(ue, na.rm = TRUE))
+```
+
+
+
+## Bring in population
+
+```{r}
+pop_goc <- read_csv(here::here("/home/shares/ohi/OHI_GOC/spatial/population_municipal","population_goc_municipality_inegi_2000_2020.csv"))
+
+## aggregate by region
+agg_pop_rgnid <- pop_goc %>% 
+  pivot_longer(cols = x2000:x2020,
+               names_to = c("year"),
+               values_to = "pop_count"
+  ) %>% 
+  group_by(rgn_id, year, unidad_medida) %>% 
+  summarize(total_rgn_pop = sum(pop_count, na.rm = TRUE))
+```
+
+
+```{r}
+library(zoo)
+
+## in order for it to join with the job data, we need to interpolate and determine the population in years between.
+year_adj_pop_rgnid <- agg_pop_rgnid %>% 
+  separate_wider_delim(year, delim = "x", names = c("delete","ano_censal")) %>% # clean up year
+  select(-delete) %>% 
+  mutate(year_interpolated = as.numeric(ano_censal)) %>% 
+  complete(year_interpolated = 2000:2024) # expand to interpolate
+
+year_adj_pop_rgnid_interpolated <- year_adj_pop_rgnid %>%
+  arrange(rgn_id, year_interpolated) %>%
+  group_by(rgn_id) %>% 
+  mutate(
+    population_interpolated = na.approx(
+      total_rgn_pop,
+      x = year_interpolated,
+      rule = 2,
+      na.rm = FALSE
+    ),
+    is_gapfilled = ifelse(is.na(ano_censal), 1, 0)
+  ) %>%
+  fill(ano_censal, .direction = "downup") %>% 
+  rename(pop_ano_censal_original = ano_censal) %>% # rename so that when it is joined, we know which two censuses are being interpolated from.
+  fill(total_rgn_pop, .direction = "downup") %>% # so we can see what the original population value was
+  fill(unidad_medida, .direction = "downup") %>%
+  select(rgn_id, pop_ano_censal_original, population_original = total_rgn_pop, year_interpolated, population_interpolated, unidad_medida, is_gapfilled) %>% 
+  ungroup()
+
+## note that the interpolated population amount from 2020-2024 is the same for each region.  It does not project the growth before it happens.
+
+## save this
+# write_csv(year_adj_pop_rgnid_interpolated, here::here("/home/shares/ohi/OHI_GOC/spatial/population_municipal","interpolated_population_per_rgn_coastalmunicipios_2000_2020.csv"))
+```
+
+Now for each year, make a column of the population.
+
+```{r}
+join_jobs_pop <- inner_join(total_jobs_per_rgn, year_adj_pop_rgnid_interpolated, by = c("ano_censal" = "year_interpolated", "rgn_id")) %>% 
+  select(rgn_id, ce_ano_censal = ano_censal, total_jobs, total_population_interpolated_for_ce_year = population_interpolated, population_original, pop_ano_censal_original, unidad_medida, total_ue) # reordering and dropping total_rgn_pop because none of the years of the job census align with the population census.  So that column is currently NA. And the gapfill column is all 1.
+```
+
+
+## Jobs scaled to population
+
+```{r}
+jobs_scaled_to_population <- join_jobs_pop %>% 
+  mutate(marine_jobs_per_local_pop = total_jobs/total_population_interpolated_for_ce_year,
+         marine_ue_per_local_pop = total_ue/total_population_interpolated_for_ce_year) %>% 
+  ungroup()
+```
+
+### Plotlys
+
+```{r}
+library(plotly)
+
+## plot marine jobs per local pop
+num_jobs_plotly <- plotly::plot_ly(
+  jobs_scaled_to_population, 
+  x = ~ce_ano_censal, 
+  y = ~marine_jobs_per_local_pop, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "Number of marine-related jobs per region, SCALED to regional population",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "marine_jobs_per_local_pop")
+  ) 
+num_jobs_plotly
+
+## plot marine ue's per local pop
+num_ue_plotly <- plotly::plot_ly(
+  jobs_scaled_to_population, 
+  x = ~ce_ano_censal, 
+  y = ~marine_ue_per_local_pop, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "Number of marine-related Economic Units (UEs) per region, SCALED to regional population",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "marine_ue_per_local_pop")
+  ) 
+num_ue_plotly
+```
+
+## Reference point (average value 2004-2014)
+
+```{r}
+historical_jobs_scaled_to_population <- jobs_scaled_to_population %>% 
+  filter(ce_ano_censal %in% c("2004","2009","2014")) %>% 
+  group_by(rgn_id) %>%  
+  summarize(avg_value_2004_2014 = mean(marine_jobs_per_local_pop))
+```
+
+## Current status
+
+First, join back the reference point, then divide the current value of marine jobs/pop by the historical average from 2004 - 2014 as a reference.
+
+If it is equal to the historical average, or above, the region will receive the current status of 100.  Otherwise, it will reflect the reduction.
+
+```{r}
+ce_jobs_current_status <- jobs_scaled_to_population %>% 
+  select(rgn_id, ce_ano_censal, marine_jobs_per_local_pop) %>% 
+  left_join(historical_jobs_scaled_to_population) %>% 
+  mutate(current_status_raw = marine_jobs_per_local_pop/avg_value_2004_2014 * 100,
+         current_status = ifelse(current_status_raw >= 100, 100, current_status_raw))
+```
+
+### Plotlys 
+
+```{r}
+## plot num jobs current status
+num_jobs_cs_plotly <- plotly::plot_ly(
+  ce_jobs_current_status, 
+  x = ~ce_ano_censal, 
+  y = ~current_status, 
+  color = ~rgn_id, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "Current status of marine-related jobs per region, SCALED to regional population, reference of average value 2004-2014",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "marine_jobs_per_local_pop / avg_value_2004_2014")
+  ) 
+num_jobs_cs_plotly
+```
+
+
