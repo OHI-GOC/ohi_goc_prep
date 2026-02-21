@@ -88,7 +88,7 @@ total_revenue_byrgn <- ce_revenue_totals_adj %>%
 ```
 
 
-### By sector
+### By sector and rgn
 
 ```{r}
 total_revenue_byrgn_and_activity <- ce_revenue_totals_adj %>% 
@@ -138,7 +138,8 @@ First, join back the reference point, then divide the current value of marine jo
 
 If it is equal to the historical average, or above, the region will receive the current status of 100.  Otherwise, it will reflect the reduction.
 
-By region:
+### By region
+
 ```{r}
 ce_rev_current_status <- ce_revenue_adj_perjob %>% 
   select(rgn_id, ano_censal, rev_per_job) %>% 
@@ -148,25 +149,7 @@ ce_rev_current_status <- ce_revenue_adj_perjob %>%
   ungroup()
 ```
 
-By region and sector:
-```{r}
-ce_rev_sector_current_status <- ce_revenue_sector_adj_perjob %>% 
-  select(rgn_id, ano_censal, sector_marino_propuesto, rev_per_job) %>% 
-  left_join(historical_rev_sector_scaled_to_jobs) %>% 
-  mutate(current_status_raw = rev_per_job/avg_value_2004_2014 * 100,
-         current_status = ifelse(current_status_raw >= 100, 100, current_status_raw)) %>% 
-  ungroup()
-
-## now, average into one score per region:
-ce_rev_sector_current_status_final <- ce_rev_sector_current_status %>% 
-  group_by(ano_censal, rgn_id) %>% 
-  summarize(avg_cs = mean(current_status, na.rm = TRUE)) %>% 
-  ungroup
-```
-
-### Plotlys 
-
-#### By region
+#### plot 
 
 ```{r}
 library(plotly)
@@ -195,7 +178,67 @@ rev_cs_plotly
 ```
 
 
-#### By region and sector
+### By sector and rgn
+
+```{r}
+ce_rev_sector_current_status <- ce_revenue_sector_adj_perjob %>% 
+  select(rgn_id, ano_censal, sector_marino_propuesto, rev_per_job) %>% 
+  left_join(historical_rev_sector_scaled_to_jobs) %>% 
+  mutate(current_status_raw = rev_per_job/avg_value_2004_2014 * 100,
+         current_status = ifelse(current_status_raw >= 100, 100, current_status_raw)) %>% 
+  ungroup()
+```
+
+Weighted average across sector:
+```{r}
+## first determine the contribution to total of each sector grouping for 2024:
+prop_contribution <- total_revenue_byrgn_and_activity %>% 
+  filter(ano_censal %in% "2024") %>% 
+  group_by(rgn_id) %>% 
+  mutate(total_rev_rgn = sum(total_rev_adj),
+         total_jobs_rgn = sum(total_jobs),
+         total_ue_rgn = sum(total_ue)) %>% 
+  ungroup() %>% 
+  mutate(prop_rev_sector_rgn = total_rev_adj/total_rev_rgn,
+         prop_job_sector_rgn = total_jobs/total_jobs_rgn,
+         prop_ue_sector_rgn = total_ue/total_ue_rgn) %>% 
+  group_by(rgn_id) %>% 
+  mutate(rev_prop_check = sum(prop_rev_sector_rgn),
+         job_prop_check = sum(prop_job_sector_rgn),
+         ue_prop_check = sum(prop_ue_sector_rgn)) %>% 
+  ungroup()
+  
+
+## now, average into one score per region using the weighted average, weighting by relative 2024 contribution of the sector's revenue to the total revenue for that region (prop_contribution$prop_rev_sector_rgn):
+rev_weights_2024 <- prop_contribution %>% 
+  select(rgn_id, sector_marino_propuesto, prop_rev_sector_rgn)
+
+ce_rev_sector_current_status_weighted <- ce_rev_sector_current_status %>% 
+  left_join(rev_weights_2024, by = c("rgn_id", "sector_marino_propuesto"))
+
+### option 1
+ce_rev_sector_current_status_final <- ce_rev_sector_current_status_weighted %>% 
+  group_by(ano_censal, rgn_id) %>% 
+  summarize(
+    avg_cs = sum(current_status * prop_rev_sector_rgn, na.rm = TRUE) /
+             sum(prop_rev_sector_rgn[!is.na(current_status)]), # NEEDED in this case because not all sectors have a current status to begin with, many are NA.  I do think we need to use a different year for the weights.
+    .groups = "drop"
+  )
+
+### option 2
+ce_rev_sector_current_status_final_2 <- ce_rev_sector_current_status_weighted %>% 
+  group_by(ano_censal, rgn_id) %>% 
+  filter(!is.na(current_status)) %>% 
+  summarize(avg_cs = sum(current_status * prop_rev_sector_rgn, na.rm = TRUE),
+            .groups = "drop") %>% ## doing this there are many weird values, especially because in 2024 there are missing values for certain sectors.  We could instead use a constant proportion based on historical values? Even then, with this denominator it looks like we get really low scores sometimes, that do not make sense.  Look at Region_3 current status after the average, it is so weird.
+  ungroup()
+
+
+ce_rev_sector_current_status_final %>% 
+  summarize(min = min(avg_cs), max = max(avg_cs))
+```
+
+#### plot
 
 ```{r}
 library(plotly)
@@ -203,6 +246,25 @@ library(plotly)
 ## Plot revenue current status by region
 rev_cs_sector_plotly <- plotly::plot_ly(
   ce_rev_sector_current_status_final,
+  x = ~ano_censal,
+  y = ~avg_cs,
+  color = ~factor(rgn_id),
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Current Status of Marine Revenue per Job by Region and Averaged Across Sector (Constant 2024 Pesos)",
+    xaxis = list(title = "Census Year"),
+    yaxis = list(
+      title = "Revenue per Job / 2004-2014 Average (%)",
+      range = c(0, 110)
+    ),
+    legend = list(title = list(text = "Region"))
+  )
+rev_cs_sector_plotly
+
+rev_cs_sector_plotly <- plotly::plot_ly(
+  ce_rev_sector_current_status_final_2,
   x = ~ano_censal,
   y = ~avg_cs,
   color = ~factor(rgn_id),
@@ -228,15 +290,14 @@ rev_cs_sector_plotly
 library(plotly)
 library(dplyr)
 
-# Make sure year is numeric for proper ordering
 ce_rev_sector_current_status <- ce_rev_sector_current_status %>%
   mutate(ano_censal = as.numeric(ano_censal))
 
-# Split data by region
+# split data by region
 region_list <- split(ce_rev_sector_current_status, 
                      ce_rev_sector_current_status$rgn_id)
 
-# Create one plot per region
+# make one plot per region
 plots <- lapply(names(region_list), function(rgn) {
   
   plot_ly(
@@ -254,7 +315,7 @@ plots <- lapply(names(region_list), function(rgn) {
     )
 })
 
-# Combine into subplot
+# make into one subplot
 rev_sector_cs_plotly <- subplot(
   plots,
   nrows = length(plots),
