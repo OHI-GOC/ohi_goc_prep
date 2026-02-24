@@ -22,7 +22,22 @@ editor_options:
 
 # LIV: Quality of Jobs from the Censos Economicos (CE)
 
+```{r}
+## for plotting:
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
 
+region_levels <- paste0("Region_", 1:9)
+```
 
 ## Save subset of job *quality* metrics
 
@@ -103,6 +118,68 @@ total_quality_byrgn_and_activity <- ce_quality_totals_adj %>%
             total_ue = sum(ue, na.rm = TRUE))
 ```
 
+See how much is suppressed:
+```{r}
+zeros_by_sector <- total_quality_byrgn_and_activity %>%
+  group_by(sector_marino_propuesto) %>%
+  summarize(
+    n_zero_total_qual_adj = sum(total_qual_adj == 0, na.rm = TRUE),
+    n_zero_total_jobs     = sum(total_jobs == 0, na.rm = TRUE),
+    n_zero_total_ue       = sum(total_ue == 0, na.rm = TRUE),
+    .groups = "drop"
+  ) # how many do not have data for that region-sector-year combination?
+
+total_quality_byrgn_and_activity <- total_quality_byrgn_and_activity %>%
+  mutate(suppressed = total_jobs == 0 | total_qual_adj == 0) # if the quality or number of jobs metric is zero.
+
+# total_rows <- nrow(total_quality_byrgn_and_activity)
+# n_suppressed <- sum(total_quality_byrgn_and_activity$suppressed, na.rm = TRUE)
+# pct_suppressed <- 100 * n_suppressed / total_rows
+# 
+# cat("Total rows:", total_rows, "\n")
+# cat("Suppressed rows:", n_suppressed, "\n")
+# cat("Percent suppressed:", round(pct_suppressed, 1), "%\n")
+
+suppressed_by_rgn_sector <- total_quality_byrgn_and_activity %>%
+  group_by(rgn_id, sector_marino_propuesto) %>%
+  summarize(
+    n_rows = n(),
+    n_suppressed = sum(suppressed, na.rm = TRUE),
+    pct_suppressed = 100 * n_suppressed / n_rows,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(pct_suppressed))
+
+suppressed_by_rgn_sector_year <- total_quality_byrgn_and_activity %>%
+  select(ano_censal, rgn_id, sector_marino_propuesto, suppressed) %>%
+  arrange(rgn_id, sector_marino_propuesto, ano_censal)
+
+
+### heatmap
+
+library(ggplot2)
+library(dplyr)
+
+suppressed_by_rgn_sector_year <- total_quality_byrgn_and_activity %>%
+  select(ano_censal, rgn_id, sector_marino_propuesto, suppressed) %>%
+  arrange(rgn_id, sector_marino_propuesto, ano_censal)
+
+ggplot(suppressed_by_rgn_sector_year, 
+       aes(x = factor(ano_censal), 
+           y = reorder(interaction(rgn_id, sector_marino_propuesto), rgn_id), 
+           fill = suppressed)) +
+  geom_tile(color = "grey90", linewidth = 0.3) +
+  scale_fill_manual(values = c("FALSE" = "#2E8B57", "TRUE" = "#DC143C"),
+                    name = "Suppressed") +
+  labs(title = "Suppression Heatmap: All Region-Sector-Year Combinations",
+       x = "Year", y = "Region × Sector") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 7))
+
+
+```
+
+
 
 ## Scale to the number of jobs
 
@@ -167,11 +244,12 @@ qual_cs_plotly <- plot_ly(
   x = ~ano_censal,
   y = ~current_status,
   color = ~factor(rgn_id),
+  colors = rgn_colors,
   type = "scatter",
   mode = "lines+markers"
 ) %>%
   layout(
-    title = "Current Status of Marine Job Quality per Region",
+    title = "Current Status of Marine Job Quality per Region (Option 1)",
     xaxis = list(title = "Census Year"),
     yaxis = list(
       title = "Quality per Job / 2004-2014 Average (%)",
@@ -195,34 +273,77 @@ ce_qual_sector_current_status <- ce_quality_sector_adj_perjob %>%
   ungroup()
 ```
 
-
-Weighted average across sector (*not done yet*):
+Simple average across sector:
 ```{r}
 ## now, average into one score per region:
-ce_qual_sector_current_status_final <- ce_qual_sector_current_status %>%
+ce_qual_sector_current_status_final_simple <- ce_qual_sector_current_status %>%
   group_by(ano_censal, rgn_id) %>%
   summarize(avg_cs = mean(current_status, na.rm = TRUE)) %>%
   ungroup
 ```
 
+
+Weighted average across sector (*not done yet*):
+```{r}
+## first determine the contribution to total of each sector grouping for 2024:
+prop_contribution_qual <- total_quality_byrgn_and_activity %>% 
+  filter(ano_censal %in% "2024") %>% 
+  group_by(rgn_id) %>% 
+  mutate(total_qual_rgn = sum(total_qual_adj),
+         total_jobs_rgn = sum(total_jobs),
+         total_ue_rgn = sum(total_ue)) %>% 
+  ungroup() %>% 
+  mutate(prop_qual_sector_rgn = total_qual_adj/total_qual_rgn,
+         prop_job_sector_rgn = total_jobs/total_jobs_rgn,
+         prop_ue_sector_rgn = total_ue/total_ue_rgn) %>% 
+  group_by(rgn_id) %>% 
+  mutate(qual_prop_check = sum(prop_qual_sector_rgn),
+         job_prop_check = sum(prop_job_sector_rgn),
+         ue_prop_check = sum(prop_ue_sector_rgn)) %>% 
+  ungroup()
+  
+
+## now, average into one score per region using the weighted average, weighting by relative 2024 contribution of the sector's revenue to the total revenue for that region (prop_contribution$prop_rev_sector_rgn):
+qual_weights_2024 <- prop_contribution_qual %>% 
+  select(rgn_id, sector_marino_propuesto, prop_ue_sector_rgn)
+
+ce_qual_sector_current_status_weighted <- ce_qual_sector_current_status %>% 
+  left_join(qual_weights_2024, by = c("rgn_id", "sector_marino_propuesto"))
+
+### now do the weighted average, renormalizing for supressions
+ce_qual_sector_current_status_final_weighted <- ce_qual_sector_current_status_weighted %>% 
+  group_by(ano_censal, rgn_id) %>% 
+  summarize(
+    avg_cs = sum(current_status * prop_ue_sector_rgn, na.rm = TRUE) /
+             sum(prop_ue_sector_rgn[!is.na(current_status)]), # NEEDED in this case because not all sectors have a current status to begin with, many are NA.  I do think we need to use a different year for the weights.
+    .groups = "drop"
+  )
+
+## note that Region_2 is NA previous to 2019 because from 2004 - 2014 the energy sector existed in that region, before the disaggregation of San Quintin. So we cannot apply the proportion of 2024 to the years previous to 2019 because, well, it did not exist.  In 2024, 0% of the total UEs are in the Energy and Infrastructure sector. So even though there are some in previous years, the proportion for the weighting does not exist.
+
+## the way to fix this would be to determine the proportion of each sector for every year, not just apply 2024 to all years.  I did not do that inditially because I wanted consistency across years just to explore.
+```
+
 #### plot
 
+Simple average:
 ```{r}
 library(plotly)
 
-ce_qual_sector_current_status_final <- ce_qual_sector_current_status_final %>%
+ce_qual_sector_current_status_final_simple <- ce_qual_sector_current_status_final_simple %>%
   mutate(ano_censal = as.numeric(ano_censal))
 
 qual_cs_sector_plotly <- plot_ly(
-  ce_qual_sector_current_status_final,
+  ce_qual_sector_current_status_final_simple,
   x = ~ano_censal,
   y = ~avg_cs,
   color = ~factor(rgn_id),
+  colors = rgn_colors,
   type = "scatter",
   mode = "lines+markers"
 ) %>%
   layout(
-    title = "Current Status of Marine Job Quality by Region (Averaged Across Sectors)",
+    title = "Current Status of Marine Job Quality by Region (Simple Average Across Sectors)",
     xaxis = list(title = "Census Year"),
     yaxis = list(
       title = "Average Sector Quality / 2004-2014 Average (%)",
@@ -235,6 +356,35 @@ qual_cs_sector_plotly
 
 ```
 
+Weighted average:
+```{r}
+library(plotly)
+
+ce_qual_sector_current_status_final_weighted <- ce_qual_sector_current_status_final_weighted %>%
+  mutate(ano_censal = as.numeric(ano_censal))
+
+qual_cs_sector_weighted_plotly <- plot_ly(
+  ce_qual_sector_current_status_final_weighted,
+  x = ~ano_censal,
+  y = ~avg_cs,
+  color = ~factor(rgn_id),
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Current Status of Marine Job Quality by Region (Option 2, Weighted Average of UEs Across Sectors)",
+    xaxis = list(title = "Census Year"),
+    yaxis = list(
+      title = "Average Sector Quality / 2004-2014 Average (%)",
+      range = c(0, 110)
+    ),
+    legend = list(title = list(text = "Region"))
+  )
+
+qual_cs_sector_weighted_plotly
+```
+
 
 # Exploration of other 
 
@@ -243,11 +393,10 @@ What about informal workers? Other ways to indicate job quality? Wage
 | Dimension     | Variable                | Interpretation            |
 | ------------- | ----------------------- | ------------------------- |
 | Earnings      | J000A / H010A           | Pay level                 |
-| Benefits      | (J300A+J400A) / H010A   | Social protection         |
+| Benefits      | (J300A+J400A) / H000A   | Social benefits         |
 | Formalization | H010A / H000A           | % paid workers            |
 | Informality   | H020A / H000A (inverse) | Family/unpaid labor       |
 | Reassurance   | J600A / H000A           | Compensation or severance pay |
-| Vulnerability | (I100A + I200A)/Total   | Outsourcing/gig intensity |
 
 *J000A*
 
