@@ -57,11 +57,10 @@ World Bank constant price methodology:<https://datahelpdesk.worldbank.org/knowle
 Office for National Statistics:<https://www.ons.gov.uk/economy/inflationandpriceindices/methodologies/deflatorsandhowweusethemineconomicestimates>
 
 ```{r}
-ce_cleaned_totals_per_yr_municipio_activity <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_cleaned_totals_per_yr_municipio_activity.csv")) %>% 
-  filter(!(municipio == "ENSENADA" & ano_censal == "2024"))
+ce_cleaned_totals_per_yr_municipio_activity <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_cleaned_totals_per_yr_municipio_activity.csv"))
 
 ce_revenue_totals <- ce_cleaned_totals_per_yr_municipio_activity %>% 
-  select(-c("j400a","j300a")) # leave in number of jobs (h000a) so that we can scale to the number of jobs.
+  dplyr::select(-c("j400a","j300a")) # leave in number of jobs (h000a) so that we can scale to the number of jobs.
 ```
 
 ## Adjust for inflation
@@ -89,118 +88,127 @@ ce_revenue_totals_adj <- ce_revenue_totals %>%
       to_date = 2024
       )
   ) %>% 
-  select(ano_censal, rgn_id, estado, e03, municipio, e04, codigo, sector_marino_propuesto, notas_breve, m000a, m000a_pesos, revenue_real_pesos_2024, revenue_real_milpesos_2024, h000a, ue)
+  dplyr::select(ano_censal, rgn_id, estado, e03, municipio, e04, codigo, general_sector, specific_sector, m000a, m000a_pesos, revenue_real_pesos_2024, revenue_real_milpesos_2024, h000a, ue)
 ```
 
-## Aggregate by region and activity
+Aggregating instead by region and general sector:
+```{r}
+total_rev_per_rgn_and_activity <- ce_revenue_totals_adj %>% 
+  group_by(ano_censal, rgn_id, general_sector, specific_sector) %>% # not using codigo, notas_breve, because those are too specific
+  summarize(rev_real2024_per_act = sum(revenue_real_pesos_2024, na.rm = TRUE),
+            jobs_per_act = sum(h000a, na.rm = TRUE), 
+            ue_per_act = sum(ue, na.rm = TRUE))
+```
 
-### By region
+
+### Add in adjustment for municipalities that cover both coastal and pacific sides
 
 ```{r}
-total_revenue_byrgn <- ce_revenue_totals_adj %>% 
+coastal_adjustment_multipliers <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le","coastal_adjustment_multiplier_2020.csv"))
+```
+
+```{r}
+coastal_total_rev_per_rgn_and_activity <- total_rev_per_rgn_and_activity %>% 
+  full_join(coastal_population_multipliers, by = "rgn_id") %>% 
+  mutate(
+    first_adj_coastal_rev_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), rev_real2024_per_act * coastal_pop_adjustment, rev_real2024_per_act),
+         coastal_rev_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","ennvironmental_research_consulting"), rev_real2024_per_act * coastal_pop_adjustment, first_adj_coastal_rev_per_act),
+    
+         first_adj_coastal_ue_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), ue_per_act * coastal_pop_adjustment, ue_per_act),
+         coastal_ue_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","ennvironmental_research_consulting"), ue_per_act * coastal_pop_adjustment, first_adj_coastal_ue_per_act)
+    ) %>%  # if in any of these sectors, adjust for 50km inland
+  dplyr::select(-c(jobs_per_act, rev_real2024_per_act, ue_per_act, first_adj_coastal_rev_per_act, first_adj_coastal_ue_per_act))
+```
+
+## Aggregate real 2024 revenue by region
+
+Aggregating the revenue for each region:
+```{r}
+total_rev_per_rgn <- coastal_total_rev_per_rgn_and_activity %>% 
   group_by(ano_censal, rgn_id) %>% 
-  summarize(total_rev_adj = sum(revenue_real_pesos_2024, na.rm = TRUE),
-            total_jobs = sum(h000a, na.rm = TRUE),
-            total_ue = sum(ue, na.rm = TRUE))
+  summarize(total_rev = sum(coastal_rev_per_act, na.rm = TRUE),
+            total_ue = sum(coastal_ue_per_act, na.rm = TRUE)) %>% 
+  mutate(total_rev = round(total_rev),
+         total_ue = round(total_ue))
 ```
 
 
-### By sector and rgn
+The below code is not needed, because it was used in exploration.  After this commit I will delete it and clean up this script.
 
-```{r}
-total_revenue_byrgn_and_activity <- ce_revenue_totals_adj %>% 
-  group_by(ano_censal, rgn_id, sector_marino_propuesto) %>% # not using codigo, notas_breve, because those are too specific
-  summarize(total_rev_adj = sum(revenue_real_pesos_2024, na.rm = TRUE),
-            total_jobs = sum(h000a, na.rm = TRUE),
-            total_ue = sum(ue, na.rm = TRUE))
-```
+<!-- ### By sector and rgn -->
 
-See how much is suppressed:
-```{r}
-zeros_by_sector_rev <- total_revenue_byrgn_and_activity %>%
-  group_by(sector_marino_propuesto) %>%
-  summarize(
-    n_zero_total_rev_adj = sum(total_rev_adj == 0, na.rm = TRUE),
-    n_zero_total_jobs    = sum(total_jobs == 0, na.rm = TRUE),
-    n_zero_total_ue      = sum(total_ue == 0, na.rm = TRUE),
-    .groups = "drop"
-  )
+<!-- ```{r} -->
+<!-- total_revenue_byrgn_and_activity <- ce_revenue_totals_adj %>%  -->
+<!--   group_by(ano_censal, rgn_id, sector_marino_propuesto) %>% # not using codigo, notas_breve, because those are too specific -->
+<!--   summarize(total_rev_adj = sum(revenue_real_pesos_2024, na.rm = TRUE), -->
+<!--             total_jobs = sum(h000a, na.rm = TRUE), -->
+<!--             total_ue = sum(ue, na.rm = TRUE)) -->
+<!-- ``` -->
 
-total_revenue_byrgn_and_activity <- total_revenue_byrgn_and_activity %>%
-  mutate(suppressed = total_jobs == 0 | total_rev_adj == 0)  # revenue version
+<!-- See how much is suppressed: -->
+<!-- ```{r} -->
+<!-- zeros_by_sector_rev <- total_revenue_byrgn_and_activity %>% -->
+<!--   group_by(sector_marino_propuesto) %>% -->
+<!--   summarize( -->
+<!--     n_zero_total_rev_adj = sum(total_rev_adj == 0, na.rm = TRUE), -->
+<!--     n_zero_total_jobs    = sum(total_jobs == 0, na.rm = TRUE), -->
+<!--     n_zero_total_ue      = sum(total_ue == 0, na.rm = TRUE), -->
+<!--     .groups = "drop" -->
+<!--   ) -->
 
-# total_rows <- nrow(total_revenue_byrgn_and_activity)
-# n_suppressed <- sum(total_revenue_byrgn_and_activity$suppressed, na.rm = TRUE)
-# pct_suppressed <- 100 * n_suppressed / total_rows
-# cat("Total rows:", total_rows, "\\n")
-# cat("Suppressed rows:", n_suppressed, "\\n")
-# cat("Percent suppressed:", round(pct_suppressed, 1), "%\\n")
+<!-- total_revenue_byrgn_and_activity <- total_revenue_byrgn_and_activity %>% -->
+<!--   mutate(suppressed = total_jobs == 0 | total_rev_adj == 0)  # revenue version -->
 
-suppressed_by_rgn_sector_rev <- total_revenue_byrgn_and_activity %>%
-  group_by(rgn_id, sector_marino_propuesto) %>%
-  summarize(
-    n_rows = n(),
-    n_suppressed = sum(suppressed, na.rm = TRUE),
-    pct_suppressed = 100 * n_suppressed / n_rows,
-    .groups = "drop"
-  ) %>%
-  arrange(desc(pct_suppressed))
+<!-- # total_rows <- nrow(total_revenue_byrgn_and_activity) -->
+<!-- # n_suppressed <- sum(total_revenue_byrgn_and_activity$suppressed, na.rm = TRUE) -->
+<!-- # pct_suppressed <- 100 * n_suppressed / total_rows -->
+<!-- # cat("Total rows:", total_rows, "\\n") -->
+<!-- # cat("Suppressed rows:", n_suppressed, "\\n") -->
+<!-- # cat("Percent suppressed:", round(pct_suppressed, 1), "%\\n") -->
 
-
-library(ggplot2)
-library(dplyr)
-
-suppressed_by_rgn_sector_year_rev <- total_revenue_byrgn_and_activity %>%
-  select(ano_censal, rgn_id, sector_marino_propuesto, suppressed) %>%
-  arrange(rgn_id, sector_marino_propuesto, ano_censal)
-
-ggplot(suppressed_by_rgn_sector_year_rev, 
-       aes(x = factor(ano_censal), 
-           y = reorder(interaction(rgn_id, sector_marino_propuesto), rgn_id), 
-           fill = suppressed)) +
-  geom_tile(color = "grey90", linewidth = 0.3) +
-  scale_fill_manual(values = c("FALSE" = "#2E8B57", "TRUE" = "#DC143C"),
-                    name = "Suppressed") +
-  labs(title = "Revenue Suppression Heatmap: All Region-Sector-Year Combinations",
-       x = "Year", y = "Region × Sector") +
-  theme_minimal() +
-  theme(axis.text.y = element_text(size = 7))
-
-```
+<!-- suppressed_by_rgn_sector_rev <- total_revenue_byrgn_and_activity %>% -->
+<!--   group_by(rgn_id, sector_marino_propuesto) %>% -->
+<!--   summarize( -->
+<!--     n_rows = n(), -->
+<!--     n_suppressed = sum(suppressed, na.rm = TRUE), -->
+<!--     pct_suppressed = 100 * n_suppressed / n_rows, -->
+<!--     .groups = "drop" -->
+<!--   ) %>% -->
+<!--   arrange(desc(pct_suppressed)) -->
 
 
-## Scale to the number of jobs
+<!-- library(ggplot2) -->
+<!-- library(dplyr) -->
 
-By region:
-```{r}
-ce_revenue_adj_perjob <- total_revenue_byrgn %>% 
-  mutate(rev_per_job = total_rev_adj/total_jobs)
-```
+<!-- suppressed_by_rgn_sector_year_rev <- total_revenue_byrgn_and_activity %>% -->
+<!--   select(ano_censal, rgn_id, sector_marino_propuesto, suppressed) %>% -->
+<!--   arrange(rgn_id, sector_marino_propuesto, ano_censal) -->
 
-By region and sector:
-```{r}
-ce_revenue_sector_adj_perjob <- total_revenue_byrgn_and_activity %>% 
-  mutate(rev_per_job = total_rev_adj/total_jobs)
-```
+<!-- ggplot(suppressed_by_rgn_sector_year_rev,  -->
+<!--        aes(x = factor(ano_censal),  -->
+<!--            y = reorder(interaction(rgn_id, sector_marino_propuesto), rgn_id),  -->
+<!--            fill = suppressed)) + -->
+<!--   geom_tile(color = "grey90", linewidth = 0.3) + -->
+<!--   scale_fill_manual(values = c("FALSE" = "#2E8B57", "TRUE" = "#DC143C"), -->
+<!--                     name = "Suppressed") + -->
+<!--   labs(title = "Revenue Suppression Heatmap: All Region-Sector-Year Combinations", -->
+<!--        x = "Year", y = "Region × Sector") + -->
+<!--   theme_minimal() + -->
+<!--   theme(axis.text.y = element_text(size = 7)) -->
+
+<!-- ``` -->
 
 
 ## Reference point (average value 2004-2014)
 
 By region:
 ```{r}
-historical_rev_scaled_to_jobs <- ce_revenue_adj_perjob %>% 
+historical_rev_ref <- total_rev_per_rgn %>% 
   filter(ano_censal %in% c("2004","2009","2014")) %>% 
   group_by(rgn_id) %>%  
-  summarize(avg_value_2004_2014 = mean(rev_per_job))
+  summarize(avg_value_2004_2014 = mean(total_rev))
 ```
 
-By region and sector:
-```{r}
-historical_rev_sector_scaled_to_jobs <- ce_revenue_sector_adj_perjob %>% 
-  filter(ano_censal %in% c("2004","2009","2014")) %>% 
-  group_by(rgn_id, sector_marino_propuesto) %>%  
-  summarize(avg_value_2004_2014 = mean(rev_per_job))
-```
 
 ## Current status
 
@@ -211,12 +219,14 @@ If it is equal to the historical average, or above, the region will receive the 
 ### By region
 
 ```{r}
-ce_rev_current_status <- ce_revenue_adj_perjob %>% 
-  select(rgn_id, ano_censal, rev_per_job) %>% 
-  left_join(historical_rev_scaled_to_jobs) %>% 
-  mutate(current_status_raw = rev_per_job/avg_value_2004_2014 * 100,
+ce_rev_current_status <- total_rev_per_rgn %>% 
+  dplyr::select(rgn_id, ano_censal, total_rev) %>% 
+  left_join(historical_rev_ref) %>% 
+  mutate(current_status_raw = total_rev/avg_value_2004_2014 * 100,
          current_status = ifelse(current_status_raw >= 100, 100, current_status_raw)) %>% 
   ungroup()
+
+# write_csv(ce_rev_current_status, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/eco","ce_rev_current_status"))
 ```
 
 #### plot 
@@ -224,7 +234,37 @@ ce_rev_current_status <- ce_revenue_adj_perjob %>%
 ```{r}
 library(plotly)
 
-## Plot revenue current status by region
+## plot num jobs current status -- NOT CAPPED
+rev_cs_plotly_noCAP <- plotly::plot_ly(
+  ce_rev_current_status,
+  x = ~ano_censal,
+  y = ~current_status_raw,
+  color = ~factor(rgn_id),
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "RAW CURRENT STATUS of marine-related revenue, reference of average value 2004-2014 (Constant 2024 Pesos)",
+    xaxis = list(title = "Census Year"),
+    yaxis = list(
+      title = "Revenue / 2004-2014 Average Revenue (%)"
+    ),
+    legend = list(title = list(text = "Region"))
+  ) %>%
+  add_lines(
+    x = range(ce_rev_current_status$ano_censal), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+rev_cs_plotly_noCAP
+```
+
+
+```{r}
+## revenue current status by region
 rev_cs_plotly <- plotly::plot_ly(
   ce_rev_current_status,
   x = ~ano_censal,
@@ -235,166 +275,167 @@ rev_cs_plotly <- plotly::plot_ly(
   mode = "lines+markers"
 ) %>%
   layout(
-    title = "Current Status of Marine Revenue per Job (Option 1, Constant 2024 Pesos)",
+    title = "CURRENT STATUS of marine-related revenue, reference of average value 2004-2014 (Constant 2024 Pesos)",
     xaxis = list(title = "Census Year"),
     yaxis = list(
-      title = "Revenue per Job / 2004-2014 Average (%)",
+      title = "Revenue / 2004-2014 Average Revenue (%)",
       range = c(0, 110)
     ),
     legend = list(title = list(text = "Region"))
   )
 
 rev_cs_plotly
-
 ```
 
 
-### By sector and rgn
+Same with all of this code, since we will not be calculating CS by sector:
 
-```{r}
-ce_rev_sector_current_status <- ce_revenue_sector_adj_perjob %>% 
-  select(rgn_id, ano_censal, sector_marino_propuesto, rev_per_job) %>% 
-  left_join(historical_rev_sector_scaled_to_jobs) %>% 
-  mutate(current_status_raw = rev_per_job/avg_value_2004_2014 * 100,
-         current_status = ifelse(current_status_raw >= 100, 100, current_status_raw)) %>% 
-  ungroup()
-```
+<!-- ### By sector and rgn -->
 
-Weighted average across sector:
-```{r}
-## first determine the contribution to total of each sector grouping for 2024:
-prop_contribution <- total_revenue_byrgn_and_activity %>% 
-  filter(ano_censal %in% "2024") %>% 
-  group_by(rgn_id) %>% 
-  mutate(total_rev_rgn = sum(total_rev_adj),
-         total_jobs_rgn = sum(total_jobs),
-         total_ue_rgn = sum(total_ue)) %>% 
-  ungroup() %>% 
-  mutate(prop_rev_sector_rgn = total_rev_adj/total_rev_rgn,
-         prop_job_sector_rgn = total_jobs/total_jobs_rgn,
-         prop_ue_sector_rgn = total_ue/total_ue_rgn) %>% 
-  group_by(rgn_id) %>% 
-  mutate(rev_prop_check = sum(prop_rev_sector_rgn),
-         job_prop_check = sum(prop_job_sector_rgn),
-         ue_prop_check = sum(prop_ue_sector_rgn)) %>% 
-  ungroup()
-  
+<!-- ```{r} -->
+<!-- ce_rev_sector_current_status <- ce_revenue_sector_adj_perjob %>%  -->
+<!--   select(rgn_id, ano_censal, sector_marino_propuesto, rev_per_job) %>%  -->
+<!--   left_join(historical_rev_sector_scaled_to_jobs) %>%  -->
+<!--   mutate(current_status_raw = rev_per_job/avg_value_2004_2014 * 100, -->
+<!--          current_status = ifelse(current_status_raw >= 100, 100, current_status_raw)) %>%  -->
+<!--   ungroup() -->
+<!-- ``` -->
 
-## now, average into one score per region using the weighted average, weighting by relative 2024 contribution of the sector's revenue to the total revenue for that region (prop_contribution$prop_rev_sector_rgn):
-rev_weights_2024 <- prop_contribution %>% 
-  select(rgn_id, sector_marino_propuesto, prop_rev_sector_rgn)
-
-ce_rev_sector_current_status_weighted <- ce_rev_sector_current_status %>% 
-  left_join(rev_weights_2024, by = c("rgn_id", "sector_marino_propuesto"))
-
-### option 1
-ce_rev_sector_current_status_final_weighted <- ce_rev_sector_current_status_weighted %>% 
-  group_by(ano_censal, rgn_id) %>% 
-  summarize(
-    avg_cs = sum(current_status * prop_rev_sector_rgn, na.rm = TRUE) /
-             sum(prop_rev_sector_rgn[!is.na(current_status)]), # NEEDED in this case because not all sectors have a current status to begin with, many are NA.  I do think we need to use a different year for the weights.
-    .groups = "drop"
-  )
-
-### option 2
-# ce_rev_sector_current_status_final_2 <- ce_rev_sector_current_status_weighted %>% 
-#   group_by(ano_censal, rgn_id) %>% 
-#   filter(!is.na(current_status)) %>% 
-#   summarize(avg_cs = sum(current_status * prop_rev_sector_rgn, na.rm = TRUE),
-#             .groups = "drop") %>% ## doing this there are many weird values, especially because in 2024 there are missing values for certain sectors.  We could instead use a constant proportion based on historical values? Even then, with this denominator it looks like we get really low scores sometimes, that do not make sense.  Look at Region_3 current status after the average, it is so weird.
-#   ungroup()
+<!-- Weighted average across sector: -->
+<!-- ```{r} -->
+<!-- ## first determine the contribution to total of each sector grouping for 2024: -->
+<!-- prop_contribution <- total_revenue_byrgn_and_activity %>%  -->
+<!--   filter(ano_censal %in% "2024") %>%  -->
+<!--   group_by(rgn_id) %>%  -->
+<!--   mutate(total_rev_rgn = sum(total_rev_adj), -->
+<!--          total_jobs_rgn = sum(total_jobs), -->
+<!--          total_ue_rgn = sum(total_ue)) %>%  -->
+<!--   ungroup() %>%  -->
+<!--   mutate(prop_rev_sector_rgn = total_rev_adj/total_rev_rgn, -->
+<!--          prop_job_sector_rgn = total_jobs/total_jobs_rgn, -->
+<!--          prop_ue_sector_rgn = total_ue/total_ue_rgn) %>%  -->
+<!--   group_by(rgn_id) %>%  -->
+<!--   mutate(rev_prop_check = sum(prop_rev_sector_rgn), -->
+<!--          job_prop_check = sum(prop_job_sector_rgn), -->
+<!--          ue_prop_check = sum(prop_ue_sector_rgn)) %>%  -->
+<!--   ungroup() -->
 
 
-# ce_rev_sector_current_status_final %>%
-# summarize(min = min(avg_cs), max = max(avg_cs))
-```
+<!-- ## now, average into one score per region using the weighted average, weighting by relative 2024 contribution of the sector's revenue to the total revenue for that region (prop_contribution$prop_rev_sector_rgn): -->
+<!-- rev_weights_2024 <- prop_contribution %>%  -->
+<!--   select(rgn_id, sector_marino_propuesto, prop_rev_sector_rgn) -->
 
-#### plot
+<!-- ce_rev_sector_current_status_weighted <- ce_rev_sector_current_status %>%  -->
+<!--   left_join(rev_weights_2024, by = c("rgn_id", "sector_marino_propuesto")) -->
 
-```{r}
-library(plotly)
+<!-- ### option 1 -->
+<!-- ce_rev_sector_current_status_final_weighted <- ce_rev_sector_current_status_weighted %>%  -->
+<!--   group_by(ano_censal, rgn_id) %>%  -->
+<!--   summarize( -->
+<!--     avg_cs = sum(current_status * prop_rev_sector_rgn, na.rm = TRUE) / -->
+<!--              sum(prop_rev_sector_rgn[!is.na(current_status)]), # NEEDED in this case because not all sectors have a current status to begin with, many are NA.  I do think we need to use a different year for the weights. -->
+<!--     .groups = "drop" -->
+<!--   ) -->
 
-## plot revenue current status by region
-rev_cs_sector_plotly <- plotly::plot_ly(
-  ce_rev_sector_current_status_final_weighted,
-  x = ~ano_censal,
-  y = ~avg_cs,
-  color = ~factor(rgn_id),
-  colors = rgn_colors,
-  type = "scatter",
-  mode = "lines+markers"
-) %>%
-  layout(
-    title = "Current Status of Marine Revenue per Job (Option 2, Weighted by % Contribution to Total Revenue Across Sector (Constant 2024 Pesos)",
-    xaxis = list(title = "Census Year"),
-    yaxis = list(
-      title = "Revenue per Job / 2004-2014 Average (%)",
-      range = c(0, 110)
-    ),
-    legend = list(title = list(text = "Region"))
-  )
-rev_cs_sector_plotly
-
-# rev_cs_sector_plotly <- plotly::plot_ly(
-#   ce_rev_sector_current_status_final_2,
-#   x = ~ano_censal,
-#   y = ~avg_cs,
-#   color = ~factor(rgn_id),
-#   type = "scatter",
-#   mode = "lines+markers"
-# ) %>%
-#   layout(
-#     title = "Current Status of Marine Revenue per Job by Region and Averaged Across Sector (Constant 2024 Pesos)",
-#     xaxis = list(title = "Census Year"),
-#     yaxis = list(
-#       title = "Revenue per Job / 2004-2014 Average (%)",
-#       range = c(0, 110)
-#     ),
-#     legend = list(title = list(text = "Region"))
-#   )
-# 
-# rev_cs_sector_plotly
-```
+<!-- ### option 2 -->
+<!-- # ce_rev_sector_current_status_final_2 <- ce_rev_sector_current_status_weighted %>%  -->
+<!-- #   group_by(ano_censal, rgn_id) %>%  -->
+<!-- #   filter(!is.na(current_status)) %>%  -->
+<!-- #   summarize(avg_cs = sum(current_status * prop_rev_sector_rgn, na.rm = TRUE), -->
+<!-- #             .groups = "drop") %>% ## doing this there are many weird values, especially because in 2024 there are missing values for certain sectors.  We could instead use a constant proportion based on historical values? Even then, with this denominator it looks like we get really low scores sometimes, that do not make sense.  Look at Region_3 current status after the average, it is so weird. -->
+<!-- #   ungroup() -->
 
 
-```{r}
-##### for FACETED, before avg across sectors:
-library(plotly)
-library(dplyr)
+<!-- # ce_rev_sector_current_status_final %>% -->
+<!-- # summarize(min = min(avg_cs), max = max(avg_cs)) -->
+<!-- ``` -->
 
-ce_rev_sector_current_status <- ce_rev_sector_current_status %>%
-  mutate(ano_censal = as.numeric(ano_censal))
+<!-- #### plot -->
 
-# split data by region
-region_list <- split(ce_rev_sector_current_status, 
-                     ce_rev_sector_current_status$rgn_id)
+<!-- ```{r} -->
+<!-- library(plotly) -->
 
-# make one plot per region
-plots <- lapply(names(region_list), function(rgn) {
-  
-  plot_ly(
-    region_list[[rgn]],
-    x = ~ano_censal,
-    y = ~current_status,
-    color = ~sector_marino_propuesto,
-    type = "scatter",
-    mode = "lines+markers"
-  ) %>%
-    layout(
-      title = paste("Region", rgn),
-      xaxis = list(title = "Census Year"),
-      yaxis = list(range = c(0, 110))
-    )
-})
+<!-- ## plot revenue current status by region -->
+<!-- rev_cs_sector_plotly <- plotly::plot_ly( -->
+<!--   ce_rev_sector_current_status_final_weighted, -->
+<!--   x = ~ano_censal, -->
+<!--   y = ~avg_cs, -->
+<!--   color = ~factor(rgn_id), -->
+<!--   colors = rgn_colors, -->
+<!--   type = "scatter", -->
+<!--   mode = "lines+markers" -->
+<!-- ) %>% -->
+<!--   layout( -->
+<!--     title = "Current Status of Marine Revenue per Job (Option 2, Weighted by % Contribution to Total Revenue Across Sector (Constant 2024 Pesos)", -->
+<!--     xaxis = list(title = "Census Year"), -->
+<!--     yaxis = list( -->
+<!--       title = "Revenue per Job / 2004-2014 Average (%)", -->
+<!--       range = c(0, 110) -->
+<!--     ), -->
+<!--     legend = list(title = list(text = "Region")) -->
+<!--   ) -->
+<!-- rev_cs_sector_plotly -->
 
-# make into one subplot
-rev_sector_cs_plotly <- subplot(
-  plots,
-  nrows = length(plots),
-  shareX = TRUE,
-  titleY = TRUE
-)
+<!-- # rev_cs_sector_plotly <- plotly::plot_ly( -->
+<!-- #   ce_rev_sector_current_status_final_2, -->
+<!-- #   x = ~ano_censal, -->
+<!-- #   y = ~avg_cs, -->
+<!-- #   color = ~factor(rgn_id), -->
+<!-- #   type = "scatter", -->
+<!-- #   mode = "lines+markers" -->
+<!-- # ) %>% -->
+<!-- #   layout( -->
+<!-- #     title = "Current Status of Marine Revenue per Job by Region and Averaged Across Sector (Constant 2024 Pesos)", -->
+<!-- #     xaxis = list(title = "Census Year"), -->
+<!-- #     yaxis = list( -->
+<!-- #       title = "Revenue per Job / 2004-2014 Average (%)", -->
+<!-- #       range = c(0, 110) -->
+<!-- #     ), -->
+<!-- #     legend = list(title = list(text = "Region")) -->
+<!-- #   ) -->
+<!-- #  -->
+<!-- # rev_cs_sector_plotly -->
+<!-- ``` -->
 
-rev_sector_cs_plotly
 
-```
+<!-- ```{r} -->
+<!-- ##### for FACETED, before avg across sectors: -->
+<!-- library(plotly) -->
+<!-- library(dplyr) -->
+
+<!-- ce_rev_sector_current_status <- ce_rev_sector_current_status %>% -->
+<!--   mutate(ano_censal = as.numeric(ano_censal)) -->
+
+<!-- # split data by region -->
+<!-- region_list <- split(ce_rev_sector_current_status,  -->
+<!--                      ce_rev_sector_current_status$rgn_id) -->
+
+<!-- # make one plot per region -->
+<!-- plots <- lapply(names(region_list), function(rgn) { -->
+
+<!--   plot_ly( -->
+<!--     region_list[[rgn]], -->
+<!--     x = ~ano_censal, -->
+<!--     y = ~current_status, -->
+<!--     color = ~sector_marino_propuesto, -->
+<!--     type = "scatter", -->
+<!--     mode = "lines+markers" -->
+<!--   ) %>% -->
+<!--     layout( -->
+<!--       title = paste("Region", rgn), -->
+<!--       xaxis = list(title = "Census Year"), -->
+<!--       yaxis = list(range = c(0, 110)) -->
+<!--     ) -->
+<!-- }) -->
+
+<!-- # make into one subplot -->
+<!-- rev_sector_cs_plotly <- subplot( -->
+<!--   plots, -->
+<!--   nrows = length(plots), -->
+<!--   shareX = TRUE, -->
+<!--   titleY = TRUE -->
+<!-- ) -->
+
+<!-- rev_sector_cs_plotly -->
+
+<!-- ``` -->
