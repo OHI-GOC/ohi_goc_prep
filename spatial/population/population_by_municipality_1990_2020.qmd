@@ -46,7 +46,7 @@ colnames(population_raw)
 ```{r}
 ## bring in the municipality to rgn_id code CSV I made...
 municipality_to_rgnid <- read_csv(here::here("/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid","municipality_to_rgnid.csv")) %>% 
-  select(-c("notes","municipio_raw")) %>% 
+  dplyr::select(-c("notes","municipio_raw")) %>% 
   janitor::clean_names() %>% 
   mutate(municipio = str_trim(municipio, side = "both"))
 ```
@@ -61,7 +61,14 @@ population_goc <- population_raw %>%
   inner_join(municipality_to_rgnid, by = c("cve_entidad" = "e03","cve_municipio" = "e04")) %>% 
   ## also, filter to municipal total...it does not look like there is as complete of data for the other variables.
   filter(indicador %in% "Total population") %>% 
-  select(cve_entidad, desc_entidad, cve_municipio, desc_municipio, indicador, unidad_medida, x2000, x2005, x2010, x2020, rgn_id, directly_coastal)
+  # filter(!desc_municipio %in% c("Santa María del Oro", "Jala","Choix"))
+  dplyr::select(cve_entidad, desc_entidad, cve_municipio, desc_municipio, indicador, unidad_medida, x2000, x2005, x2010, x2020, rgn_id, directly_coastal) %>% 
+  pivot_longer(cols = x2000:x2020,
+               names_to = c("year"),
+               values_to = "pop_count"
+  ) %>% 
+  separate_wider_delim(year, delim = "x", names = c("delete","ano_censal")) %>% # clean up year
+  dplyr::select(-delete)
 ```
 
 ## Save to mazu
@@ -117,8 +124,17 @@ st_bbox(pop_2020_rast)
 ```{r}
 inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
 
-st_bbox(inland_50)
 st_crs(inland_50) == st_crs(pop_2020_rast) # TRUE
+
+res(inland_50) # polygon sf
+raster::res(pop_2020_rast) # [1] 1000 1000
+
+ext(inland_50) == ext(pop_2020_rast) #[1] FALSE
+
+st_bbox(inland_50) == st_bbox(inland_50) 
+# xmin ymin xmax ymax 
+# TRUE TRUE TRUE TRUE 
+
 ```
 
 ```{r}
@@ -138,7 +154,7 @@ inland_50_population_2020 <- inland_50 %>%
   dplyr::select(rgn_id, pop_sum_2020_inland_50) %>% 
   st_drop_geometry()
 
-write_csv(inland_50_population_2020, here::here("/home/shares/ohi/OHI_GOC/spatial/population_municipal","extracted_pop_sum_by_rgn_inland_50.csv"))
+# write_csv(inland_50_population_2020, here::here("/home/shares/ohi/OHI_GOC/spatial/population_inland_50km","extracted_pop2020_sum_by_rgn_inland_50.csv"))
 ```
 
 
@@ -165,13 +181,86 @@ write_csv(inland_50_population_2020, here::here("/home/shares/ohi/OHI_GOC/spatia
 
 
 
+```{r}
+# exact_extract(crop_pop_rast_2020, inland_50[1, ], 'sum', progress = FALSE)
+# exact_extract(crop_pop_rast_2020, inland_50[1, ], 'mean', progress = FALSE)
+# 
+# 
+# r1 <- inland_50 %>% filter(rgn_id == 1)
+# r1_area_km2 <- st_area(r1) / 1e6
+# r1_pop <- exact_extract(crop_pop_rast_2020, r1, 'sum')[[1]]
+# r1_density <- r1_pop / r1_area_km2
+# r1_area_km2
+# r1_pop
+# r1_density
+
+```
 
 
 
 
+```{r}
+# pop_rast_2 <- rasterize(
+#   x = pop_loc_vect,
+#   y = r_template,
+#   field = "POBTOT",
+#   fun = "sum",
+#   background = 0
+# )
+# 
+# # same field for point data, still POBTOT
+# pop_pts_rast_2 <- rasterize(
+#   x = pop_pts_vect,
+#   y = r_template,
+#   field = "POBTOT",
+#   fun = "sum",
+#   background = 0
+# )
+# 
+# final_raster_2 <- pop_pts_rast_2 + pop_rast_2
+# 
+# crop_pop_rast_2020_2 <- crop(final_raster_2, inland_50)
+# zonal_stats_pop_inland_50_2 <- exact_extract(crop_pop_rast_2020, inland_50, 'sum')
+# 
+# sum(inland_50$zonal_stats_pop_inland_50_2, na.rm = TRUE)
+
+```
 
 
+## Coastal population using polygons of localities instead of extracting from raster
 
+```{r}
+library(sf)
+library(dplyr)
 
+# find which localities intersect each inland_50 region
+
+pop_loc <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_localities/inegi_boundaries_pop.shp"))
+
+# checkCRS
+st_crs(inland_50)
+st_crs(pop_loc)
+
+# transform pop_loc to match inland_50 (EPSG:6372)
+pop_loc_transformed <- st_transform(pop_loc, st_crs(inland_50))
+st_crs(inland_50) == st_crs(pop_loc_transformed)  # TRUE
+
+intersections <- st_intersects(inland_50, pop_loc_transformed, sparse = FALSE)
+
+# sum from intersections matrix
+intersecting_rows_list <- apply(intersections, 1, which)  # list of row indices per region
+
+pop_by_region_vector <- tibble(
+  rgn_id = inland_50$rgn_id,
+  pop_sum_2020_inland_50 = sapply(intersecting_rows_list, function(rows) {
+    if(length(rows) == 0) 0 else sum(pop_loc_transformed$POBTOT[rows], na.rm = TRUE)
+  }),
+  n_localities = sapply(intersecting_rows_list, length)
+)
+print(pop_by_region_vector)
+
+# write_csv(pop_by_region_vector, here::here("/home/shares/ohi/OHI_GOC/spatial/population_inland_50km","pop2020_by_region_vector_inland_50.csv"))
+
+```
 
 

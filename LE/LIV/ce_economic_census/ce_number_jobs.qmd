@@ -63,10 +63,11 @@ Reminder:
 The longer description of H000A: "Personnel employed by the company. This includes personnel hired directly by the company, whether permanent, temporary, or unpaid, unionized or non-unionized, who worked during the reference year for the economic unit, subject to its management and control, covering at least one-third of the working hours of the unit. Includes: personnel who worked outside the economic unit under its labor and legal control; pieceworkers; striking workers; persons on sick leave, vacation, or temporary leave. Excludes: pensioners and retirees; personnel on unlimited leave and personnel who worked exclusively for fees or commissions without receiving a base salary; as well as personnel from companies hired to provide services such as cleaning, gardening, or security, among others."
 
 ```{r}
-ce_cleaned_totals_per_yr_municipio_activity <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_cleaned_totals_per_yr_municipio_activity.csv")) 
+ce_cleaned_totals_per_yr_municipio_activity <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_cleaned_totals_per_yr_municipio_activity.csv")) %>% 
+  filter(!(municipio == "MEXICALI" & ano_censal == "2023"))
 
 ce_job_totals <- ce_cleaned_totals_per_yr_municipio_activity %>% 
-  select(-c("a800a","m000a", "j400a","j300a"))
+  dplyr::select(-c("a800a","m000a", "j400a","j300a"))
 ```
 
 Aggregating all the activities per municipio:
@@ -82,20 +83,23 @@ Aggregating instead by region and general sector:
 total_jobs_per_rgn_and_activity <- ce_job_totals %>% 
   group_by(ano_censal, rgn_id, general_sector, specific_sector) %>% # not using codigo, notas_breve, because those are too specific
   summarize(jobs_per_act = sum(h000a, na.rm = TRUE), 
-            ue_per_act = sum(ue, na.rm = TRUE))
+            ue_per_act = sum(ue, na.rm = TRUE)) %>% 
+  ungroup()
 ```
 
-### Add in adjustment for municipalities that cover both coastal and pacific sides
+### Add in adjustment for municipalities that cover both coastal and pacific sides, and sectors that are not strictly coastal
 
 ```{r}
-inland_50_population_2020 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/spatial/population_municipal","extracted_pop_sum_by_rgn_inland_50.csv"))
+inland_50_population_2020 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/spatial/population_inland_50km","pop2020_by_region_vector_inland_50.csv"))
 
 coastal_population_multipliers <- agg_pop_rgnid %>% 
   filter(ano_censal %in% 2020) %>% 
   full_join(inland_50_population_2020) %>% 
   mutate(prop_coastal = pop_sum_2020_inland_50 / total_rgn_pop,
          coastal_pop_adjustment = ifelse(prop_coastal > 1, 1, prop_coastal)) %>% 
-  dplyr::select(rgn_id, coastal_pop_adjustment) 
+  ungroup() %>% 
+  dplyr::select(rgn_id, coastal_pop_adjustment) %>% 
+  filter(!is.na(rgn_id))
 
 ### save for future coastal adjustments
 # write_csv(coastal_population_multipliers, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le","coastal_adjustment_multiplier_2020.csv"))
@@ -104,10 +108,16 @@ coastal_population_multipliers <- agg_pop_rgnid %>%
 ```{r}
 coastal_total_jobs_per_rgn_and_activity <- total_jobs_per_rgn_and_activity %>% 
   full_join(coastal_population_multipliers, by = "rgn_id") %>% 
-  mutate(first_adj_coastal_jobs_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), jobs_per_act * coastal_pop_adjustment, jobs_per_act),
-         coastal_jobs_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","ennvironmental_research_consulting"), jobs_per_act * coastal_pop_adjustment, first_adj_coastal_jobs_per_act),
-         first_adj_coastal_ue_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), ue_per_act * coastal_pop_adjustment, ue_per_act),
-         coastal_ue_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","ennvironmental_research_consulting"), ue_per_act * coastal_pop_adjustment, first_adj_coastal_ue_per_act)) %>%  # if in any of these sectors, adjust for 50km inland
+  mutate(
+    
+    # jobs
+    first_adj_coastal_jobs_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), jobs_per_act * coastal_pop_adjustment, jobs_per_act),
+    coastal_jobs_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","environmental_research_consulting"), jobs_per_act * coastal_pop_adjustment, first_adj_coastal_jobs_per_act),
+    
+    # ue
+    first_adj_coastal_ue_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), ue_per_act * coastal_pop_adjustment, ue_per_act),
+    coastal_ue_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","environmental_research_consulting"), ue_per_act * coastal_pop_adjustment, first_adj_coastal_ue_per_act)) %>%  # if in any of these sectors, adjust for 50km inland
+  
   dplyr::select(-c(jobs_per_act, ue_per_act, first_adj_coastal_jobs_per_act, first_adj_coastal_ue_per_act))
 ```
 
@@ -129,14 +139,9 @@ pop_goc <- read_csv(here::here("/home/shares/ohi/OHI_GOC/spatial/population_muni
 
 ## aggregate by region
 agg_pop_rgnid <- pop_goc %>% 
-  pivot_longer(cols = x2000:x2020,
-               names_to = c("year"),
-               values_to = "pop_count"
-  ) %>% 
-  group_by(rgn_id, year, unidad_medida) %>% 
+  group_by(rgn_id, ano_censal, unidad_medida) %>% 
   summarize(total_rgn_pop = sum(pop_count, na.rm = TRUE)) %>% 
-  separate_wider_delim(year, delim = "x", names = c("delete","ano_censal")) %>% # clean up year
-  dplyr::select(-delete)
+  ungroup()
 ```
 
 ### Interpolate municipal population for all years
@@ -146,8 +151,9 @@ library(zoo)
 
 ## in order for it to join with the job data, we need to interpolate and determine the population in years between.
 year_adj_pop_rgnid <- agg_pop_rgnid %>% 
-  mutate(year_interpolated = as.numeric(ano_censal)) %>% 
-  complete(year_interpolated = 2000:2024) # expand to interpolate
+  mutate(year_interpolated = as.numeric(ano_censal)) %>%
+  group_by(rgn_id) %>% 
+  complete(year_interpolated = 2000:2023) # expand to interpolate
 
 year_adj_pop_rgnid_interpolated <- year_adj_pop_rgnid %>%
   arrange(rgn_id, year_interpolated) %>%
@@ -165,10 +171,10 @@ year_adj_pop_rgnid_interpolated <- year_adj_pop_rgnid %>%
   rename(pop_ano_censal_original = ano_censal) %>% # rename so that when it is joined, we know which two censuses are being interpolated from.
   fill(total_rgn_pop, .direction = "downup") %>% # so we can see what the original population value was
   fill(unidad_medida, .direction = "downup") %>%
-  select(rgn_id, pop_ano_censal_original, population_original = total_rgn_pop, year_interpolated, population_interpolated, unidad_medida, is_gapfilled) %>% 
+  dplyr::select(rgn_id, pop_ano_censal_original, population_original = total_rgn_pop, year_interpolated, population_interpolated, unidad_medida, is_gapfilled) %>% 
   ungroup()
 
-## note that the interpolated population amount from 2020-2024 is the same for each region.  It does not project the growth before it happens.
+## note that the interpolated population amount from 2020-2023 is the same for each region.  It does not project the growth before it happens.
 
 ## save this
 # write_csv(year_adj_pop_rgnid_interpolated, here::here("/home/shares/ohi/OHI_GOC/spatial/population_municipal","interpolated_population_per_rgn_coastalmunicipios_2000_2020.csv"))
@@ -238,9 +244,9 @@ num_ue_plotly
 
 ```{r}
 historical_jobs_scaled_to_population <- jobs_scaled_to_population %>% 
-  filter(ce_ano_censal %in% c("2004","2009","2014")) %>% 
+  filter(ce_ano_censal %in% c("2003","2008","2013")) %>% 
   group_by(rgn_id) %>%  
-  summarize(avg_value_2004_2014 = mean(marine_jobs_per_local_pop))
+  summarize(avg_value_2003_2013 = mean(marine_jobs_per_local_pop))
 ```
 
 ## Current status
@@ -253,10 +259,10 @@ If it is equal to the historical average, or above, the region will receive the 
 ce_jobs_current_status <- jobs_scaled_to_population %>% 
   dplyr::select(rgn_id, ce_ano_censal, marine_jobs_per_local_pop) %>% 
   left_join(historical_jobs_scaled_to_population) %>% 
-  mutate(current_status_raw = marine_jobs_per_local_pop/avg_value_2004_2014 * 100,
+  mutate(current_status_raw = marine_jobs_per_local_pop/avg_value_2003_2013 * 100,
          current_status = ifelse(current_status_raw >= 100, 100, current_status_raw))
 
-# write_csv(ce_jobs_current_status, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/liv","ce_jobs_current_status"))
+write_csv(ce_jobs_current_status, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/liv","ce_jobs_current_status.csv"))
 ```
 
 ### Plotlys 
@@ -273,9 +279,9 @@ num_jobs_cs_plotly_noCAP <- plotly::plot_ly(
   mode = "lines"
 ) %>% 
   layout(
-    title = "RAW CURRENT STATUS of marine-related jobs per region, SCALED to regional population, reference of average value 2004-2014",
+    title = "RAW CURRENT STATUS of marine-related jobs per region, SCALED to regional population, reference of average value 2003-2013",
     xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "marine_jobs_per_local_pop / avg_value_2004_2014")
+    yaxis = list(title = "marine_jobs_per_local_pop / avg_value_2003_2013")
   ) %>%
   add_lines(
     x = range(ce_jobs_current_status$ce_ano_censal), 
@@ -300,9 +306,9 @@ num_jobs_cs_plotly <- plotly::plot_ly(
   mode = "lines"
 ) %>% 
   layout(
-    title = "CURRENT STATUS of marine-related jobs per region, SCALED to regional population, reference of average value 2004-2014",
+    title = "CURRENT STATUS of marine-related jobs per region, SCALED to regional population, reference of average value 2003-2013",
     xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "marine_jobs_per_local_pop / avg_value_2004_2014")
+    yaxis = list(title = "marine_jobs_per_local_pop / avg_value_2003_2013")
   ) 
 num_jobs_cs_plotly
 ```

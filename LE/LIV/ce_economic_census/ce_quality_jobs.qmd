@@ -64,10 +64,10 @@ Because of this, I will be summing J300A and J400A for job quality.
 
 ```{r}
 ce_cleaned_totals_per_yr_municipio_activity <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_cleaned_totals_per_yr_municipio_activity.csv")) %>% 
-  filter(!(municipio == "ENSENADA" & ano_censal == "2024"))
+  filter(!(municipio == "MEXICALI" & ano_censal == "2023"))
 
 ce_quality_totals <- ce_cleaned_totals_per_yr_municipio_activity %>% 
-  select(-c("a800a","m000a"))  # leave in number of jobs (h000a) so that we can scale to the number of jobs.
+  dplyr::select(-c("a800a","m000a"))  # leave in number of jobs (h000a) so that we can scale to the number of jobs.
 ```
 
 
@@ -84,100 +84,75 @@ ce_quality_totals_adj <- ce_quality_totals %>%
   mutate(sum_j300a_j400a_milpesos = j300a + j400a) %>% 
   mutate(sum_j300a_j400a_pesos = sum_j300a_j400a_milpesos * 1e6) %>% 
   mutate(
-    quality_real_pesos_2024 = adjust_for_inflation(
+    quality_real_pesos_2023 = adjust_for_inflation(
       price = sum_j300a_j400a_pesos,
       from_date = ano_censal,
       country = "Mexico",
-      to_date = 2024
+      to_date = 2023
       )
   ) %>% 
-  select(ano_censal, rgn_id, estado, e03, municipio, e04, codigo, sector_marino_propuesto, notas_breve, sum_j300a_j400a_pesos, quality_real_pesos_2024, h000a, ue)
+  dplyr::select(ano_censal, rgn_id, estado, e03, municipio, e04, codigo, general_sector, specific_sector, sum_j300a_j400a_pesos, quality_real_pesos_2023, h000a, ue)
 ```
 
 
-## Aggregate by region and activity
-
-### By region
+### Aggregate by region and sector
 
 ```{r}
-total_quality_byrgn <- ce_quality_totals_adj %>%
-  group_by(ano_censal, rgn_id) %>%
-  summarize(total_qual_adj = sum(quality_real_pesos_2024, na.rm = TRUE),
-            total_jobs = sum(h000a, na.rm = TRUE),
-            total_ue = sum(ue, na.rm = TRUE))
+total_quality_byrgn_and_activity <- ce_quality_totals_adj %>%
+  group_by(ano_censal, rgn_id, general_sector, specific_sector) %>% # not using codigo, notas_breve, because those are too specific
+  summarize(qual_real2023_per_act = sum(quality_real_pesos_2023, na.rm = TRUE),
+            jobs_per_act = sum(h000a, na.rm = TRUE),
+            ue_per_act = sum(ue, na.rm = TRUE))
+```
+
+### Add in adjustment for municipalities that cover both coastal and pacific sides, and sectors that are not strictly coastal
+
+Remember that \(\frac{a}{b} \times c\) is the same as \(\frac{a \times c}{b}\).
+
+This is because multiplication and division follow the associative and commutative properties, allowing you to rearrange terms like this without changing the value. 
+
+So when we adjust the numerator in our current status, we do not need to adjust the denominator (the scalar, in this case the number of jobs).  
+
+```{r}
+coastal_adjustment_multipliers <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le","coastal_adjustment_multiplier_2020.csv"))
+```
+
+```{r}
+coastal_total_qual_per_rgn_and_activity <- total_quality_byrgn_and_activity %>% 
+  full_join(coastal_population_multipliers, by = "rgn_id") %>% 
+  mutate(
+    
+    # quality
+    first_adj_coastal_qual_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), qual_real2023_per_act * coastal_pop_adjustment, qual_real2023_per_act),
+    coastal_qual_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","environmental_research_consulting"), qual_real2023_per_act * coastal_pop_adjustment, first_adj_coastal_qual_per_act),
+    
+    # # jobs
+    # first_adj_coastal_jobs_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), jobs_per_act * coastal_pop_adjustment, jobs_per_act),
+    # coastal_jobs_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","environmental_research_consulting"), jobs_per_act * coastal_pop_adjustment, first_adj_coastal_jobs_per_act), # not needed because it is the scalar
+    
+    # ue
+    first_adj_coastal_ue_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), ue_per_act * coastal_pop_adjustment, ue_per_act),
+    coastal_ue_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","environmental_research_consulting"), ue_per_act * coastal_pop_adjustment, first_adj_coastal_ue_per_act) # only doing UE for exploration and understanding purposes.
+  ) %>%  # if in any of these sectors, adjust for 50km inland
+  
+  dplyr::select(-c(qual_real2023_per_act, ue_per_act, first_adj_coastal_qual_per_act, first_adj_coastal_ue_per_act))
 ```
 
 
-<!-- ### By sector -->
+## Aggregate real 2023 quality by region
 
-<!-- ```{r} -->
-<!-- total_quality_byrgn_and_activity <- ce_quality_totals_adj %>% -->
-<!--   group_by(ano_censal, rgn_id, sector_marino_propuesto) %>% # not using codigo, notas_breve, because those are too specific -->
-<!--   summarize(total_qual_adj = sum(quality_real_pesos_2024, na.rm = TRUE), -->
-<!--             total_jobs = sum(h000a, na.rm = TRUE), -->
-<!--             total_ue = sum(ue, na.rm = TRUE)) -->
-<!-- ``` -->
+Aggregating the quality for each region:
 
-<!-- See how much is suppressed: -->
-<!-- ```{r} -->
-<!-- zeros_by_sector <- total_quality_byrgn_and_activity %>% -->
-<!--   group_by(sector_marino_propuesto) %>% -->
-<!--   summarize( -->
-<!--     n_zero_total_qual_adj = sum(total_qual_adj == 0, na.rm = TRUE), -->
-<!--     n_zero_total_jobs     = sum(total_jobs == 0, na.rm = TRUE), -->
-<!--     n_zero_total_ue       = sum(total_ue == 0, na.rm = TRUE), -->
-<!--     .groups = "drop" -->
-<!--   ) # how many do not have data for that region-sector-year combination? -->
-
-<!-- total_quality_byrgn_and_activity <- total_quality_byrgn_and_activity %>% -->
-<!--   mutate(suppressed = total_jobs == 0 | total_qual_adj == 0) # if the quality or number of jobs metric is zero. -->
-
-<!-- # total_rows <- nrow(total_quality_byrgn_and_activity) -->
-<!-- # n_suppressed <- sum(total_quality_byrgn_and_activity$suppressed, na.rm = TRUE) -->
-<!-- # pct_suppressed <- 100 * n_suppressed / total_rows -->
-<!-- #  -->
-<!-- # cat("Total rows:", total_rows, "\n") -->
-<!-- # cat("Suppressed rows:", n_suppressed, "\n") -->
-<!-- # cat("Percent suppressed:", round(pct_suppressed, 1), "%\n") -->
-
-<!-- suppressed_by_rgn_sector <- total_quality_byrgn_and_activity %>% -->
-<!--   group_by(rgn_id, sector_marino_propuesto) %>% -->
-<!--   summarize( -->
-<!--     n_rows = n(), -->
-<!--     n_suppressed = sum(suppressed, na.rm = TRUE), -->
-<!--     pct_suppressed = 100 * n_suppressed / n_rows, -->
-<!--     .groups = "drop" -->
-<!--   ) %>% -->
-<!--   arrange(desc(pct_suppressed)) -->
-
-<!-- suppressed_by_rgn_sector_year <- total_quality_byrgn_and_activity %>% -->
-<!--   select(ano_censal, rgn_id, sector_marino_propuesto, suppressed) %>% -->
-<!--   arrange(rgn_id, sector_marino_propuesto, ano_censal) -->
-
-
-<!-- ### heatmap -->
-
-<!-- library(ggplot2) -->
-<!-- library(dplyr) -->
-
-<!-- suppressed_by_rgn_sector_year <- total_quality_byrgn_and_activity %>% -->
-<!--   select(ano_censal, rgn_id, sector_marino_propuesto, suppressed) %>% -->
-<!--   arrange(rgn_id, sector_marino_propuesto, ano_censal) -->
-
-<!-- ggplot(suppressed_by_rgn_sector_year,  -->
-<!--        aes(x = factor(ano_censal),  -->
-<!--            y = reorder(interaction(rgn_id, sector_marino_propuesto), rgn_id),  -->
-<!--            fill = suppressed)) + -->
-<!--   geom_tile(color = "grey90", linewidth = 0.3) + -->
-<!--   scale_fill_manual(values = c("FALSE" = "#2E8B57", "TRUE" = "#DC143C"), -->
-<!--                     name = "Suppressed") + -->
-<!--   labs(title = "Suppression Heatmap: All Region-Sector-Year Combinations", -->
-<!--        x = "Year", y = "Region × Sector") + -->
-<!--   theme_minimal() + -->
-<!--   theme(axis.text.y = element_text(size = 7)) -->
-
-
-<!-- ``` -->
+```{r}
+total_quality_byrgn <- coastal_total_qual_per_rgn_and_activity %>%
+  group_by(ano_censal, rgn_id) %>%
+  summarize(total_qual_adj = sum(coastal_qual_per_act, na.rm = TRUE),
+            total_jobs = sum(jobs_per_act, na.rm = TRUE),
+            total_ue = sum(coastal_ue_per_act, na.rm = TRUE)) %>% 
+  mutate(total_qual_adj = round(total_qual_adj),
+         total_jobs = round(total_jobs),
+         total_ue = round(total_ue))
+```
 
 
 
@@ -186,51 +161,39 @@ total_quality_byrgn <- ce_quality_totals_adj %>%
 By region:
 ```{r}
 ce_quality_adj_perjob <- total_quality_byrgn %>%
-  mutate(qual_per_job = total_qual_adj/total_jobs)
-```
-
-By region and sector:
-```{r}
-ce_quality_sector_adj_perjob <- total_quality_byrgn_and_activity %>%
-  mutate(qual_per_job = total_qual_adj/total_jobs)
-```
-
-
-## Reference point (average value 2004-2014)
-
-By region:
-```{r}
-historical_qual_scaled_to_jobs <- ce_quality_adj_perjob %>%
-  filter(ano_censal %in% c("2004","2009","2014")) %>%
-  group_by(rgn_id) %>%
-  summarize(avg_value_2004_2014 = mean(qual_per_job))
-```
-
-<!-- By region and sector: -->
-<!-- ```{r} -->
-<!-- historical_qual_sector_scaled_to_jobs <- ce_quality_sector_adj_perjob %>% -->
-<!--   filter(ano_censal %in% c("2004","2009","2014")) %>% -->
-<!--   group_by(rgn_id, sector_marino_propuesto) %>% -->
-<!--   summarize(avg_value_2004_2014 = mean(qual_per_job)) -->
-<!-- ``` -->
-
-## Current status
-
-First, join back the reference point, then divide the current value of marine jobs/pop by the historical average from 2004 - 2014 as a reference.
-
-If it is equal to the historical average, or above, the region will receive the current status of 100.  Otherwise, it will reflect the reduction.
-
-### By region
-```{r}
-ce_qual_current_status <- ce_quality_adj_perjob %>%
-  select(rgn_id, ano_censal, qual_per_job) %>%
-  left_join(historical_qual_scaled_to_jobs) %>%
-  mutate(current_status_raw = qual_per_job/avg_value_2004_2014 * 100,
-         current_status = ifelse(current_status_raw >= 100, 100, current_status_raw)) %>%
+  mutate(qual_per_job = total_qual_adj/total_jobs) %>% 
   ungroup()
 ```
 
-#### plot
+
+## Reference point (90th quantile quality social benefits pesos per job available)
+
+By region:
+```{r}
+reference_high_qual_scaled_to_jobs <- ce_quality_adj_perjob %>%
+  mutate(percap_90th = quantile(qual_per_job, probs = 0.9))
+```
+
+
+## Current status
+
+First, join back the reference point, then divide the current value of marine quality/job by the 90th quantile across all regions and years as a reference.
+
+If it is equal to the 90th quantile, or above, the region will receive the current status of 100.  Otherwise, it will reflect the reduction.
+
+```{r}
+ce_qual_current_status <- ce_quality_adj_perjob %>%
+  dplyr::select(rgn_id, ano_censal, qual_per_job) %>%
+  left_join(reference_high_qual_scaled_to_jobs) %>%
+  mutate(current_status_raw = qual_per_job/percap_90th * 100,
+         current_status = ifelse(current_status_raw >= 100, 100, current_status_raw)) %>%
+  ungroup()
+
+write_csv(ce_qual_current_status, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/liv","ce_qual_current_status.csv"))
+
+```
+
+### plot
 
 ```{r}
 library(plotly)
@@ -249,10 +212,10 @@ qual_cs_plotly <- plot_ly(
   mode = "lines+markers"
 ) %>%
   layout(
-    title = "Current Status of Marine Job Quality per Region (Option 1)",
+    title = "CURRENT STATUS of marine-related job quality per region, SCALED by the number of jobs, with the 90th quantile across all regions and years as a reference",
     xaxis = list(title = "Census Year"),
     yaxis = list(
-      title = "Quality per Job / 2004-2014 Average (%)",
+      title = "Quality per Job / 90th quantile (%)",
       range = c(0, 110)
     ),
     legend = list(title = list(text = "Region"))
@@ -263,173 +226,39 @@ qual_cs_plotly
 
 ```
 
-<!-- ### By region and sector: -->
-<!-- ```{r} -->
-<!-- ce_qual_sector_current_status <- ce_quality_sector_adj_perjob %>% -->
-<!--   select(rgn_id, ano_censal, sector_marino_propuesto, qual_per_job) %>% -->
-<!--   left_join(historical_qual_sector_scaled_to_jobs) %>% -->
-<!--   mutate(current_status_raw = qual_per_job/avg_value_2004_2014 * 100, -->
-<!--          current_status = ifelse(current_status_raw >= 100, 100, current_status_raw)) %>% -->
-<!--   ungroup() -->
-<!-- ``` -->
+```{r}
+library(plotly)
+library(dplyr)
 
-<!-- Simple average across sector: -->
-<!-- ```{r} -->
-<!-- ## now, average into one score per region: -->
-<!-- ce_qual_sector_current_status_final_simple <- ce_qual_sector_current_status %>% -->
-<!--   group_by(ano_censal, rgn_id) %>% -->
-<!--   summarize(avg_cs = mean(current_status, na.rm = TRUE)) %>% -->
-<!--   ungroup -->
-<!-- ``` -->
+ce_qual_current_status <- ce_qual_current_status %>%
+  mutate(ano_censal = as.numeric(ano_censal))
 
+raw_qual_cs_plotly <- plot_ly(
+  ce_qual_current_status,
+  x = ~ano_censal,
+  y = ~current_status_raw,
+  color = ~factor(rgn_id),
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "RAW CURRENT STATUS of marine-related job quality per region, SCALED by the number of jobs, with the 90th quantile across all regions and years as a reference",
+    xaxis = list(title = "Census Year"),
+    yaxis = list(
+      title = "Quality per Job / 90th quantile (%)"
+    ),
+    legend = list(title = list(text = "Region"))
+  ) %>%
+  add_lines(
+    x = range(ce_qual_current_status$ano_censal), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
 
-<!-- Weighted average across sector (*not done yet*): -->
-<!-- ```{r} -->
-<!-- ## first determine the contribution to total of each sector grouping for 2024: -->
-<!-- prop_contribution_qual <- total_quality_byrgn_and_activity %>%  -->
-<!--   filter(ano_censal %in% "2024") %>%  -->
-<!--   group_by(rgn_id) %>%  -->
-<!--   mutate(total_qual_rgn = sum(total_qual_adj), -->
-<!--          total_jobs_rgn = sum(total_jobs), -->
-<!--          total_ue_rgn = sum(total_ue)) %>%  -->
-<!--   ungroup() %>%  -->
-<!--   mutate(prop_qual_sector_rgn = total_qual_adj/total_qual_rgn, -->
-<!--          prop_job_sector_rgn = total_jobs/total_jobs_rgn, -->
-<!--          prop_ue_sector_rgn = total_ue/total_ue_rgn) %>%  -->
-<!--   group_by(rgn_id) %>%  -->
-<!--   mutate(qual_prop_check = sum(prop_qual_sector_rgn), -->
-<!--          job_prop_check = sum(prop_job_sector_rgn), -->
-<!--          ue_prop_check = sum(prop_ue_sector_rgn)) %>%  -->
-<!--   ungroup() -->
+raw_qual_cs_plotly
 
 
-<!-- ## now, average into one score per region using the weighted average, weighting by relative 2024 contribution of the sector's revenue to the total revenue for that region (prop_contribution$prop_rev_sector_rgn): -->
-<!-- qual_weights_2024 <- prop_contribution_qual %>%  -->
-<!--   select(rgn_id, sector_marino_propuesto, prop_ue_sector_rgn) -->
-
-<!-- ce_qual_sector_current_status_weighted <- ce_qual_sector_current_status %>%  -->
-<!--   left_join(qual_weights_2024, by = c("rgn_id", "sector_marino_propuesto")) -->
-
-<!-- ### now do the weighted average, renormalizing for supressions -->
-<!-- ce_qual_sector_current_status_final_weighted <- ce_qual_sector_current_status_weighted %>%  -->
-<!--   group_by(ano_censal, rgn_id) %>%  -->
-<!--   summarize( -->
-<!--     avg_cs = sum(current_status * prop_ue_sector_rgn, na.rm = TRUE) / -->
-<!--              sum(prop_ue_sector_rgn[!is.na(current_status)]), # NEEDED in this case because not all sectors have a current status to begin with, many are NA.  I do think we need to use a different year for the weights. -->
-<!--     .groups = "drop" -->
-<!--   ) -->
-
-<!-- ## note that Region_2 is NA previous to 2019 because from 2004 - 2014 the energy sector existed in that region, before the disaggregation of San Quintin. So we cannot apply the proportion of 2024 to the years previous to 2019 because, well, it did not exist.  In 2024, 0% of the total UEs are in the Energy and Infrastructure sector. So even though there are some in previous years, the proportion for the weighting does not exist. -->
-
-<!-- ## the way to fix this would be to determine the proportion of each sector for every year, not just apply 2024 to all years.  I did not do that inditially because I wanted consistency across years just to explore. -->
-<!-- ``` -->
-
-<!-- #### plot -->
-
-<!-- Simple average: -->
-<!-- ```{r} -->
-<!-- library(plotly) -->
-
-<!-- ce_qual_sector_current_status_final_simple <- ce_qual_sector_current_status_final_simple %>% -->
-<!--   mutate(ano_censal = as.numeric(ano_censal)) -->
-
-<!-- qual_cs_sector_plotly <- plot_ly( -->
-<!--   ce_qual_sector_current_status_final_simple, -->
-<!--   x = ~ano_censal, -->
-<!--   y = ~avg_cs, -->
-<!--   color = ~factor(rgn_id), -->
-<!--   colors = rgn_colors, -->
-<!--   type = "scatter", -->
-<!--   mode = "lines+markers" -->
-<!-- ) %>% -->
-<!--   layout( -->
-<!--     title = "Current Status of Marine Job Quality by Region (Simple Average Across Sectors)", -->
-<!--     xaxis = list(title = "Census Year"), -->
-<!--     yaxis = list( -->
-<!--       title = "Average Sector Quality / 2004-2014 Average (%)", -->
-<!--       range = c(0, 110) -->
-<!--     ), -->
-<!--     legend = list(title = list(text = "Region")) -->
-<!--   ) -->
-
-<!-- qual_cs_sector_plotly -->
-
-<!-- ``` -->
-
-<!-- Weighted average: -->
-<!-- ```{r} -->
-<!-- library(plotly) -->
-
-<!-- ce_qual_sector_current_status_final_weighted <- ce_qual_sector_current_status_final_weighted %>% -->
-<!--   mutate(ano_censal = as.numeric(ano_censal)) -->
-
-<!-- qual_cs_sector_weighted_plotly <- plot_ly( -->
-<!--   ce_qual_sector_current_status_final_weighted, -->
-<!--   x = ~ano_censal, -->
-<!--   y = ~avg_cs, -->
-<!--   color = ~factor(rgn_id), -->
-<!--   colors = rgn_colors, -->
-<!--   type = "scatter", -->
-<!--   mode = "lines+markers" -->
-<!-- ) %>% -->
-<!--   layout( -->
-<!--     title = "Current Status of Marine Job Quality by Region (Option 2, Weighted Average of UEs Across Sectors)", -->
-<!--     xaxis = list(title = "Census Year"), -->
-<!--     yaxis = list( -->
-<!--       title = "Average Sector Quality / 2004-2014 Average (%)", -->
-<!--       range = c(0, 110) -->
-<!--     ), -->
-<!--     legend = list(title = list(text = "Region")) -->
-<!--   ) -->
-
-<!-- qual_cs_sector_weighted_plotly -->
-<!-- ``` -->
-
-
-<!-- # Exploration of other  -->
-
-<!-- What about informal workers? Other ways to indicate job quality? Wage  -->
-
-<!-- | Dimension     | Variable                | Interpretation            | -->
-<!-- | ------------- | ----------------------- | ------------------------- | -->
-<!-- | Earnings      | J000A / H010A           | Pay level                 | -->
-<!-- | Benefits      | (J300A+J400A) / H000A   | Social benefits         | -->
-<!-- | Formalization | H010A / H000A           | % paid workers            | -->
-<!-- | Informality   | H020A / H000A (inverse) | Family/unpaid labor       | -->
-<!-- | Reassurance   | J600A / H000A           | Compensation or severance pay | -->
-
-<!-- *J000A* -->
-
-<!-- "Remuneraciones. Son todos los pagos y aportaciones normales y extraordinarias, en dinero y especie, antes de cualquier deducción, para retribuir el trabajo del personal dependiente de la razón social, en forma de salarios y sueldos, prestaciones sociales y utilidades repartidas al personal, ya sea que este pago se calcule sobre la base de una jornada de trabajo o por la cantidad de trabajo desarrollado (destajo), o mediante un salario base que se complementa con comisiones por ventas u otras actividades. Incluye: las contribuciones patronales a regímenes de seguridad social, el pago realizado al personal con licencia y permiso temporal. Excluye: los pagos por liquidaciones o indemnizaciones, pagos a terceros por el suministro de personal ocupado; pagos exclusivamente de comisiones para aquel personal que no recibió un sueldo base; pagos de honorarios por servicios profesionales contratados de manera infrecuente." -->
-
-<!-- "Remuneration. This includes all normal and extraordinary payments and contributions, in cash and in kind, before any deductions, to remunerate the work of personnel employed by the company, in the form of wages and salaries, social benefits, and profits distributed to personnel, whether this payment is calculated on the basis of a working day or the amount of work performed (piecework), or through a base salary supplemented by commissions for sales or other activities. Includes: employer contributions to social security schemes, payments made to staff on leave and temporary leave. Excludes: payments for settlements or indemnities, payments to third parties for the supply of employed personnel; payments exclusively of commissions for personnel who did not receive a base salary; payments of fees for professional services contracted on an infrequent basis." -->
-
-<!-- *H010A* -->
-
-<!-- "Personal remunerado. Comprende a todas las personas que trabajaron durante el periodo de referencia dependiendo contractualmente de la unidad económica, sujetas a su dirección y control, a cambio de una remuneración fija y periódica."  -->
-
-<!-- "Paid personnel. This includes all persons who worked during the reference period under a contract with the economic unit, subject to its direction and control, in exchange for fixed and periodic remuneration." -->
-
-
-<!-- *J300A*  -->
-
-<!-- "Contribuciones patronales a regímenes de seguridad social. Son todas las aportaciones monetarias que la unidad económica cubrió con sus recursos a instituciones de seguridad social en beneficio de los trabajadores remunerados." -->
-
-<!-- “Employer contributions to social security schemes. These are all monetary contributions that the economic unit covered with its resources to social security institutions for the benefit of paid workers.” -->
-
-<!-- *J400A* -->
-<!-- "Otras prestaciones sociales. Son los pagos que la unidad económica realizó a instituciones privadas en beneficio de sus trabajadores o que otorgó directamente en especie al personal remunerado, en complemento o adición a los sueldos y salarios, tales como servicios médicos privados, despensas, primas de seguros, servicios educativos, ayudas para estudio y guarderías. Excluye: las contribuciones patronales a regímenes de seguridad social, compra de equipo, uniformes y ropa de trabajo; costos de capacitación; primas vacacionales; erogaciones para actividades deportivas y recreativas; gastos por concepto de pasajes, viáticos y alimentación; además de todos aquellos gastos reembolsables al trabajador." -->
-
-<!-- "Other social benefits. These are payments that the economic unit made to private institutions for the benefit of its workers or that it granted directly in kind to paid personnel, in addition to or as a supplement to wages and salaries, such as private medical services, food allowances, insurance premiums, educational services, study grants, and childcare. Excludes: employer contributions to social security schemes, purchase of equipment, uniforms, and work clothes; training costs; vacation bonuses; expenditures for sports and recreational activities; expenses for travel, per diem, and meals; in addition to all expenses reimbursable to the worker." -->
-
-<!-- *H020A* -->
-
-<!-- "Propietarios, familiares y otros trabajadores no remunerados. Son las personas que trabajaron bajo la dirección y control de la unidad económica, cubriendo como mínimo una tercera parte de la jornada laboral de la misma, sin recibir un sueldo o salario fijo de forma periódica. Incluye: a los propietarios, familiares de éstos, socios activos, personal que labora para la unidad económica percibiendo exclusivamente propinas, prestadores de servicio social, becarios por el sistema nacional de empleo o en programas de capacitación y entrenamiento, trabajadores meritorios y los trabajadores voluntarios. Excluye: a las personas que prestaron sus servicios profesionales o técnicos y cobraron honorarios por esto; pensionados, jubilados; y al personal suministrado por otra razón social." -->
-
-<!-- "Owners, family members, and other unpaid workers. These are people who worked under the direction and control of the economic unit, covering at least one-third of the unit's working hours, without receiving a regular fixed wage or salary. Includes: owners, their family members, active partners, personnel working for the economic unit receiving exclusively tips, social service providers, interns in the national employment system or in training programs, merit-based workers, and volunteer workers. It excludes: persons who provided professional or technical services and charged fees for this; pensioners, retirees; and personnel supplied by another company." -->
-
-
-<!-- *J600A*	 -->
-<!-- "Pagos por indemnización o liquidación del personal. Se refiere a la compensación monetaria que se otorgó a los trabajadores por concepto de despido, retiro o terminación de contrato laboral con la unidad económica." -->
-
-<!-- "Payments for compensation or severance pay. This refers to the monetary compensation granted to workers for dismissal, retirement, or termination of their employment contract with the economic unit." -->
+```
