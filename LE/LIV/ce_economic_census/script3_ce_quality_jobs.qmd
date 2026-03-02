@@ -1,0 +1,274 @@
+---
+title: 'OHI GoC 2025: Livelihoods Quality of Jobs'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# LIV: Quality of Jobs from the Censos Economicos (CE)
+
+```{r}
+## for plotting:
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+region_levels <- paste0("Region_", 1:9)
+```
+
+## Save subset of job *quality* metrics
+
+Reminder:
+* The number of jobs, *H000A*;
+* The employer contributions to social security schemes *J300A*,
+* Other social benefits *J400A*;
+* Total revenue from the supply of goods and services (millions of pesos) *M000A*; and
+* Total revenue (millions of pesos) *A800A*
+
+Specifically: 
+
+*J300A* is "Contribuciones patronales a regímenes de seguridad social. Son todas las aportaciones monetarias que la unidad económica cubrió con sus recursos a instituciones de seguridad social en beneficio de los trabajadores remunerados."
+
+*J300A* is “Employer contributions to social security schemes. These are all monetary contributions that the economic unit covered with its resources to social security institutions for the benefit of paid workers.”
+
+---
+
+*J400A* is "Otras prestaciones sociales. Son los pagos que la unidad económica realizó a instituciones privadas en beneficio de sus trabajadores o que otorgó directamente en especie al personal remunerado, en complemento o adición a los sueldos y salarios, tales como servicios médicos privados, despensas, primas de seguros, servicios educativos, ayudas para estudio y guarderías. Excluye: las contribuciones patronales a regímenes de seguridad social, compra de equipo, uniformes y ropa de trabajo; costos de capacitación; primas vacacionales; erogaciones para actividades deportivas y recreativas; gastos por concepto de pasajes, viáticos y alimentación; además de todos aquellos gastos reembolsables al trabajador."
+
+*J400A* is "Other social benefits. These are payments that the economic unit made to private institutions for the benefit of its workers or that it granted directly in kind to paid personnel, in addition to or as a supplement to wages and salaries, such as private medical services, food allowances, insurance premiums, educational services, study grants, and childcare. Excludes: employer contributions to social security schemes, purchase of equipment, uniforms, and work clothes; training costs; vacation bonuses; expenditures for sports and recreational activities; expenses for travel, per diem, and meals; in addition to all expenses reimbursable to the worker."
+
+Because of this, I will be summing J300A and J400A for job quality.
+
+```{r}
+ce_cleaned_totals_per_yr_municipio_activity <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_cleaned_totals_per_yr_municipio_activity.csv")) %>% 
+  filter(!(municipio == "MEXICALI" & ano_censal == "2023"))
+
+ce_quality_totals <- ce_cleaned_totals_per_yr_municipio_activity %>% 
+  dplyr::select(-c("a800a","m000a"))  # leave in number of jobs (h000a) so that we can scale to the number of jobs.
+```
+
+
+## Adjust for inflation
+
+This will be done using the package `priceR`.  Documentation is located here: <https://cran.r-project.org/web/packages/priceR/readme/README.html> 
+
+"adjust_for_inflation() automatically converts between nominal and real dollars, or in/deflates prices from one year’s prices to another’s.  It works for 304 countries / areas (see them with all by running show_countries())."
+
+```{r}
+library(priceR)
+
+ce_quality_totals_adj <- ce_quality_totals %>%
+  mutate(sum_j300a_j400a_milpesos = j300a + j400a) %>% 
+  mutate(sum_j300a_j400a_pesos = sum_j300a_j400a_milpesos * 1e6) %>% 
+  mutate(
+    quality_real_pesos_2023 = adjust_for_inflation(
+      price = sum_j300a_j400a_pesos,
+      from_date = ano_censal,
+      country = "Mexico",
+      to_date = 2023
+      )
+  ) %>% 
+  dplyr::select(ano_censal, rgn_id, estado, e03, municipio, e04, codigo, general_sector, specific_sector, sum_j300a_j400a_pesos, quality_real_pesos_2023, h000a, ue)
+```
+
+
+### Aggregate by region and sector
+
+```{r}
+total_quality_byrgn_and_activity <- ce_quality_totals_adj %>%
+  group_by(ano_censal, rgn_id, general_sector, specific_sector) %>% # not using codigo, notas_breve, because those are too specific
+  summarize(qual_real2023_per_act = sum(quality_real_pesos_2023, na.rm = TRUE),
+            jobs_per_act = sum(h000a, na.rm = TRUE),
+            ue_per_act = sum(ue, na.rm = TRUE))
+```
+
+### Add in adjustment for municipalities that cover both coastal and pacific sides, and sectors that are not strictly coastal
+
+Remember that \(\frac{a}{b} \times c\) is the same as \(\frac{a \times c}{b}\).
+
+This is because multiplication and division follow the associative and commutative properties, allowing you to rearrange terms like this without changing the value. 
+
+So when we adjust the numerator in our current status, we do not need to adjust the denominator (the scalar, in this case the number of jobs).  
+
+```{r}
+coastal_adjustment_multipliers <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le","coastal_adjustment_multiplier_2020.csv"))
+```
+
+```{r}
+coastal_total_qual_per_rgn_and_activity <- total_quality_byrgn_and_activity %>% 
+  full_join(coastal_population_multipliers, by = "rgn_id") %>% 
+  mutate(
+    
+      # fix San Felipe
+    coastal_pop_adjustment = ifelse(rgn_id %in% "Region_1" & ano_censal %in% "2023", 1, coastal_pop_adjustment),
+    
+    # quality
+    first_adj_coastal_qual_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), qual_real2023_per_act * coastal_pop_adjustment, qual_real2023_per_act),
+    coastal_qual_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","environmental_research_consulting"), qual_real2023_per_act * coastal_pop_adjustment, first_adj_coastal_qual_per_act),
+    
+    # jobs
+    first_adj_coastal_jobs_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), jobs_per_act * coastal_pop_adjustment, jobs_per_act),
+    coastal_jobs_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","environmental_research_consulting"), jobs_per_act * coastal_pop_adjustment, first_adj_coastal_jobs_per_act), # not needed because it is the scalar
+    
+    # ue
+    first_adj_coastal_ue_per_act = ifelse(rgn_id %in% c("Region_3","Region_4"), ue_per_act * coastal_pop_adjustment, ue_per_act),
+    coastal_ue_per_act = ifelse(specific_sector %in% c("coastal_recreation","travel_planners","accommodations_food_drink","environmental_research_consulting"), ue_per_act * coastal_pop_adjustment, first_adj_coastal_ue_per_act) # only doing UE for exploration and understanding purposes.
+  ) %>%  # if in any of these sectors, adjust for 50km inland
+  
+  dplyr::select(-c(qual_real2023_per_act, ue_per_act, first_adj_coastal_qual_per_act, first_adj_coastal_ue_per_act, first_adj_coastal_jobs_per_act))
+```
+
+
+## Aggregate real 2023 quality by region
+
+Aggregating the quality for each region:
+
+```{r}
+total_quality_byrgn <- coastal_total_qual_per_rgn_and_activity %>%
+  group_by(ano_censal, rgn_id) %>%
+  summarize(total_qual_adj = sum(coastal_qual_per_act, na.rm = TRUE),
+            total_jobs = sum(coastal_jobs_per_act, na.rm = TRUE),
+            total_ue = sum(coastal_ue_per_act, na.rm = TRUE)) %>% 
+  mutate(total_qual_adj = round(total_qual_adj),
+         total_jobs = round(total_jobs),
+         total_ue = round(total_ue))
+```
+
+
+
+## Scale to the number of jobs
+
+By region:
+```{r}
+ce_quality_adj_perjob <- total_quality_byrgn %>%
+  mutate(qual_per_job = total_qual_adj/total_jobs) %>% 
+  ungroup()
+```
+
+
+## Reference point (90th quantile quality social benefits pesos per job available)
+
+By region:
+```{r}
+reference_high_qual_scaled_to_jobs <- ce_quality_adj_perjob %>%
+  mutate(percap_90th = quantile(qual_per_job, probs = 0.9))
+```
+
+
+## Current status
+
+First, join back the reference point, then divide the current value of marine quality/job by the 90th quantile across all regions and years as a reference.
+
+If it is equal to the 90th quantile, or above, the region will receive the current status of 100.  Otherwise, it will reflect the reduction.
+
+```{r}
+ce_qual_current_status <- ce_quality_adj_perjob %>%
+  dplyr::select(rgn_id, ano_censal, qual_per_job) %>%
+  left_join(reference_high_qual_scaled_to_jobs) %>%
+  mutate(current_status_raw = qual_per_job/percap_90th * 100,
+         current_status = ifelse(current_status_raw >= 100, 100, current_status_raw)) %>%
+  ungroup()
+
+write_csv(ce_qual_current_status, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/liv","ce_qual_current_status.csv"))
+
+```
+
+### plot
+
+```{r}
+library(plotly)
+library(dplyr)
+
+ce_qual_current_status <- ce_qual_current_status %>%
+  mutate(ano_censal = as.numeric(ano_censal))
+
+qual_cs_plotly <- plot_ly(
+  ce_qual_current_status,
+  x = ~ano_censal,
+  y = ~current_status,
+  color = ~factor(rgn_id),
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS of marine-related job quality per region, SCALED by the number of jobs, with the 90th quantile across all regions and years as a reference",
+    xaxis = list(title = "Census Year"),
+    yaxis = list(
+      title = "Quality per Job / 90th quantile (%)",
+      range = c(0, 110)
+    ),
+    legend = list(title = list(text = "Region"))
+  ) %>%
+  add_lines(
+    x = range(ce_qual_current_status$ano_censal), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+
+qual_cs_plotly
+
+
+```
+
+```{r}
+library(plotly)
+library(dplyr)
+
+ce_qual_current_status <- ce_qual_current_status %>%
+  mutate(ano_censal = as.numeric(ano_censal))
+
+raw_qual_cs_plotly <- plot_ly(
+  ce_qual_current_status,
+  x = ~ano_censal,
+  y = ~current_status_raw,
+  color = ~factor(rgn_id),
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "RAW CURRENT STATUS of marine-related job quality per region, SCALED by the number of jobs, with the 90th quantile across all regions and years as a reference",
+    xaxis = list(title = "Census Year"),
+    yaxis = list(
+      title = "Quality per Job / 90th quantile (%)"
+    ),
+    legend = list(title = list(text = "Region"))
+  ) %>%
+  add_lines(
+    x = range(ce_qual_current_status$ano_censal), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+
+raw_qual_cs_plotly
+
+
+```
