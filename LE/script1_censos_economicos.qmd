@@ -22,7 +22,17 @@ editor_options:
 
 # LE: Censos Economicos (CE) 
 
-For number of jobs, quality of jobs, and revenue of certain sectors.  
+This script brings in data from the Censos Economicos (CE) and cleans it, prepping it for analysis and use in the LIV and ECO subgoals.  The CE contains data for the number of jobs, quality of jobs, and revenue of certain marine-related sectors.  
+
+This analysis uses only the Economic Census (CE)  conducted by Instituto Nacional de Estadística y Geografía (INEGI) rather than the National Survey of Occupation and Employment (ENOE) because the Census provides a complete count of businesses, not just a sample of households. That matters because this project evaluates marine-sector employment at the municipal level, and the Economic Census covers every formally registered establishment in each municipality. In contrast, ENOE is designed to be representative at the state and national levels, which means municipal estimates would be less precise and subject to sampling variability.
+
+The Economic Census also allows employment, wages, benefits, and revenue to be measured using the same establishments and the same reporting system. This ensures internal consistency between the Livelihoods (number of jobs and job quality) and Economies (revenue) components of the analysis. Using a single census-based data source reduces complexity in the methodology, improves comparability across years, and avoids introducing additional assumptions that would be needed to merge survey-based labor estimates with economic data at the establishment level.
+
+Note that while the Labor Indicators for the Municipalities of Mexico (ILMM) data source from INEGI has taken the ENOE and adjusted for municipality estimations instead of state-level, it does not disaggregate by sector. Therefore, we would not be able to isolate marine-related sectors and industries.  Additionally, it provides the percentage of the municipal labor force that is employed vs informal employment, but it neglects any job quality metrics.  
+
+However, if we were desperate for an estimate of the number of jobs for a certain sector and municipality, we could make an assumption of sectoral homogeneity.  That would allow us to take the ENOE state-level data and multiply by the proportion of occupied individuals in that municipality within the state.  However, that is a big assumption to make, and unfortunately the locality data was suppressed for confidentiality.  
+
+Therefore, we chose to use the Economic Census in lieu of the ENOE or ILMM.
 
 
 ```{r}
@@ -40,6 +50,7 @@ For downloading years 2024 and 2019:
 
 For downloading 2014 - 2004, go to "Descarga Masiva" at <https://www.inegi.org.mx/app/descarga/?p=1664#denue>, and select the state you would like to download for on the left hand side of the page.  Then, once you have selected the state, you will click "Indicadores" -> "Programas" -> "Censos Economicos (CE)" -> "2014" -> "Indicadores".  You will then have to do that for every one of the GoC states.
 
+Since we have raw data for each one of the states for every year, we will need to read each one in and bind them.
 
 ### 2024
 ```{r}
@@ -121,7 +132,7 @@ fix_types <- \(df) df |>
   mutate(
     ENTIDAD = as.numeric(ENTIDAD),
     MUNICIPIO = as.numeric(MUNICIPIO),
-    CODIGO = as.character(CODIGO)
+    CODIGO = as.character(CODIGO) # fixing the types so that they can bind together
   )
 
 ce_bind_2019 <- bind_rows(
@@ -167,7 +178,7 @@ spec(sin_2014_2009_2004_raw)
 spec(son_2014_2009_2004_raw)
 
 
-fix_types <- \(df) df %>% 
+fix_types <- \(df) df %>% # needed to do a lot more here because the data is presented differently, it is more cleaned up.
   mutate(
     clave_entidad = as.numeric(clave_entidad),  # bc has char, others have numeric
     clave_municipio = as.numeric(clave_municipio),
@@ -188,6 +199,7 @@ ce_bind_2014_2009_2004 <- bind_rows(
   fix_types(son_2014_2009_2004_raw)
 )
 
+## out of curiousity, looking at fishing in La Paz:
 # pesca_lapaz <- ce_bind_2014_2009_2004 %>% 
   # filter(clave_actividad_economica %in% "1141") %>% 
   # filter(clave_entidad %in% "3") %>% 
@@ -197,7 +209,9 @@ ce_bind_2014_2009_2004 <- bind_rows(
 
 ## Merge all years
 
-First do some explorations of the differences between the years.
+Now that we have separate bound datasets for *2004-2014*, *2019*, and *2024*, which really refer to data collected in *2003-2013*, *2018*, and *2023*, respectively, we can now merge them all into one dataframe. 
+
+Before we do that, let's first do some explorations of the differences between the years.
 
 ```{r}
 setdiff(colnames(ce_bind_2014_2009_2004), colnames(ce_bind_2019))
@@ -235,7 +249,7 @@ What we really need is:
 * Total revenue from the supply of goods and services (millions of pesos) *M000A*; and
 * Total revenue (millions of pesos) *A800A*
 
-For now.  
+So, let's isolate those variables (columns).
 
 ```{r}
 ## first, standardize the names of the columns for binding.
@@ -262,8 +276,7 @@ str(ce_rename_2024)
 
 ce_all_years <- bind_rows(ce_rename_2014_2009_2004, ce_rename_2019, ce_rename_2024)
 
-# write_csv(ce_all_years, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_all_years.csv"))
-
+## again, we can check La Paz:
 # pesca_lapaz <- ce_all_years %>% 
 #   filter(CODIGO %in% "1141") %>% 
 #   filter(E03 %in% "3") %>% 
@@ -271,19 +284,29 @@ ce_all_years <- bind_rows(ce_rename_2014_2009_2004, ce_rename_2019, ce_rename_20
 ```
 
 
+Save the fully bound df:
+```{r}
+# write_csv(ce_all_years, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_all_years.csv"))
+```
+
+
+
 ## Identify marine activities and CE sector codes 
 
+Now, we want to limit our analysis to MARINE-RELATED sectors, not all sectors in the CE.  First, we should see what sectors are available in the 2004-2014 data, to ensure we have reference points for those sectors:
 
 ```{r}
 all_sectors <- ce_bind_2014_2009_2004 %>% 
   select(clave_actividad_economica, actividad_economica) %>% 
   group_by(clave_actividad_economica, actividad_economica) %>% 
   distinct()
-# write_csv(all_sectors, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","all_sectors.csv"))
+
+# write_csv(all_sectors, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_all_sectors_2004_2014.csv"))
 ```
 
-See spreadsheet for more information on marine-related sectors that were chosen: https://docs.google.com/spreadsheets/d/1X-Y8haoH3p59tzyAAGBKNggXJ10LWm1Ck15rjOc_nk8/edit?gid=265681868#gid=265681868 and [methods](https://docs.google.com/document/d/17YoomySVRz6IHWR6BYlDN11uF26A7qEjAfkDzssq1ZU/edit?tab=t.0).
+Then I went through each one and identified those that are marine-related.  See this spreadsheet for more information on marine-related sectors that were chosen: https://docs.google.com/spreadsheets/d/1X-Y8haoH3p59tzyAAGBKNggXJ10LWm1Ck15rjOc_nk8/edit?gid=265681868#gid=265681868 and [methods](https://docs.google.com/document/d/17YoomySVRz6IHWR6BYlDN11uF26A7qEjAfkDzssq1ZU/edit?tab=t.0).
 
+We can now make a tibble of these sectors that we are interested in:
 ```{r}
 library(tibble)
 
@@ -409,7 +432,6 @@ ce_actividades_marino <- tribble(
 )
 
 ce_actividades_marino
-
 ```
 
 Quick kable to see it all in a pretty way:
@@ -456,8 +478,7 @@ See which sectors are present in 2019 and 2024, but not in 2004, 2009, & 2014.
 ```{r}
 setdiff(unique(ce_actividades_marino$codigo), unique(all_sectors$clave_actividad_economica)) # [1] "221112" "483113" note that these two sectors, oil and gas maritime transport and hydraulic energy, did not exist as sectors in 2004 - 2014.
 
-# write_csv(ce_actividades_marino, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","all_marine_related_sectors.csv"))
-
+# write_csv(ce_actividades_marino, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_identified_marine_sectors.csv"))
 ```
 
 
@@ -477,7 +498,7 @@ municipio_codigo_rename <- municipio_codigo_df %>%
   select(-tasa_regional)
 ```
 
-
+Filter the CE municipalities to those identified as coastal GoC.
 ```{r}
 # now filter the ce to only those municipalities. 
 ce_all_years_goc <- ce_all_years %>% 
@@ -515,9 +536,6 @@ unique(ce_all_years_goc$municipio)
 
 ```
 
-
-### Marine activities
-
 Now limit to the actividades we care about:
 ```{r}
 # limit to marine-related economic activities (df)
@@ -525,10 +543,7 @@ ce_all_years_goc_marine <- inner_join(ce_actividades_marino, ce_all_years_goc, b
 # write_csv(ce_all_years_goc_marine, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_all_years_goc_marine.csv"))
 ```
 
-
-## Assign OHI rgn_id
-
-Bring in the municipality to rgn_id classifier df:
+Read in the municipality to rgn_id classifier df:
 ```{r}
 ## bring in the municipality to rgn_id code CSV I made...isolate_goc_municipios.qmd led to the manually made .CSV: `~/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid.csv`
 
@@ -540,7 +555,7 @@ municipality_to_rgnid <- read_csv(here::here("/home/shares/ohi/OHI_GOC/spatial/m
 setdiff(unique(municipality_to_rgnid$municipio), unique(ce_all_years_goc_marine$municipio)) #character(0)
 ```
 
-
+Join to obtain rgn_id:
 ```{r}
 ce_all_years_goc_marine_rgnid  <- left_join(ce_all_years_goc_marine, municipality_to_rgnid, by = c("e03","e04", "estado", "municipio")) ## Joining with `by = join_by(e03, e04, estado, municipio)`
 ```
@@ -590,7 +605,10 @@ ce_actividades_rgnid <- ce_all_years_goc_marine_rgnid %>%
 
 unique(ce_all_years_goc_marine_rgnid$municipio) # 79
 unique(ce_actividades_rgnid$municipio) # 60 municipios, makes sense: 79-19 = 60
+```
 
+Save the filtered dataframe of all years marine activities with region ids
+```{r}
 ## save the filtered dataframe of all years marine activities with region ids
 # write_csv(ce_actividades_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_all_years_goc_marine_w_rgnid.csv"))
 ```
@@ -615,7 +633,7 @@ pesca_ce_bind_2024 <- ce_bind_2024 %>%  filter(CODIGO %in% "1141")
 
 ## NOTE that 02001, which previously encompassed a large portion of the northern pacific-side *and* gulf-side of BC, is now only pacific-side!!! <https://en.wikipedia.org/wiki/Municipalities_of_Baja_California>.  
 
-## so for 2024, we should only consider 02002, 02007, and 02006 to be GoC.
+## so for 2024, we should only consider 02007 and 02006 to be GoC.
 ```
 
 ```{r}
@@ -680,7 +698,7 @@ check_structure <- ce_actividades_rgnid %>%
 If NA total exists, use that row.
 Else if only one row and it's 99, treat as total.
 Else if strata 1-4 exists, sum them.
-Else if only 99 rows exist, treat 99 as total.
+Else if only 99 rows (multiple this time) exist, treat 99 as total.
 Else... flag as having an issue.
 
 So we only have one row per group!
@@ -776,7 +794,7 @@ check_structure_2 <- ce_totals_clean %>%
     has_99 = any(id_estrato == 99),
     has_strata = any(id_estrato %in% 1:4),
     .groups = "drop"
-  ) ## now we do not have any 99s in there.... need to come back and check on this.
+  ) ## now we do not have any 99s in there.... 
 
 missing_by_year <- ce_totals_clean %>%
   group_by(ano_censal) %>%
@@ -805,7 +823,7 @@ missing_rgn_year_act <- ce_totals_clean %>%
     pct_missing_ue = mean(is.na(ue)) * 100,
     .groups = "drop"
   ) %>%
-  arrange(desc(pct_missing_jobs)) ### note that 2019 and 2024, since they are newer and did not have the summarized table of all previous years (as we had for 2004 - 2014), have many more suppressed observations... we will need to return to this and ensure what we are doing is correct.
+  arrange(desc(pct_missing_jobs)) ### note that 2019 and 2024, since they are newer and did not have the summarized table of all previous years (as we had for 2004 - 2014), have many more suppressed observations... 
 ```
 
 ### Fixing the years
@@ -826,15 +844,21 @@ ce_totals_clean_years_adjusted <- ce_totals_clean %>%
 
 
 
-
 ## Save to Mazu
 
 ```{r}
 ## save the filtered dataframe of all years marine activities with region ids that only have one row per group.
-# write_csv(ce_totals_clean_years_adjusted, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_cleaned_totals_per_yr_municipio_activity.csv"))
+write_csv(ce_totals_clean_years_adjusted, here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_cleaned_totals_per_yr_municipio_activity.csv"))
 ```
 
+
+We can now use this cleaned df for LIV_number_jobs, LIV_quality_jobs, and ECO_revenue.  Continue on to script 2-5.
+
+
+
 #### Exploration
+
+Looking at fishing over time:
 
 ```{r}
 library(plotly)
@@ -934,7 +958,7 @@ ce_by_sector_year <- ce_totals_clean_years_adjusted %>%
   ) %>%
   arrange(general_sector, ano_censal)
 
-# Plot 1: Jobs by general_sector over time
+# plot 1: Jobs by general_sector over time
 plot_jobs_by_sector <- plot_ly(
   ce_by_sector_year,
   x = ~ano_censal,
@@ -954,7 +978,7 @@ plot_jobs_by_sector <- plot_ly(
 
 plot_jobs_by_sector
 
-# Plot 2: UE by general_sector over time  
+# plot 2: UE by general_sector over time  
 plot_ue_by_sector <- plot_ly(
   ce_by_sector_year,
   x = ~ano_censal,
@@ -974,7 +998,7 @@ plot_ue_by_sector <- plot_ly(
 
 plot_ue_by_sector
 
-# Plot 3: Revenue by general_sector over time
+# plot 3: Revenue by general_sector over time
 plot_revenue_by_sector <- plot_ly(
   ce_by_sector_year,
   x = ~ano_censal,
@@ -998,7 +1022,7 @@ plot_revenue_by_sector
 
 ```{r}
 
-# Aggregate jobs by general_sector (or specific_sector) and year
+# agg jobs by general_sector (or specific_sector) and year
 ce_by_sector_year <- ce_totals_clean_years_adjusted %>%
   group_by(specific_sector, ano_censal) %>%
   summarise(
@@ -1009,7 +1033,7 @@ ce_by_sector_year <- ce_totals_clean_years_adjusted %>%
   ) %>%
   arrange(specific_sector, ano_censal)
 
-# Plot 1: Jobs by general_sector over time
+# plot 1: Jobs by general_sector over time
 plot_jobs_by_sector <- plot_ly(
   ce_by_sector_year,
   x = ~ano_censal,
@@ -1029,7 +1053,7 @@ plot_jobs_by_sector <- plot_ly(
 
 plot_jobs_by_sector
 
-# Plot 3: Revenue by general_sector over time
+# plot 3: Revenue by general_sector over time
 plot_revenue_by_sector <- plot_ly(
   ce_by_sector_year,
   x = ~ano_censal,
@@ -1050,7 +1074,7 @@ plot_revenue_by_sector <- plot_ly(
 plot_revenue_by_sector
 ```
 
-
+Looking at specific sectors over time:
 ```{r}
 sectors_of_interest <- c(
   "fishing",
