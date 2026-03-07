@@ -1066,7 +1066,9 @@ municipality_to_rgnid <- read_csv(here::here("/home/shares/ohi/OHI_GOC/spatial/m
 setdiff(unique(municipality_to_rgnid$municipio), unique(sesnsp_goc_states$municip)) # NA
 
 ## join the two
-sesnsp_goc_municipios <- inner_join(sesnsp_goc_states, municipality_to_rgnid, by = c("entidad" = "estado","municip" = "municipio"))
+sesnsp_goc_municipios <- inner_join(sesnsp_goc_states, municipality_to_rgnid, by = c("entidad" = "estado","municip" = "municipio")) %>% 
+  filter(!municip %in% "Ensenada") %>% 
+  filter(!municip %in% "Mexicali")
 ```
 
 
@@ -1127,8 +1129,9 @@ updated_tr_qual_crime_subtypes <- c(
 
 
 # filter sesnsp_goc by those subtypes
-sesnsp_goc_tr_qual <- sesnsp_goc_50km %>%
-  filter(sbtp_d_ %in% updated_tr_qual_crime_subtypes)
+sesnsp_goc_tr_qual <- sesnsp_goc_municipios %>%
+  filter(sbtp_d_ %in% updated_tr_qual_crime_subtypes) %>% 
+  filter(!municip %in% "Mexicali")
 
 unique(sesnsp_goc_tr_qual$rgn_id) # [1] "Region_1" "Region_3" "Region_4" "Region_5" "Region_7" "Region_8" "Region_9"
 ```
@@ -1203,6 +1206,7 @@ No weighting:
 # summarize the number of crimes by each region, not weighing any crime more than another, because they all affect tourist quality.  
 sesnsp_goc_tr_qual_sum <- sesnsp_goc_tr_qual %>% 
   st_drop_geometry() %>% 
+  filter(!is.na(rgn_id)) %>% 
   group_by(ano, rgn_id) %>% 
   summarise(number_crimes = sum(annl_tt)) %>% 
   ungroup()
@@ -1222,6 +1226,7 @@ crime_weights <- tibble(
 # summarize weighted crimes by year and region
 sesnsp_goc_tr_qual_sum_weighted <- sesnsp_goc_tr_qual %>% 
   st_drop_geometry() %>% 
+  filter(!is.na(rgn_id)) %>% 
   left_join(crime_weights, by = "sbtp_d_") %>% 
   group_by(ano, rgn_id) %>% 
   summarise(number_crimes = sum(annl_tt * weight)) %>% 
@@ -1272,43 +1277,58 @@ crime_raw_plotly <- plotly::plot_ly(
 crime_raw_plotly
 ```
 
-#### Divide by coastal population in each region
+### Divide by coastal population in each region
 
-##### NOTE: NEED TO UPDATE...
-
-1. We will have to update this because we eventually want to use 2015, 2020, and 2025 census data for population, not just static 2020.
-2. I think maybe we should use the population per municipality (instead of population per OHI Region).  Because for some regions there are multiple municipios in the region that have data collected for them, versus some only have one or two.  
-
-```{r}
-coastal_50km_pop <- read_csv(here::here("general/OHI_rgn_population_50km.csv")) 
-
-coastal_50km_pop_sumrgn9 <- coastal_50km_pop %>% 
-  group_by(rgn_id) %>% 
-  summarize(rgn_population_50km = sum(population_50km_2020))
-
-sesnsp_goc_tr_sum_percapita <- left_join(sesnsp_goc_tr_qual_sum, coastal_50km_pop_sumrgn9, by = "rgn_id")
-
-sesnsp_goc_tr_crimes_percapita <- sesnsp_goc_tr_sum_percapita %>% 
-  group_by(ano, rgn_id) %>% 
-  mutate(tr_crimes_percapita = (number_crimes / rgn_population_50km)) %>% 
-  ungroup()
-```
-
-updated:
-### Bring in population
+##### Bring in population
 
 ```{r}
 pop_goc <- read_csv(here::here("/home/shares/ohi/OHI_GOC/spatial/population_municipal","population_goc_municipality_inegi_2000_2020.csv"))
 
-# limit to the municipalities that have SESNSP data
-sesnsp_municipalities <- unique(sesnsp_goc_50km$municip)
+setdiff(unique(municipality_to_rgnid$municipio), unique(pop_goc$desc_municipio)) 
+# [1] "General Plutarco Elias Calles" "Bacum" "San Felipe"
 
-## see if they are named the same in pop_goc
-setdiff(unique(pop_goc$desc_municipio), sesnsp_municipalities)
-setdiff(sesnsp_municipalities, unique(pop_goc$desc_municipio))
+# add in San Felipe as `desc_municipio`, and the `ano_censal` and `pop_count` from this document: 17,143 https://www.inegi.org.mx/contenidos/productos/prod_serv/contenidos/espanol/bvinegi/productos/nueva_estruc/702825197735.pdf 
+# San Felipe	Mexicali	13,123	14,845	16,721	17,143
+# Source: Instituto Nacional de Estadística Geografía e Informática, México.
+san_felipe_rows <- data.frame(
+  cve_entidad = rep("02", 4),
+  desc_entidad = rep("Baja California", 4),
+  cve_municipio = rep("7", 4),
+  desc_municipio = rep("San Felipe", 4),
+  indicador = rep("From INEGI aggregation of localities", 4),
+  unidad_medida = rep("People", 4),
+  rgn_id = rep("Region_1", 4),
+  directly_coastal = rep("Y", 4),
+  ano_censal = c(2000, 2005, 2010, 2020),
+  pop_count = c(13123, 14845, 16721, 17143)
+)
 
-## aggregate by region
-agg_pop_rgnid <- pop_goc %>% 
+# https://www.economia.gob.mx/datamexico/en/profile/geo/bacum?redirect=true
+bacum_rows <- data.frame(
+  cve_entidad = rep("26", 2),
+  desc_entidad = rep("Sonora", 2),
+  cve_municipio = rep("12", 2),
+  desc_municipio = rep("Bacum", 2),
+  indicador = rep("From INEGI aggregation of localities", 2),
+  unidad_medida = rep("People", 2),
+  rgn_id = rep("Region_7", 2),
+  directly_coastal = rep("Y", 2),
+  ano_censal = c(2010, 2020),
+  pop_count = c(22820, 23151)
+)
+
+pop_goc <- rbind(pop_goc, san_felipe_rows, bacum_rows)
+
+setdiff(unique(municipality_to_rgnid$municipio), unique(pop_goc$desc_municipio))  # leave "General Plutarco Elias Calles" because it is not coastal GoC.
+
+pop_goc_municipalities <- inner_join(pop_goc, municipality_to_rgnid, by = c("desc_entidad" = "estado","desc_municipio" = "municipio", "rgn_id")) %>% 
+  filter(!is.na(rgn_id)) %>% 
+  filter(!desc_municipio %in% "Mexicali") # not representative of GoC, rather border.
+```
+
+```{r}
+## aggregate by region of all GoC-bordering municipalities. NOT yet adjusted for only the coastal parts of Region_2 and Region_3
+agg_pop_rgnid <- pop_goc_municipalities %>% 
   group_by(rgn_id, ano_censal, unidad_medida) %>% 
   summarize(total_rgn_pop = sum(pop_count, na.rm = TRUE)) %>% 
   ungroup()
@@ -1324,17 +1344,24 @@ library(zoo)
 year_adj_pop_rgnid <- agg_pop_rgnid %>% 
   mutate(year_interpolated = as.numeric(ano_censal)) %>%
   group_by(rgn_id) %>% 
-  complete(year_interpolated = 2000:2023) # expand to interpolate
+  complete(year_interpolated = 2000:2025) # expand to interpolate
 
 year_adj_pop_rgnid_interpolated <- year_adj_pop_rgnid %>%
   arrange(rgn_id, year_interpolated) %>%
   group_by(rgn_id) %>% 
   mutate(
-    population_interpolated = na.approx(
-      total_rgn_pop,
-      x = year_interpolated,
-      rule = 2,
-      na.rm = FALSE
+    population_interpolated = case_when(
+      # Region_2: NA for all years before 2020 (San Quintin created in 2020)
+      rgn_id == "Region_2" & year_interpolated < 2020 ~ NA_real_,
+      # Region_2: hold 2020 value forward through 2025
+      rgn_id == "Region_2" & year_interpolated >= 2020 ~ 117568.0,
+      # All other regions: interpolate as before
+      TRUE ~ na.approx(
+        total_rgn_pop,
+        x = year_interpolated,
+        rule = 2,
+        na.rm = FALSE
+      )
     ),
     is_gapfilled = ifelse(is.na(ano_censal), 1, 0)
   ) %>%
@@ -1345,20 +1372,23 @@ year_adj_pop_rgnid_interpolated <- year_adj_pop_rgnid %>%
   dplyr::select(rgn_id, pop_ano_censal_original, population_original = total_rgn_pop, year_interpolated, population_interpolated, unidad_medida, is_gapfilled) %>% 
   ungroup()
 
-## note that the interpolated population amount from 2020-2023 is the same for each region.  It does not project the growth before it happens.
+## note that the interpolated population amount from 2020-2025 is the same for each region.  It does not project the growth before it happens.
 
 ## save this
-# write_csv(year_adj_pop_rgnid_interpolated, here::here("/home/shares/ohi/OHI_GOC/spatial/population_municipal","interpolated_population_per_rgn_coastalmunicipios_2000_2020.csv"))
+# write_csv(year_adj_pop_rgnid_interpolated, here::here("/home/shares/ohi/OHI_GOC/spatial/population_municipal","interpolated_population_per_rgn_coastalmunicipios_2000_2025.csv"))
 ```
 
 ```{r}
-municipal_adj_pop_interpolated_50km <- read_csv(here::here("/home/shares/ohi/OHI_GOC/spatial/population_municipal","interpolated_population_per_rgn_coastalmunicipios_2000_2020.csv"))
+sesnsp_goc_tr_sum_percapita <- left_join(sesnsp_goc_tr_qual_sum_weighted, year_adj_pop_rgnid_interpolated, by = c("rgn_id", "ano" = "year_interpolated")) %>% 
+  group_by(ano, rgn_id) %>% 
+  mutate(tr_crimes_percapita = (number_crimes / population_interpolated)) %>% 
+  ungroup()
 ```
 
 
 ```{r}
 crime_percap_plotly <- plotly::plot_ly(
-  sesnsp_goc_tr_crimes_percapita, 
+  sesnsp_goc_tr_sum_percapita, 
   x = ~ano, 
   y = ~tr_crimes_percapita, 
   color = ~rgn_id, 
@@ -1381,6 +1411,7 @@ crime_percap_plotly <- plotly::plot_ly(
 crime_percap_plotly
 ```
 
+# Stopped here
 
 Make a visualization for 2024:
 ```{r}
