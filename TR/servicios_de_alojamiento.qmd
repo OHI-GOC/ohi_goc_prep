@@ -15,9 +15,9 @@ format:
 editor: 
   markdown:
     wrap: sentence
-  chunk_output_type: inline
+  chunk_output_type: console
 editor_options: 
-  chunk_output_type: inline
+  chunk_output_type: console
 ---
 
 # Seeing if the number of employees INEGIs DENUE "Servicios de alojamiento temporal y de preparación de alimentos y bebidas" has a relationship with tourist arrivals (SECTUR Hotel Monitoring Program)
@@ -346,7 +346,7 @@ First, clean them both up:
 ```{r}
 ## look for differences
 
-unique(employees_by_muni_yr$municipio)
+unique(employees_by_muni_yr_50$municipio)
 # [1] "Ahome"                    "Angostura"                "Bah<ed>a de Banderas"     "Bahía de Banderas"        "Benito Ju<e1>rez"         "Benito Juárez"            "Cabo Corrientes"          "Caborca"                 
 #  [9] "Compostela"               "Culiac<e1>n"              "Culiacán"                 "Elota"                    "Empalme"                  "Ensenada"                 "Escuinapa"                "Guasave"                 
 # [17] "Guaymas"                  "Hermosillo"               "Huatabampo"               "La Paz"                   "Loreto"                   "Los Cabos"                "Mazatl<e1>n"              "Mazatlán"                
@@ -393,7 +393,7 @@ employees_by_muni_yr_join_50 <- employees_by_muni_yr_50 %>%
     
     data_year = as.numeric(data_year)
   ) %>% 
-  select(-municipio) %>% 
+  dplyr::select(-municipio) %>% 
   complete(nesting(municipio_clean, estado), data_year) %>%  # for ensenada (missing 2024), san quintin (missing 2019, 2020) and san pedro laguilla (missing 2019 and 2020)
   mutate(
     total_employees = replace_na(total_employees, 0),
@@ -436,7 +436,7 @@ employees_by_muni_yr_join_50_sf <- employees_by_muni_yr_50 %>%
     
     data_year = as.numeric(data_year)
   ) %>% 
-  select(municipio_clean, geometry) %>% 
+  dplyr::select(municipio_clean, geometry) %>% 
   distinct()
 ```
 
@@ -449,7 +449,7 @@ denue_municipios_rgn_sf <- st_intersection(employees_by_muni_yr_join_50_sf, inla
 
 denue_municipios_rgn <- denue_municipios_rgn_sf %>% 
   st_drop_geometry() %>%
-  select(municipio_clean, rgn_id) %>% 
+  dplyr::select(municipio_clean, rgn_id) %>% 
   distinct()
 
 dups <- denue_municipios_rgn %>% 
@@ -571,6 +571,8 @@ combined_arrivals_employees_data <- total_arrivals_aggregated_join %>%
 
 ## Visitor and Accommodation Employees Relationship
 
+### model1
+
 ```{r}
 model1 <- lm(arrivals ~ total_employees, data = combined_arrivals_employees_data)
 summary(model1)
@@ -590,17 +592,22 @@ ggplot(combined_arrivals_employees_data, aes(x = total_employees, y = arrivals))
 
 ```
 
+### model2
+
 ```{r}
 ## just to check
 model2 <- lm(log(arrivals) ~ log(total_employees), data = combined_arrivals_employees_data)
 summary(model2)
 ```
+### model3
 
 With municipio effects:
 ```{r}
 model3 <- lm(arrivals ~ total_employees + municipio_clean, data = combined_arrivals_employees_data)
 summary(model3)
 ```
+
+### model4
 
 ```{r}
 model4 <- lm(arrivals ~ total_employees + estado, data = combined_arrivals_employees_data)
@@ -638,11 +645,23 @@ combined_arrivals_employees_data_full <- full_join(employees_by_muni_yr_join_50,
 #       arrivals
 #     )
 #   )
-# 
-# plot(model1, which = 1) # residuals vs fitted
-# plot(model1, which = 2) # QQ plot
 ```
 
+## bptest
+
+```{r}
+plot(model1, which = 1) # residuals vs fitted
+plot(model1, which = 2) # QQ plot
+plot(model1, which = 3) # scale - location
+
+library(lmtest)
+bptest(model1) # Breusch Pagan test. BP = 19.161, df = 1, p-value = 1.201e-05, heteroscedastic
+bptest(model3) # when employees + municipio: BP = 21.914, df = 13, p-value = 0.05672, just over 0.05... homoscedastic or hetero
+bptest(model2) # when log(): BP = 13.647, df = 1, p-value = 0.0002206... hetero
+bptest(model4) # employees + estado: BP = 22.289, df = 5, p-value = 0.0004613. .... hetero
+```
+
+## prep for fill
 
 ```{r}
 # use predict() to fill arrivals by employees
@@ -657,27 +676,30 @@ df_model1 <- combined_arrivals_employees_data_full %>%
 ```
 
 
+## use predict() to fill
+
+### model3
 ```{r}
 ## fill using model3
 df_model3_filled <- df_model3 %>%
   filter(data_year %in% 2019:2024) %>% 
   mutate(
     arrivals_filled_model3 = ifelse(
-      is.na(arrivals) & !is.na(total_employees),
+      is.na(arrivals) & !is.na(total_employees), # if there are no arrivals data but there are employees for that municipality, predict using model3 !!
       predict(model3, newdata = df_model3),
       arrivals
     )
   )
 ```
 
-
+### model1
 ```{r}
 ## fill using model 1
 df_model1_filled <- df_model1 %>%
   filter(data_year %in% 2019:2024) %>% 
   mutate(
     arrivals_filled_model1 = ifelse(
-      is.na(arrivals) & !is.na(total_employees),
+      is.na(arrivals) & !is.na(total_employees),  # if, of the municipalities left, there are no arrivals data but there are employees for that municipality, predict using model1 !!
       predict(model1, newdata = df_model1),
       arrivals
     )
@@ -690,18 +712,23 @@ filled_combined <- bind_rows(
   df_model3_filled,
   df_model1_filled
 ) %>% 
-  mutate(is_filled = ifelse(is.na(arrivals), "1", "0"))
+  mutate(is_filled = ifelse(is.na(arrivals), "1", "0")) # so we can see what has been gapfilled
 ```
 
 
 ```{r}
+## now, lets make the column of arrivals contained of all that have been filled, and the OG data.
 arrivals_employees_filled <- filled_combined %>% 
   mutate(arrivals_merged = case_when(
     is.na(arrivals) & !is.na(arrivals_filled_model3) ~ arrivals_filled_model3,
     is.na(arrivals) & is.na(arrivals_filled_model3) & !is.na(arrivals_filled_model1) ~ arrivals_filled_model1,
     TRUE ~ arrivals
   ))
+```
 
+## plotly
+
+```{r}
 library(plotly)
 
 plot_data <- arrivals_employees_filled %>% 
@@ -727,33 +754,40 @@ plot_data_plotly
 Check it diagnostically:
 
 ```{r}
-ggplot(df_model3_filled, aes(x = arrivals, y = arrivals_filled_model3)) +
-  geom_point(alpha = 0.6) +
-  geom_abline(slope = 1, intercept = 0, color = "red") +
-  theme_minimal() +
-  labs(
-    title = "Model3 Diagnostic: Actual vs Predicted Arrivals",
-    x = "Actual arrivals",
-    y = "Predicted arrivals (model3)"
-  )
-```
-```{r}
-ggplot(df_model1_filled, aes(x = arrivals, y = arrivals_filled_model1)) + ## there are no arrivals in this case, all need to be predicted.
-  geom_point(alpha = 0.6) +
-  geom_abline(slope = 1, intercept = 0, color = "red") +
-  theme_minimal() +
-  labs(
-    title = "Model1 Diagnostic: Actual vs Predicted Arrivals",
-    x = "Actual arrivals",
-    y = "Predicted arrivals (model1)"
-  )
+## first, check that there are no negative predictions
+arrivals_employees_filled %>%
+  filter(arrivals_merged < 0) ## none!!
 ```
 
+
 ```{r}
-hist(arrivals_employees_filled$arrivals_merged, breaks = 30,
+# ggplot(df_model3_filled, aes(x = arrivals, y = arrivals_filled_model3)) +
+#   geom_point(alpha = 0.6) +
+#   geom_abline(slope = 1, intercept = 0, color = "red") +
+#   theme_minimal() +
+#   labs(
+#     title = "Model3 Diagnostic: Actual vs Predicted Arrivals",
+#     x = "Actual arrivals",
+#     y = "Predicted arrivals (model3)"
+#   )
+```
+
+### hist model3 filled
+```{r}
+hist(arrivals_employees_filled$arrivals_filled_model3, breaks = 30,
      main = "Distribution of filled arrivals",
      xlab = "arrivals")
 ```
+
+### hist model1 filled
+
+```{r}
+hist(arrivals_employees_filled$arrivals_filled_model1, breaks = 30,
+     main = "Distribution of filled arrivals",
+     xlab = "arrivals")
+```
+
+
 ```{r}
 df_compare <- arrivals_employees_filled %>%
   mutate(source = ifelse(is.na(arrivals), "predicted", "actual"))
@@ -764,67 +798,29 @@ ggplot(df_compare, aes(x = arrivals_merged, fill = source)) +
 ```
 
 ```{r}
-ggplot(arrivals_employees_filled,
-       aes(x = data_year, y = arrivals_merged, color = is_filled)) +
-  geom_line() +
-  facet_wrap(~ municipio_clean, scales = "free_y") +
-  theme_minimal() +
-  labs(title = "Per-Municipio Time Series (Actual vs Filled)")
+# ggplot(arrivals_employees_filled,
+#        aes(x = data_year, y = arrivals_merged, color = is_filled)) +
+#   geom_line() +
+#   facet_wrap(~ municipio_clean, scales = "free_y") +
+#   theme_minimal() +
+#   labs(title = "Per-Municipio Time Series (Actual vs Filled)")
+
+# df_model3_filled %>%
+#   filter(!is.na(arrivals)) %>%
+#   summarize(
+#     RMSE = sqrt(mean((arrivals - predict(model3, newdata = .))^2)), # a lower RMSE indicates a better fit and more accurate predictions
+#     MAE  = mean(abs(arrivals - predict(model3, newdata = .)))
+#   )
+# 
+# df_model1_filled %>%
+#   filter(!is.na(arrivals)) %>%
+#   summarize(
+#     RMSE = sqrt(mean((arrivals - predict(model1, newdata = .))^2)),
+#     MAE  = mean(abs(arrivals - predict(model1, newdata = .)))
+#   )
 ```
 
-```{r}
-## check that there are no negative predictions
-arrivals_employees_filled %>%
-  filter(arrivals_merged < 0) ## none!!
-```
-
-```{r}
-df_model3_filled %>%
-  filter(!is.na(arrivals)) %>%
-  summarize(
-    RMSE = sqrt(mean((arrivals - predict(model3, newdata = .))^2)),
-    MAE  = mean(abs(arrivals - predict(model3, newdata = .)))
-  )
-
-df_model1_filled %>%
-  filter(!is.na(arrivals)) %>%
-  summarize(
-    RMSE = sqrt(mean((arrivals - predict(model1, newdata = .))^2)),
-    MAE  = mean(abs(arrivals - predict(model1, newdata = .)))
-  )
-```
-
-```{r}
-## diagnostics
-set.seed(123)
-
-train_idx <- sample(nrow(df_model3_orig), 0.8 * nrow(df_model3_orig))
-train_data <- df_model3_orig[train_idx, ]
-test_data <- df_model3_orig[-train_idx, ]
-
-model3_cv <- lm(arrivals ~ total_employees, data = train_data)
-
-pred_test <- predict(model3_cv, newdata = test_data)
-
-sqrt(mean((test_data$arrivals - pred_test)^2))  # RMSE
-
-```
-
-```{r}
-arrivals_employees_filled %>%
-  filter(is_filled == "1") %>%
-  mutate(pred = ifelse(!is.na(arrivals_filled_model3),
-                       predict(model3, newdata = .),
-                       predict(model1, newdata = .))) %>%
-  summarize(
-    diff_mean = mean(arrivals_merged - pred, na.rm = TRUE),
-    diff_sd = sd(arrivals_merged - pred, na.rm = TRUE),
-    diff_range = range(arrivals_merged - pred, na.rm = TRUE)
-  )
-
-```
-
-
+### arrivals vs emp
 
 ```{r}
 ggplot(arrivals_employees_filled,
@@ -833,6 +829,7 @@ ggplot(arrivals_employees_filled,
   geom_smooth(method = "lm") +
   theme_minimal()
 ```
+
 ## Write out
 
 ```{r}
