@@ -1,12 +1,9 @@
 ################################################################################
-# title
+# HELPERS: Clean Permit Holder names?
 ################################################################################
 #
-# Juan Carlos Villaseñor-Derbez
-# juancvd@stanford.edu
-# date
-#
-# Description
+# Juan Carlos Villaseñor-Derbez, Ph.D.
+# jc_villasenor@miami.edu
 #
 ################################################################################
 
