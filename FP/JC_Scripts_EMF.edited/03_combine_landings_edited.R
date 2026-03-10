@@ -1,13 +1,14 @@
 ################################################################################
-# title
+# CONAPESCA Landings Raw Combine
 ################################################################################
 #
-# Juan Carlos Villaseñor-Derbez
-# juancvd@stanford.edu
-# date
+# Original Author: Juan Carlos Villaseñor-Derbez, Ph.D.
+# Shared by J.C. Sep, 2025
 #
-# ERICA's EDITS - Oct 29 2025
+# Edited by Erica Ferrer, Ph.D.
+# Oct 29, 2025
 
+# NOTES:
 # The raw data for this file is included in the /home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/ directory.
 # The output data is stored in the /home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/ directory.
 # Small files (including this script) is included in the /home/ferrer/ohi_goc_prep directory.
@@ -77,7 +78,7 @@ final_landings_edited <- landings_fixed_dates |>
          vessel_rnpa,
          vessel_name,
          main_species_group,
-         species_name, # I added this column, Erica - Oct 29 2025
+         species_name, # I added this column to be includes, Erica - Oct 29 2025 (whereas J.C. removed it for his purposes)
          landed_weight,
          live_weight,
          value)
@@ -90,3 +91,4 @@ final_landings_edited <- landings_fixed_dates |>
 # This creates all sorts of issues because it's so big.
 saveRDS(final_landings_edited, 
         file = "/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/mex_landings_2000_present_EMF_edited.rds")
+# Now saved as "AllMex_landings_2000_present_EMF_edited.rds"

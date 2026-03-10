@@ -1,10 +1,9 @@
 ################################################################################
-# title
+# HELPERS: Clean the names of Economic Units (EUs)
 ################################################################################
 #
-# Juan Carlos Villaseñor-Derbez
-# juancvd@stanford.edu
-# date
+# Juan Carlos Villaseñor-Derbez, Ph.D.
+# jc_villasenor@miami.edu
 #
 # Description
 # Build a function to clean cooperative names. The steps are to:
