@@ -61,7 +61,7 @@ MexLandings_2000.present$weight_kg_corrected <- ifelse(
 # n = 12153879 obs., 21 vars.
 ```
 
-# STEP 4a: Filter down to GOC data ------------------------------
+# STEP 4a: Filter down to Northwest Mexico data ------------------------------
 
 ```{r Filter out data from Northwest Mexico}
 length(unique(MexLandings_2000.present$species_name)) 
@@ -71,13 +71,13 @@ length(unique(MexLandings_2000.present$species_name))
 States_of_Interest<- c("BAJA CALIFORNIA", "BAJA CALIFORNIA SUR", "SONORA", "SINALOA", "NAYARIT", "JALISCO")
 
 NW.Mex_Landings <- MexLandings_2000.present %>% filter(state %in% States_of_Interest)
-# n = 4713144 obs.
+# n = 4713144 obs., 21 vars.
 
 length(unique(NW.Mex_Landings$species_name)) 
 # 1827 unique species in States of Interest.
 ```
 
-# STEP 5: Attach lat-long info based on landing site ------------------------------
+# STEP 4b: Attach lat-long and OHI_region info based on landing site ------------------------------
 NOTE TO SELF: Come back to this! The lat long keys are imperfect. We'll want to fix this as much as possible.
 ```{r Append lat-long data to sites in Baja BCS Sonora and Sinaloa}
 # Filter OUT sites from Baja that are on the Pacific side using lat-Long file from Mel's repository:
@@ -86,7 +86,7 @@ BajaSonora_LatLong_Key<- read_csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/
 colnames(BajaSonora_LatLong_Key) <- c("state", "landing_site", "OHI_rgn", "lat", "long", "GoC")
 
 Jalisco_LatLong_Key<- read_csv(here("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/landing_sites_jalisco.csv"))
-colnames(Jalisco_LatLong_Key) <- c("landing_site", "CONAPESCA_landing_key", "habitat", "lat", "long", "Notes", "OHI_rgn", "state")
+colnames(Jalisco_LatLong_Key) <- c("landing_site", "CONAPESCA_landing_key", "habitat", "lat", "long", "site_notes", "OHI_rgn", "state")
 
 
 #### CLEANING LAT-LONG KEYS: ####
@@ -144,6 +144,9 @@ Jalisco_LatLong_Key_clean <- Jalisco_LatLong_Key_clean %>%
     lat  = as.numeric(str_replace_all(lat, "[−–—]", "-"))
   )
 
+# Add the "GoC" helpful column here based on a latitude cut off for the Nayarit/Jalisco OHI region, region 9 starting at 20.40895:
+Jalisco_LatLong_Key_clean <- Jalisco_LatLong_Key_clean %>%
+  mutate(GoC = if_else(lat < 20.40895, "no", NA_character_))
 
 #### MERGE LAT-LONG KEYS: ####
 LatLong_MasterKey_pending <- bind_rows(BajaSonora_LatLong_Key_clean, Jalisco_LatLong_Key_clean) %>%
@@ -158,98 +161,66 @@ rm(BajaSonora_LatLong_Key, Jalisco_LatLong_Key, removed_rows)
 unique(LatLong_MasterKey_pending$state)
 unique(LatLong_MasterKey_pending$OHI_rgn)
 
-# My regional key:
-RegionKey_temporary<- read_csv(here("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/RegionKey_UNDERCONSTRUCTION_Mar102026.csv"))
+# My regional key (temporary, subject to change, UNDER CONSTRUCTION):
+RegionKey_pending<- read_csv(here("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/RegionKey_UNDERCONSTRUCTION_Mar102026.csv"))
 # Previously: RegionKey_UNDERCONSTRUCTION_Dec012025.csv
+colnames(RegionKey_pending) <- c("state", "OHI_rgn", "OHI_rgn_number", "OHI_rgn_name", "exclude_rgn", "exclude_notes")
 ```
 
-```{r Append lat-long info to landings data & filter out GOC data}
+```{r Append lat-long and OHI_region info to landings data}
 # Append lat-long info to landings data:
 temp_df <- NW.Mex_Landings %>%
   left_join(
-    BajaSonora_LatLong_Key,
-    by = c("state", "landing_site")  # columns to match
+    LatLong_MasterKey_pending,
+    by = c("state", "landing_site")  # matching columns
   )
 
 table(temp_df$GoC)
-# 4713144 (total) - 996729 (no) = 3716415 obs. that are explicitly as "yes" in the GoC or NA. I have removed entries that are definitely "no" not in the Gulf.
+# 4713144 obs., 28 vars.
+# 1090368 "no" not in the GOC.
 
-# Generate filtered landings data for the GoC:
-GOC_Landings <- temp_df %>%
-  filter(GoC != "no" | is.na(GoC))
-# 3716415 obs.
+# Append RegionKey_pending info to landings data:
+temp_df <- temp_df %>%
+  left_join(
+    RegionKey_pending,
+    by = c("state", "OHI_rgn")  # matching columns
+  )
+# 4713144 obs., 32 vars.
+table(temp_df$GoC)
+# 1090368 "no" not in the GOC as we'd expect!
+
+NW.Mex_Landings<- temp_df
+# 4713144 obs., 32 vars.
 
 # Delete temp_df, not needed anymore.
 rm(temp_df)
+```
+
+# STEP 4c: Save the NW Mexico landings with lat-long info as an rds file
+```{r Save the Northwest Mexico dataframe: Mar 11 2026}
+saveRDS(GOC_Landings, file="/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/NWMex_Landings_2000.present_EMF.Mar112026.rds")
+# 4713144 obs., 32 vars.
+```
+
+# STEP 5: Filter down to GOC data ------------------------------
+```{r filter out GOC data}
+# Generate filtered landings data for the GoC:
+GOC_Landings <- NW.Mex_Landings %>%
+  filter(GoC != "no" | is.na(GoC))
+# 3622776 obs., 32 vars.
 
 # Check that this all makes sense:
 length(unique(GOC_Landings$species_name))
 length(unique(GOC_Landings$main_species_group))
-# 1693 unique species from 57 main species groups in the Gulf of California, keeping in mind that these are not really SPECIES (per se) but rather log-book entries for species.
+# 1703 unique species from 57 main species groups in the Gulf of California, keeping in mind that these are not really SPECIES (per se) but rather log-book entries for species.
 ```
-1693 unique species in the Gulf of California according to Juan Carlos' version of the CONAPESCA data base, keeping in mind that these are not really SPECIES (per se) but rather log-book entries for species.
-
-# Region Key (December 2025) ------------------------------
-```{r Region Keys}
-# KEYS FROM MEL (including lat, long):
-BajaSonoraKey<- read_csv(here("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/Baja_Sonora_states_key.csv"))
-
-BajaSonoraKey <- BajaSonoraKey %>%
-  mutate(
-    long = as.numeric(long),
-    lat  = as.numeric(lat)
-  )
-
-Jalisco_LatLong_Key<- read_csv(here("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/landing_sites_jalisco.csv"))
-
-Jalisco_LatLong_Key <- Jalisco_LatLong_Key %>%
-  rename(long= lon) %>% 
-  mutate(
-    long = as.numeric(long),
-    lat  = as.numeric(lat)
-  )
-
-Jalisco_LatLong_Key_clean <- Jalisco_LatLong_Key %>%
-  # Normalize state names
-  mutate(state = toupper(state)) %>%
-  
-  # Remove any rows where landing_site is NA (can cause matching issues later)
-  filter(!is.na(landing_site)) %>%
-  
-  # Keep only one row per CONAPESCA_landing_key; if duplicate keys exist, keep first
-  group_by(CONAPESCA_landing_key) %>%
-  slice(1) %>%  # keeps the first occurrence per key
-  ungroup() %>%
-  
-  # Optional: also deduplicate by landing_site if there are rows with NA CONAPESCA_landing_key
-  group_by(landing_site) %>%
-  slice(1) %>%
-  ungroup()
-
-# NOTE TO SELF: Come back to this! The Jalisco key is imperfect, but we'll have to fix this in the new year.
-# Identify rows that were removed in the deduplication of Jalisco_LatLong_Key
-removed_rows <- anti_join(Jalisco_LatLong_Key, Jalisco_LatLong_Key_clean, 
-                          by = c("CONAPESCA_landing_key", "landing_site"))
-
-
-#### MERGE THESE WORKING KEYS FOR NOW: ####
-RegionKey_working <- bind_rows(BajaSonoraKey, Jalisco_LatLong_Key_clean) %>%
-  filter(!is.na(landing_site)) %>%  # remove the NA from this dataframe as this will create a many-to-many matching issue later on
-  mutate(long = as.numeric(long))
-# 1176 obs., 9 vars.
-
-RegionKey_working <- RegionKey_working %>% mutate(long = as.numeric(long))
-rm(Jalisco_LatLong_Key, Jalisco_LatLong_Key_clean, BajaSonoraKey, removed_rows)
-
-# My regional key:
-RegionKey_temporary<- read_csv(here("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Data&Keys/CONAPESCA_Keys/RegionKey_UNDERCONSTRUCTION_Dec02024.csv"))
-```
-
+NOW 1703 (previously 1693) unique species in the Gulf of California according to Juan Carlos' version of the CONAPESCA data base, keeping in mind that these are not really SPECIES, per se, but rather log-book entries for species.
 
 ## Save the GOC landings rds file
-
-```{r Save the GOC_Landings dataframe: Nov 03 2025}
-# saveRDS(GOC_Landings, file="/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds")
+```{r Save the GOC_Landings dataframe: Mar 11 2026}
+saveRDS(GOC_Landings, file="/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_2000.present_EMF.Mar112026.rds")
+# 3622776 obs., 32 vars.
+# Previous iteration: GOC_FIS.landings_CLEAN_as.of.Dec092025.rds
 ```
 
 STOPPED HERE
