@@ -1,0 +1,147 @@
+################################################################################
+
+Erica Ferrer, Ph.D.
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+# STEP 1: Load in CONAPESCA RAW data ------------------------------
+This is done in the file shared by Juan Carlos: "03_combine_landings_edited.R"
+  file path: /home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/JC_Scripts_EMF.edited/03_combine_landings_edited.R
+
+# STEP 2: Work with CONAPESCA STITCHED data ------------------------------
+A stitched version of these data is available as one single file: "AllMex_landings_2000_present_EMF_edited.rds"
+  file path: /home/shares/ohi/OHI_GOC/goal_prep/fp/juan_carlos/AllMex_landings_2000_present_EMF_edited.rds
+```{r}
+MexLandings_2000.present<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/juan_carlos/AllMex_landings_2000_present_EMF_edited.rds"))
+# n = 12153879 obs., 20 vars.
+```
+
+# STEP 3: Create weight_kg_corrected column ------------------------------
+```{r Landed weight correction}
+# Kind of looks like sometimes 'landed weight' is 'live weight' and vice versa. Fix this:
+MexLandings_2000.present$weight_kg_corrected <- ifelse(
+  MexLandings_2000.present$live_weight >= MexLandings_2000.present$landed_weight,
+  MexLandings_2000.present$live_weight,
+  MexLandings_2000.present$landed_weight
+)
+# n = 12153879 obs., 21 vars.
+```
+  
+# STEP 4: Filter down to GOC data ------------------------------
+```{r Regenerating J.C. CONAPESCA data including species name from the landing receipts}
+length(unique(MexLandings_2000.present$species_name)) # 2052 unique species in all of Mexico.
+# But remember... We don't need species from all of Mexico! Only the GoC region. Let's filter by state.
+
+States_of_Interest<- c("BAJA CALIFORNIA", "BAJA CALIFORNIA SUR", "SONORA", "SINALOA", "NAYARIT", "JALISCO")
+
+NW.Mex_Landings <- MexLandings_2000.present %>% filter(state %in% States_of_Interest)
+# n obs.= 4713144
+length(unique(NW.Mex_Landings$species_name)) 
+# 1827 unique species in States of Interest.
+
+# Filter OUT sites from Baja that are on the Pacific side using lat-Long file from Mel's repository:
+Lat_Long_MasterFile<- read_csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/Baja_Sonora_states_key.csv")
+colnames(Lat_Long_MasterFile) <- c("state", "landing_site", "landing_site_primary", "lat", "long", "GoC")
+
+# Append lat-long info to landings data:
+temp_df <- NW.Mex_Landings %>%
+  left_join(
+    Lat_Long_MasterFile,
+    by = c("state", "landing_site")  # columns to match
+  )
+
+table(temp_df$GoC)
+# 4713144 (total) - 996729 (no) = 3716415 obs. that are explicitly as "yes" in the GoC or NA. I have removed entries that are definitely "no" not in the Gulf.
+
+# Generate filtered landings data for the GoC:
+GoC_Landings <- temp_df %>%
+  filter(GoC != "no" | is.na(GoC))
+# 3716415 obs.
+
+# Delete temp_df, not needed anymore.
+rm(temp_df)
+
+# Check that this all makes sense:
+length(unique(GoC_Landings$species_name))
+length(unique(GoC_Landings$main_species_group))
+# 1693 unique species in the Gulf of California according to Juan Carlos' version of the CONAPESCA data base, keeping in mind that these are not really SPECIES (per se) but rather log-book entries for species.
+# From 57 main species groups.
+```
+1693 unique species in the Gulf of California according to Juan Carlos' version of the CONAPESCA data base, keeping in mind that these are not really SPECIES (per se) but rather log-book entries for species.
+
+## Save the GoC_Landings rds file
+```{r Save the GoC_Landings dataframe: Nov 03 2025}
+# saveRDS(GoC_Landings, file="/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds")
+```
+
+
+STOPPED HERE
+
+
+# PART 4: Merge the cleaned master sp key with landings data ------------------------------
+```{r Load data frames if needed}
+Master_SpKey_Cleaned <- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Data&Keys/CONAPESCA_Keys/Species_Keys/CleanedMaster_SpKey_Dec012025.csv")
+# 802 obs of 41 variables
+# Was previously found here: "/home/ferrer/ohi_goc_prep/general/Species_Keys/CleanedMaster_SpKey_Dec012025.csv"
+
+GoC_Landings_Cleaned<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_wKeyWords_2000.present_Dec012025.rds"))
+# n = 3716415 obs.
+```
+
+```{r Shave down the size of Master_SpKey_filtered}
+Master_SpKey_filtered<- Master_SpKey_Cleaned %>% 
+  select(recorded_taxa_group, recorded_taxa_name_clean, common_name_clean,
+         estimated_species_name, species_est_certainty, estimated_genus_name, estimated_family_name,
+         IHH_order, IHH_class, IHH_functional_major_groups_sm, IHH_fishery)
+# 802 obs., 11 vars.
+```
+
+```{r Merge landings with filtered sp key}
+GoC_Landings_Cleaned_wSp <- GoC_Landings_Cleaned %>%
+  left_join(
+    Master_SpKey_filtered,
+    by = c(
+      "recorded_taxa_group",
+      "recorded_taxa_name_clean",
+      "common_name_clean"
+    )
+  )
+# 3716415 obs. as expected, 41 vars.
+```
+
+## Save GoC_Landings_Cleaned_wSp rds file
+```{r Save this dataframe - landings keywords & species for top groupings: Nov 10 2025}
+saveRDS(GoC_Landings_Cleaned_wSp, file="/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_wSp_2000.present_Dec012025.rds")
+```
