@@ -1,11 +1,11 @@
-################################################################################
+################################################################################ 
 
-Erica Ferrer, Ph.D.
-emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+For questions contact: Erica Ferrer, Ph.D. [emferrer\@ucsd.edu](mailto:emferrer@ucsd.edu){.email} - OR - [ferrer\@nceas.ucsb.edu](mailto:ferrer@nceas.ucsb.edu){.email}
 
-################################################################################
+################################################################################ 
 
 # PRE-WORK ------------------------------
+
 ```{r Clear environment}
 rm(list=ls(all=T))
 ```
@@ -37,18 +37,20 @@ setwd("/home/ferrer/ohi_goc_prep/FP/")
 ```
 
 # STEP 1: Load in CONAPESCA RAW data ------------------------------
-This is done in the file shared by Juan Carlos: "03_combine_landings_edited.R"
-  file path: /home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/JC_Scripts_EMF.edited/03_combine_landings_edited.R
+
+This step is completed in the file shared by Juan Carlos: "03_combine_landings_edited.R" file path: /home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/JC_Scripts_EMF.edited/03_combine_landings_edited.R
 
 # STEP 2: Work with CONAPESCA STITCHED data ------------------------------
-A stitched version of these data is available as one single file: "AllMex_landings_2000_present_EMF_edited.rds"
-  file path: /home/shares/ohi/OHI_GOC/goal_prep/fp/juan_carlos/AllMex_landings_2000_present_EMF_edited.rds
-```{r}
+
+A stitched version of these data is available as one single file: "AllMex_landings_2000_present_EMF_edited.rds" file path: /home/shares/ohi/OHI_GOC/goal_prep/fp/juan_carlos/AllMex_landings_2000_present_EMF_edited.rds
+
+```{r Load in CONAPESCA STITCHED data}
 MexLandings_2000.present<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/juan_carlos/AllMex_landings_2000_present_EMF_edited.rds"))
 # n = 12153879 obs., 20 vars.
 ```
 
 # STEP 3: Create weight_kg_corrected column ------------------------------
+
 ```{r Landed weight correction}
 # Kind of looks like sometimes 'landed weight' is 'live weight' and vice versa. Fix this:
 MexLandings_2000.present$weight_kg_corrected <- ifelse(
@@ -58,9 +60,10 @@ MexLandings_2000.present$weight_kg_corrected <- ifelse(
 )
 # n = 12153879 obs., 21 vars.
 ```
-  
-# STEP 4: Filter down to GOC data ------------------------------
-```{r Regenerating J.C. CONAPESCA data including species name from the landing receipts}
+
+# STEP 4a: Filter down to GOC data ------------------------------
+
+```{r Filter out data from Northwest Mexico}
 length(unique(MexLandings_2000.present$species_name)) 
 # 2052 unique species in all of Mexico.
 # But, we don't need species from ALL of Mexico, only the GoC region for now - so let's filter by state.
@@ -68,18 +71,103 @@ length(unique(MexLandings_2000.present$species_name))
 States_of_Interest<- c("BAJA CALIFORNIA", "BAJA CALIFORNIA SUR", "SONORA", "SINALOA", "NAYARIT", "JALISCO")
 
 NW.Mex_Landings <- MexLandings_2000.present %>% filter(state %in% States_of_Interest)
-# n obs.= 4713144
+# n = 4713144 obs.
+
 length(unique(NW.Mex_Landings$species_name)) 
 # 1827 unique species in States of Interest.
+```
 
+# STEP 5: Attach lat-long info based on landing site ------------------------------
+NOTE TO SELF: Come back to this! The lat long keys are imperfect. We'll want to fix this as much as possible.
+```{r Append lat-long data to sites in Baja BCS Sonora and Sinaloa}
 # Filter OUT sites from Baja that are on the Pacific side using lat-Long file from Mel's repository:
-Lat_Long_MasterFile<- read_csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/Baja_Sonora_states_key.csv")
-colnames(Lat_Long_MasterFile) <- c("state", "landing_site", "landing_site_primary", "lat", "long", "GoC")
+# NOTE TO SELF: THIS PART IS SUBJECT TO CHANGE once we integrate lat-long data from Hem. Mar 10 2026
+BajaSonora_LatLong_Key<- read_csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/Baja_Sonora_states_key.csv")
+colnames(BajaSonora_LatLong_Key) <- c("state", "landing_site", "OHI_rgn", "lat", "long", "GoC")
 
+Jalisco_LatLong_Key<- read_csv(here("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/landing_sites_jalisco.csv"))
+colnames(Jalisco_LatLong_Key) <- c("landing_site", "CONAPESCA_landing_key", "habitat", "lat", "long", "Notes", "OHI_rgn", "state")
+
+
+#### CLEANING LAT-LONG KEYS: ####
+# Clean the Baja-Sonora key...
+BajaSonora_LatLong_Key_clean <- BajaSonora_LatLong_Key %>%
+  
+  # Normalize state names:
+  mutate(state = toupper(state)) %>%
+  
+  # Remove any rows where landing_site is NA (NAs cause matching issues later on):
+  filter(!is.na(landing_site)) %>%
+  
+  # Remove any direct duplicates of landing_site:
+  group_by(state, landing_site) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup()
+
+# Look into the rows that were removed in the de duplication of BajaSonora_LatLong_Key...
+removed_rows <- anti_join(BajaSonora_LatLong_Key, BajaSonora_LatLong_Key_clean, 
+                          by = c("landing_site"))
+
+# Convert lat-long entries to numeric entries, accounting for unique cases where the minus (-) is actually an n dash or m dash:
+BajaSonora_LatLong_Key_clean <- BajaSonora_LatLong_Key_clean %>%
+  mutate(
+    long = as.numeric(str_replace_all(long, "[−–—]", "-")),
+    lat  = as.numeric(str_replace_all(lat, "[−–—]", "-"))
+  )
+
+# Clean the Jalisco key...
+Jalisco_LatLong_Key_clean <- Jalisco_LatLong_Key %>%
+  # Normalize state names
+  mutate(state = toupper(state)) %>%
+  
+  # Remove any rows where landing_site is NA (NAs cause matching issues later on):
+  filter(!is.na(landing_site)) %>%
+  
+  # Keep only one row per CONAPESCA_landing_key; if duplicate keys exist, keep first
+  group_by(CONAPESCA_landing_key) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup() %>%
+  
+  # Optional: remove any direct duplicates of landing_site if there are rows with NA in the CONAPESCA_landing_key
+  group_by(state, landing_site) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup()
+
+# Look into the rows that were removed in the de duplication of Jalisco_LatLong_Key...
+removed_rows <- anti_join(Jalisco_LatLong_Key, Jalisco_LatLong_Key_clean, 
+                          by = c("CONAPESCA_landing_key", "landing_site"))
+
+# Convert lat-long entries to numeric entries, accounting for unique cases where the minus (-) is actually an n dash or m dash:
+Jalisco_LatLong_Key_clean <- Jalisco_LatLong_Key_clean %>%
+  mutate(
+    long = as.numeric(str_replace_all(long, "[−–—]", "-")),
+    lat  = as.numeric(str_replace_all(lat, "[−–—]", "-"))
+  )
+
+
+#### MERGE LAT-LONG KEYS: ####
+LatLong_MasterKey_pending <- bind_rows(BajaSonora_LatLong_Key_clean, Jalisco_LatLong_Key_clean) %>%
+  filter(!is.na(landing_site)) %>%  # remove the NA from this data frame as this will create a many-to-many matching issue later on
+  mutate(long = as.numeric(long))
+# 1176 obs., 9 vars.
+
+# Remove unused data frames:
+rm(BajaSonora_LatLong_Key, Jalisco_LatLong_Key, removed_rows)
+
+# Take a look
+unique(LatLong_MasterKey_pending$state)
+unique(LatLong_MasterKey_pending$OHI_rgn)
+
+# My regional key:
+RegionKey_temporary<- read_csv(here("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/RegionKey_UNDERCONSTRUCTION_Mar102026.csv"))
+# Previously: RegionKey_UNDERCONSTRUCTION_Dec012025.csv
+```
+
+```{r Append lat-long info to landings data & filter out GOC data}
 # Append lat-long info to landings data:
 temp_df <- NW.Mex_Landings %>%
   left_join(
-    Lat_Long_MasterFile,
+    BajaSonora_LatLong_Key,
     by = c("state", "landing_site")  # columns to match
   )
 
@@ -97,21 +185,77 @@ rm(temp_df)
 # Check that this all makes sense:
 length(unique(GOC_Landings$species_name))
 length(unique(GOC_Landings$main_species_group))
-# 1693 unique species in the Gulf of California according to Juan Carlos' version of the CONAPESCA data base, keeping in mind that these are not really SPECIES (per se) but rather log-book entries for species.
-# From 57 main species groups.
+# 1693 unique species from 57 main species groups in the Gulf of California, keeping in mind that these are not really SPECIES (per se) but rather log-book entries for species.
 ```
 1693 unique species in the Gulf of California according to Juan Carlos' version of the CONAPESCA data base, keeping in mind that these are not really SPECIES (per se) but rather log-book entries for species.
 
+# Region Key (December 2025) ------------------------------
+```{r Region Keys}
+# KEYS FROM MEL (including lat, long):
+BajaSonoraKey<- read_csv(here("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/Baja_Sonora_states_key.csv"))
+
+BajaSonoraKey <- BajaSonoraKey %>%
+  mutate(
+    long = as.numeric(long),
+    lat  = as.numeric(lat)
+  )
+
+Jalisco_LatLong_Key<- read_csv(here("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/landing_sites_jalisco.csv"))
+
+Jalisco_LatLong_Key <- Jalisco_LatLong_Key %>%
+  rename(long= lon) %>% 
+  mutate(
+    long = as.numeric(long),
+    lat  = as.numeric(lat)
+  )
+
+Jalisco_LatLong_Key_clean <- Jalisco_LatLong_Key %>%
+  # Normalize state names
+  mutate(state = toupper(state)) %>%
+  
+  # Remove any rows where landing_site is NA (can cause matching issues later)
+  filter(!is.na(landing_site)) %>%
+  
+  # Keep only one row per CONAPESCA_landing_key; if duplicate keys exist, keep first
+  group_by(CONAPESCA_landing_key) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup() %>%
+  
+  # Optional: also deduplicate by landing_site if there are rows with NA CONAPESCA_landing_key
+  group_by(landing_site) %>%
+  slice(1) %>%
+  ungroup()
+
+# NOTE TO SELF: Come back to this! The Jalisco key is imperfect, but we'll have to fix this in the new year.
+# Identify rows that were removed in the deduplication of Jalisco_LatLong_Key
+removed_rows <- anti_join(Jalisco_LatLong_Key, Jalisco_LatLong_Key_clean, 
+                          by = c("CONAPESCA_landing_key", "landing_site"))
+
+
+#### MERGE THESE WORKING KEYS FOR NOW: ####
+RegionKey_working <- bind_rows(BajaSonoraKey, Jalisco_LatLong_Key_clean) %>%
+  filter(!is.na(landing_site)) %>%  # remove the NA from this dataframe as this will create a many-to-many matching issue later on
+  mutate(long = as.numeric(long))
+# 1176 obs., 9 vars.
+
+RegionKey_working <- RegionKey_working %>% mutate(long = as.numeric(long))
+rm(Jalisco_LatLong_Key, Jalisco_LatLong_Key_clean, BajaSonoraKey, removed_rows)
+
+# My regional key:
+RegionKey_temporary<- read_csv(here("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Data&Keys/CONAPESCA_Keys/RegionKey_UNDERCONSTRUCTION_Dec02024.csv"))
+```
+
+
 ## Save the GOC landings rds file
+
 ```{r Save the GOC_Landings dataframe: Nov 03 2025}
 # saveRDS(GOC_Landings, file="/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds")
 ```
 
-
 STOPPED HERE
 
-
 # PART 4: Merge the cleaned master sp key with landings data ------------------------------
+
 ```{r Load data frames if needed}
 Master_SpKey_Cleaned <- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Data&Keys/CONAPESCA_Keys/Species_Keys/CleanedMaster_SpKey_Dec012025.csv")
 # 802 obs of 41 variables
@@ -143,6 +287,7 @@ GOC_Landings_Cleaned_wSp <- GOC_Landings_Cleaned %>%
 ```
 
 ## Save GOC_Landings_Cleaned_wSp rds file
+
 ```{r Save this dataframe - landings keywords & species for top groupings: Nov 10 2025}
 saveRDS(GOC_Landings_Cleaned_wSp, file="/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GOC_Landings_wSp_2000.present_Dec012025.rds")
 ```
