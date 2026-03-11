@@ -20,6 +20,7 @@ library(mapview)
 library(units)
 library(here)
 library(tidyverse)
+library(terra)
 
 get_overpass_url() 
 set_overpass_url("https://overpass-api.de/api/interpreter") # Ensure using a reliable mirror
@@ -139,7 +140,13 @@ Calirepr,String,Position qualifier,Catalogo_Calirepr,10
 
 ```{r}
 ## main cities/towns
-cities <- st_read( "/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_localities/inegi_boundaries_pop.shp") %>% st_transform(crs=4326)
+cities_m <- st_read( "/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_localities/inegi_boundaries_pop.shp")  %>% filter(AMBITO=="Urbana") 
+
+mapview(cities_buf) + mapview(cities)  
+
+muns <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_boundaries/889463807469_s/conjunto_de_datos/00mun.shp") %>% st_transform(crs=4326)
+
+#mapview(muns) + mapview(cities) 
 
 ## beaches
 coastline <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_coastline/conjunto_de_datos_2024/conjunto_de_datos/lc_rep_mex_v_2024.shp") 
@@ -182,7 +189,6 @@ roads <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_roads/794551132166_s/
 
 #site data
 site <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_roads/794551132166_s/conjunto_de_datos/sitio_de_interes.shp") %>% st_transform(crs=4326)
-mapview(site)
 
 #Muelle o Embarcadero: Pier, Dock, or Jetty
 #Puerto: Port / Harbor
@@ -196,6 +202,9 @@ bus <- filter(site, CLASE %in% c("Central Camionera"))
 
 #rest_area <-   filter(site, CLASE %in% c("Área de Descanso")) # not much here.
 
+## protected areas
+mpa <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/CONANP/anpmx/anpmx.shp") %>%
+  st_make_valid()
 
 
 ```
@@ -204,49 +213,124 @@ bus <- filter(site, CLASE %in% c("Central Camionera"))
 
 General function to accomplish this with the above laters clipped by region.
 ```{r}
-area_id <- "25 012 0001"
-area <- filter(cities, id %in% area_id)
 
-area_mal <- st_crop(malecon, area)
-area_paths <- st_crop(paths, area)
-area_parking <- st_crop(parking, area)
-area_roads <- st_crop(roads, area)
-area_bus <- st_crop(bus, area)
+mun_name <- "La Paz"
 
-mapview(area, color="green", alpha.regions = 0.1) +
-mapview(area_mal, color="red") +
-mapview(area_paths, color="red") +
-mapview(area_parking, color="purple") +
+area <- filter(muns, NOMGEO == mun_name) %>%
+  st_make_valid() %>%
+  st_union() %>%                     # dissolve to one geometry
+  st_as_sf(crs = 4326)      # keep CRS
+
+
+city <- filter(cities, NOM_MUN %in% mun_name) %>%
+  st_make_valid()
+
+cities_buf <- st_buffer(st_transform(city, crs=crs(cities_m)), dist = 20000) %>%
+  filter(!(CVE_LOC %in% c("0003", "0684"))) # get rid of pacific side
+
+# 3) Merge / dissolve all buffers into one geometry
+buf_merged <- st_union(cities_buf)
+
+# (optional) make it an sf object again
+cities_buf <- st_as_sf(buf_merged) %>% st_transform(crs=4326)
+
+mapview(cities_buf)  
+
+
+## select features
+
+area_mal <- st_crop(malecon, cities_buf)
+area_paths <- st_crop(paths, cities_buf)
+area_parking <- st_crop(parking, cities_buf)
+area_roads <- st_crop(roads, cities_buf)
+area_bus <- st_crop(bus, cities_buf)
+area_protected <- st_crop(mpa, cities_buf)
+
+mapview_final <- mapview(city, color="magenta", alpha.regions=0.1) +
+mapview(cities_buf, color="magenta", alpha.regions=0.1) +
+mapview(area_mal, color="forestgreen") +
+mapview(area_paths, color="forestgreen") +
+mapview(area_parking, col.regions = "purple", color = "purple", layer.name = "Parking") + 
 mapview(area_roads, color="orange") + 
-mapview(beach, color="blue") 
+mapview(beach, lwd=4) + 
+mapview(area_protected, color="olivedrab3") + 
+mapview(coastline, color="lightblue")
 
-
-mapview(beach, color="blue") + mapview(cities)
-mapview(beach, color="blue") + mapview(paths, color="orange") + mapview(roads, color="red")
-
-```
-
-## map of Mazatlan
-```{r}
-maz <- read_csv(here("_pressures/access/data/beach_access.csv")) %>%
-  rename(ID_Beach = ID_beach)
-maz_beach <- filter(beach, ID_Beach %in% maz$ID_Beach) %>%
-  left_join(maz) %>%
-  mutate(accessibility_score = as.numeric(accessibility_score))
-
-map_final <- 
-mapview(area, color="green", alpha.regions = 0.1) +
-mapview(area_mal, color="red") +
-mapview(area_paths, color="red") +
-mapview(area_parking, col.regions = "purple", color = "purple", layer.name = "Parking") +
-mapview(area_roads, color="orange") + 
-#mapview(beach, color="blue") +
-mapview(maz_beach, 
+mapview(beach, 
           zcol = "accessibility_score", 
           lwd = 4,                       # Make lines thicker so they are easier to see
-          layer.name = "Beach Accessibility Score")
+          layer.name = "Beach Accessibility Score") +
 
+  
+```
+
+
+## merge after researching each beach
+```{r}
+lp <- read_csv(here("_pressures/access/data/LaPaz.csv"))
+setdiff(lp$ID_Beach, beach$ID_Beach)
+duplicated(lp$ID_Beach)
+lp_beach <- filter(beach, ID_Beach %in% lp$ID_Beach)
+lp_beach <- left_join(lp_beach, lp, by="ID_Beach")
+
+lp_beach$length_km <- st_length(lp_beach)/1000
+sum(lp_beach$length_km)
+
+recreation <- lp_beach %>%
+  filter(Category == "recreational") %>%
+  mutate(
+    category2 = case_when(
+      urban_rural == "urban" & malecon == "yes" ~ "urban_malecon",
+
+      urban_rural == "urban" & malecon == "no" &
+        (equitable_access_score < 7 | !(parking %in% c("informal","formal"))) ~ "urban_lower_access",
+
+      urban_rural == "urban" & malecon == "no" &
+        (equitable_access_score >= 7 & parking %in% c("informal","formal")) ~ "urban_higher_access",
+
+      urban_rural == "rural" &
+        (equitable_access_score < 7 |
+           public_roads_within_1km == "no" |
+           vehicle != "standard") ~ "rural_lower_access",
+
+      urban_rural == "rural" &
+        (equitable_access_score >= 7 &
+           public_roads_within_1km == "yes" &
+           vehicle == "standard") ~ "rural_higher_access",
+
+      TRUE ~ NA_character_
+    )
+  )
+
+recreation %>%
+group_by(category2) %>%
+  summarize(sum(length_km, na.rm=TRUE))
+
+recreation %>%
+  mutate(weighted_equity = equitable_access_score*length_km) %>%
+  group_by(urban_rural) %>%
+  summarize(total_weighted_equity = sum(weighted_equity, na.rm=TRUE), 
+            total_length = sum(length_km)*10) %>%
+  mutate(score = total_weighted_equity/total_length)
+
+
+
+lp_beach %>%
+  group_by(Category, urban_rural) %>%
+  summarize(sum(length_km, na.rm=TRUE))
+
+lp_beach <- lp_beach %>%
+  mutate(urban_malecon = ifelse(urban_rural=="urban" & malecon == "yes", 1, NA))
+sum(lp_beach$urban_malecon*lp_beach$length_km, na.rm=TRUE)
+
+
+
+```
+  
+  
 mapshot(map_final, url = "_pressures/access/output/Mazatlan_Accessibility_Map.html")
+
+
 
 library(leaflet)
 
