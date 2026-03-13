@@ -86,7 +86,7 @@ BajaSonora_LatLong_Key<- read_csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/
 colnames(BajaSonora_LatLong_Key) <- c("state", "landing_site", "OHI_rgn", "lat", "long", "GoC")
 
 Jalisco_LatLong_Key<- read_csv(here("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/landing_sites_jalisco.csv"))
-colnames(Jalisco_LatLong_Key) <- c("landing_site", "CONAPESCA_landing_key", "habitat", "lat", "long", "site_notes", "OHI_rgn", "state")
+colnames(Jalisco_LatLong_Key) <- c("landing_site", "CONAPESCA_landing_key", "est_habitat", "lat", "long", "site_notes", "OHI_rgn", "state")
 
 
 #### CLEAN LAT-LONG KEYS: ####
@@ -361,7 +361,7 @@ GOC_Landings_clean <- GOC_Landings_parsed %>%
 
   select(
     # General info
-    state, office_name, landing_site, landing_site_key, GoC, lat, long, habitat,
+    state, office_name, landing_site, landing_site_key, GoC, lat, long, est_habitat,
     year, month,
     receipt_date_fixed, period_start_fixed, period_end_fixed,
     fleet, acuaculture_production, eu_rnpa, eu_name, vessel_rnpa, vessel_name,
@@ -399,8 +399,9 @@ test <- GOC_Landings_clean %>%
 ```
 
 ```{r Investigating Keywords}
+#### VIEW: ALL KEY WORDS ####
 # Extract all unique keywords from keyword columns 1 through 5. Delete exact duplicates. 
-vector <- GOC_Landings_clean %>%
+Keyword_vector <- GOC_Landings_clean %>%
   select(keywords_1:keywords_5) %>%
   unlist() %>%
   unique() %>%
@@ -456,7 +457,7 @@ Let's implement a series of rules to estimate if records are associated with aqu
 ```{r Create a GOC_Landings_aquaculture dataframe}
 GOC_Landings_aquaculture<- GOC_Landings_clean
 GOC_Landings_aquaculture$est_aquaculture_production<- c(NA)
-# n = 3622771 obs., 43 vars.
+# n = 3622776 obs., 43 vars.
 ```
 
 First, let's flag landing site names that are associated with aquaculture.
@@ -476,7 +477,10 @@ GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
       str_detect(landing_site, regex("DREN|DRENES|BORDO|PREDIO", ignore_case = TRUE)) ~ "POSSIBLY",
       TRUE ~ "NO"
     )
-  )
+  ) %>%
+  
+  # Drop helper column:
+  select(-acuaculture_production_norm)
 
 table(GOC_Landings_aquaculture$aquacultureFLAG_landing.site)
 
@@ -557,7 +561,7 @@ colnames(GOC_Landings_aquaculture)
 table(GOC_Landings_aquaculture$recorded_taxa_group)
 
 #### FLAG 2 - Flag aquaculture key words ####
-aquaculture_keywords<- c(
+Aquaculture_keywords<- c(
   "DE CULTIVO", "DE CULTIVO VIVO", "ABASTO RANCHO", "RANCHO"
 )
 
@@ -565,7 +569,7 @@ aquaculture_keywords<- c(
 GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
 mutate(
   aquacultureFLAG_keywords = case_when(
-    rowSums(across(keywords_1:keywords_5, ~ str_to_upper(str_trim(.x)) %in% aquaculture_keywords), na.rm = TRUE) > 0 ~ "YES",
+    rowSums(across(keywords_1:keywords_5, ~ str_to_upper(str_trim(.x)) %in% Aquaculture_keywords), na.rm = TRUE) > 0 ~ "YES",
     TRUE ~ "NO"
   )
 )
@@ -596,13 +600,14 @@ table(GOC_Landings_aquaculture$aquacultureFLAG_specific.taxa)
 ```
 
 Create a combined aquaculture flag based on the previous three flags: aquacultureFLAG_landing.site, aquacultureFLAG_keywords, aquacultureFLAG_specific.taxa
+
 Here's the logic for the combined flag:
 • If at least one flag is "YES", then flags indicate aquaculture is highly likely (my YES flags are pretty robust at this point)
-• If one more flags is "POSSIBLY", then flags indicate aquaculture is possible but not certain
-• If combined flag is "NO", then aquaculture is not indicated by the flags
+• If one more flags is "POSSIBLY", then flags indicate the record is possibly aquaculture but not certain
+• If combined flag is "NO", then flags do not indicate aquaculture
 
 ```{r Create a combined aquaculture flag}
-#### FLAG 4: Create a combined aquaculture flag based on the previous three flags ####
+#### FLAG 4 - Create a combined aquaculture flag based on the previous three flags ####
 GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
   mutate(
     aquacultureFLAG_combined = case_when(
@@ -626,57 +631,57 @@ table(subset$aquacultureFLAG_combined)
 
 # STEP 7b: ESTIMATE quaculture entries based on a series of logical rules
 Here is the logic and set of decisions designed to estimate aquaculture:
-• If original report = "yes" and aquaculture_flags = "yes", then aquaculture_estimate = "aquaculture" & confidence = "high; flags agree with original report" 
-• If original report = "no" and aquaculture_flags = "no", then aquaculture_estimate = "not aquaculture" & certainty = "high; flags agree with original report"
+• If original report for acuaculture_production = "yes" & aquaculture_flags = "yes", then aquaculture_estimate = "aquaculture" & confidence = "high; flags agree with original report" 
+• If original report for acuaculture_production = "no" & aquaculture_flags = "no", then aquaculture_estimate = "not aquaculture" & certainty = "high; flags agree with original report"
 
-• If original report = "no" and aquaculture_flags = "yes", then aquaculture_estimate = "likely aquaculture" & certainty = "medium; flags suggest most likely aquaculture but original report says no" 
-• If original report = "no" and aquaculture_flags = "possibly", then aquaculture_estimate = "possibly aquaculture" & certainty = "low; flags suggest possibly aquaculture but original report says no"
+• If original report = "no" & aquaculture_flags = "yes", then aquaculture_estimate = "likely aquaculture" & certainty = "medium; flags suggest most likely aquaculture but original report says no" 
+• If original report = "no" & aquaculture_flags = "possibly", then aquaculture_estimate = "possibly aquaculture" & certainty = "low; flags suggest possibly aquaculture but original report says no"
 
-• If original report = NA and aquaculture_flags = "yes", then aquaculture_estimate = "likely aquaculture" & certainty = "high; no data from the original report but flags suggest most likely aquaculture"
-• If original report = NA and aquaculture_flags = "possibly", then aquaculture_estimate = "possibly aquaculture" & certainty = "low; no data from the original report but flags suggest possibly aquaculture"
-• If original report = NA and aquaculture_flags = "no", then aquaculture_estimate = "unlikely aquaculture" & certainty = "medium-high; no data from the original report but flags suggest probably not aquaculture"
+• If original report = NA & aquaculture_flags = "yes", then aquaculture_estimate = "likely aquaculture" & certainty = "high; no data from the original report but flags suggest most likely aquaculture"
+• If original report = NA & aquaculture_flags = "possibly", then aquaculture_estimate = "possibly aquaculture" & certainty = "low; no data from the original report but flags suggest possibly aquaculture"
+• If original report = NA & aquaculture_flags = "no", then aquaculture_estimate = "unlikely aquaculture" & certainty = "medium-high; no data from the original report but flags suggest probably not aquaculture"
 
-Decision Table
-Original Report	Combined Flags (aquacultureFLAG_combined)	aquaculture_estimate	certainty
-yes	NO	aquaculture	high; no flags but original report says aquaculture
-yes	YES	aquaculture	high; flags agree with original report
-no	NO	not aquaculture	high; flags agree with original report
-no	YES	likely aquaculture	medium; flags suggest most likely aquaculture but original report says no
-no	POSSIBLY	possibly aquaculture	low; flags suggest possibly aquaculture but original report says no
-NA	YES	likely aquaculture	medium-high; no data from original report but flags suggest most likely aquaculture
-NA	POSSIBLY	possibly aquaculture	low; no data from original report but flags suggest possibly aquaculture
-NA	NO	unlikely aquaculture	medium-high; no data from original report but flags suggest probably not aquaculture
+Decision Table:
+Report   aquacultureFLAG_combined  aquaculture_estimate    certainty
+  yes       NO                        aquaculture	            high; no flags but original report says aquaculture
+  yes       YES                       aquaculture             high; flags agree with original report
+  no        NO                        not aquaculture         high; flags agree with original report
+  no        YES	                      likely aquaculture	    medium; flags suggest most likely aquaculture but original report says no
+  no        POSSIBLY                  possibly aquaculture    low; flags suggest possibly aquaculture but original report says no
+  NA        YES                       likely aquaculture      medium-high; no data from original report but flags suggest most likely aquaculture
+  NA        POSSIBLY                  possibly aquaculture    low; no data from original report but flags suggest possibly aquaculture
+  NA        NO                        unlikely aquaculture    medium-high; no data from original report but flags suggest probably not aquaculture
 
 ```{r Generate estimates and confidence values}
 #### Estimate aquaculture and confidence values based on the comparison of aquacultureFLAG_combined versus the official report: ####
 GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
   mutate(
-    # Normalize original report for consistency
-    acuaculture_production_lowercase = str_to_lower(str_trim(acuaculture_production)),
+    # Normalize original report for consistency (low case font):
+    acuaculture_original.report = str_to_lower(str_trim(acuaculture_production)),
     
     # Final estimate based on original report and combined flags
     est_aquaculture_production = case_when(
       
       # Original report = yes (regardless of flags)
-      acuaculture_production_lowercase == "yes" ~ "aquaculture",
+      acuaculture_original.report == "yes" ~ "aquaculture",
       
       # Original report = no & flags = NO
-      acuaculture_production_lowercase == "no" & aquacultureFLAG_combined == "NO" ~ "not aquaculture",
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "NO" ~ "not aquaculture",
       
       # Original report = no & flags = YES
-      acuaculture_production_lowercase == "no" & aquacultureFLAG_combined == "YES" ~ "likely aquaculture",
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "YES" ~ "likely aquaculture",
       
       # Original report = no & flags = POSSIBLY
-      acuaculture_production_lowercase == "no" & aquacultureFLAG_combined == "POSSIBLY" ~ "possibly aquaculture",
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "POSSIBLY" ~ "possibly aquaculture",
       
       # Original report = NA & flags = YES
-      is.na(acuaculture_production_lowercase) & aquacultureFLAG_combined == "YES" ~ "likely aquaculture",
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "YES" ~ "likely aquaculture",
       
       # Original report = NA & flags = POSSIBLY
-      is.na(acuaculture_production_lowercase) & aquacultureFLAG_combined == "POSSIBLY" ~ "possibly aquaculture",
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "POSSIBLY" ~ "possibly aquaculture",
       
       # Original report = NA & flags = NO
-      is.na(acuaculture_production_lowercase) & aquacultureFLAG_combined == "NO" ~ "unlikely aquaculture",
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "NO" ~ "unlikely aquaculture",
       
       # Fallback for any other case
       TRUE ~ "uncertain"
@@ -685,20 +690,23 @@ GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
     # Certainty messages corresponding to the estimate
     est_aquaculture_certainty = case_when(
       
-      acuaculture_production_lowercase == "yes" & aquacultureFLAG_combined == "YES" ~ "virtually certain; flags agree with original report",
-      acuaculture_production_lowercase == "yes" & aquacultureFLAG_combined == "NO" ~ "high; no flags but original report say aquaculture",
-      acuaculture_production_lowercase == "no" & aquacultureFLAG_combined == "NO" ~ "virtually certain; flags agree with original report",
-      acuaculture_production_lowercase == "no" & aquacultureFLAG_combined == "YES" ~ "medium; flags suggest likely aquaculture but original report says no; suspect record is misreported",
-      acuaculture_production_lowercase == "no" & aquacultureFLAG_combined == "POSSIBLY" ~ "low; flags suggest possibly aquaculture but original report says no; record could be misreported",
-      is.na(acuaculture_production_lowercase) & aquacultureFLAG_combined == "YES" ~ "high; no data from original report but flags suggest likely aquaculture",
-      is.na(acuaculture_production_lowercase) & aquacultureFLAG_combined == "POSSIBLY" ~ "low; no data from original report but flags suggest possibly aquaculture",
-      is.na(acuaculture_production_lowercase) & aquacultureFLAG_combined == "NO" ~ "medium-high; no data from original report but flags suggest unlikely aquaculture",
+      acuaculture_original.report == "yes" & aquacultureFLAG_combined == "YES" ~ "virtually certain; flags agree with original report",
+      acuaculture_original.report == "yes" & aquacultureFLAG_combined == "NO" ~ "high; no flags for aquaculture but original report says it is",
+      acuaculture_original.report == "yes" & aquacultureFLAG_combined == "POSSIBLY" ~ "virtually certain; flags agree with original report",
+      
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "NO" ~ "virtually certain; flags agree with original report",
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "YES" ~ "medium; flags suggest likely aquaculture but original report says no; suspect record is misreported",
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "POSSIBLY" ~ "low; flags suggest possibly aquaculture but original report says no; record could be misreported",
+      
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "YES" ~ "high; no data from original report but flags suggest likely aquaculture",
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "POSSIBLY" ~ "low; no data from original report but flags suggest possibly aquaculture",
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "NO" ~ "medium-high; no data from original report but flags suggest unlikely aquaculture",
       TRUE ~ "not enough information to assign aquaculture estimate"
     )
   ) %>%
   
   # Drop the helper normalization column
-  select(-acuaculture_production_lowercase)
+  select(-acuaculture_original.report)
 
 # SANITY CHECK:
 table(GOC_Landings_aquaculture$est_aquaculture_production)
@@ -709,10 +717,14 @@ subset<- GOC_Landings_aquaculture %>% filter(acuaculture_production==c("yes"))
 table(subset$est_aquaculture_production) 
 # Excellent, 100% of the aquaculture explicitly reported as aquaculture is estimated to be aquaculture (n= 17496).
 
+min(subset$year)
+max(subset$year)
+# Very weird the aquaculture reports only go from 2006 to 2017
+
 subset<- GOC_Landings_aquaculture %>% filter(est_aquaculture_production==c("aquaculture", "likely aquaculture"))
 # 149382 obs. The data set grows a lot!!!
 
-# Re-level this dataset so the levels to est_aquaculture_production are a little more logical:
+# Re-level est_aquaculture_production to be a little more logical:
 GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
   mutate(
     est_aquaculture_production = factor(
@@ -726,6 +738,8 @@ GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
       )
     )
   )
+
+# 3622776 obs., 48 vars.
 ```
 
 ```{r Summarize reported aquaculture versus estimated aquaculture}
@@ -741,7 +755,7 @@ SummaryOf_ReportedAquaculture<- GOC_Landings_aquaculture %>%
             reported_annual_value= sum(value, na.rm = TRUE))
 
 SummaryOf_EstimatedAquaculture<- GOC_Landings_aquaculture %>% 
-  filter(est_aquaculture_production== c("aquaculture", "likely aquaculture", "possibly aquaculture")) %>%
+  filter(est_aquaculture_production== c("aquaculture", "likely aquaculture")) %>%
   filter(year >= 2014, year <= 2024) %>%
   select(year, weight_kg_corrected, value) %>%
   group_by(year) %>%
@@ -749,7 +763,8 @@ SummaryOf_EstimatedAquaculture<- GOC_Landings_aquaculture %>%
             est_annual_value= sum(value, na.rm = TRUE))
 
 Aquaculture_Summary<- SummaryOf_EstimatedAquaculture %>%
-  left_join(SummaryOf_ReportedAquaculture, by = "year")
+  left_join(SummaryOf_ReportedAquaculture, by = "year") %>%
+  select(year, reported_annual_catch, est_annual_catch, reported_annual_value, est_annual_value)
 ```
 
 ```{r Plot reported aquaculture versus estimated aquaculture}
@@ -768,36 +783,41 @@ ggplot(Aquaculture_Summary, aes(x = year)) +
   ) +
   labs(
     x = "Year",
-    y = "Catch",
+    y = "Catch (kg)",
     color = "",
-    title = "Estimated vs Reported Catch"
+    title = "Estimated vs Reported Aquaculture"
   ) +
   theme_minimal(base_size = 14)
 ```
+Notice the spike in landings from 2017-2018? Of course, how could you miss it.
+This jump coincides (temporally) with a change in reporting associated with the raw data itself. 
+Data pre-2018 is reported here: mex_conapesca_avisos_2000_2019.rds
+Data 2018 and onward is reported here: mex_conapesca_apertura_2018_present.rds
+> NOTE TO SELF: Consult with Juan Carlos about these two datasets. What do different about them?
 
 
 # STEP 8: Time to filter out freshwater taxa...
 ```{r Flag freshwater taxa}
-#### Filter out freshwater landings ####
+#### FLAG 5 - Freshwater landings ####
 
 Freshwater_keywords<- c(
   "DE AGUA DULCE"
 )
 
-FreshwaterTaxa<- c(
+Definite_FreshwaterTaxa<- c(
   "tilapia",
   "rana", "rana toro",
   "trucha",
   "bagre canal"
 )
 
-# Flag freshwater rows:
+# Flag freshwater rows based on keywords, info from the IHH key, and estimated habitat type (based on landing site):
 GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
   mutate(
     freshwater_flag = coalesce(
-      (common_name_clean %in% FreshwaterTaxa) |
+      (common_name_clean %in% Definite_FreshwaterTaxa) |
       (rowSums(across(keywords_1:keywords_5, ~ .x %in% Freshwater_keywords), na.rm = TRUE) > 0) |
-      (habitat == "freshwater") |
+      (est_habitat == "freshwater") |
       (IHH_functional_major_groups_sm =="Freshwater fishes"),
       FALSE
     )
@@ -805,41 +825,101 @@ GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
 
 table(GOC_Landings_aquaculture$freshwater_flag)
 # 303293 observations explicitly flagged as freshwater landings (either based on the taxa, keyword, or landing site)
+```
 
+```{r SANITY CHECK: Do the records classed as aquaculture make sense?}
 # SANITY CHECK:
 table(GOC_Landings_aquaculture$est_aquaculture_production)
 subset<- GOC_Landings_aquaculture %>% filter(est_aquaculture_production=="likely aquaculture")
+table(subset$freshwater_flag)
+table(subset$recorded_taxa_name_clean)
+# Note that 172961 out of 281612 (~61%) records that are "likely aquaculture" are also flagged as freshwater species - things like Tilapia, trout. The marine species include snapper, jacks, lots of bivalves and snails.
+
+subset2<- subset %>% filter(recorded_taxa_name_clean=="JUREL")
+# NOTE TO SELF: Yes, these data for Jurel look really nice. These are definitely aquaculture jacks. Flags are doing a decent job so far!
 ```
 
-```{r Reorder columns in GOC_Landings_aquaculture}
-GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
+```{r Reorder and rename columns in GOC_Landings_aquaculture in new df GOC_Landings_sorted}
+GOC_Landings_sorted <- GOC_Landings_aquaculture %>%
+  # rename(reported_aquaculture_production = acuaculture_production,
+  #        reported_fleet = fleet) %>%
   relocate(
+    reported_aquaculture_production,
     aquacultureFLAG_landing.site,
     aquacultureFLAG_keywords,
     aquacultureFLAG_specific.taxa,
     aquacultureFLAG_combined,
     est_aquaculture_production,
     est_aquaculture_certainty,
+    est_habitat,
     freshwater_flag,
+    reported_fleet,
     .after = last_col()
   )
+# 3622776 obs., 49 vars.
 ```
 
-# STEP 9: Estimate sector based on est_aquaculture_production and freshwater_flag
+# STEP 9: ESTIMATE SECTOR based on est_aquaculture_production and freshwater_flag
 ```{r Estimate sector}
-GOC_Landings_sorted <- GOC_Landings_aquaculture %>%
+
+#### ESTIMATE SECTOR based on report info and flags ####
+
+GOC_Landings_sorted <- GOC_Landings_sorted %>%
   mutate(
-    sector_estimate = case_when(
+    # Helper columns:
+    is_aquaculture = est_aquaculture_production %in% c("aquaculture","likely aquaculture"),
+    is_wildcatch = est_aquaculture_production %in% c("unlikely aquaculture","not aquaculture"),
+    
+    # Implement logic to estimate sector:
+    sector_estimate_draft = case_when(
       
-      est_aquaculture_production %in% c("aquaculture", "likely aquaculture") & freshwater_flag == FALSE ~ "mariculture",
+      #### FRESHWATER SECTORS ####
+      freshwater_flag & is_aquaculture ~ "freshwater: aquaculture",
+      freshwater_flag & is_wildcatch ~ "freshwater: wild capture",
+      # Estimate: freshwater ornamentals > PENDING
+      #freshwater_flag & ornamental_flag ~ "freshwater: ornamentals",
+      freshwater_flag ~ "freshwater: yet to be classified",
+ 
+      #### MARINE SECTORS ####     
+      !freshwater_flag & is_aquaculture ~ "marine: mariculture",
+      !freshwater_flag & is_wildcatch & reported_fleet == "small_scale" ~ "marine: small-scale fisheries",
+      !freshwater_flag & is_wildcatch & reported_fleet == "large_scale" ~ "marine: large-scale fisheries",
+      # Estimate: marine ornamentals > PENDING
+      #!freshwater_flag & ornamental_flag ~ "marine: ornamentals",
+      !freshwater_flag ~ "marine: yet to be classified",
       
-      est_aquaculture_production %in% c("aquaculture", "likely aquaculture") & freshwater_flag == TRUE ~ "freshwater aquaculture",
-      
-      est_aquaculture_production %in% c("not aquaculture", "unlikely aquaculture") & freshwater_flag == FALSE ~ "marine capture",
-      
-      est_aquaculture_production %in% c("not aquaculture", "unlikely aquaculture") & freshwater_flag == TRUE ~ "freshwater capture",
-      
-      TRUE ~ "uncertain"
+      # Catch-all safeguard
+      TRUE ~ NA_character_
+
+    )
+  ) %>%
+  select(-is_aquaculture, -is_wildcatch)
+
+# SANITY CHECK:
+table(GOC_Landings_sorted$sector_estimate_draft) # Excellent! This all adds up to 3622776 obs.
+         # freshwater: aquaculture         freshwater: wild capture freshwater: yet to be classified    marine: large-scale fisheries 
+         #                  175109                           127130                             1054                           142404 
+         #     marine: mariculture    marine: small-scale fisheries     marine: yet to be classified 
+         #                  123999                           964673                          2088407 
+
+table(GOC_Landings_sorted$est_aquaculture_production)
+table(GOC_Landings_sorted$freshwater_flag)
+table(GOC_Landings_sorted$fleet)
+
+# Re-level
+GOC_Landings_sorted <- GOC_Landings_sorted %>%
+  mutate(
+    sector_estimate_draft = factor(
+      sector_estimate_draft,
+      levels = c(
+        "marine: yet to be classified",
+        "marine: large-scale fisheries",
+        "marine: small-scale fisheries",
+        "marine: mariculture",
+        "freshwater: aquaculture",
+        "freshwater: wild capture",
+        "freshwater: yet to be classified"
+      )
     )
   )
 ```
@@ -847,38 +927,90 @@ GOC_Landings_sorted <- GOC_Landings_aquaculture %>%
 ```{r Summarize by sector}
 SummaryOf_SectorLandings<- GOC_Landings_sorted %>% 
   filter(year >= 2014, year <= 2024) %>%
-  select(year, weight_kg_corrected, value, sector_estimate) %>%
-  group_by(year, sector_estimate) %>%
-  summarize(est_annual_catch= sum(weight_kg_corrected, na.rm = TRUE),
+  select(year, weight_kg_corrected, value, sector_estimate_draft) %>%
+  group_by(year, sector_estimate_draft) %>%
+  summarize(est_annual_catch_kg= sum(weight_kg_corrected, na.rm = TRUE),
             est_annual_value= sum(value, na.rm = TRUE))
+
+SummaryOf_SectorLandings$est_annual_catch_mton <- SummaryOf_SectorLandings$est_annual_catch_kg/1000
+
+table(SummaryOf_SectorLandings$sector_estimate_draft)
 ```
 
 ```{r Plot each sector over time}
-ggplot(SummaryOf_SectorLandings,
-       aes(x = year, y = est_annual_catch, fill = sector_estimate)) +
+# Define colors for each sector (fleet distinction = lighter for small-scale)
+sector_colors <- c(
+  # Marine (blues)
+  "marine: yet to be classified"       = "#cce0ff",  # very light blue for unknown
+  "marine: small-scale fisheries"      = "#6699cc",  # medium blue
+  "marine: large-scale fisheries"      = "#336699",  # darker blue
+  "marine: mariculture"                = "#33cccc",  # teal/aquaculture cue
+  
+  # Freshwater (warm shades)
+  "freshwater: yet to be classified"  = "#ffe0cc",  # light orange for unknown
+  "freshwater: wild capture"           = "#ff6666",  # strong red/orange
+  "freshwater: aquaculture"            = "#ffb366"   # lighter orange/yellow
+)
+
+# Plot
+Landings_bySector_plot<- SummaryOf_SectorLandings %>%
+  filter(year >= 2018) %>%
+  ggplot(aes(x = year, y = est_annual_catch_mton, fill = sector_estimate_draft)) +
+  
+  # Area plot with slight border for separation
   geom_area(alpha = 0.9, color = "white", linewidth = 0.2) +
+  
+  # Manual fill palette
   scale_fill_manual(
-    values = c(
-      "marine capture" = "#003366",          # dark blue
-      "mariculture" = "#b19cd9",             # light purple
-      "freshwater capture" = "#66c2a5",      # sea foam blue/green
-      "freshwater aquaculture" = "#ffb3de"   # pink-purple
-    )
+    values = sector_colors,
+    name = "Sector"
   ) +
+  
+  # Labels
   labs(
     x = "Year",
-    y = "Estimated catch (kg)",
-    fill = "Sector",
-    title = "Estimated Catch by Sector (2014–2024)"
+    y = "Estimated Annual Catch (metric tons)",
+    title = "Estimated Catch by Sector",
+    subtitle = "Filtered for 2018 onwards"
   ) +
-  theme_minimal(base_size = 14)
+  
+  # Minimal theme and sleek styling
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey85"),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 13, color = "grey30")
+  ) +
+  
+  # Optional: better legend layout
+  guides(
+    fill = guide_legend(nrow = 3, byrow = TRUE, title.position = "top")
+  )
+```
+
+Looks great! Save this plot.
+```{r Save Landings_bySector_plot}
+# Save the plot as a high-resolution PNG
+ggsave(
+  filename = "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/Catch_bySector_plot_Mar132026.png",
+  plot = Landings_bySector_plot,
+  width = 10,       # width in inches
+  height = 6,       # height in inches
+  dpi = 300         # resolution
+)
 ```
 
 
 
+#### Now filter out freshwater & aquaculture landings from main landings ####
 
 ```{r Filter out freshwater and MAR species}
-#### Now filter out freshwater & aquaculture landings from main landings ####
 
 #### FRESHWATER
 Freshwater_Landings <- GOC_Landings_aquaculture %>%
@@ -909,7 +1041,7 @@ table(MarineFisheries_Landings$OHI_Region_No)
 NOTE TO SELF: There could still be some freshwater species hiding in here. For example, the "MOJARRA" general category is mixed freshwater and marine demersal fish.
 
 
-# STEP 9: Interogate the EU and permit holder columns
+# STEP 10: Interogate the EU and permit holder columns
 ```{r First look}
 length(unique(GOC_Landings_clean$eu_name))
 # 7414 unique economic units in the dataframe??
@@ -928,12 +1060,12 @@ length(unique(GOC_Landings_clean$vessel_rnpa))
 # How many of the 3622776 observations have no economic unit name associated with them? Only ~2% of all records.
 GOC_Landings_clean %>%
   count(eu_name == "NO DISPONIBLE")
-# 72381 / 3622771
+# 72381 / 3622776
 
 # How many of all observations have no vessel name associated with them? About 53% of all records.
 GOC_Landings_clean %>%
   count(vessel_rnpa == "00000000")
-# 1908721 / 3622771
+# 1908721 / 3622776
 
 # This tells us that about half of all records have no information about the fishers' vessel, but nearly all have permit info.
 ```
