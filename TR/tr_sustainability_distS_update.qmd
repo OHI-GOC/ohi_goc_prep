@@ -403,6 +403,21 @@ dist_S_goc_rgn_recent_yr <- dist_S_goc_rgn %>%
       }
     },
     
+    # --- gapfilling updated_fecha_de_inicio_del_programa_en_la_empresa_inicio_historico ---
+    # in the case where there is an NA in the sheet, replace with the first year they were certified.
+    updated_fecha_de_inicio_del_programa_en_la_empresa_inicio_historico = {
+      if (is.na(updated_fecha_de_inicio_del_programa_en_la_empresa_inicio_historico)) {
+        
+        vals <- c_across(all_of(expiration_cols))
+        earliest_val <- vals[[min(which(!is.na(vals)))]]
+        as.numeric(format(earliest_val, "%Y"))
+        
+      } else {
+        # otherwise, use what was given!
+        as.numeric(format(updated_fecha_de_inicio_del_programa_en_la_empresa_inicio_historico, "%Y"))
+      }
+    },
+    
     # --- times_certified ---
     # how many certification cycles has this hotel completed between 2014-2025?
     # each expiration column = one potential cycle.
@@ -420,18 +435,7 @@ dist_S_goc_rgn_recent_yr <- dist_S_goc_rgn %>%
     
     # --- years_in_program ---
     # how many years since the hotel first joined? from start year to 2025.
-    years_in_program = {
-      start_year <- if (!is.na(updated_fecha_de_inicio_del_programa_en_la_empresa_inicio_historico)) {
-        # use the official start date if we have it
-        as.numeric(format(updated_fecha_de_inicio_del_programa_en_la_empresa_inicio_historico, "%Y"))
-      } else {
-        # otherwise, dig through the expiration columns and grab the earliest one...
-        vals <- c_across(all_of(expiration_cols))
-        earliest_val <- vals[[min(which(!is.na(vals)))]]
-        as.numeric(format(earliest_val, "%Y"))
-      }
-      2025 - start_year
-    },
+    years_in_program = 2025 - updated_fecha_de_inicio_del_programa_en_la_empresa_inicio_historico,
     
     # --- certification_consistency_pct ---
     # times_certified / years_in_program
@@ -443,12 +447,48 @@ dist_S_goc_rgn_recent_yr <- dist_S_goc_rgn %>%
 
 # see how the distribution looks across hotels
 table(dist_S_goc_rgn_recent_yr$times_certified, useNA = "always")
+
+
+### now, pivot to long format...
+# define the expiration cols with their corresponding years
+expiration_cols_named <- c(
+  "fecha_de_expiracion_2014" = 2014,
+  "fecha_de_expiracion_2015" = 2015,
+  "fecha_de_expiracion_2016" = 2016,
+  "fecha_de_expiracion_2017" = 2017,
+  "fecha_de_expiracion_2018" = 2018,
+  "fecha_de_expiracion_2019" = 2019,
+  "fecha_de_expiracion_2020" = 2020,
+  "fecha_de_expiracion_2021" = 2021,
+  "fecha_de_expiracion_2022" = 2022,
+  "fecha_de_expiracion_2023" = 2023,
+  "fecha_de_expiracion_2024" = 2024,
+  "fecha_de_expiracion_2025" = 2025
+)
+
+dist_S_goc_rgn_long <- dist_S_goc_rgn_recent_yr %>%
+  
+  # drop the wide expiration columns and pivot only the certified years
+  pivot_longer(
+    cols = all_of(names(expiration_cols_named)),
+    names_to = "cert_year_col",
+    values_to = "expiration_date"
+  ) %>%
+  
+  # keep only rows where the hotel actually had a certification that year
+  filter(!is.na(expiration_date)) %>%
+  
+  # extract the year as a clean integer for easy joining later
+  mutate(cert_year = as.integer(format(expiration_date, "%Y"))) %>%
+  
+  # drop the helper column, you don't need it anymore
+  dplyr::select(-cert_year_col)
 ```
 
 
 ```{r}
-dist_S_goc_rgn_recent_yr_select <- dist_S_goc_rgn_recent_yr %>% 
-  dplyr::select(most_recent_expiration_year, updated_fecha_de_inicio_del_programa_en_la_empresa_inicio_historico, nombre_comercial_de_la_empresa, nombre_comercial_clean, times_certified, years_in_program, certification_consistency_pct, rgn_id, estado, localidad, direccion) %>% 
+dist_S_goc_rgn_recent_yr_select <- dist_S_goc_rgn_long %>% 
+  dplyr::select(cert_year, most_recent_expiration_year, updated_fecha_de_inicio_del_programa_en_la_empresa_inicio_historico, nombre_comercial_de_la_empresa, nombre_comercial_clean, times_certified, years_in_program, certification_consistency_pct, rgn_id, estado, localidad, direccion, ultimo_organismo_evaluador) %>% 
   st_as_sf()
 
 st_write(dist_S_goc_rgn_recent_yr_select, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","distintivo_S_certified_50km_030926.gpkg"), append = FALSE) 
@@ -458,10 +498,10 @@ st_write(dist_S_goc_rgn_recent_yr_select, here::here("/home/shares/ohi/OHI_GOC/g
 
 ```{r}
 # count the 
-dist_S_counts_by_rgn <- dist_S_goc_rgn_recent_yr %>% 
+dist_S_counts_by_rgn <- dist_S_goc_rgn_recent_yr_select %>% 
   st_drop_geometry() %>% 
-  distinct(rgn_id, nombre_comercial_clean, most_recent_expiration_year) %>% 
-  group_by(rgn_id, most_recent_expiration_year) %>% 
+  distinct(rgn_id, nombre_comercial_clean, cert_year) %>% 
+  group_by(rgn_id, cert_year) %>% 
   summarise(n_hotels = n(), .groups = "drop")
 ```
 
@@ -470,7 +510,7 @@ dist_S_counts_by_rgn <- dist_S_goc_rgn_recent_yr %>%
 
 ```{r}
 dist_S_counts_by_rgn <- dist_S_counts_by_rgn %>% 
-  mutate(year = as.numeric(year_documented))
+  mutate(year = as.numeric(cert_year))
 
 library(plotly)
 
@@ -483,7 +523,7 @@ plot_ly(
   mode = 'lines+markers'
 ) %>% 
   layout(
-    title = "Distintivo S Certified Hotels by GoC Region (2015–2023)",
+    title = "Distintivo S Certified Hotels by GoC Region (2013-2025)",
     xaxis = list(title = "Year"),
     yaxis = list(title = "Number of Certified Hotels"),
     legend = list(title = list(text = "Region ID"))
@@ -492,9 +532,9 @@ plot_ly(
 ```
 
 
-# STOPPED HERE
-
 ## Compare with DENUE Accommodations
+
+First, lets read in the list of hotel economic units for each year, and make a `nombre_comercial_clean` column.
 
 ```{r}
 alojamientos_2019_2024_50km <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_alojamiento_temporal_y_preparación_alimentos_y_bebidas/int","update_alojamientos_2019_2024_goc_50km.shp"))
@@ -525,109 +565,194 @@ alojamientos_2019_2024_50km_clean <- alojamientos_2019_2024_50km %>%
     )
   )
 
-all_hotels <- unique(alojamientos_2019_2024_50km_clean$nombre_comercial_clean)
+denue_hotels <- unique(alojamientos_2019_2024_50km_clean$nombre_comercial_clean)
 ```
 
+Now, let's read in the list of Distintivo S certified hotels that I manually found the DENUE ID for by using setdiff and then walking through any that are not clear and searching their name in `alojamientos_2019_2024_50km_clean`.
+
+Note that before I had the data from SECTUR, I was using three publicly available PDFs released in 2015, 2017, and 2023.  Since I already did work to find the DENUE ID for those hotels listed, I will use what I can to ID the full SECTUR list.
 
 ```{r}
-dist_S_goc_50km <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","distintivo_S_certified_50km_030926.gpkg"))
+dist_S_goc_50km_SECTUR <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","distintivo_S_certified_50km_030926.gpkg"))
 
-dist_S_goc_rgn_recent_yr_select <- dist_S_goc_rgn_recent_yr %>% 
-  dplyr::select(most_recent_expiration_year, updated_fecha_de_inicio_del_programa_en_la_empresa_inicio_historico, nombre_comercial_de_la_empresa, nombre_comercial_clean, times_certified, years_in_program, certification_consistency_pct, rgn_id, estado, localidad, direccion) %>% 
-  st_as_sf()
-
-dist_S_businesses <- dist_S_goc_rgn_recent_yr %>% 
+sectur_dist_S_businesses <- dist_S_goc_50km_SECTUR %>% 
   dplyr::select(nombre_comercial_de_la_empresa, nombre_comercial_clean, estado, localidad, rgn_id) %>% 
   mutate(across(c(nombre_comercial_de_la_empresa, nombre_comercial_clean, estado, localidad), 
                 ~tolower(str_squish(.)))) %>% 
   distinct()
-  
-unique(dist_S_goc_50km$nmbr_c_)
-print(dist_S_businesses)
 ```
 
 ```{r}
-dist_S_businesses_names <- unique(dist_S_businesses$nombre_comercial_clean)
+# use the old key for DENUE IDs, to save time
+OLD_dist_s_denue_id <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","DistintivoS_x_DENUE_Accommodations.csv")) %>% 
+  janitor::clean_names()
 
-setdiff(dist_S_businesses_names, all_hotels)
-##those not present in y (all_hotels) but are present in x:
-
-
-setdiff(all_hotels, dist_S_businesses_names)
-```
-
-### Join w DENUE, find avg size of Distintivo S hotels.
-
-```{r}
-dist_s_denue_id <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","DistintivoS_x_DENUE_Accommodations.csv")) %>% 
-  janitor::clean_names() %>% 
-  filter(!is.na(id_denue)) %>%  # if it did not have a denue id, it is either not a hotel or it did not have enough information to know which hotel it was. This was done through manual searches *after* using setdiff first.
-  select(hotel_resort_name, id_denue)
-
-join_denue_alojamientos_dist_s <- left_join(dist_s_denue_id, alojamientos_2019_2024_50km_clean, by = c("id_denue" = "id"))
-
-length(unique(join_denue_alojamientos_dist_s$id_denue)) # 31, less than 35 because some had slightly different names but the same DENUE id.
-```
-
-Find the avg size of the hotels that have already been able to obtain dist. S, as a standard for the size of hotel that could potentially obtain the certification:
-
-```{r}
-# across all regions:
-size_join_denue_alojamientos_dist_s <- join_denue_alojamientos_dist_s %>% 
-  summarize(
-    avg_employees_dist_s = mean(employees_estimated, na.rm = TRUE),
-    sd = sd(employees_estimated, na.rm = TRUE),
-    n = sum(!is.na(employees_estimated)),
-    se = sd / sqrt(n)
-  )
-
-```
-
-For now, filter out to only all the DENUE hotels that are that size or larger. 
-
-```{r}
-missing_regions <- expand.grid(
-  rgn_id = c("Region_1", "Region_2", "Region_3"),
-  data_year = c(2015, 2017, 2023),
-  total_large_hotels = 0
-) 
-
-large_hotels_denue <- alojamientos_2019_2024_50km_clean %>% 
-  filter(data_year %in% 2023) %>% 
-  filter(employees_estimated >= 226) %>% 
-  group_by(rgn_id, data_year) %>% 
-  summarize(total_large_hotels = n()) %>% 
-  st_drop_geometry() %>% 
-  bind_rows(large_hotels_2015_2017) %>% 
-  bind_rows(missing_regions) %>% # makes sure that every region is represented here.
-  group_by(rgn_id, data_year) %>% 
-  summarize(total_large_hotels = sum(total_large_hotels))
-
-```
-
-Now, summarize the number of hotels per rgn with dist. S: 
-
-```{r}
-sum_dist_S_goc_50km <- dist_S_goc_50km %>% 
-  group_by(rgn_id, yr_dcmn) %>% 
-  summarize(total_dist_s = n()) %>% 
-  mutate(data_year = as.numeric(yr_dcmn)) %>% 
+dist_S_goc_50km_PDFs <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","distintivo_S_certified_50km.shp")) %>% 
   st_drop_geometry()
-
-joined_distS_vs_large_hotels <- full_join(sum_dist_S_goc_50km, large_hotels_denue, by = c("rgn_id","data_year"))
-
-## regions that have large hotels but no distintivo S:
-joined_distS_vs_large_hotels_fix <- joined_distS_vs_large_hotels %>% 
-  mutate(total_dist_s = ifelse(is.na(total_dist_s) & data_year %in% c(2015, 2017, 2023), 0, total_dist_s)) # to show that for those regions and years, there were no dist. S certified hotels.
 ```
+
+Some exploration before manual work:
+```{r}
+sectur_dist_S_businesses_names <- unique(sectur_dist_S_businesses$nombre_comercial_clean)
+
+not_in_OLD <- setdiff(sectur_dist_S_businesses_names, unique(OLD_dist_s_denue_id$hotel_resort_name))
+##those not present in y (OLD_dist_s) but are present in x (new from SECTUR):
+#  [1] "barcelo los cabos palace deluxe"      "casa mexicana de la ballena gris"    
+#  [3] "ecoturismo kuyima"                    "secrets marquis los cabos"           
+#  [5] "fiesta americana grand los cabos"     "sandos finisterra los cabos"         
+#  [7] "vista encantada residences"           "el cid marina mazatlan"              
+#  [9] "estrella del mar golf y country club" "dreams villamagna"                   
+# [11] "now amber puerto vallarta"  
+
+new_dist_s_establishments_withoutDENUE_yet <- sectur_dist_S_businesses %>% 
+  filter(nombre_comercial_clean %in% not_in_OLD)
+
+# to see if any of those without DENUE ID already are easily identifiable in DENUE
+clearly_in_DENUE <- setdiff(new_dist_s_establishments_withoutDENUE_yet$nombre_comercial_clean, denue_hotels)
+
+setdiff(unique(new_dist_s_establishments_withoutDENUE_yet$nombre_comercial_clean), clearly_in_DENUE)
+## only [1] "fiesta americana grand los cabos"!!!
+```
+
+### Join all certified hotels, find their DENUE ID
+
+All manual work was done in this spreadsheet: <https://docs.google.com/spreadsheets/d/1QwVcd9Zj3qSvbu0Zshmm64V6zycQ1-pCnCnwZMYhils/edit?gid=2040057616#gid=2040057616> 
+
+The most updated Dist. S list with DENUE IDs is on the sheet tab "all_distS_w_IDs", while the Green Key hotels are under "green_key_w_IDs".
+
+#### Greenkey Hotels
+
+```{r}
+greenkey_hotels <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","greenkey_hotels_03_10_26.csv")) %>% 
+  janitor::clean_names() %>% 
+  mutate(
+    nombre_comercial_clean = nombre %>% 
+      str_to_lower() %>% 
+      str_squish() %>% 
+      stri_trans_general("Latin-ASCII") %>% # remove accents
+      str_replace_all("[^a-z0-9 ]", "") %>% # remove punctuation
+      str_replace_all("\\s+", " ") %>%  # normalize spaces
+      str_replace_all("\\b(hotel|resort|spa|suites|suite|all inclusive|the|grupo)\\b", "") %>% 
+      str_squish(),
+    certification = "green_key"
+  )  %>% 
+  st_as_sf(coords = c("long", "lat"),
+           crs = 4326, # WGS84
+           remove = FALSE)
+
+## after manual work in this google spreadsheet: <https://docs.google.com/spreadsheets/d/1QwVcd9Zj3qSvbu0Zshmm64V6zycQ1-pCnCnwZMYhils/edit?gid=2040057616#gid=2040057616> 
+greenkey_denue_id <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","green_key_w_IDs.csv")) %>% 
+  janitor::clean_names() %>% 
+  mutate(certification = "green_key") %>% 
+  filter(!is.na(id_denue)) %>% 
+  dplyr::select(nombre_comercial_clean, id_denue, certification) %>% 
+  mutate(cert_year = 2025) # waiting on updated greenkey data that has years previous to 2025.
+
+all_greenkey_id_w_yr <- inner_join(greenkey_hotels, greenkey_denue_id) %>% 
+  st_transform(st_crs(inland_50)) %>% 
+  st_intersection(inland_50) %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(cert_year, certification, id_denue, rgn_id)
+```
+
+#### Dist.S Establishments
+
+```{r}
+dist_S_goc_50km_SECTUR <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","distintivo_S_certified_50km_030926.gpkg"))
+
+dist_s_denue_id <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int","DistintivoS_x_DENUE_Accommodations_all_distS_w_IDs.csv")) %>%
+  janitor::clean_names() %>% 
+  filter(!is.na(id_denue)) %>%  # if it did not have a denue id, it is either not a hotel or it did not have enough information to know which hotel it was. This was done through manual searches *after* using setdiff first.  the DENUE ID could also be NA if I found duplicates between the new SECTUR-given data and the PDFs we originally used.
+  dplyr::select(nombre_comercial_clean = hotel_resort_name, id_denue) %>% 
+  mutate(certification = "distintivo_s")
+
+all_dist_s_id_w_yr <- inner_join(dist_s_denue_id, dist_S_goc_50km_SECTUR) %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(cert_year, certification, id_denue, rgn_id)
+```
+
+Join them so that we have one list of all certified hotels:
+
+```{r}
+joined_certified_hotels <- full_join(all_dist_s_id_w_yr, all_greenkey_id_w_yr) %>% 
+  dplyr::select(-rgn_id) # denue data already has that
+
+# check the number of hotels:
+length(unique(joined_certified_hotels$id_denue)) # 52, which reflects (1) all the dist.s hotels in the spreadsheet provided by SECTUR, not those that only exist in the PDFs, and (2) the 22 greenkey certifications, of which there were two overlapping DENUE IDs (as in those hotels were certified in both distS and greenkey at some point).  
+```
+
+#### Join with DENUE:
+
+```{r}
+join_denue_alojamientos_certified_and_not <- full_join(joined_certified_hotels, alojamientos_2019_2024_50km_clean, by = c("id_denue" = "id","cert_year" = "data_year")) %>% 
+  filter(cert_year %in% 2019:2024) %>% 
+  mutate(certification = ifelse(is.na(certification), "no_certification", certification)) 
+
+join_denue_alojamientos_certified <- join_denue_alojamientos_certified_and_not %>% 
+  filter(!certification %in% "no_certification")
+
+mapview(join_denue_alojamientos_certified, zcol = "certification")
+```
+
+<!-- ```{r} -->
+<!-- # looking at including OSM hotel locations -->
+<!-- new_hotel_data <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025","OpenStreetMap_Tourist_Attractions_for_North_America.geojson")) %>%  -->
+<!--   st_zm() -->
+<!--   filter(addr_country %in% "MX") -->
+
+<!-- mapview(new_hotel_data) -->
+
+<!-- t2 <- new_hotel_data %>%  -->
+<!--   filter(tourism %in% "hotel") -->
+
+<!-- mapview(t2) -->
+
+<!-- t2_mex <- t2 %>%  -->
+<!--   filter(addr_country %in% "MX") # not validated data. loss of MX hotels  -->
+<!-- mapview(t2_mex) -->
+
+<!-- inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp")) -->
+<!-- t2_trans <- st_transform(t2, st_crs(inland_50)) -->
+<!-- t2_50km <- st_intersection(t2_trans, inland_50) -->
+
+<!-- mapview(t2_50km, zcol = "rgn_id") + mapview(alojamientos_2019_2024_50km_clean) -->
+
+<!-- summary(t2_50km) -->
+<!-- ``` -->
+
+
+## Filter out to only all the DENUE hotels that are 100+ employees.
+
+```{r}
+large_hotels_denue <- join_denue_alojamientos_certified_and_not %>% 
+  filter(employees_estimated >= 100 & cert_year %in% 2019:2024) %>% 
+  group_by(rgn_id, cert_year) %>% 
+  summarize(total_large_hotels = n()) # none in small regions
+
+# region1 <- join_denue_alojamientos_certified_and_not %>%
+#   filter(rgn_id %in% "Region_1")
+# unique(region1$per_ocu) # no hotels with a midpoint over 100 employees from 2019-2024
+
+large_hotels_denue_w_cert <- join_denue_alojamientos_certified_and_not %>% 
+  st_drop_geometry() %>% 
+  filter(employees_estimated >= 100) %>% 
+  filter(cert_year %in% 2019:2024) %>% 
+  mutate(certification = ifelse(certification %in% c("distintivo_s","green_key"), "certified",certification)) %>% 
+  group_by(rgn_id, cert_year, certification) %>% 
+  summarize(total_large_hotels = n()) %>% 
+  pivot_wider(
+    names_from = certification,
+    values_from = total_large_hotels
+  ) %>% 
+  replace_na(list(certified = 0, no_certification = 0)) %>% 
+  mutate(total_large_hotels = certified + no_certification,
+         current_status = (certified / total_large_hotels) * 100) 
+```
+
 
 ## Current Status
 
 ```{r}
-dist_S_current_status <- joined_distS_vs_large_hotels_fix %>% 
-  mutate(current_status = (total_dist_s / total_large_hotels) * 100) %>% 
-  mutate(current_status = ifelse(total_dist_s == 0 & total_large_hotels == 0, 100, current_status)) %>%  # because if there are no large hotels to get certified, then they should get a 100% (for now).
-  select(rgn_id, data_year, total_dist_s, total_large_hotels, current_status)
 
 ### table to visualize
 library(gt)
@@ -635,7 +760,7 @@ library(dplyr)
 
 region_levels <- paste0("Region_", 1:9)
 
-dist_S_current_status %>%
+large_hotels_denue_w_cert %>%
   mutate(
     rgn_id = factor(rgn_id, levels = region_levels),
     current_status = current_status / 100
@@ -644,9 +769,9 @@ dist_S_current_status %>%
   gt() %>%
   cols_label(
     rgn_id = "Region",
-    data_year = "Year",
-    total_dist_s = "Certified Hotels (Distintivo S)",
-    total_large_hotels = "Total Large Hotels (+250 employees)",
+    cert_year = "Year",
+    certified = "Certified Hotels (Distintivo S & GreenKey)",
+    total_large_hotels = "Total Large Hotels (+100 employees)",
     current_status = "Certification Coverage"
   ) %>%
   fmt_percent(
@@ -659,7 +784,7 @@ dist_S_current_status %>%
   ) %>%
   tab_header(
     title = "Distintivo S Certification Coverage",
-    subtitle = "Certified hotels as a share of total large hotels (+250 employees)"
+    subtitle = "Certified hotels as a share of total large hotels (+100 employees)"
   ) %>%
   opt_table_outline() %>%
   opt_all_caps()
@@ -668,137 +793,61 @@ dist_S_current_status %>%
 
 
 ```{r}
-dist_S_current_status_final <- dist_S_current_status %>% 
-  select(rgn_id, data_year, current_status) %>% 
+dist_S_current_status_final <- large_hotels_denue_w_cert %>% 
+  dplyr::select(rgn_id, cert_year, current_status) %>% 
   ungroup()
 
 # write_csv(dist_S_current_status_final, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_121225.csv"))
-write_csv(dist_S_current_status_final, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_75over_010726.csv"))
+write_csv(dist_S_current_status_final, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_2019_2024_100over_031326.csv"))
 
 dist_S_cs_final <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_75over_010726.csv"))
 dist_S_cs_old <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_121225.csv"))
-
-# avg_2023_dist2 <- dist_S_cs_final %>% ## because of Region_1,2,3 it is not representative to do an average because there are no large hotels in those rgns.
-#   filter(data_year == 2023) %>% 
-#   summarize(pct_large_hotels_goc = mean(current_status))
-
-avg_2023_dist2 <- dist_S_cs_final %>% 
-  filter(!rgn_id %in% c("Region_1", "Region_2", "Region_3")) %>% 
-  filter(data_year == 2023) %>%
-  summarize(pct_large_hotels_goc = mean(current_status)) # now seems more accurate.  Only ~8.26%
-```
-
-
-### Gapfill
-
-```{r}
-library(zoo)
-
-dist_S_current_status_complete <- dist_S_current_status_final %>% 
-  complete(rgn_id, data_year = 2015:2024) %>% 
-  mutate(current_status = as.numeric(current_status))  
-
-
-dist_S_current_status_gapfilled_interpolated <- dist_S_current_status_complete %>%
-  arrange(rgn_id, data_year) %>%
-  group_by(rgn_id) %>% 
-  mutate(
-    score_interpolated = na.approx(
-      current_status,
-      x = data_year,
-      rule = 2,
-      na.rm = FALSE
-    ),
-    is_gapfilled = ifelse(is.na(current_status), 1, 0)
-  ) %>%
-  ungroup()
-
-write_csv(dist_S_current_status_gapfilled_interpolated, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_interpolated_75over_010726.csv"))
-
-# dist_S_current_status_gapfilled_lm <- dist_S_current_status_complete %>% ## lm feels unstable because we only have three points for each rgn_id.  Let's stick to interpolation here.
-#   group_by(rgn_id) %>% 
-#   mutate(
-#     score_lm = {
-#       fit <- lm(current_status ~ data_year, na.action = na.exclude)
-#       predict(fit, newdata = data.frame(data_year = data_year))
-#     }) %>% 
-#   mutate(
-#     score_final = if_else(
-#       !is.na(current_status),
-#       current_status,
-#       score_lm),
-#     is_gapfilled = ifelse(is.na(current_status), 1, 0)
-#   )
-
-library(plotly)
-
-## plot the score over time
-dist_S_current_status_gapfilled_interpolated_plotly <- plotly::plot_ly(
-  dist_S_current_status_gapfilled_interpolated, 
-  x = ~data_year, 
-  y = ~score_interpolated, 
-  color = ~rgn_id, 
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "TR Sustainability: total dist. S hotels / total large hotels (interpolated)",
-    xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "Interpolated score")
-  ) %>%
-  add_lines(
-    x = range(dist_S_current_status_final$data_year), 
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal (100/100)",
-    inherit = FALSE
-  )
-dist_S_current_status_gapfilled_interpolated_plotly
 ```
 
 
 ```{r}
 library(plotly)
 
-dist_S_current_status_final <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_121225.csv"))
+dist_S_current_status_final <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","dist_S_current_status_final_2019_2024_100over_031326.csv"))
 
 ## plot the score over time
 final_score_plotly <- plotly::plot_ly(
   dist_S_current_status_final, 
-  x = ~data_year, 
+  x = ~cert_year, 
   y = ~current_status, 
   color = ~rgn_id, 
   type = "scatter", 
   mode = "lines+markers"
 ) %>% 
   layout(
-    title = "TR Sustainability: total dist. S hotels / total large hotels",
+    title = "TR Sustainability: certified hotels / total large hotels",
     xaxis = list(title = "Año // Year"),
     yaxis = list(title = "Puntaje // Percent (out of 100)")
   ) %>%
   add_lines(
-    x = range(dist_S_current_status_final$data_year), 
+    x = range(dist_S_current_status_final$cert_year), 
     y = c(100, 100),
     line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal 2030 (100/100)",
+    name = "Meta // Goal (100/100)",
     inherit = FALSE
   )
 final_score_plotly
 
-large_hotels_denue_plot <- large_hotels_denue %>% 
-  arrange(data_year)
+large_hotels_denue_w_cert <- large_hotels_denue_w_cert %>% 
+  arrange(cert_year) %>% 
+  ungroup()
 
 ## plot the score over time
 denue_large_hotels_plotly <- plotly::plot_ly(
-  large_hotels_denue_plot, 
-  x = ~data_year, 
+  large_hotels_denue_w_cert, 
+  x = ~cert_year, 
   y = ~total_large_hotels, 
   color = ~rgn_id, 
   type = "scatter", 
   mode = "lines+markers"
 ) %>% 
   layout(
-    title = "Total DENUE Large Hotels (>226 employees) across the GoC (50km)",
+    title = "Total DENUE Large Hotels (>100 employees) in coastal areas of the GoC (50km)",
     xaxis = list(title = "Año // Year"),
     yaxis = list(title = "Number of hotels")
   ) 
