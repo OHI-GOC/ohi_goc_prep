@@ -420,6 +420,13 @@ NOTE TO SELF: How did I get this list of key words originally? I think I started
 ```{r Load MasterSpKey_pending}
 MasterSpKey_pending <- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Species_Keys/CleanedMaster_SpKey_Dec012025.csv")
 # 802 obs of 41 variables
+
+GenusGroupKey_pending <- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Genus_to_MajorGroup_Key_Feb242026.csv")
+unique(GenusGroupKey_pending$Major_Functional_Group)
+#  [1] "Shrimps, prawns"            "Pelagic marine fishes"      "Demersal marine fishes"     "Sharks"                    
+#  [5] "Crustaceans"                "Cephalopods"                NA                           "Molluscs excl. Cephalopods"
+#  [9] "Freshwater fishes"          "Marine fishes NEI"          "Other marine invertebrates" "Diadromous fishes"         
+# [13] "Marine algae"               "Other freshwater taxa"    
 ```
 
 ```{r Shave down the size of Master_SpKey_pending}
@@ -564,6 +571,9 @@ table(GOC_Landings_aquaculture$recorded_taxa_group)
 Aquaculture_keywords<- c(
   "DE CULTIVO", "DE CULTIVO VIVO", "ABASTO RANCHO", "RANCHO"
 )
+
+# ## WORK IN PROGRESS add cultivadas from common_name_clean to keywords..
+# Aquaculture_Summary "cultivadas"
 
 # Flag rows with aquaculture keywords:
 GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
@@ -925,6 +935,7 @@ GOC_Landings_sorted <- GOC_Landings_sorted %>%
 ```
 
 ```{r Summarize by sector}
+# ESTIMATED:
 SummaryOf_SectorLandings<- GOC_Landings_sorted %>% 
   filter(year >= 2014, year <= 2024) %>%
   select(year, weight_kg_corrected, value, sector_estimate_draft) %>%
@@ -1006,6 +1017,116 @@ ggsave(
 )
 ```
 
+So that's estimated. What about what was actually reported?
+```{r Plot what was actually reported}
+colnames(GOC_Landings_sorted)
+
+GOC_Landings_sorted <- GOC_Landings_sorted %>%
+  mutate(
+    sector_estimate_reported = case_when(
+      
+      # More specific first
+      reported_aquaculture_production == "yes" & reported_fleet == "small_scale" ~ "small-scale aquaculture",
+      
+      # General aquaculture
+      reported_aquaculture_production == "yes" ~ "aquaculture",
+      
+      # Fisheries by fleet
+      reported_fleet == "small_scale" ~ "small-scale fisheries",
+      reported_fleet == "large_scale" ~ "large-scale fisheries",
+      
+      # Fallback for missing/unknown
+      TRUE ~ "yet to be classified"
+    )
+  )
+
+# SANITY CHECK:
+table(GOC_Landings_sorted$sector_estimate_reported)
+         # aquaculture large-scale fisheries small-scale fisheries  yet to be classified 
+         #        17496                142431               1052851               2409998 
+
+# Re-level
+GOC_Landings_sorted <- GOC_Landings_sorted %>%
+  mutate(
+    sector_estimate_reported = factor(
+      sector_estimate_reported,
+      levels = c(
+        "aquaculture",
+        "yet to be classified",
+        "small-scale fisheries",
+        "large-scale fisheries"
+      )
+    )
+  )
+
+# REPORTED:
+SummaryOf_SectorLandings_REPORTED<- GOC_Landings_sorted %>% 
+  filter(year >= 2014, year <= 2024) %>%
+  select(year, sector_estimate_reported, weight_kg_corrected, value) %>%
+  group_by(year, sector_estimate_reported) %>%
+  summarize(est_annual_catch_kg= sum(weight_kg_corrected, na.rm = TRUE),
+            est_annual_value= sum(value, na.rm = TRUE))
+
+SummaryOf_SectorLandings_REPORTED$est_annual_catch_mton <- SummaryOf_SectorLandings_REPORTED$est_annual_catch_kg/1000
+
+table(SummaryOf_SectorLandings_REPORTED$sector_estimate_reported)
+
+# Plot
+REPORTEDLandings_bySector_plot<- SummaryOf_SectorLandings_REPORTED %>%
+  filter(year >= 2018) %>%
+  ggplot(aes(x = year, y = est_annual_catch_mton, fill = sector_estimate_reported)) +
+  
+  # Area plot with slight border for separation
+  geom_area(alpha = 0.9, color = "white", linewidth = 0.2) +
+  
+  # Labels
+  labs(
+    x = "Year",
+    y = "Reported Annual Catch (metric tons)",
+    title = "Catch by Reported Sector",
+    subtitle = "Filtered for 2018 onwards"
+  ) +
+  
+  # Minimal theme and sleek styling
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey85"),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 13, color = "grey30")
+  ) +
+  
+  # Optional: better legend layout
+  guides(
+    fill = guide_legend(nrow = 3, byrow = TRUE, title.position = "top")
+  )
+
+REPORTEDLandings_bySector_plot
+```
+
+
+# Let's look into jellyfish.
+```{r}
+# Create a vector of keywords
+Jellyfish_keywords <- c("bola", "cañon", "canon", "aguamala", "medusa", "stomolophus")
+
+# Filter using regex with ignore case
+GOC_Landings_jellies <- GOC_Landings_sorted %>%
+  filter(grepl(paste(Jellyfish_keywords, collapse = "|"), common_name_clean, ignore.case = TRUE))
+# Found them!
+
+table(GOC_Landings_jellies$recorded_taxa_group)
+table(GOC_Landings_jellies$recorded_taxa_name_clean)
+
+subset<- GOC_Landings_sorted %>% filter(is.na(estimated_genus_name))
+table(subset$recorded_taxa_group)
+table(subset$recorded_taxa_name_clean)
+```
 
 
 #### Now filter out freshwater & aquaculture landings from main landings ####
