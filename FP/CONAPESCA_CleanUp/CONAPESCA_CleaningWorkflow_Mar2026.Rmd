@@ -1119,43 +1119,74 @@ GOC_Landings_clean<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned
 
 ```{r Load in revised major group key}
 MajorGroupKey_pending<- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/MajorGroupKey_Mar132026.csv")
+# 527 obs. 13 vars.
 ```
 
 ```{r Complicated merge landings data with MajorGroupKey_pending}
-MajorGroupKey_lookup <- MajorGroupKey_pending %>%
+Special_groups <- c("OTRAS", "ESPECIE GENERICA", "FAUNA", "ORNATO", "PECES DE ORNATO", "NEI")
+
+#STEP 1: Join in non-OTRAS, simple join
+# For non-otra taxa, we only want to look up based on the recorded_taxa_group and estimated_genus_name. From that look-up we want to assign Major_Functional_Group, Assignment_for_Major_Functional_Group
+NONOTRAS_MajorGroupKey_lookup <- MajorGroupKey_pending %>%
+  filter(!recorded_taxa_group %in% Special_groups) %>%
+  select(-c("common_name_clean", "estimated_species_name", "Manual_Classification_Notes", "species_est_certainty", "species_est_reasoning", "genus_est_reasoning", "ornamentalFLAG_1")) %>%
   distinct(
     recorded_taxa_group,
     estimated_genus_name,
-    common_name_clean,
     .keep_all = TRUE
   )
 
-Special_groups <- c("OTRAS", "ESPECIE GENERICA", "FAUNA", "ORNATO", "PECES DE ORNATO", "NEI")
-
-#STEP 1: 
+# 223 obs. 6 vars.
+  
 normal_join <- GOC_Landings_clean %>%
   filter(!recorded_taxa_group %in% Special_groups) %>%
   left_join(
-    MajorGroupKey_lookup,
-    by = c("recorded_taxa_group","estimated_genus_name")
+    NONOTRAS_MajorGroupKey_lookup,
+    by = c("recorded_taxa_group","estimated_genus_name", "IHH_functional_major_groups_sm")
   )
+# 3101927 obs. (as expected) and +3 new vars.
 
-# STEP 2:
+# STEP 2: JOIN IN OTRAS
+# In contrast: for otras taxa, we want to look up based on the recorded_taxa_group and common_name_clean. From that look-up we want to assign estimated_taxa_group, estimated_species_name, species_est_certainty, species_est_reasoning, estimated_genus_name, genus_est_reasoning, Major_Functional_Group, Assignment_for_Major_Functional_Group, Manual_Classification_Notes, and ornamentalFLAG_1
+OTRAS_MajorGroupKey_lookup <- MajorGroupKey_pending %>%
+  filter(recorded_taxa_group %in% Special_groups) %>%
+  distinct(
+    recorded_taxa_group,
+    common_name_clean,
+    .keep_all = TRUE
+  )
+# 277 obs. 13 vars.
+
 special_join <- GOC_Landings_clean %>%
   filter(recorded_taxa_group %in% Special_groups) %>%
   left_join(
-    MajorGroupKey_lookup,
-    by = c(
-      "recorded_taxa_group",
-      "estimated_genus_name",
-      "common_name_clean"
+    OTRAS_MajorGroupKey_lookup,
+    by = c("recorded_taxa_group", "common_name_clean"),
+    suffix = c("", "_new")
+  ) %>%
+  mutate(
+    across(
+      ends_with("_new"),
+      ~ .,
+      .names = "{sub('_new$', '', .col)}"
     )
   )
+# 520849 obs. (as expected) and +11 new vars.
+
+# SANITY CHECK: Check that jellies got labeled.
+# Create a vector of keywords
+Jellyfish_keywords <- c("bola", "cañon", "canon", "aguamala", "medusa", "stomolophus")
+
+# Filter using regex with ignore case
+GOC_Landings_jellies <- special_join %>%
+  filter(grepl(paste(Jellyfish_keywords, collapse = "|"), common_name_clean, ignore.case = TRUE))
+# 15978 obs. Found them!
 
 # STEP 3:
 GOC_Landings_merged <- bind_rows(normal_join, special_join)
   
-# NOTE TO SELF: This join is a little wonky. Some of the columns are duplicates and I want toclean this up. But for now, let's just see if we can isolate and plot jellies. - Mar 13 2026
+# NOTE TO SELF: This join is a little wonky. Some of the columns are duplicates and I want to clean this up. But for now, let's just see if we can isolate and plot jellies. - Mar 13 2026
+# Seems like its fixed now - Mar 14 2026.
 ```
 
 
@@ -1172,6 +1203,8 @@ table(GOC_Landings_jellies$recorded_taxa_group)
 table(GOC_Landings_jellies$recorded_taxa_name_clean)
 
 table(GOC_Landings_merged$Major_Functional_Group)
+# BEFORE THE FIX:
+# Something weird is happening with the merge. The capitalization is off, etc. Common name clean is not quite right, it's not lowercase so the merge doesn't work...
      #           Cephalopods                Crustaceans     Demersal marine fishes          Diadromous fishes 
      #                 88211                     195861                    1583704                       7393 
      #           Echinoderms          Freshwater fishes               Marine algae          Marine fishes NEI 
@@ -1181,7 +1214,17 @@ table(GOC_Landings_merged$Major_Functional_Group)
      # Pelagic marine fishes                     Sharks            Shrimps, prawns                    unknown 
      #                379493                     171073                     561207                       3519 
 
-# Again, something weird is happening with the merge. The capitalization is off, etc. Common name clean is not quite right, it's not lowercase so the merge doesn't work...
+# AFTER THE FIX:
+#               Cephalopods                Crustaceans     Demersal marine fishes          Diadromous fishes 
+#                      88211                     195868                    1582905                       7393 
+#                Echinoderms          Freshwater fishes                    Jellies               Marine algae 
+#                      12075                      70591                      15978                       1723 
+#          Marine fishes NEI         Marine species NEI Molluscs excl. Cephalopods      Other freshwater taxa 
+#                     325975                      26719                     172884                       2563 
+# Other marine invertebrates      Pelagic marine fishes                     Sharks            Shrimps, prawns 
+#                         15                     379180                     166587                     560968 
+#                    unknown 
+#                       3519
 ```
 ```{r Plot jellies over time}
 Jellies_Summary <- GOC_Landings_jellies %>%
