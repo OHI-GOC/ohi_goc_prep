@@ -26,13 +26,15 @@ editor_options:
 
 This indicator will reflect the goal that all touristy beaches are managed by the Blue Flag certification. [This document](https://blueflag.us/wp-content/uploads/2021/11/USA-National-Beach-Criteria-2021_track-changes_11.21.pdf) details what it means for a beach to be compliant with the Blue Flag program, and it hits everything that I think is really important (infrastructure availability such as available trashcans, environmental education, litter/plastic cleanups on beaches, safety of beachgoers, water quality, free access/only small fees for parking etc, management of different users on the beach, toilet or restroom facilities with controlled sewage disposals, sensitive areas and species must be protected and managed, and more!).
 
-So, current status = [the km length of touristy beaches with a blue flag] / [the total km of touristy beaches in the Gulf] * 100
+So, current status = [the m length of touristy beaches WITH a blue flag] / [the total m of touristy beaches in the Gulf] * 100
 
 The key here is to determine which beaches *should* have this certification (aka, which beaches are urban/touristy), so that we can find the *length* of beaches that need to be protected. 
 
 
 ### Make a list of all GoC coastal cities
 
+
+This list specifically is not used yet, but if we want to do manual cuts, these are the ones I could include:
 - Los Cabos
 - La Paz
 - Loreto ? 
@@ -78,6 +80,19 @@ coastline <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/inegi_coastline/conjunt
 #beach$ID_Beach <- 1:nrow(beach)
 #st_write(beach, here("_pressures/access/data/beach.shp"))
 beach <- st_read(here("_pressures/access/data/beach.shp"))
+
+beach2 <- coastline %>% 
+  filter(SUBTIPO %in% c("Playa","Acantilado") & TIPO == "Continental") %>%
+  st_transform(crs=4326)
+beach2$ID_Beach <- 1:nrow(beach2)
+mapview(beach2)
+
+# subtipo Construcción portuaria
+ports <- coastline %>% 
+  filter(SUBTIPO %in% c("Construcción portuaria") & TIPO=="Continental") %>%
+  st_transform(crs=4326)
+
+
 ```
 
 ```{r}
@@ -166,6 +181,91 @@ mapview(beach_urban_RUR, color = "magenta") + mapview(cities_buf_2_RUR, col.regi
 
 ```
 
+```{r}
+## use POBTOT_km2 (population per km2) as a way to define whether a beach is touristy or not.
+
+## use both AMBITO == urban and rural:
+cities_w_rgnids_50km_RUR
+
+# summary(cities_w_rgnids_50km_RUR$POBTOT_km2)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#     2.1   973.4  1696.4  2091.6  2642.9 44800.7 
+
+## puerto peñasco is 1531.980210226832 POBTOT_km2, San Felipe is 1543.4270893317282, Sayulita is 2080.617258333723.
+
+## This makes me feel good about having a threshold of greater than or equal to San Felipe POBTOT_km2 to be a touristy locality/city polygon.  Even small polygons like El Chileno/Santa Maria in Los Cabos has a POBTOT_km2 = 3281.6748449526376, so it really would limit out any that are not touristy (like puerto libertad in Sonora, 829.2587738359624)!!
+
+## filter POBTOT_km2:
+urban_cities_w_rgnids_50km <- cities_w_rgnids_50km_RUR %>% 
+  filter(POBTOT_km2 >= 1500)
+mapview(urban_cities_w_rgnids_50km)
+
+pobtot_cities_buf <- st_buffer(urban_cities_w_rgnids_50km, dist = 400) # reminder: inland_50 is in CRS = Mexico ITRF2008 / LCC , which is a metric projection, so we can interpret the dist = 500 as meters.  
+
+mapview(urban_cities_w_rgnids_50km) + mapview(pobtot_cities_buf, col.region = "lightblue") + mapview(pobtot_beach_urban, color = "magenta") + mapview(alojamientos_2019_2024_50km)
+
+
+## UHOH!! ran into some places, like Bahia de Kino, that have many hotels in the locality polygon but < 1000 POBTOT_km2.  This makes me think we need to use employees per km2 instead.
+
+
+alojamientos_est_perocu <- alojamientos_2019_2024_50km %>% 
+  mutate(
+    employees_estimated = case_when(
+      per_ocu == "0 a 5 personas" ~ 3,
+      per_ocu == "6 a 10 personas" ~ 8,
+      per_ocu == "11 a 30 personas" ~ 20.5,
+      per_ocu == "31 a 50 personas" ~ 40.5,
+      per_ocu == "51 a 100 personas" ~ 75.5,
+      per_ocu == "101 a 250 personas" ~ 175.5,
+      per_ocu %in% c("251 y m<e1>s personas", "251 y más personas") ~ 300,
+      TRUE ~ NA_real_
+    )
+  ) %>% 
+  filter(data_year %in% 2024) # most recent hotel directory to understand where people visit
+
+## join by cve_loc
+hotel_emp_per_area_cveloc_join <- st_join(cities_w_rgnids_50km_RUR, alojamientos_est_perocu, by = c("CVE_LOC" = "cve_loc", "CVE_MUN" = "cve_mun","CVE_ENT" = "cve_ent"), relationship = "many-to-many") 
+
+hotel_emp_per_area_cveloc <- hotel_emp_per_area_cveloc_join %>% 
+  unite(col = "cve_mun_loc", c("cve_mun", "cve_loc"), sep = "_") %>% 
+  group_by(cve_mun_loc, geometry) %>% 
+  summarize(
+    total_hotel_employees = sum(employees_estimated, na.rm = TRUE),
+    total_area_km2 = sum(area_km2, na.rm = TRUE)
+  ) %>% 
+  ungroup() %>% 
+  mutate(hotel_emp_per_km2 = total_hotel_employees / total_area_km2) %>% 
+  st_as_sf()
+
+mapview(hotel_emp_per_area_cveloc, zcol = "hotel_emp_per_km2")
+summary(hotel_emp_per_area_cveloc$hotel_emp_per_km2)
+summary(hotel_emp_per_area_cveloc$total_hotel_employees)
+
+hotel_emp_per_area_cveloc_touristy <- hotel_emp_per_area_cveloc %>% 
+  filter(hotel_emp_per_km2 >= 1.755)
+hotel_emp_per_area_cveloc_touristy <- hotel_emp_per_area_cveloc %>% 
+  filter(total_hotel_employees >= 25.76)
+hotel_emp_per_area_cveloc_touristy <- hotel_emp_per_area_cveloc %>% 
+  filter(total_hotel_employees >= 100)
+
+mapview(hotel_emp_per_area_cveloc_touristy, zcol = "hotel_emp_per_km2") + mapview(alojamientos_est_perocu)
+
+mapview(hotel_emp_per_area_cveloc_touristy, zcol = "total_hotel_employees") + mapview(alojamientos_est_perocu)
+
+## a good place to start. including both urban and rural areas, these are all the beaches.  Then I will go through and say yes or no to "touristy" here: <https://docs.google.com/spreadsheets/d/1tVsSwANpZAdqtuugBZJ50l_xPl6uVBwOE0geRvmWjXU/edit?gid=463454199#gid=463454199>
+
+
+pobtot_beach_urban <- st_intersection(st_transform(beach2_urban_RUR, st_crs(pobtot_cities_buf)), pobtot_cities_buf)
+
+beach2_urban_RUR_df <- beach2_urban_RUR %>% 
+  st_drop_geometry()
+
+
+
+# write_csv(beach2_urban_RUR_df, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/blue_flag_int","urban_and_rural_beaches_and_cliffs.csv"))
+
+mapview(beach2_urban_RUR, zcol = "ID_Beach") + mapview(cities_buf_2_RUR, col.regions ="lightblue") + mapview(cities_w_rgnids_50km_RUR)
+```
 
 
 ### Read in Blue Flag Beaches
@@ -181,6 +281,9 @@ library(mapview)
 ```{r}
 ## read in the data taken from the website
 blue_flag_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/FEE_foundation_environmental_education/blueflag_mexico", "blueflag_beaches_03_10_26.csv"))
+
+### with the year since becoming blue flag
+blue_flag_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/FEE_foundation_environmental_education/blueflag_mexico", "blueflag_beaches_03_17_26.csv"))
 
 blueflag_sf <- blue_flag_raw %>% 
   janitor::clean_names() %>% 
@@ -222,7 +325,7 @@ library(tibble)
 library(readr)
   
 bf_beaches <- tibble( # bf = blue flag
-  nombre = c(
+  blue_flag_nombre = c(
     "Hotel Marriott Puerto Vallarta Resort & Spa",
     "Hotel The Westin Resort & Spa Puerto Vallarta",
     "Sheraton",
@@ -276,7 +379,9 @@ bf_beaches <- tibble( # bf = blue flag
   )
 ) %>% 
   mutate(certified = "yes") %>% 
-  rename(blue_flag_nombre = nombre)
+  left_join(blueflag_sf, by = c("blue_flag_nombre" = "nombre")) %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(-geometry)
 ```
 
 
@@ -291,8 +396,6 @@ st_crs(beach_urban) == st_crs(bf_rural_beaches) # TRUE
 
 beach_urban_complete <- bind_rows(beach_urban, bf_rural_beaches) # join the bf rural beaches
 mapview(beach_urban_complete, color = "magenta")
-
-
 ```
 
 
@@ -302,7 +405,7 @@ bf_w_beach_urban_complete <- full_join(beach_urban_complete, bf_beaches, relatio
   janitor::clean_names() %>% 
   mutate(ambito = ifelse(is.na(ambito), "Urbana", ambito),
          certified = ifelse(is.na(certified), "no", certified)) %>% 
-  dplyr::select(id_beach, ambito, certified, blue_flag_nombre, geometry) %>% 
+  dplyr::select(id_beach, blue_flag_since, ambito, certified, blue_flag_nombre, geometry) %>% 
   st_as_sf()
 
 mapview(bf_w_beach_urban_complete, color = "magenta")
@@ -312,21 +415,25 @@ mapview(bf_w_beach_urban_complete, color = "magenta")
 Since there are multiple blue flags for some beaches, we can just call a beach certified if it has at least one BF certification:
 ```{r}
 bf_w_beach_urban_complete_nodups <- bf_w_beach_urban_complete %>% 
-  group_by(id_beach, ambito, certified, geometry) %>%
-  summarise(blue_flag_nombre = paste(blue_flag_nombre, collapse = "; "),
-            .groups = "drop") %>%
+  group_by(id_beach, ambito, geometry) %>%
+  summarize(
+    certified = first(certified),
+    blue_flag_nombre = paste(blue_flag_nombre, collapse = "; "), # put all names of blue flag beaches associated with one INEGI beach
+    blue_flag_since = suppressWarnings(min(blue_flag_since, na.rm = TRUE)), # take the earliest year that beach was certified if it has multiple blue flag beaches on one INEGI beach. Suppress warnings because any urban beach that does not have a blue flag would produce Inf but we will fix that... ->
+    .groups = "drop") %>%
+  mutate(blue_flag_since = ifelse(is.infinite(blue_flag_since), NA, blue_flag_since)) %>% # ...here!!
   st_as_sf() %>% 
   st_cast("MULTILINESTRING") %>% # to ensure they are the same types
   mutate(length_m = st_length(geometry)) # find each beach's length in meters
 
-# st_write(bf_w_beach_urban_complete_nodups, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/blue_flag_int","all_urban_beaches_plus_bf_rural_beaches.gpkg"))
+# st_write(bf_w_beach_urban_complete_nodups, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/blue_flag_int","all_urban_beaches_plus_bf_rural_beaches_and_yr.gpkg"))
   
 mapview(bf_w_beach_urban_complete_nodups, color = "magenta")
 
 st_geometry_type(bf_w_beach_urban_complete_nodups) %>% unique()
 # should return LINESTRING or MULTILINESTRING: returned MULTILINESTRING because I used st_cast
 
-mapview(bf_w_beach_urban_complete_nodups, color = "magenta") + mapview(blueflag_sf, color = "blue") + mapview(cities_buf_2, col.regions ="lightblue")
+mapview(bf_w_beach_urban_complete_nodups, color = "magenta") + mapview(blueflag_sf, color = "blue") + mapview(cities_buf_2, col.regions ="lightblue") + mapview(beach, color = "yellow")
 ```
 
 ```{r}
@@ -342,7 +449,7 @@ bf_w_beach_urban_complete_rgnid <- st_intersection(st_transform(bf_w_beach_urban
 
 mapview(bf_w_beach_urban_complete_rgnid, zcol = "rgn_id") + mapview(blueflag_sf, color = "blue") + mapview(cities_buf_2, col.regions ="lightblue")
 
-mapview(bf_w_beach_urban_complete_rgnid, zcol = "certified")
+mapview(bf_w_beach_urban_complete_rgnid, zcol = "certified") + mapview(blueflag_sf, color = "blue")
 
 # st_write(bf_w_beach_urban_complete_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/blue_flag_int","blue_flag_w_urban_beaches_length_meters_rgn_id.gpkg"))
 ```
@@ -350,6 +457,56 @@ mapview(bf_w_beach_urban_complete_rgnid, zcol = "certified")
 ### Current status
 
 current status = [the m length of touristy beaches with a blue flag] / [the total m of touristy beaches in the Gulf] * 100
+
+First, we need to adjust for the "blue_flag_since" column, where if a beach has been blue flag certified since 2015, it should count as a certified beach for every year after that.
+
+```{r}
+### expand the blue flags into one row for each year it has been certified, earliest is 2013, to 2025
+blue_flag_status_allyrs <- bf_w_beach_urban_complete_rgnid %>%
+  st_drop_geometry() %>%
+  mutate(length_m = as.numeric(length_m)) %>% # make numeric
+  # expand certified beaches into one row per year
+  mutate(year = ifelse(certified == "yes", blue_flag_since, NA)) %>%
+  filter(certified == "yes" & !is.na(year)) %>%
+  rowwise() %>%
+  mutate(year = list(seq(year, 2025, by = 1))) %>%
+  unnest(year) %>%
+  ungroup()
+
+# now get total certified length per rgn_id per year
+certified_by_yr <- blue_flag_status_allyrs %>%
+  group_by(rgn_id, year) %>%
+  summarize(yes = sum(length_m, na.rm = TRUE), .groups = "drop")
+
+# total beach length per region (constant across years)
+total_urban_length_by_rgn <- bf_w_beach_urban_complete_rgnid %>%
+  st_drop_geometry() %>%
+  mutate(length_m = as.numeric(length_m)) %>%
+  group_by(rgn_id) %>%
+  summarize(total_length = sum(length_m, na.rm = TRUE), .groups = "drop")
+```
+
+
+#### Now we can calculate the current status for every region and year.
+
+```{r}
+# join and calculate status for every year
+blue_flag_status_allyrs_final <- expand_grid(
+    rgn_id = unique(total_urban_length_by_rgn$rgn_id),
+    year = 2013:2025
+  ) %>%
+  left_join(total_urban_length_by_rgn, by = "rgn_id") %>%
+  left_join(certified_by_yr, by = c("rgn_id", "year")) %>%
+  mutate(
+    yes = replace_na(yes, 0), # no certifications yet that year = 0
+    prop_blue_flag = yes / total_length,
+    current_status = prop_blue_flag * 100
+  )
+
+# write_csv(blue_flag_status_allyrs_final, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","blue_flag_current_status_final_by_yr_031726.csv"))
+```
+
+#### OLD current status without years since being a blue flag:
 
 ```{r}
 blue_flag_current_status <- bf_w_beach_urban_complete_rgnid %>%
@@ -371,6 +528,48 @@ blue_flag_current_status <- bf_w_beach_urban_complete_rgnid %>%
 
 ```
 
+### plotly
+
+```{r}
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+## TR sustainability BlueFlag score over time
+bf_plotly <- plotly::plot_ly(
+  blue_flag_status_allyrs_final,
+  x = ~year, 
+  y = ~current_status, 
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS: length of urban beaches that have at least one Blue Flag site / total urban beach length",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Score (out of 100)"),
+    legend = list(title = list(text = "Región"))
+  ) %>%
+  add_lines(
+    x = range(blue_flag_status_allyrs_final$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (all beaches are blue flag = 100/100)",
+    inherit = FALSE
+  )
+bf_plotly
+```
+
+
 ## Questions to resolve:
 
 (1) What should we do about the blue flag beaches Santa María and El Chileno?  INEGI does not register that part of the coastline as a beach, but it does look like one on the ESRI World Imagery. 
@@ -378,7 +577,5 @@ blue_flag_current_status <- bf_w_beach_urban_complete_rgnid %>%
 (2) Should we limit the beaches we consider "touristy" further by filtering out certain coastal cities that we would not consider highly visited, or needing to be blue flag beaches? EX: Loreto and other cities in Region_3?
 
 (3) If they have zero BF beaches, should it absolutely have a current status of zero? 
-
-(4) Some BF beaches have been BF since 2015, for example, some since 2025.  I need to go through and add the year that each one became Blue Flag.  The reason why I did not do that at first is because it would take a bit of time to walk through each one, but I will do that. 
 
 
