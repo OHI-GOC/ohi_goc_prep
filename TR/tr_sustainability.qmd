@@ -15,7 +15,7 @@ format:
 editor: 
   markdown:
     wrap: sentence
-  chunk_output_type: inline
+  chunk_output_type: console
 editor_options: 
   chunk_output_type: console
 ---
@@ -1063,4 +1063,217 @@ expanded_pct_returned <- expand_grid(
 write_csv(expanded_pct_returned, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","conanp_fee_return_current_status_final_121625.csv"))
 
 ```
+
+
+# Fed Budget
+
+```{r}
+fed_budget_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/conanp_int/fed_budget_programas_importantes_2012_2026.csv"))
+
+fed_budget_sust_tourism <- fed_budget_raw %>% 
+  dplyr::select(year, v003_anp_management, s046_sustainable_conservation, v005_protection_restoration, presupuesto_total_mdp_2026)
+```
+
+```{r}
+plot(fed_budget_sust_tourism$year, fed_budget_sust_tourism$s046_sustainable_conservation)
+plot(fed_budget_sust_tourism$year, fed_budget_sust_tourism$v003_anp_management)
+plot(fed_budget_sust_tourism$year, fed_budget_sust_tourism$v005_protection_restoration)
+plot(fed_budget_sust_tourism$year, fed_budget_sust_tourism$presupuesto_total_mdp_2026)
+```
+
+
+I will use 2012 - 2018 as the historial reference period to determine if the budget is increasing, decreasing, or staying relatively constant over time.
+
+## Find hist avg
+
+```{r}
+fed_budget_sust_tourism_long <- fed_budget_sust_tourism %>% 
+  pivot_longer(
+    cols = v003_anp_management:presupuesto_total_mdp_2026,
+    names_to = "programas",
+    values_to = "mdp_2026"
+  )
+
+w_hist_avg_fed_budget <- fed_budget_sust_tourism_long %>% 
+  filter(year %in% 2012:2018) %>% 
+  group_by(programas) %>% 
+  summarize(
+    hist_avg_mdp_2026 = mean(mdp_2026)
+  ) %>% 
+  ungroup()
+```
+
+
+## Current status
+
+### Each program
+
+```{r}
+current_status_fed_budget <- left_join(fed_budget_sust_tourism_long, w_hist_avg_fed_budget) %>% 
+  mutate(current_status_raw = (mdp_2026 / hist_avg_mdp_2026) * 100,
+         current_status = ifelse(current_status_raw > 100, 100, current_status_raw)) 
+```
+
+
+#### plotly
+
+```{r}
+library(plotly)
+
+fed_budget_plotly <- plotly::plot_ly(
+  current_status_fed_budget, 
+  x = ~year, 
+  y = ~current_status_raw, 
+  color = ~programas, 
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: CONANP budget of programs (millones de pesos 2026)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(current_status_fed_budget$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+fed_budget_plotly
+```
+
+
+#### descripcion
+
+
+*s046_sustainable_conservation*
+Programa de Conservación para el Desarrollo Sostenible (PROCODES)
+
+
+*v003_anp_management*
+(antes E016-16) Conservación y Manejo de Áreas Naturales Protegidas
+
+*v005_protection_restoration*
+(antes U040-16) Programa para la Protección y Restauración de Ecosistemas y Especies en Riesgo (U025-16, del 2012 hasta el 2018)
+
+*presupuesto_total_mdp_2026*
+total federal budget to CONANP in millions of 2026 pesos.
+
+
+### Merged
+
+```{r}
+# with presupuesto_total_mdp_2026
+current_status_fed_budget_merged <- current_status_fed_budget %>% 
+  group_by(year) %>% 
+  mutate(current_status_all = mean(current_status)) %>% 
+  ungroup()
+
+# without presupuesto_total_mdp_2026
+current_status_fed_budget_merged_wo_presupuesto <- current_status_fed_budget %>% 
+  filter(!programas %in% "presupuesto_total_mdp_2026") %>% 
+  group_by(year) %>% 
+  mutate(current_status_all = mean(current_status)) %>% 
+  ungroup()
+```
+
+```{r}
+all_fed_budget_plotly <- plotly::plot_ly(
+  current_status_fed_budget_merged_wo_presupuesto, 
+  x = ~year, 
+  y = ~current_status_all, 
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: CONANP budget of programs (millones de pesos 2026)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(current_status_fed_budget_merged_wo_presupuesto$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+all_fed_budget_plotly
+```
+
+### Save to Mazu
+
+```{r}
+write_csv(current_status_fed_budget_merged_wo_presupuesto, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","conanp_federal_budget_current_status_final_032026.csv"))
+```
+
+
+### (incorrect) Alt methods
+
+Instead of calculating CS for each program and averaging the CS across these programs, lets add them all together and find the CS of the overall added mdp per program per year.
+
+This is incorrect because the programs are not equally weighted in importance, instead the program that has more money to it overall drives the current status score more. However, we want to reflect the fact that each of these programs will be maintained or increasing, not that the overall budget (regardless of where it goes) is improving.  Though that is important, it would apply more to the general resilience of protected areas, rather than "investment in maintained/enforced sustainable tourism and recreation". which is what this component of the score will reflect.
+
+```{r}
+# take the pivoted df
+fed_budget_sust_tourism_long <- fed_budget_sust_tourism %>% 
+  pivot_longer(
+    cols = v003_anp_management:presupuesto_total_mdp_2026,
+    names_to = "programas",
+    values_to = "mdp_2026"
+  )
+
+# sum the budget to all three programs
+fed_budget_sust_tourism_sum <- fed_budget_sust_tourism_long %>% 
+  filter(!programas %in% "presupuesto_total_mdp_2026") %>% # remove so we can see the programs highlighted by Ana Figueroa
+  group_by(year) %>% 
+  summarize(
+    total_mdp_de_2026 = sum(mdp_2026)
+  ) %>% 
+  ungroup()
+
+## find the hist avg for the summed budget
+hist_avg_fed_budget_sust_tourism_sum <- fed_budget_sust_tourism_sum %>% 
+  mutate(hist_avg_mdp_de_2026 = mean(total_mdp_de_2026))
+
+## current status
+alt_current_status_fed_budget <- hist_avg_fed_budget_sust_tourism_sum %>% 
+  mutate(current_status_raw = (total_mdp_de_2026 / hist_avg_mdp_de_2026) * 100,
+         current_status = ifelse(current_status_raw > 100, 100, current_status_raw))
+
+# plot and compare
+alt_fed_budget_plotly <- plotly::plot_ly(
+  alt_current_status_fed_budget, 
+  x = ~year, 
+  y = ~current_status, 
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "alt CURRENT STATUS: CONANP budget of programs (millones de pesos 2026)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(alt_current_status_fed_budget$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+alt_fed_budget_plotly
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
 
