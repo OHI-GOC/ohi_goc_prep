@@ -36,21 +36,21 @@ library(janitor)
 
 ```{r}
 ## bring in data cleaned from LE of the CE
-ce_totals_clean_years_adjusted <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_cleaned_totals_per_yr_municipio_activity.csv"))
+ce_totals <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int","ce_cleaned_totals_per_yr_municipio_activity.csv"))
 ```
 
 
 Now, limit to the tourism sectors.
 
 ```{r}
-tr_ce_totals_clean_years_adjusted <- ce_totals_clean_years_adjusted %>% 
+tr_ce_totals <- ce_totals %>% 
   filter(general_sector %in% "marine_tourism")
 
-unique(tr_ce_totals_clean_years_adjusted$specific_sector)
+unique(tr_ce_totals$specific_sector)
 # [1] "accommodations_food_drink" "marine_tourist_transport"  "travel_planners"          
 # [4] "coastal_recreation"    
 
-unique(tr_ce_totals_clean_years_adjusted$eng_sector_desc)
+unique(tr_ce_totals$eng_sector_desc)
 #  [1] "Hotels and motels, and similar"                                                                       
 #  [2] "Food and alcoholic and non-alcoholic beverage preparation services; includes restaurants and similar."
 #  [3] "Tourist water transport, includes 48721 and 487210."                                                  
@@ -62,6 +62,47 @@ unique(tr_ce_totals_clean_years_adjusted$eng_sector_desc)
 #  [9] "Museums, historical sites, zoos, and similar."                                                        
 # [10] "Organization of excursions and tourist packages for travel agencies (tour operators)."    
 
+```
+
+#### Adjust for inflation
+
+This will be done using the package `priceR`.  Documentation is located here: <https://cran.r-project.org/web/packages/priceR/readme/README.html> 
+
+"adjust_for_inflation() automatically converts between nominal and real dollars, or in/deflates prices from one year’s prices to another’s.  It works for 304 countries / areas (see them with all by running show_countries())."
+
+I adjusted all values in pesos to constant 2023 pesos to remove the effects of inflation and ensure that differences across 2003, 2008, 2013, 2018, and 2023 represent real changes in economic activity rather than changes in the general price level. Using constant pesos preserves internal consistency for regional comparisons within Mexico without introducing unnecessary distortions from exchange rates or purchasing power parity conversions, which are only required for cross-country analysis.
+
+```{r}
+library(priceR)
+
+tr_ce_totals_clean_years_adjusted <- tr_ce_totals %>% 
+  mutate(
+    j000a_adj = adjust_for_inflation(
+      price = j000a,
+      from_date = ano_censal,
+      country = "Mexico",
+      to_date = 2023
+      ), 
+    j400a_adj = adjust_for_inflation(
+      price = j400a,
+      from_date = ano_censal,
+      country = "Mexico",
+      to_date = 2023
+      ),
+    j600a_adj = adjust_for_inflation(
+      price = j600a,
+      from_date = ano_censal,
+      country = "Mexico",
+      to_date = 2023
+      ),
+    j300a_adj = adjust_for_inflation(
+      price = j300a,
+      from_date = ano_censal,
+      country = "Mexico",
+      to_date = 2023
+      )
+  ) %>% 
+  dplyr::select(-c(j000a, j300a, j400a, j600a))
 ```
 
 
@@ -92,10 +133,10 @@ tr_total_jobs_per_rgn_and_activity <- tr_ce_totals_clean_years_adjusted %>%
     h010c_rgn = sum(h010c, na.rm = TRUE),
     
     # remunerations metrics
-    j000a_rgn = sum(j000a, na.rm = TRUE),
-    j300a_rgn = sum(j300a, na.rm = TRUE),
-    j400a_rgn = sum(j400a, na.rm = TRUE),
-    j600a_rgn = sum(j600a, na.rm = TRUE)
+    j000a_rgn = sum(j000a_adj, na.rm = TRUE),
+    j300a_rgn = sum(j300a_adj, na.rm = TRUE),
+    j400a_rgn = sum(j400a_adj, na.rm = TRUE),
+    j600a_rgn = sum(j600a_adj, na.rm = TRUE)
     
   ) %>% 
   ungroup()
@@ -200,7 +241,8 @@ J000A = Total compensation (in millions of pesos): This includes all regular and
 ```{r}
 # J000A / H010A to represent maintained/stable/increasing salary.
 tr_job_salary <- total_per_rgn %>% 
-  mutate(maintained_salary = total_j000a / total_h010a)
+  mutate(maintained_salary = total_j000a / total_h010a) %>% 
+  ungroup()
 ```
 
 
@@ -212,7 +254,8 @@ tr_job_salary <- total_per_rgn %>%
 
 tr_job_stability <- total_per_rgn %>% 
   mutate(stability_formalized = total_h010a / total_h000a,
-         stability_severance = total_j600a / total_h000a)
+         stability_severance = total_j600a / total_h000a) %>% 
+  ungroup()
 ```
 
 
@@ -223,28 +266,467 @@ tr_job_stability <- total_per_rgn %>%
 tr_job_gender_eq <- total_per_rgn %>% 
   mutate(men_formalized = total_h010b / total_h000b,
          women_formalized = total_h010c / total_h000c,
-         prop_eq = women_paid / men_paid) # goal: prop_eq >= 1
+         prop_eq = women_formalized / men_formalized) %>% # goal: prop_eq >= 1  
+  ungroup()
 ```
 
 
 ##### plotlys
 
 ```{r}
+# --- MAINTAINED SALARY ---
 
+# total_j000a: Total compensation
+total_j000a_plotly <- plotly::plot_ly(
+  tr_job_salary,
+  x = ~ano_censal,
+  y = ~total_j000a,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Total compensation (J000A, millions of pesos) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Total compensation (millions of pesos)")
+  )
+total_j000a_plotly
+
+# total_h010a: Total paid workers
+total_h010a_plotly <- plotly::plot_ly(
+  tr_job_salary,
+  x = ~ano_censal,
+  y = ~total_h010a,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Total paid/formalized workers (H010A) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Number of paid workers")
+  )
+total_h010a_plotly
+
+# maintained_salary: J000A / H010A
+maintained_salary_raw_plotly <- plotly::plot_ly(
+  tr_job_salary,
+  x = ~ano_censal,
+  y = ~maintained_salary,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Maintained salary (J000A / H010A): compensation per paid worker per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Compensation per paid worker (millions of pesos)")
+  )
+maintained_salary_raw_plotly
+```
+
+
+```{r}
+# --- MAINTAINED STABILITY ---
+
+# total_h000a: Total workers
+total_h000a_plotly <- plotly::plot_ly(
+  tr_job_stability,
+  x = ~ano_censal,
+  y = ~total_h000a,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Total workers (H000A) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Total number of workers")
+  )
+total_h000a_plotly
+
+# total_j600a: Severance pay
+total_j600a_plotly <- plotly::plot_ly(
+  tr_job_stability,
+  x = ~ano_censal,
+  y = ~total_j600a,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Total severance pay (J600A, millions of pesos) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Severance pay (millions of pesos)")
+  )
+total_j600a_plotly
+
+# stability_formalized: H010A / H000A
+stability_formalized_raw_plotly <- plotly::plot_ly(
+  tr_job_stability,
+  x = ~ano_censal,
+  y = ~stability_formalized,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Job stability: % formalized/paid workers (H010A / H000A) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Proportion of paid workers")
+  )
+stability_formalized_raw_plotly
+
+# stability_severance: J600A / H000A
+stability_severance_raw_plotly <- plotly::plot_ly(
+  tr_job_stability,
+  x = ~ano_censal,
+  y = ~stability_severance,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Job stability: severance pay per total worker (J600A / H000A) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Severance pay per worker (millions of pesos)")
+  )
+stability_severance_raw_plotly
+```
+
+
+```{r}
+# --- GENDER EQUALITY ---
+
+# total_h000b: Total male workers
+total_h000b_plotly <- plotly::plot_ly(
+  tr_job_gender_eq,
+  x = ~ano_censal,
+  y = ~total_h000b,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Total male workers (H000B) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Total male workers")
+  )
+total_h000b_plotly
+
+# total_h000c: Total female workers
+total_h000c_plotly <- plotly::plot_ly(
+  tr_job_gender_eq,
+  x = ~ano_censal,
+  y = ~total_h000c,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Total female workers (H000C) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Total female workers")
+  )
+total_h000c_plotly
+
+# total_h010b: Total paid male workers
+total_h010b_plotly <- plotly::plot_ly(
+  tr_job_gender_eq,
+  x = ~ano_censal,
+  y = ~total_h010b,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Total paid male workers (H010B) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Total paid male workers")
+  )
+total_h010b_plotly
+
+# total_h010c: Total paid female workers
+total_h010c_plotly <- plotly::plot_ly(
+  tr_job_gender_eq,
+  x = ~ano_censal,
+  y = ~total_h010c,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Total paid female workers (H010C) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Total paid female workers")
+  )
+total_h010c_plotly
+
+# men_formalized: H010B / H000B
+men_formalized_plotly <- plotly::plot_ly(
+  tr_job_gender_eq,
+  x = ~ano_censal,
+  y = ~men_formalized,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "% formalized male workers (H010B / H000B) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Proportion of paid male workers")
+  )
+men_formalized_plotly
+
+# women_formalized: H010C / H000C
+women_formalized_plotly <- plotly::plot_ly(
+  tr_job_gender_eq,
+  x = ~ano_censal,
+  y = ~women_formalized,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "% formalized female workers (H010C / H000C) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Proportion of paid female workers")
+  )
+women_formalized_plotly
+
+# prop_eq: women_formalized / men_formalized
+prop_eq_raw_plotly <- plotly::plot_ly(
+  tr_job_gender_eq,
+  x = ~ano_censal,
+  y = ~prop_eq,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "Gender equality: ratio of formalized women to men workers (H010C/H000C vs H010B/H000B) per region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "prop_eq (goal: >= 1)")
+  ) %>%
+  add_lines(
+    x = range(tr_job_gender_eq$ano_censal),
+    y = c(1, 1),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (1)",
+    inherit = FALSE
+  )
+prop_eq_raw_plotly
 ```
 
 
 ### Current Status
 
-```{r}
+For TR Job Quality, it is that stability_formalized, stability_severance, prop_eq, and maintained_salary will either be equal to or greater than the avg value from 2003:2018.
 
+```{r}
+tr_job_hist_avg <- left_join(tr_job_gender_eq, tr_job_stability) %>% 
+  left_join(tr_job_salary) %>% 
+  filter(ano_censal %in% 2003:2018) %>% 
+  group_by(rgn_id) %>% 
+  mutate(prop_eq_hist = mean(prop_eq, na.rm = TRUE),
+         stability_severance_hist = mean(stability_severance, na.rm = TRUE),
+         stability_formalized_hist = mean(stability_formalized, na.rm = TRUE),
+         maintained_salary_hist = mean(maintained_salary, na.rm = TRUE)) %>% 
+  dplyr::select(rgn_id, prop_eq_hist, stability_severance_hist, stability_formalized_hist, maintained_salary_hist) %>% 
+  distinct()
+
+```
+
+
+```{r}
+tr_job_current_status <- left_join(tr_job_gender_eq, tr_job_stability) %>% 
+  left_join(tr_job_salary) %>% 
+  dplyr::select(-c(total_h000a:total_j600a)) %>% 
+  left_join(tr_job_hist_avg, by = c("rgn_id")) %>% 
+  filter(!rgn_id %in% "Region_2") %>%  # no data previous to 2023, so no reference available.
+  group_by(rgn_id, ano_censal) %>% 
+  mutate(
+    prop_eq_cs_raw = (prop_eq / prop_eq_hist) * 100,
+    stability_severance_cs_raw = (stability_severance / stability_severance_hist) * 100,
+    stability_formalized_cs_raw = (stability_formalized / stability_formalized_hist) * 100,
+    maintained_salary_cs_raw = (maintained_salary / maintained_salary_hist) * 100
+  ) %>% 
+  mutate(
+    prop_eq_cs = ifelse(prop_eq_cs_raw > 100, 100, prop_eq_cs_raw),
+    prop_eq_capped = ifelse(prop_eq > 1, 1, prop_eq), # so that we can use just the ratio between formalized women and men, not comparing to hist avg
+    prop_eq_capped = prop_eq_capped * 100,
+    stability_severance_cs = ifelse(stability_severance_cs_raw > 100, 100, stability_severance_cs_raw),
+    stability_formalized_cs = ifelse(stability_formalized_cs_raw > 100, 100, stability_formalized_cs_raw),
+    maintained_salary_cs = ifelse(maintained_salary_cs_raw > 100, 100, maintained_salary_cs_raw)
+  ) %>% 
+  ungroup()
+```
+
+##### plotlys
+
+Change for the `_raw` version of the current status to see the uncapped versions.
+
+```{r}
+# prop_eq_cs
+prop_eq_cs_plotly <- plotly::plot_ly(
+  tr_job_current_status, 
+  x = ~ano_censal, 
+  y = ~prop_eq_cs, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "RAW CURRENT STATUS of gender equality (% formalized women vs men), reference of average value 2003-2018",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "prop_eq / avg_prop_eq_2003_2018")
+  ) %>%
+  add_lines(
+    x = range(tr_job_current_status$ano_censal), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+prop_eq_cs_plotly
+
+# stability_severance_cs
+stability_severance_cs_plotly <- plotly::plot_ly(
+  tr_job_current_status, 
+  x = ~ano_censal, 
+  y = ~stability_severance_cs, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "RAW CURRENT STATUS of job stability (severance pay per total jobs), reference of average value 2003-2018",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "stability_severance / avg_stability_severance_2003_2018")
+  ) %>%
+  add_lines(
+    x = range(tr_job_current_status$ano_censal), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+stability_severance_cs_plotly
+
+# stability_formalized_cs
+stability_formalized_cs_plotly <- plotly::plot_ly(
+  tr_job_current_status, 
+  x = ~ano_censal, 
+  y = ~stability_formalized_cs, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "RAW CURRENT STATUS of job stability (% paid/formalized workers), reference of average value 2003-2018",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "stability_formalized / avg_stability_formalized_2003_2018")
+  ) %>%
+  add_lines(
+    x = range(tr_job_current_status$ano_censal), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+stability_formalized_cs_plotly
+
+# maintained_salary_cs
+maintained_salary_cs_plotly <- plotly::plot_ly(
+  tr_job_current_status, 
+  x = ~ano_censal, 
+  y = ~maintained_salary_cs, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "RAW CURRENT STATUS of maintained salary (total compensation per paid worker), reference of average value 2003-2018",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "maintained_salary / avg_maintained_salary_2003_2018")
+  ) %>%
+  add_lines(
+    x = range(tr_job_current_status$ano_censal), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+maintained_salary_cs_plotly
 ```
 
 
 ### Merged Current Status
 
-```{r}
+For now, since we do *not* have the number of individuals who were dismissed, retired, or terminated, the `stability_severance` metric does not make sense and is not accurate.  This is because this is the definition of J600A:
 
+"Payments for compensation or severance pay. This refers to the monetary compensation granted to workers for dismissal, retirement, or termination of their employment contract with the economic unit."
+
+If we scale by the number of jobs, it is possible that there are a high number of jobs for a certain year but a low number of people that were dismissed, and so the amount given for severance was actually fairly high per capita.  But, since we do not have the number of individuals who are dismissed, we are not able to track that information. 
+
+Therefore, for now I will average `maintained_salary_cs`, `stability_formalized_cs`, and `prop_eq` (*NOTE* that I am just using the raw comparison of the ratio of formalized workers of women / men, because the goal is for the % of formalized female workers to be >= the % of formalized male workers.  If we want to have an ideal state of "growth towards that goal" then we can use the historical avg, `prop_eq_cs`).
+
+```{r}
+tr_job_current_status_merge <- tr_job_current_status %>% 
+  group_by(rgn_id, ano_censal) %>% 
+  mutate(tr_job_quality_cs_raw = mean(c(prop_eq_capped, stability_formalized_cs, maintained_salary_cs))) %>% 
+  ungroup()
+```
+
+### Interpolate between years
+
+```{r}
+library(zoo)
+
+tr_job_current_status_merge_interpolated <- tr_job_current_status_merge %>% 
+  complete(rgn_id, ano_censal = 2003:2025) %>% 
+  mutate(tr_job_quality_cs_raw = as.numeric(tr_job_quality_cs_raw)) %>% 
+  arrange(rgn_id, ano_censal) %>%
+  group_by(rgn_id) %>% 
+  mutate(
+    score_interpolated = na.approx(
+      tr_job_quality_cs_raw,
+      x = ano_censal,
+      rule = 2,
+      na.rm = FALSE
+    ),
+    is_gapfilled = ifelse(is.na(tr_job_quality_cs_raw), 1, 0)
+  ) %>%
+  ungroup()
+```
+
+
+##### Write to Mazu
+
+```{r}
+write_csv(tr_job_current_status_merge, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","tr_job_quality_sustainability_current_status_merged_032326.csv"))
+```
+
+```{r}
+write_csv(tr_job_current_status_merge_interpolated, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability","tr_job_quality_sustainability_current_status_merged_interpolated_032326.csv"))
 ```
 
 
