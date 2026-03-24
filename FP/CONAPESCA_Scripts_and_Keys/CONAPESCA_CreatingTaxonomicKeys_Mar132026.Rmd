@@ -629,7 +629,7 @@ NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
       TRUE ~ Major_Functional_Group
     ),
     Assignment_for_Major_Functional_Group = case_when(
-      !is.na(IHH_functional_major_groups_sm) ~ "Assigned_Step_1: based directly on IHH_functional_major_group details assigned by the IHH key for that taxa",
+      !is.na(IHH_functional_major_groups_sm) ~ "Assigned_Step_1: based directly on IHH_functional_major_group assignment for this genus in this group.",
       TRUE ~ Assignment_for_Major_Functional_Group
     )
   )
@@ -672,7 +672,7 @@ NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
     # Update assignment label
     Assignment_for_Major_Functional_Group = case_when(
       !is.na(genus_major) & is.na(Assignment_for_Major_Functional_Group) & !is.na(Major_Functional_Group) ~
-        "Assigned_Step_2: based on genus-level details",
+        "Assigned_Step_2: based on genus-level details; interpolated Major_Functional_Group based on records with matching genus name.",
       TRUE ~ Assignment_for_Major_Functional_Group
     )
   ) %>%
@@ -709,7 +709,7 @@ NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
     Assignment_for_Major_Functional_Group = if_else(
       !is.na(genus_consensus_group) &
         (is.na(old_Major_Functional_Group) | old_Major_Functional_Group != Major_Functional_Group),
-      "Assigned_Step_3: forced genus-level consistency",
+      "Assigned_Step_3: forced genus-level consistency; if genus is equal then assume Major_Functional_Group is equal too.",
       Assignment_for_Major_Functional_Group
     )
   ) %>%
@@ -717,6 +717,7 @@ NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
 
 
 # STEP 4: Assign Major_Functional_Group values based on recorded_taxa_group fallback (weaker signal)
+# > If we don’t know anything yet, borrow a typical value from a reference to IHH_functional_major_groups.
 NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
   group_by(recorded_taxa_group) %>%
   mutate(
@@ -740,45 +741,51 @@ NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
     # Update assignment label
     Assignment_for_Major_Functional_Group = if_else(
       !(recorded_taxa_group %in% Special_groups) & is.na(Assignment_for_Major_Functional_Group) & !is.na(Major_Functional_Group),
-      "Assigned_Step_4: based on average IHH functional group for recorded_taxa_group",
+      "Assigned_Step_4: assigned Major_Functional_Group based on the average IHH functional group associated with this recorded_taxa_group.",
       Assignment_for_Major_Functional_Group
     )
   ) %>%
   ungroup() %>%
   select(-group_major)
 
-# STEP 5: Force consistency for Major_Functional_Group at the recorded_taxa_group level in cases where genus = NA or NEI ---- 
+# STEP 5: Enforce consistency for Major_Functional_Group at the recorded_taxa_group level in cases where genus = NA or NEI ----
+# > Now that we have some real assignments, make the group internally consistent.
 NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
   mutate(old_Major_Functional_Group = Major_Functional_Group) %>%
   
   group_by(recorded_taxa_group) %>%
   mutate(
-    taxa_group_consensus = if(any(is.na(estimated_genus_name) | estimated_genus_name == "NEI")) {
-      # Compute the mode of Major_Functional_Group within the taxa group
-      vals <- Major_Functional_Group[!is.na(Major_Functional_Group)]
-      if(length(vals) == 0) NA_character_ else names(sort(table(vals), decreasing = TRUE))[1]
+    taxa_group_consensus = if (any(is.na(estimated_genus_name) | estimated_genus_name == "NEI")) {
+      vals <- Major_Functional_Group[!is.na(Major_Functional_Group) & Major_Functional_Group != "NEI"]
+      if (length(vals) == 0) NA_character_ else names(sort(table(vals), decreasing = TRUE))[1]
     } else {
       NA_character_
     },
-    # Apply consensus only to rows with unknown/NEI genus
+
+    # Apply only when genus or Major_Functional_Group is NA or NEI
     Major_Functional_Group = if_else(
-      !is.na(taxa_group_consensus) & (is.na(estimated_genus_name) | estimated_genus_name == "NEI"),
+      !is.na(taxa_group_consensus) & 
+        # THIS IS THE LINE!!
+        (is.na(estimated_genus_name) | estimated_genus_name == "NEI" | is.na(Major_Functional_Group) | Major_Functional_Group == "NEI"),
       taxa_group_consensus,
       Major_Functional_Group
     ),
+    
+    # Step 5 assignment: robust to NAs
     Assignment_for_Major_Functional_Group = if_else(
       !is.na(taxa_group_consensus) &
-        (is.na(old_Major_Functional_Group) | old_Major_Functional_Group != Major_Functional_Group),
-      "Assigned_Step_5: forced taxa-group-level consistency",
+        (
+          (is.na(old_Major_Functional_Group) & !is.na(Major_Functional_Group)) |
+          (old_Major_Functional_Group == "NEI" & Major_Functional_Group != "NEI") |
+          (!is.na(old_Major_Functional_Group) & !is.na(Major_Functional_Group) & old_Major_Functional_Group != Major_Functional_Group)
+        ),
+      "Assigned_Step_5: enforced Major_Functional_Group consistency across recorded_taxa_group.",
       Assignment_for_Major_Functional_Group
     )
   ) %>%
   ungroup() %>%
   select(-old_Major_Functional_Group, -taxa_group_consensus)
 
-# Put Assignment_for_Major_Functional_Group column at the end for readability
-NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
-  relocate(Assignment_for_Major_Functional_Group, .after = last_col())
 
 # STEP 6: Manual patches for specific taxonomic groups and two typos ----
 unique(NONOTRAS_MajorGroupKey$recorded_taxa_group)
@@ -786,23 +793,30 @@ unique(NONOTRAS_MajorGroupKey$recorded_taxa_group)
 unique(NONOTRAS_MajorGroupKey$recorded_taxa_group[is.na(NONOTRAS_MajorGroupKey$Major_Functional_Group)])
 
 # Split_Groups: groups of fish for which it is not possible to assign a taxonomic group with high accuracy based on recorded_taxa_group alone...
-# NOTE TO SELF: COME BACK TO THESE GROUPS WHEN / IF THERE'S TIME. Catagorization across groups are still a little wrong tbh. - Mar 23 2026
-SplitGroup_list <- c("MOJARRA", "PECES ORNATO", "BAGRE")
+# NOTE TO SELF: COME BACK TO THESE GROUPS WHEN / IF THERE'S TIME. Categorization across groups of fishes are still a little wrong tbh. - Mar 23 2026
+# A note about PETO: I feel pretty confident that PETO is not shark. I think Hem's key for Peto carrito is incorrect...
+# Because of this Lamna is incorrectly assigned as a demersal fish and not a shark.
+SplitGroup_list <- c("MOJARRA", "BAGRE", "CARPA", "PECES ORNATO")
 
 NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
   mutate(
     # Assign Major_Functional_Group and Assignment_for_Major_Functional_Group in one go:
     
     Major_Functional_Group = case_when(
-      # Split groups, cannot be determined:
-      recorded_taxa_group %in% SplitGroup_list & (is.na(estimated_genus_name) | estimated_genus_name == "NEI") ~ "Marine or freshwater fishes NEI",
+      
+      # Split groups, cannot be fully categorized:
+      recorded_taxa_group %in% SplitGroup_list & (is.na(estimated_genus_name) | estimated_genus_name == "NEI" | is.na(IHH_functional_major_groups_sm)) ~ "Marine or freshwater fishes NEI",
+      
       # Specific taxa and groups for which there is no IHH data:
       recorded_taxa_group == "ANCHOVETA" ~ "Pelagic marine fishes",
       recorded_taxa_group %in% c("ALGAS", "SARGAZO") ~ "Marine algae",
       recorded_taxa_group %in% c("PEPINO DE MAR", "ERIZO") ~ "Echinoderms",
-      recorded_taxa_group %in% c("PETO", "TIBURON", "CAZON") ~ "Sharks",
+      recorded_taxa_group %in% c("TIBURON", "CAZON") ~ "Sharks",
+      recorded_taxa_group %in% c("CINTILLA") ~ "Pelagic marine fishes",
+      recorded_taxa_group %in% c("TRUCHA") ~ "Marine or freshwater fishes NEI",
+      
       # Typos:
-      estimated_genus_name == "Sphoeriodes" ~ "Marine fishes NEI",
+      # estimated_genus_name == "Sphoeriodes" ~ "Marine fishes NEI",
       estimated_genus_name == "Lujtanus" ~ "Demersal marine fishes",
       TRUE ~ Major_Functional_Group  # keep existing if no condition matches
     ),
@@ -813,12 +827,51 @@ NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
       recorded_taxa_group == "ANCHOVETA" ~ "Assigned_Step_6: manual patch",
       recorded_taxa_group %in% c("ALGAS", "SARGAZO") ~ "Assigned_Step_6: manual patch",
       recorded_taxa_group %in% c("PEPINO DE MAR", "ERIZO") ~ "Assigned_Step_6: manual patch",
-      recorded_taxa_group %in% c("PETO", "TIBURON", "CAZON") ~ "Assigned_Step_6: manual patch",
-      estimated_genus_name == "Sphoeriodes" ~ "Assigned_Step_6: manual patch",
-      estimated_genus_name == "Lujtanus" ~ "Assigned_Step_6: manual patch",
+      recorded_taxa_group %in% c("TIBURON", "CAZON") ~ "Assigned_Step_6: manual patch",
+      recorded_taxa_group %in% c("CINTILLA") ~ "Assigned_Step_6: manual patch",
+      recorded_taxa_group %in% c("TRUCHA") ~ "Assigned_Step_6: manual patch",
+      # estimated_genus_name == "Sphoeriodes" ~ "Assigned_Step_6: manual patch",
+      estimated_genus_name == "Lujtanus" ~ "Assigned_Step_6: manual patch or override",
       TRUE ~ Assignment_for_Major_Functional_Group  # keep existing if no condition matches
     )
   )
+
+# STEP 3 REPEATED: Reinforce genus-level consistency (except when genus = NA or NEI) ----
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  # Keep original Major_Functional_Group for comparison
+  mutate(old_Major_Functional_Group = Major_Functional_Group) %>%
+  
+  # Compute genus-level consensus for non-NA/NEI genera
+  group_by(estimated_genus_name) %>%
+  mutate(
+    genus_consensus_group = if(!is.na(first(estimated_genus_name)) & first(estimated_genus_name) != "NEI") {
+      # Get mode of Major_Functional_Group in the genus
+      vals <- Major_Functional_Group[!is.na(Major_Functional_Group)]
+      if(length(vals) == 0) NA_character_ else names(sort(table(vals), decreasing = TRUE))[1]
+    } else {
+      NA_character_
+    }
+  ) %>%
+  ungroup() %>%
+  
+  # Apply the consensus to all rows in the genus (if applicable)
+  mutate(
+    Major_Functional_Group = if_else(
+      !is.na(genus_consensus_group),
+      genus_consensus_group,
+      Major_Functional_Group
+    ),
+    
+    # Update Assignment_for_Major_Functional_Group if the value changed
+    Assignment_for_Major_Functional_Group = if_else(
+      !is.na(genus_consensus_group) &
+        (is.na(old_Major_Functional_Group) | old_Major_Functional_Group != Major_Functional_Group),
+      "Assigned_Step_3: forced genus-level consistency; if genus is equal then assume Major_Functional_Group is equal too.",
+      Assignment_for_Major_Functional_Group
+    )
+  ) %>%
+  select(-old_Major_Functional_Group, -genus_consensus_group)
+
 
 # STEP 7: If Major_Functional_Group is NA then Assignment_for_Major_Functional_Group= "could not be assigned" ----
 NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
@@ -831,29 +884,43 @@ NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
   )
 
 
-# STEP 8: Finally, assign estimated_taxa_group to be equal across the genus based the most common value for that genus (so genera like Lutjanus) ---- 
+# STEP 8: Finally, assign estimated_taxa_group based on recorded_taxa_group and force the estimated_taxa_group to be equal for all records with the same genus (so genera like Lutjanus) ---- 
 
  # Initialize the new column
 NONOTRAS_MajorGroupKey$estimated_taxa_group = NA_character_
 
 NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  
+  # Fill in missing estimated_taxa_group using recorded_taxa_group
+  mutate(
+    estimated_taxa_group = if_else(
+      is.na(estimated_taxa_group),
+      recorded_taxa_group,
+      estimated_taxa_group
+    )
+  ) %>%
+  
+  # Enforce consistency at the genus level, ignoring NA or "NEI"
   group_by(estimated_genus_name) %>%
   mutate(
-    # Compute the most common recorded_taxa_group per genus
-    genus_consensus_taxa_group = {
-      vals <- recorded_taxa_group[!is.na(recorded_taxa_group)]
-      if(length(unique(vals)) > 1) names(sort(table(vals), decreasing = TRUE))[1] else NA_character_
-    },
-    # Apply consensus to all rows in the genus if applicable
+    genus_consensus_taxa_group = if_else(
+      !is.na(estimated_genus_name) & estimated_genus_name != "NEI",
+      {
+        vals <- estimated_taxa_group[!is.na(estimated_taxa_group)]
+        if (length(vals) == 0) NA_character_ else names(sort(table(vals), decreasing = TRUE))[1]
+      },
+      NA_character_
+    ),
+
+    # Apply consensus only to valid genera
     estimated_taxa_group = if_else(
-      !is.na(genus_consensus_taxa_group),
+      !is.na(estimated_genus_name) & estimated_genus_name != "NEI",
       genus_consensus_taxa_group,
       estimated_taxa_group
     )
   ) %>%
   ungroup() %>%
   select(-genus_consensus_taxa_group)
-
 
 # Step 9: Rearrange for ease of reading ----
 NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
@@ -865,15 +932,60 @@ NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
     Major_Functional_Group,
     Assignment_for_Major_Functional_Group
   )
+
+# STEP 10: Two manual patches for PETO and MERO
+# NOTE TO SELF: Honestly it would probably be easiest to just nanually create a key assignment for the ~57 major groups in the CONAPESCA database... come back to this.
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  mutate(
+    estimated_taxa_group = case_when(
+      recorded_taxa_group == "TIBURON" & estimated_genus_name == "Lamna" ~ "TIBURON",
+      TRUE ~ estimated_taxa_group
+    ),
+    Major_Functional_Group = case_when(
+      recorded_taxa_group == "TIBURON" & estimated_genus_name == "Lamna" ~ "Sharks",
+      TRUE ~ Major_Functional_Group
+    ),
+    Assignment_for_Major_Functional_Group = case_when(
+      recorded_taxa_group == "TIBURON" & estimated_genus_name == "Lamna" ~ 
+        "Manual patch, come back to correctly file PETO and Lamna. Issue can be traced back to Hem's species key.",
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  )
+
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  mutate(
+    estimated_taxa_group = case_when(
+      recorded_taxa_group == "BAQUETA" & estimated_genus_name == "Hyporthodus" ~ "MERO",
+      TRUE ~ estimated_taxa_group
+    ),
+    Major_Functional_Group = case_when(
+      recorded_taxa_group == "BAQUETA" & estimated_genus_name == "Hyporthodus" ~ "Demersal marine fishes",
+      TRUE ~ Major_Functional_Group
+    ),
+    Assignment_for_Major_Functional_Group = case_when(
+      recorded_taxa_group == "BAQUETA" & estimated_genus_name == "Hyporthodus" ~ 
+        "Manual patch, come back to assign BAQUETA with an earlier manual key later on.",
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  )
     
 # 249 obs., 6 vars.
-# table(NONOTRAS_MajorGroupKey$Major_Functional_Group)
+table(NONOTRAS_MajorGroupKey$Major_Functional_Group)
+# BEFORE Mar 24 2026:
 #                Cephalopods                Crustaceans     Demersal marine fishes                Echinoderms 
 #                          6                          7                         87                          5 
 #          Freshwater fishes               Marine algae          Marine fishes NEI Molluscs excl. Cephalopods 
 #                          6                          4                         23                         26 
 #      Pelagic marine fishes                     Sharks            Shrimps, prawns 
 #                         36                         35                         14 
+
+# AFTER Mar 24 2026: Looks pretty good.
+     #                Cephalopods                     Crustaceans          Demersal marine fishes                     Echinoderms 
+     #                          6                               7                              89                               5 
+     #          Freshwater fishes                    Marine algae               Marine fishes NEI Marine or freshwater fishes NEI 
+     #                          5                               4                               4                              17 
+     # Molluscs excl. Cephalopods           Pelagic marine fishes                          Sharks                 Shrimps, prawns 
+     #                         26                              40                              32                              14 
 ```
 
 ```{r Assign Major_Functional_Group manually for OTRAS taxa}
@@ -902,7 +1014,7 @@ Genus_lookup <- NONOTRAS_MajorGroupKey %>%
     Major_Functional_Group
   ) %>%
   distinct()
-# 134 obs., 3 vars.
+# 135 obs., 3 vars.
 
 # Perform a left join to bring in data from the NON-OTRAS data frame:
 OTRAS_MajorGroupKey <- OTRAS_MajorGroupKey %>%
@@ -926,7 +1038,7 @@ OTRAS_MajorGroupKey_comparison <- OTRAS_MajorGroupKey %>%
     MajorGroup_match = Major_Functional_Group == IHH_functional_major_groups_sm
   ) %>% 
   filter(!MajorGroup_match)
-# Yes, mostly. The cases where they don't match all make sense (n=6); they are records for fish landings that could kind of be classified either way depending on the exact species landed.
+# Yes, mostly. The cases where they don't match all make sense (n=1); they are records for fish landings that could kind of be classified either way depending on the exact species landed.
 
 # Good check. Then delete this to keep work space clean:
 rm(OTRAS_MajorGroupKey_comparison)
@@ -935,6 +1047,7 @@ rm(OTRAS_MajorGroupKey_comparison)
 ```{r Separate out the OTRAS that have info about Major_Functional_Group and those that don't}
 OTRAS_MajorGroup_completed.auto<- OTRAS_MajorGroupKey %>%
   filter(!is.na(Major_Functional_Group))
+
 OTRAS_MajorGroup_completed.auto$Assignment_for_Major_Functional_Group <- c("Assigned based genus name and IHH functional group")
 # 137 obs., 11 vars.
 
@@ -970,8 +1083,12 @@ OTRAS_MajorGroup_complete.merge <- bind_rows(
 # Call this OTRAS_MajorGroupKey and then...
 OTRAS_MajorGroupKey<- OTRAS_MajorGroup_complete.merge
 
+OTRAS_MajorGroupKey$estimated_taxa_group<- "OTRAS"
+
 # ... delete unnecessary dataframes now that we have a merged frame:
 rm(OTRAS_MajorGroup_completed.auto, OTRAS_MajorGroup_completed.manually, OTRAS_MajorGroup_complete.merge)
+
+# NOTE TO SELF REGARDING NATURAL PRODUCTS: Missing a lot of ornamental flags. Come back to this key work when I switch to working on the NP goal.
 ```
 
 ```{r Merge the OTRAS and the NON-OTRAS keys}
@@ -991,6 +1108,15 @@ preferred_order <- c(
 # Reorder columns (only those that exist in combined dataframe)
 COMBINED_MajorGroupKey <- COMBINED_MajorGroupKey[, intersect(preferred_order, colnames(COMBINED_MajorGroupKey))]
 
+COMBINED_MajorGroupKey <- COMBINED_MajorGroupKey %>%
+  mutate(
+    estimated_taxa_group = ifelse(
+      is.na(estimated_taxa_group) & !is.na(recorded_taxa_group),
+      recorded_taxa_group,
+      estimated_taxa_group
+    )
+  )
+
 # test <- COMBINED_MajorGroupKey %>%
 #   select(recorded_taxa_group, estimated_genus_name, common_name_clean) %>%
 #   mutate(
@@ -1002,14 +1128,15 @@ COMBINED_MajorGroupKey <- COMBINED_MajorGroupKey[, intersect(preferred_order, co
 #   ) %>%
 #   distinct(recorded_taxa_group, estimated_genus_name, distinct_key, .keep_all = TRUE) %>%
 #   select(-distinct_key)
+# 501 obs.! Good!
 ```
 
 ```{r Save this key!}
 # Save this key to work on offline
 write.csv(
   COMBINED_MajorGroupKey,
-  "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/MajorGroupKey_Mar132026.csv",
+  "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/MajorGroupKey_Mar242026.csv",
   row.names = FALSE
 )
 ```
-# COMPLETE ENOUGH FOR NOW! MAR 13 2026
+# COMPLETE ENOUGH FOR NOW! MAR 13 2026 and Mar 24 2026
