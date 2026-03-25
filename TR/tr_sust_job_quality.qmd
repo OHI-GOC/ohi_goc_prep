@@ -730,6 +730,215 @@ write_csv(tr_job_current_status_merge_interpolated, here::here("/home/shares/ohi
 ```
 
 
+# Updated version:
+
+Erica and I discussed this indicator and came to a couple of conclusions. 
+
+(1) Unfortunately, we likely cannot include `stability_severance` here, because we do not have a metric from the Economic Census that represents the number of people dissmissed, retired, or terminated during that year.  Scaling by the total number of jobs in tourism for that year would be inaccurate, because severance pay is only given to those who leave.  For example, if we have a severance pay of 100, and there are 4 people who were terminated, but 50 people who currently are employed, then the true severance-per-capita pay would be 25 pesos/person, but using the methods in this script, it would be 2 pesos/person. Even if we tried to normalize by the number of economic units, it would not be truly representative of the stability in each region, because one economic unit could contain 0 or 500 terminated employees.  
+
+
+(2) Instead of having the ideal state for formalization be that the % of formalized women with jobs in the tourism sector is the same or more than the % of formalized men with jobs in the tourism sector, or that the ratio of (% formalized women / % formalized men) is the same or increasing over time, we decided that perhaps both genders should both be held to the same standard.  So the indicator of formalization overall (`stability_formalized`) will instead be replaced with `stability_formalized_women` and `stability_formalized_men`, where each of them must have at least 67% (super-majority, for example) formalized jobs to get a current status score of 100.  That way each of those metrics represent both stability via formalization, and inherently, equality in job quality for both genders, since they are held to the same standard. 
+
+Therefore, job_quality = avg(maintained_salary, women_formalized, men_formalized), where both men and women are held to the same threshold standard of at least 67% of tourism jobs being paid (aka formalized).  
+
+(3) We decided that we would talk to Mel about what she thinks regarding including maintained salary. I personally think that it would not be good to include it as a metric for job quality in the overall LE goal, since we do not want it interpreted as a "good" or "bad" individual salary, which it cannot represent since there is very likely a large skew in terms of what each individual employee in an economic unit is being paid.  For example, the CEO may be getting paid 60% of the overall J000A, and all the entry-level employees are getting paid a very small amount (1%) that is actually not of good quality, and they are each getting paid less than they would in another OHI GoC Region. And I think that is especially true in largely unformalized jobs. *However,* I think it could be a metric for TR Sustainability, as we have already narrowed the sector to marine tourism, which is mostly formalized sector. And perhaps we can emphasize that if there is a drop in the average total remunerations in a year without a drop in the number of employees, that it is very likely that the salaries of those jobs are dropping as well, which is certainly negative. 
+
+## Indicators of job quality
+
+Maintained Remunerations
+J000A / H010A to represent maintained/stable/increasing remunerations.
+
+Maintained Stability & Gender Equality
+H010B/H000B = % of paid workers men
+H010C/H000C = % of paid workers women
+
+```{r}
+tr_job_metrics <- total_per_rgn %>% 
+  mutate(maintained_salary = total_j000a / total_h010a,
+         men_formalized = total_h010b / total_h000b,
+         women_formalized = total_h010c / total_h000c) %>% 
+  ungroup()
+```
+
+## Current Status
+
+For TR Job Quality, it is that stability_formalized, stability_severance, prop_eq, and maintained_salary will either be equal to or greater than the avg value from 2003:2018.
+
+### Hist avg
+
+```{r}
+
+tr_job_hist_avg <- tr_job_metrics %>% 
+  filter(ano_censal %in% 2003:2018) %>% 
+  group_by(rgn_id) %>% 
+  mutate(men_formalized_hist = mean(men_formalized, na.rm = TRUE),
+         women_formalized_hist = mean(women_formalized, na.rm = TRUE),
+         maintained_salary_hist = mean(maintained_salary, na.rm = TRUE)) %>% 
+  dplyr::select(rgn_id, men_formalized_hist, women_formalized_hist, maintained_salary_hist) %>% 
+  distinct()
+
+```
+
+### CS score
+
+```{r}
+tr_job_current_status <- tr_job_metrics %>% 
+  dplyr::select(-c(total_h000a:total_j600a)) %>% 
+  left_join(tr_job_hist_avg, by = c("rgn_id")) %>% 
+  filter(!rgn_id %in% "Region_2") %>%  # no data previous to 2023, so no reference available.
+  group_by(rgn_id, ano_censal) %>% 
+  mutate(
+    
+    men_formalized_cs_raw = (men_formalized / men_formalized_hist) * 100,
+    women_formalized_cs_raw = (women_formalized / women_formalized_hist) * 100,
+    maintained_salary_cs_raw = (maintained_salary / maintained_salary_hist) * 100
+    
+  ) %>% 
+  mutate(
+    
+    men_formalized_cs = ifelse(men_formalized_cs_raw > 100, 100, men_formalized_cs_raw),
+    women_formalized_cs = ifelse(women_formalized_cs_raw > 100, 100, women_formalized_cs_raw),
+    maintained_salary_cs = ifelse(maintained_salary_cs_raw > 100, 100, maintained_salary_cs_raw)
+    
+  ) %>% 
+  ungroup()
+```
+
+### Interpolate between years
+
+```{r}
+library(zoo)
+
+tr_job_metrics_interpolated <- tr_job_metrics %>% 
+  complete(rgn_id, ano_censal = 2003:2025) %>% 
+  arrange(rgn_id, ano_censal) %>%
+  group_by(rgn_id) %>% 
+  mutate(
+    men_formalized_interpolated = na.approx(
+      men_formalized,
+      x = ano_censal,
+      rule = 2,
+      na.rm = FALSE
+    ),
+    women_formalized_interpolated = na.approx(
+      women_formalized,
+      x = ano_censal,
+      rule = 2,
+      na.rm = FALSE
+    ),
+    maintained_salary_interpolated = na.approx(
+      maintained_salary,
+      x = ano_censal,
+      rule = 2,
+      na.rm = FALSE
+    ),
+    is_gapfilled = ifelse(is.na(men_formalized) | is.na(women_formalized) | is.na(maintained_salary), 1, 0)
+  ) %>%
+  ungroup()
+```
+
+#### Trend in recent years:
+
+```{r}
+last_15yrs <- c(2013, 2018, 2023)
+
+trend_last15_slope <- tr_job_metrics_interpolated %>%
+  dplyr::select(rgn_id, ano_censal, men_formalized_interpolated, women_formalized_interpolated) %>% 
+  filter(ano_censal %in% last_15yrs) %>%
+  group_by(rgn_id) %>%
+  summarize(
+    men_slope_per_year = coef(lm(men_formalized ~ ano_censal))[2], # but not significant !!!!!
+    women_slope_per_year = coef(lm(women_formalized ~ ano_censal))[2],
+    .groups = "drop"
+  )
+```
+
+```{r}
+last_3yrs <- c(2021, 2022, 2023)
+
+trend_last3_slope <- tr_job_metrics_interpolated %>%
+  dplyr::select(rgn_id, ano_censal, men_formalized_interpolated, women_formalized_interpolated) %>% 
+  filter(ano_censal %in% last_3yrs) %>%
+  group_by(rgn_id) %>%
+  summarize(
+    men_slope_per_year = coef(lm(men_formalized_interpolated ~ ano_censal))[2], # significant, though low R^2
+    women_slope_per_year = coef(lm(women_formalized_interpolated ~ ano_censal))[2], # significant, though low R^2
+    .groups = "drop"
+  ) %>% 
+  filter(!rgn_id %in% "Region_2")
+
+formalization_trend_last3yrs <- full_join(tr_job_metrics_interpolated, trend_last3_slope) %>% 
+  dplyr::select(rgn_id, ano_censal, men_formalized_interpolated, men_slope_per_year, women_formalized_interpolated, women_slope_per_year) %>% 
+  filter(!rgn_id %in% "Region_2") %>% 
+  filter(ano_censal %in% 2023) %>% 
+  mutate(men_proj_formalized = men_formalized_interpolated + (7 * men_slope_per_year), # 7 years to reach 2030 from 2023.
+         women_proj_formalized = women_formalized_interpolated + (7 * women_slope_per_year))
+
+## seems pretty high!! unreasonable...
+
+# lets look at % change
+trend_last3_pct <- tr_job_metrics_interpolated %>%
+  filter(ano_censal %in% last_3yrs) %>%
+  group_by(rgn_id) %>%
+  summarise(
+    men_formalized_interpolated_2021 = men_formalized_interpolated[ano_censal == 2021],
+    men_formalized_interpolated_2023 = men_formalized_interpolated[ano_censal == 2023],
+    men_pct_change_3yr = (men_formalized_interpolated_2023 - men_formalized_interpolated_2021) / men_formalized_interpolated_2021 * 100,
+    .groups = "drop"
+  ) 
+```
+
+
+#### Global avg for formalization
+```{r}
+# avg across all regions and time for TR
+
+formalization_global_avg <- tr_job_metrics %>% 
+  summarize(
+    men_globalmean_formalized = mean(men_formalized, na.rm = TRUE),
+    women_globalmean_formalized = mean(women_formalized, na.rm = TRUE) ## wait but I want them the exact same
+  )
+
+```
+
+##### alt CS score
+
+```{r}
+tr_job_current_status_alt <- tr_job_metrics %>% 
+  dplyr::select(-c(total_h000a:total_j600a)) %>% 
+  left_join(tr_job_hist_avg, by = c("rgn_id")) %>% 
+  cross_join(formalization_global_avg) %>% 
+  mutate(same_threshold = 0.75) %>% # supermajority
+  filter(!rgn_id %in% "Region_2") %>%  # no data previous to 2023, so no reference available.
+  group_by(rgn_id, ano_censal) %>% 
+  mutate(
+    
+    # men_formalized_cs_raw = (men_formalized / men_globalmean_formalized) * 100,
+    # women_formalized_cs_raw = (women_formalized / women_globalmean_formalized) * 100,
+    # maintained_salary_cs_raw = (maintained_salary / maintained_salary_hist) * 100
+    
+    men_formalized_cs_raw = (men_formalized / same_threshold) * 100,
+    women_formalized_cs_raw = (women_formalized / same_threshold) * 100,
+    maintained_salary_cs_raw = (maintained_salary / maintained_salary_hist) * 100
+    
+  ) %>% 
+  mutate(
+    
+    men_formalized_cs = ifelse(men_formalized_cs_raw > 100, 100, men_formalized_cs_raw),
+    women_formalized_cs = ifelse(women_formalized_cs_raw > 100, 100, women_formalized_cs_raw),
+    maintained_salary_cs = ifelse(maintained_salary_cs_raw > 100, 100, maintained_salary_cs_raw)
+    
+  ) %>% 
+  ungroup()
+```
+
+
+
+
+
+
+
+
 
 
 
