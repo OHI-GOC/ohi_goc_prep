@@ -1935,37 +1935,172 @@ GOC_Landings_vessels %>%
 # 953604 / 1211350
 ```
 
-```{Take a closer look at vessel names per economic unit}
+```{r Testing some ideas}
+colnames(GOC_Landings_vessels)
+
 # Case studies:
-subset_vessel <- GOC_Landings_vessels %>%
-  filter(trimws(eu_rnpa) == "2508005234")
+subset <- GOC_Landings_vessels %>%
+  filter(eu_rnpa == "2508005234")
 
 length(unique(subset$vessel_name))
 # 9 vessels registered to this economic unit permit
 
 subset2<- GOC_Landings_vessels %>%
-  filter(is.na(vessel_name))
-
-length(unique(subset2$eu_rnpa))
-# 3030 economic unit permits registered to these 953604 un-named vessels
-
-subset22<- GOC_Landings_vessels %>%
   filter(eu_rnpa =="0203010103")
 
-length(unique(subset22$vessel_name))
+length(unique(subset2$vessel_name))
 # 1 vessel name registered to this economic unit permit
-length(unique(subset22$eu_name))
+length(unique(subset2$eu_name))
 # 1 name for this economic unit
-unique(subset22$vessel_rnpa)
+unique(subset2$vessel_rnpa)
 # 1 vessel permit for this economic unit, 0000000_
 
-range(subset22$year)
+range(subset2$year)
 # From 2018 to 2025
-unique(subset22$recorded_taxa_name_clean)
+unique(subset2$recorded_taxa_name_clean)
 # Across several taxa
-unique(subset22$sector_estimate_reported)
+unique(subset2$sector_estimate_reported)
 # And all small-scale (or unclassified)
 ```
+
+```{r Estimate CPUE per economic unit 2018-2024}
+# Let's look through unit Economic Units. All records have a non-NA economic unit (at least since 2018)
+EconomicUnits_df <- GOC_Landings_vessels %>%
+  distinct(eu_rnpa)    # Keeps unique values as a one-column tibble
+
+GOC_Landings_vessels %>%
+  count(is.na(eu_rnpa))
+
+# Estimate Catch per economic unit 2018-2024: summarize weight_kg_corrected by eu_rnpa per year
+
+CatchPerEU_summary <- GOC_Landings_vessels %>%
+  filter(year >= 2018 & year <= 2024) %>%   # filter the years
+  group_by(year, eu_rnpa) %>%              # group by year and economic unit
+  summarize(
+    total_catch_kg = sum(weight_kg_corrected, na.rm = TRUE)  # sum catch, ignore NAs
+  ) %>%
+  ungroup()  # remove grouping after summarizing
+
+# Next, pull out the eu_rnpas that are present in all years 2018-2025. Using these eu_rnpas only, estimate the total catch of Major_Taxa_Group divided by the total eu_rnpa per year
+
+# Step 1: Identify eu_rnpa present in all years
+eu_all_years <- GOC_Landings_vessels %>%
+  filter(year >= 2018 & year <= 2025) %>%
+  group_by(eu_rnpa) %>%
+  summarize(years_present = n_distinct(year), .groups = "drop") %>%
+  filter(years_present == 8) %>%    # 2018–2025 = 8 years
+  pull(eu_rnpa)                     # get vector of eu_rnpa
+# 1214 eu.rnpas are present in all years 2018-2025
+
+# Step 2: Filter data to only include these eu_rnpa
+filtered_data <- GOC_Landings_vessels %>%
+  filter(eu_rnpa %in% eu_all_years, year >= 2018 & year <= 2025)
+
+# Step 3: Summarize catch by Major_Functional_Group per year
+CPUE_summary <- filtered_data %>%
+  group_by(year, Major_Functional_Group) %>%
+  summarize(
+    total_catch_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    n_eu = n_distinct(eu_rnpa),                    # number of economic units that year
+    catch_per_eu = total_catch_kg / n_eu          # divide total catch by number of units
+  ) %>%
+  ungroup()
+
+# Looking promising! Let's plot it...
+```
+
+```{r Plot CPUE for Small Pelagics}
+# Filter for Small Pelagics
+SmallPelagic_CPUE <- CPUE_summary %>%
+  filter(year <=2024) %>%
+  filter(Major_Functional_Group == "Anchovy & Sardine (small pelagics)")
+
+# Plot catch per economic unit over time for Small Pelagics
+SmallPelagic_CPUE %>%
+ggplot(aes(x = year, y = catch_per_eu)) +
+  geom_line(color = "pink", size = 1.2) +
+  geom_point(color = "tomato", size = 2) +
+  labs(
+    title = "CPUE of Small Pelagics per Economic Unit (2018-2024)",
+    x = "Year",
+    y = "Catch per Economic Unit (kg)"
+  ) +
+  theme_bw()
+
+# PLOT FOR ALL GROUPS, excluding Small Pelagics:
+# Remove NAs or 'unknown' if you don’t want them cluttering the plot
+CPUE_plot_data <- CPUE_summary %>%
+  filter(!is.na(Major_Functional_Group), Major_Functional_Group != "unknown")
+
+CPUE_plot_data %>%
+  filter(!Major_Functional_Group=="Anchovy & Sardine (small pelagics)") %>%
+  
+ggplot(aes(x = year, y = catch_per_eu, color = Major_Functional_Group)) +
+  geom_line(size = 1.1) +
+  geom_point(size = 2) +
+  labs(
+    title = "CPUE per Economic Unit by Functional Group (2018-2025)",
+    x = "Year",
+    y = "Catch per Economic Unit (kg)",
+    color = "Functional Group"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+# More granular: Plot Cephalopods
+Cephalopods_CPUE <- CPUE_summary %>%
+  filter(year <=2024) %>%
+  filter(Major_Functional_Group == "Cephalopods")
+
+# Plot catch per economic unit over time
+ggplot(Cephalopods_CPUE, aes(x = year, y = catch_per_eu)) +
+  geom_line(color = "gold", size = 1.2) +
+  geom_point(color = "salmon", size = 2) +
+  labs(
+    title = "CPUE of Cephalopods per Economic Unit (2018-2024)",
+    x = "Year",
+    y = "Catch per Economic Unit (kg)"
+  ) +
+  theme_bw()
+
+# More granular: Plot Demersal marine fishes
+DemersalFishes_CPUE <- CPUE_summary %>%
+  filter(year <=2024) %>%
+  filter(Major_Functional_Group == "Demersal marine fishes")
+
+# Plot catch per economic unit over time
+ggplot(DemersalFishes_CPUE, aes(x = year, y = catch_per_eu)) +
+  geom_line(color = "goldenrod", size = 1.2) +
+  geom_point(color = "brown", size = 2) +
+  labs(
+    title = "CPUE of Demersal marine fishes per Economic Unit (2018-2024)",
+    x = "Year",
+    y = "Catch per Economic Unit (kg)"
+  ) +
+  theme_bw()
+
+# More granular: Plot Pelagic marine fishes
+PelagicFishes_CPUE <- CPUE_summary %>%
+  filter(year <=2024) %>%
+  filter(Major_Functional_Group == "Pelagic marine fish (excl. anchovy & sardine)")
+
+# Plot catch per economic unit over time
+ggplot(PelagicFishes_CPUE, aes(x = year, y = catch_per_eu)) +
+  geom_line(color = "pink", size = 1.2) +
+  geom_point(color = "purple", size = 2) +
+  labs(
+    title = "CPUE of Pelagic marine fish (excl. anchovy & sardine) per Economic Unit (2018-2024)",
+    x = "Year",
+    y = "Catch per Economic Unit (kg)"
+  ) +
+  theme_bw()
+```
+
+
 
 
 
