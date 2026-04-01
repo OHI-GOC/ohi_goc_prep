@@ -1,0 +1,184 @@
+---
+title: 'OHI GoC 2025: CCE Beach Cleanups'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# Sense of Pertenencia: Coastal Community Engagement (CCE)
+
+## Adoption of beaches = regular cleanups
+
+"UN COMPROMISO CON EL FUTURO DE NUESTROS OCÉANOS La Estrategia Nacional de Limpieza y Conservación de Playas y Costas de México 2025-2030 es una iniciativa ambiciosa del Gobierno de México para erradicar la contaminación por plásticos del 100% de playas y costas."
+
+"El Problema: Entre el 60% y 90% de los residuos encontrados en playas son plásticos y microplásticos. Se estima que a nivel mundial, 13 millones de toneladas de plástico se arrojan al mar al año, lo que afecta a la vida marina y a la salud humana."
+
+"La meta: Eliminar el 100% de los residuos plásticos de las playas y costas de México para el año 2030"
+
+"¿Quiénes participan? Gobierno federal, estatal y municipal en alianza con comunidades, organizaciones de la sociedad civil y empresas."
+
+"Adopta una playa: Elige una playa o zona costera y comprométete a mantenerla limpia hasta el 2030."
+
+"¿Cómo adoptar? Envía un correo a <adoptatuplaya@semarnat.gob.mx>. Incluye: Nombre de tu organización, colectivo o empresa, Playa o playas de tu interés."
+
+"¿Qué implica adoptar? --> Retirar los residuos de la playa o costa. Disposición adecuada de residuos. Eliminar el uso de plásticos de un solo uso. Reducir la generación de residuos. Reportar mensualmente las actividades realizadas."
+
+
+<https://www.adoptaunaplaya.com/playas/sumate/>
+
+```{r}
+library(tidyverse)
+library(mapview)
+library(sf)
+library(here)
+library(janitor)
+```
+
+### Read in beach adoption data
+
+```{r}
+library(textclean)
+
+## bring in data tabulated using `Tabula` from a pdf into a csv
+adopted_beaches_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/ama_tu_playa/ama_tu_playa_040126","tabula-adoptaunaplaya_amatuplaya_lista.csv")) %>% 
+  janitor::clean_names()
+```
+
+Note that the pdf itself has duplicate entries: for example, Playa El Anclote in Nayarit.  So we will clean that up.
+
+```{r}
+
+unique_beaches <- adopted_beaches_raw %>% 
+  dplyr::select(-adopcion) %>% 
+  distinct()
+
+unique_adopted_beaches <- adopted_beaches_raw %>% 
+  filter(adopcion == 1) %>% 
+  distinct()
+
+adopted_beaches_raw_nodups <- left_join(unique_beaches, unique_adopted_beaches)
+
+```
+
+
+
+### Restrict to GoC
+
+```{r}
+adopted_beaches_goc <- adopted_beaches_raw_nodups %>% 
+  filter(entidad %in% c("Baja California","Baja California Sur","Jalisco","Nayarit","Sinaloa","Sonora")) %>% 
+  mutate(municipio_clean = textclean::replace_non_ascii(municipio),
+         municipio_clean = str_to_lower(municipio_clean)) %>% 
+  mutate(long = str_replace_all(x, ",","."),
+         lat = str_replace_all(y, ",",".")) %>% 
+  st_as_sf(coords = c("long", "lat"), # making sf object
+           crs = 4326, # WGS84
+           remove = FALSE) 
+
+mapview(adopted_beaches_goc)
+```
+
+
+### Assign to rgn_id
+
+First, group by region and unite the polygons for inland 10km with the marine polygons.
+```{r}
+## intersect with inland_10:
+inland_10 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer","inland_10km_goc.shp"))
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+
+st_crs(inland_10) == st_crs(regions_marine) # TRUE
+
+marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>% 
+  dplyr::select(rgn_id, geometry) %>% 
+  group_by(rgn_id) %>% 
+  summarize(
+    geometry = st_union(geometry)
+  )
+
+mapview(adopted_beaches_goc) + mapview(marine_and_inland10)
+```
+
+Now, we can intersect with the `marine_and_inland10` so that each beach is assigned an OHI GoC Region ID.
+```{r}
+# intersect with GoC
+adopted_beaches_goc_rgnid <- st_intersection(st_transform(adopted_beaches_goc, st_crs(marine_and_inland10)), marine_and_inland10) %>% 
+  dplyr::select(playa, adopcion, organismo, municipio_clean, entidad, poblacion, long, lat, rgn_id, geometry) %>% 
+  mutate(adopcion = ifelse(is.na(adopcion), "no","yes")) 
+
+all_yes <- adopted_beaches_goc_rgnid %>% 
+  filter(adopcion %in% "yes")
+mapview(all_yes)
+
+mapview(adopted_beaches_goc_rgnid, zcol = "adopcion")
+```
+
+
+### Current status
+
+Now that we have a list of all the beaches that SEMARNAT aims to be adopted by 2030, we can determine, as of 04.01.26, how many beaches have been adopted.  That is inherently representative of how close the GoC is to achieving that goal of having 100% beaches adopted.
+
+```{r}
+ama_tu_playa_progress <- adopted_beaches_goc_rgnid %>% 
+  group_by(rgn_id) %>% 
+  summarize(
+    adopted_beaches = sum(adopcion == "yes"),
+    total_beaches = n(),
+    pct_adopted = adopted_beaches / total_beaches,
+  ) %>% 
+  ungroup() %>% 
+  mutate(current_status = pct_adopted * 100) # %>% 
+ # st_drop_geometry()
+
+mapview(ama_tu_playa_progress)
+```
+
+
+#### Write to Mazu
+
+```{r}
+write_csv(ama_tu_playa_progress, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/output","current_status_ama_tu_playa_progress_040126.csv"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
