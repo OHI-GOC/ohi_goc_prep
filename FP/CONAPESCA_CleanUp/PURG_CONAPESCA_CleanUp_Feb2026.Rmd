@@ -1,0 +1,632 @@
+################################################################################
+
+Erica Ferrer, Ph.D.
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+# STEP 2 & 3: Region Key (December 2025) ------------------------------
+```{r Region Keys}
+# KEYS FROM MEL (including lat, long):
+BajaSonoraKey<- read_csv(here("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/Baja_Sonora_states_key.csv"))
+
+BajaSonoraKey <- BajaSonoraKey %>%
+  mutate(
+    long = as.numeric(long),
+    lat  = as.numeric(lat)
+  )
+
+JaliscoKey<- read_csv(here("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/landing_sites_jalisco.csv"))
+
+JaliscoKey <- JaliscoKey %>%
+  rename(long= lon) %>% 
+  mutate(
+    long = as.numeric(long),
+    lat  = as.numeric(lat)
+  )
+
+JaliscoKey_clean <- JaliscoKey %>%
+  # Normalize state names
+  mutate(state = toupper(state)) %>%
+  
+  # Remove any rows where landing_site is NA (can cause matching issues later)
+  filter(!is.na(landing_site)) %>%
+  
+  # Keep only one row per landing_site_key; if duplicate keys exist, keep first
+  group_by(landing_site_key) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup() %>%
+  
+  # Optional: also deduplicate by landing_site if there are rows with NA landing_site_key
+  group_by(landing_site) %>%
+  slice(1) %>%
+  ungroup()
+
+# NOTE TO SELF: Come back to this! The Jalisco key is imperfect, but we'll have to fix this in the new year.
+# Identify rows that were removed in the deduplication of JaliscoKey
+removed_rows <- anti_join(JaliscoKey, JaliscoKey_clean, 
+                          by = c("landing_site_key", "landing_site"))
+
+
+#### MERGE THESE WORKING KEYS FOR NOW: ####
+RegionKey_working <- bind_rows(BajaSonoraKey, JaliscoKey_clean) %>%
+  filter(!is.na(landing_site)) %>%  # remove the NA from this dataframe as this will create a many-to-many matching issue later on
+  mutate(long = as.numeric(long))
+# 1176 obs., 9 vars.
+
+RegionKey_working <- RegionKey_working %>% mutate(long = as.numeric(long))
+rm(JaliscoKey, JaliscoKey_clean, BajaSonoraKey, removed_rows)
+
+# My regional key:
+RegionKey_temporary<- read_csv(here("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Data&Keys/CONAPESCA_Keys/RegionKey_UNDERCONSTRUCTION_Dec02024.csv"))
+```
+
+# Load: Landings data with species info (December 2025) ------------------------------
+```{r Load in landings data with species info}
+Landings_GoC_Original_wSp<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/juan_carlos/GoC_Landings_wSp_2000.present_Dec012025.rds"))
+# 3716415 obs, 41 vars.
+
+Landings_GoC_Original_wSp <- Landings_GoC_Original_wSp %>% 
+  select(-lat, -long) # remove lat, long for now to do the merge
+
+Landings_GoC <- Landings_GoC_Original_wSp %>%
+  left_join(
+    RegionKey_working %>%
+      select(-landing_site_key),
+    by = c("state", "landing_site")
+  )
+# 3716415 obs, 45 vars.
+
+# A few quick checks:
+table(Landings_GoC$GoC)
+# All in the GoC or not otherwise noted.
+table(Landings_GoC$state)
+table(Landings_GoC_Original_wSp$state)
+table(Landings_GoC$OHI_rgn)
+```
+
+```{r Add OHI region to landings w species}
+Landings_GoC <- Landings_GoC %>%
+  mutate(Region_pick = if_else(!is.na(OHI_rgn), OHI_rgn, state))
+# 3716415 obs, 46 vars. as expected!
+
+Landings_GoC <- Landings_GoC %>%
+  left_join(
+    RegionKey_temporary %>%
+      select(-Region_Name_Proposed),  # remove this column for now
+    by = c("Region_pick" = "Region_Mel_or_CONAPESCA")
+  )
+# 3716415 obs, 47 vars. as expected!
+
+subset<- Landings_GoC %>% filter(is.na(OHI_Region_No))
+table(subset$state)
+# 156952 obs., 47 vars.
+# Only Jalisco entries are not keyed. This makes sense. These are parts of Jalisco that either aren't in Region 9 or we can't be totally sure they are in Region 9.
+
+Landings_GoC<- Landings_GoC %>% filter(!is.na(OHI_Region_No)) 
+# 3559463 obs., 47 vars.
+# Removed some landings (-156952) from Jalisco.
+
+rm(RegionKey_temporary, RegionKey_working, Landings_GoC_Original_wSp)
+```
+
+```{r Landed weight correction}
+# Kind of looks like sometimes 'landed weight' is 'live weight' and vice versa. Fix this:
+Landings_GoC$weight_kg_corrected <- ifelse(
+  Landings_GoC$live_weight >= Landings_GoC$landed_weight,
+  Landings_GoC$live_weight,
+  Landings_GoC$landed_weight
+)
+```
+
+```{r Flagging freshwater and MAR landings}
+colnames(Landings_GoC)
+table(Landings_GoC$recorded_taxa_group)
+table(Landings_GoC$acuaculture_production)
+
+#### Filter out aquaculture landings ####
+
+aquaculture_keywords<- c(
+  "DE CULTIVO", "DE CULTIVO VIVO", "ABASTO RANCHO", "RANCHO"
+)
+
+##### AQUACULTURE TAXA: UNDER CONSTRUCTION - NOTE TO SELF
+aquaculture_taxa<- c(
+  "OSTION"
+)
+
+# Flag aquaculture rows:
+Landings_GoC <- Landings_GoC %>%
+  mutate(
+    aquaculture_flag = (
+      coalesce(tolower(acuaculture_production) == "yes", FALSE) |
+      (recorded_taxa_group %in% aquaculture_taxa) |
+      (rowSums(across(keywords_1:keywords_5, ~ .x %in% aquaculture_keywords), na.rm = TRUE) > 0)
+    )
+  )
+
+table(Landings_GoC$aquaculture_flag)
+# 136090 observations explicitly flagged as aquaculture (when we include all "OSTION")
+
+#### Filter out freshwater landings ####
+freshwater_keywords<- c(
+  "DE AGUA DULCE"
+)
+
+freshwater_taxa<- c(
+  "tilapia",
+  "rana", "rana toro",
+  "trucha",
+  "bagre canal"
+)
+
+# Flag freshwater rows:
+Landings_GoC <- Landings_GoC %>%
+  mutate(
+    freshwater_flag = coalesce(
+      (common_name_clean %in% freshwater_taxa) |
+      (rowSums(across(keywords_1:keywords_5, ~ .x %in% freshwater_keywords), na.rm = TRUE) > 0) |
+      (habitat == "freshwater") |
+      (IHH_functional_major_groups_sm =="Freshwater fishes"),
+      FALSE
+    )
+  )
+
+table(Landings_GoC$freshwater_flag)
+# 286013 observations explicitly flagged as freshwater landings (either based on the taxa, keyword, or landing site)
+```
+
+```{r Filter out freshwater and MAR species}
+#### Now filter out freshwater & aquaculture landings from main landings ####
+
+#### FRESHWATER
+Freshwater_Landings <- Landings_GoC %>%
+  filter(freshwater_flag)
+# 286013 obs., 50 vars
+
+FreshFisheries_Landings <- Landings_GoC %>%
+  filter(freshwater_flag & !aquaculture_flag)
+# 280355 obs., 50 vars
+
+FreshAquaculture_Landings <- Landings_GoC %>%
+  filter(freshwater_flag & aquaculture_flag)
+# 5658 obs., 50 vars
+
+#### MARINE - WILD CATCH AND MARICULTURE
+Mariculture_Landings <- Landings_GoC %>%
+  filter(!freshwater_flag & aquaculture_flag)
+# 130432 obs., 50 vars
+
+MarineFisheries_Landings <- Landings_GoC %>%
+  filter(!(aquaculture_flag | freshwater_flag))
+# 3143018 obs., 50 vars
+
+sum(is.na(MarineFisheries_Landings$OHI_Region_No))
+table(MarineFisheries_Landings$OHI_Region_No)
+# Seems like all entries have an OHI region number...
+```
+NOTE TO SELF: There could still be some freshwater species hiding in here. For example, the "MOJARRA" general category is mixed freshwater and marine demersal fish.
+
+# Save the FIS and MAR dataframes as of Feb 24 2026
+```{r Save the FIS MAR and Freshwater dataframes as of Feb 24 2026}
+saveRDS(MarineFisheries_Landings, "/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Feb242026.rds")
+
+saveRDS(Freshwater_Landings, "/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_Freshwater.landings_CLEAN_as.of.Feb242026.rds")
+
+saveRDS(Mariculture_Landings, "/home/shares/ohi/OHI_GOC/goal_prep/fp/mar/v2025/int/GOC_MAR.landings_CLEAN_as.of.Feb242026.rds")
+```
+
+# Plotting landings per fishery type
+```{r}
+# Add the fishery_type column to each
+MarineFisheries_Landings$fishery_type <- "marine fisheries"
+Mariculture_Landings$fishery_type <- "mariculture"
+Freshwater_Landings$fishery_type <- "freshwater (aquaculture & fisheries)"
+
+# Combine all three data frames into one
+all_landings <- rbind(MarineFisheries_Landings, Mariculture_Landings, Freshwater_Landings)
+
+# View the first few rows to check
+head(all_landings)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Summarize total landings per year and fishery type
+total_landings <- all_landings %>% filter(year< 2025) %>%
+  group_by(year, fishery_type) %>%
+  summarise(total_landings = sum(weight_kg_corrected, na.rm = TRUE))
+
+# Plot
+ggplot(total_landings, aes(x = year, y = total_landings, color = fishery_type)) +
+  geom_line(size = 1.2) +
+  geom_point() +
+  labs(
+    title = "Total Landings in the GoC per Fishery Type",
+    x = "Time (Year)",
+    y = "Total Landings (kg)",
+    color = "Fishery Type"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 12),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+ggplot(total_landings, aes(x = year, y = total_landings, color = fishery_type)) +
+  geom_line(linewidth = 1.3) +
+  geom_point(size = 2.5, alpha = 0.85) +
+  scale_color_manual(
+    values = c(
+      "marine_fisheries" = "#8E3B5F",
+      "mariculture" = "#C8A2C8",
+      "freshwater_aquaculture&fisheries" = "#4B2E83"
+    ),
+    breaks = c(
+      "marine_fisheries",
+      "mariculture",
+      "freshwater_aquaculture&fisheries"
+    ),
+    labels = c(
+      "Marine fisheries",
+      "Mariculture",
+      "Freshwater (fisheries & aquaculture)"
+    ),
+    name = "Fishery Type"
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Total Landings in the GoC by Fishery Type",
+    subtitle = "Annual landings (kg)",
+    x = NULL,
+    y = "Total Landings (kg)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(color = "gray40"),
+    legend.position = "top",
+    legend.title = element_text(face = "bold"),
+    legend.key.width = unit(1.5, "cm"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+```
+
+
+
+# Fix Major_Functional_Group as of Feb 24 2026
+```{r FIXING MAJOR FUNCTIONAL GROUPS}
+# NOTE TO SELF: Return to this when needed (Dec 09 2025). Returned the next day, Dec 10 2025.
+Genus_MajorGroup_Key_ALL <- Landings_GoC %>%
+  select(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm) %>%
+  distinct(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm, .keep_all = TRUE)
+# 367 obs., 3 vars.
+# NOW: 381 obs., 3 vars.
+
+# See the issue here? One genus could be associated with multiple recorded_taxa_groups. We need the unique combination of estimated_genus_name & recorded_taxa_group to key out the larger dataset. But, in the end, we'll want to be able to group by ESTIMATED_taxa_group to avoid issues of splitting the catch from a single genus across two larger functional groups.
+
+# ---- Create Major_Functional_Group values based IHH major functional groups assigned to recorded_taxa_group ----
+
+# Step 1: Assign one Major_Functional_Group per recorded_taxa_group, respecting that a few of the categories (like "OTRAS") are inherently different.
+skip_groups <- c("OTRAS", "ESPECIE GENERICA", "FAUNA", "ORNATO", "NEI")
+
+Genus_MajorGroup_Key_ALL$Assignment_for_Major_Functional_Group = NA_character_  # initialize flag column
+
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  group_by(recorded_taxa_group) %>%
+  mutate(
+    
+    # Most frequent non-NA value for IHH_functional_major_groups within the recorded_taxa_group
+    group_major = {
+      x <- IHH_functional_major_groups_sm
+      x <- x[!is.na(x) & x != ""]
+      if (length(x) == 0) NA_character_ else {
+        tbl <- table(x)
+        names(tbl)[which.max(tbl)]
+      }
+    },
+    
+    # Assign only to non-skipped groups
+    Major_Functional_Group = if_else(
+      !(recorded_taxa_group %in% skip_groups),
+      group_major,
+      NA_character_
+    ),
+      Assignment_for_Major_Functional_Group = if_else(
+      !(recorded_taxa_group %in% skip_groups) & is.na(Assignment_for_Major_Functional_Group),
+      "Assigned_Step_1: based on recorded_taxa_group and IHH_functional_major_groups",
+      Assignment_for_Major_Functional_Group
+    )
+  ) %>%
+  ungroup() %>%
+  select(-group_major)
+
+# Put Assignment_for_Major_Functional_Group column at the end:
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  relocate(Assignment_for_Major_Functional_Group, .after = last_col())
+
+
+# Step 2: Genus-level assignment (ignores cases where genus = NA or NEI)
+# Calculates the most common functional group within each genus; uses that majority value to fill missing (or “skip”) records; leaves everything else unchanged
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  group_by(estimated_genus_name) %>%
+  mutate(
+
+    # ---- Determine genus_major ONLY IF genus is real (not NA, not NEI) ----
+    genus_major = {
+      genus_value <- cur_group()$estimated_genus_name   # single value
+
+      if (!is.na(genus_value) && genus_value != "NEI") {
+
+        x <- c(Major_Functional_Group, IHH_functional_major_groups_sm)
+        x <- x[!is.na(x) & x != ""]
+        if (length(x) == 0) NA_character_ else {
+          tbl <- table(x)
+          names(tbl)[which.max(tbl)]
+        }
+
+      } else {
+        # If genus is NA or NEI, then cannot derive Functional_Group
+        NA_character_
+      }
+    },
+
+    Major_Functional_Group = case_when(
+
+      # ---- CASE 1: if genus is NA or NEI → leave Functional_Group unchanged ----
+      (is.na(estimated_genus_name) | estimated_genus_name == "NEI") ~ Major_Functional_Group,
+
+      # ---- CASE 2: non-skip taxa with missing Functional_Group → fill Functional_Group with genus_major ----
+      !(recorded_taxa_group %in% skip_groups) &
+        is.na(Major_Functional_Group) ~ genus_major,
+
+      # ---- CASE 3: if skip taxa → fill Functional_Group *only* from genus_major ----
+      recorded_taxa_group %in% skip_groups ~ genus_major,
+
+      # ---- CASE 4: keep original Functional_Group ----
+      TRUE ~ Major_Functional_Group
+    ),
+      Assignment_for_Major_Functional_Group = case_when(
+      ((!(recorded_taxa_group %in% skip_groups) & is.na(Assignment_for_Major_Functional_Group) & !is.na(Major_Functional_Group)) |
+       (recorded_taxa_group %in% skip_groups & is.na(Assignment_for_Major_Functional_Group) & !is.na(Major_Functional_Group))) ~ "Assigned_Step_2: based on genus (which has been keyed out elsewhere)",
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  ) %>%
+  ungroup() %>%
+  select(-genus_major)
+  
+
+# Step 3: Enforce genus-level consistency for Major_Functional_Group (ignores cases where genus = NA or NEI; assign "OTRAS" that have a verified genus)
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  group_by(estimated_genus_name) %>%
+  mutate(
+    new_value = if (
+      !is.na(cur_group()$estimated_genus_name) &&
+      cur_group()$estimated_genus_name != "NEI" &&
+      n() > 1
+    ) {
+      x <- Major_Functional_Group[!is.na(Major_Functional_Group) & Major_Functional_Group != ""]
+      if(length(x) == 0) Major_Functional_Group else names(which.max(table(x))) 
+    } else {
+      Major_Functional_Group
+    },
+    Assignment_for_Major_Functional_Group = if_else(
+      Major_Functional_Group != new_value & !is.na(new_value),
+      "Assigned_Step_3: forced consistency across the genus",
+      Assignment_for_Major_Functional_Group
+    ),
+    Major_Functional_Group = new_value
+  ) %>%
+  ungroup() %>%
+  select(-new_value)
+  
+
+# Step 4: Manual patches for specific taxonomic groups (and two typos)
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  mutate(
+    Major_Functional_Group = case_when(
+      estimated_genus_name == "Sphoeriodes" ~ "Marine fishes NEI", # Pressumably, is a typo of "Sphoeroides"
+      estimated_genus_name == "Lujtanus" ~ "Demersal marine fishes", # Pressumably, is a typo of "Lutjanus"
+      recorded_taxa_group == "MOJARRA" ~ "Marine fishes NEI",
+      recorded_taxa_group == "ANCHOVETA" ~ "Pelagic marine fishes",
+      recorded_taxa_group == "PECES ORNATO" ~ "Marine fishes NEI",
+      recorded_taxa_group %in% c("ALGAS", "SARGAZO") ~ "Marine algae",
+      recorded_taxa_group %in% c("PEPINO DE MAR", "ERIZO") ~ "Other marine invertebrates",
+      recorded_taxa_group %in% c("PETO", "TIBURON", "CAZON") ~ "Sharks",
+      TRUE ~ Major_Functional_Group
+    ),
+     Assignment_for_Major_Functional_Group = case_when(
+      (estimated_genus_name == "Sphoeriodes" |
+       estimated_genus_name == "Lujtanus" |
+       recorded_taxa_group %in% c("MOJARRA", "ANCHOVETA", "PECES ORNATO", "ALGAS", "SARGAZO",
+                                  "PEPINO DE MAR", "ERIZO", "PETO", "TIBURON", "CAZON")) ~ "Assigned_Step_4: manual patch",
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  )
+
+
+# Step 5: If Major_Functional_Group is NA then Assignment_for_Major_Functional_Group= "could not be assigned"
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  mutate(
+    Assignment_for_Major_Functional_Group = if_else(
+      is.na(Major_Functional_Group),
+      "Alert: Major_Functional_Group could not be assigned (at present)",
+      Assignment_for_Major_Functional_Group
+    )
+  )
+
+
+# Step 6: Assign estimated_taxa_group by looking at the most common recorded_taxa_group for each genus
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  group_by(estimated_genus_name) %>%
+  mutate(
+    # Step 1: calculate mode of recorded_taxa_group within the genus
+    genus_mode_group = if (!is.na(cur_group()$estimated_genus_name[1]) &&
+                           cur_group()$estimated_genus_name[1] != "NEI") {
+      tbl <- table(recorded_taxa_group)
+      names(tbl)[which.max(tbl)]
+    } else {
+      NA_character_
+    },
+    
+    # Step 2: assign estimated_taxa_group
+    estimated_taxa_group = if_else(
+      !is.na(genus_mode_group) & recorded_taxa_group != genus_mode_group,
+      genus_mode_group,          # use mode for genus when recorded_taxa_group differs
+      recorded_taxa_group        # otherwise keep recorded_taxa_group
+    )
+  ) %>%
+  ungroup() %>%
+  select(-genus_mode_group)
+
+
+# Step 7: A couple of manual patches for specific taxa where we actually lost info due to "OTRAS" (e.g., Lutjanus and "Lujtanus, & Oligoplites)
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  mutate(
+    old_estimated_taxa_group = estimated_taxa_group,
+
+    estimated_taxa_group = case_when(
+      estimated_genus_name %in% c("Lutjanus","Lujtanus") ~ "GUACHINANGO",
+      estimated_genus_name %in% c("Oligoplites") ~ "SARDINA",
+      estimated_genus_name %in% c("Pseudobatos") ~ "RAYA Y SIMILARES",
+      estimated_genus_name %in% c("Scomberomorus") ~ "SIERRA",
+      estimated_genus_name %in% c("Selene") ~ "RONCO",
+      estimated_genus_name %in% c("Trachinotus") ~ "PAMPANO",
+      TRUE ~ estimated_taxa_group
+    ),
+
+    Assignment_for_Major_Functional_Group = case_when(
+      !is.na(old_estimated_taxa_group) &
+      old_estimated_taxa_group != estimated_taxa_group ~
+        "Assigned_Step_7: manual patch for estimated_taxa_group based on specific genus",
+
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  ) %>%
+  select(-old_estimated_taxa_group)
+
+# subset<- Genus_MajorGroup_Key_ALL %>% filter(is.na(Major_Functional_Group))  %>% select(estimated_genus_name)
+# print(subset)
+
+# Step 8: Manual patches — force tag for specific genera
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  mutate(
+    Major_Functional_Group = case_when(
+      # Pelagic marine fishes
+      estimated_genus_name %in% c("Makaira","Tetrapturus","Trachurus",
+                                  "Brevoortia","Ethmidium","Belone",
+                                  "Hemiramphus", "Hemirhamphus") ~ "Pelagic marine fishes",
+      
+      # Demersal marine fishes
+      estimated_genus_name %in% c("Gillichthys","Helicolenus","Bathystoma",
+                                  "Bellator","Bairdiella","Cheilotrema",
+                                  "Chaetodipterus","Holocentrus","Alphestes",
+                                  "Diplodus","Spondyliosoma","Albula",
+                                  "Cathorops") ~ "Demersal marine fishes",
+      
+      # Sharks
+      estimated_genus_name %in% c("Pristis","Pseudocarcharias") ~ "Sharks",
+      
+      # Crustaceans
+      estimated_genus_name %in% c("Pagurus","Chaceon","Calappa") ~ "Crustaceans",
+      
+      # Molluscs excl. Cephalopods
+      estimated_genus_name %in% c("Atrina","Pinna") ~ "Molluscs excl. Cephalopods",
+      
+      # Other marine invertebrates
+      estimated_genus_name %in% c("Actinia") ~ "Other marine invertebrates",
+      
+      # Freshwater fishes
+      estimated_genus_name %in% c("Lepidoseus","Cyprinodon") ~ "Freshwater fishes",
+      
+      # Diadromous fishes
+      estimated_genus_name %in% c("Dorosoma","Clupanodon") ~ "Diadromous fishes",
+      
+      # Other freshwater taxa
+      estimated_genus_name %in% c("Rana") ~ "Other freshwater taxa",
+      
+      # Keep existing value if not in manual list
+      TRUE ~ Major_Functional_Group
+    ),
+    
+    # Force tag for all genera you manually worked with
+    Assignment_for_Major_Functional_Group = case_when(
+      estimated_genus_name %in% c("Makaira","Tetrapturus","Trachurus",
+                                  "Brevoortia","Ethmidium","Belone",
+                                  "Hemiramphus",
+                                  "Gillichthys","Helicolenus","Bathystoma",
+                                  "Bellator","Bairdiella","Cheilotrema",
+                                  "Chaetodipterus","Holocentrus","Alphestes",
+                                  "Diplodus","Spondyliosoma","Albula",
+                                  "Cathorops",
+                                  "Pristis","Pseudocarcharias",
+                                  "Pagurus","Chaceon","Calappa",
+                                  "Atrina","Pinna",
+                                  "Actinia",
+                                  "Lepidoseus","Cyprinodon",
+                                  "Dorosoma","Clupanodon",
+                                  "Rana") ~
+        "Assigned_Step_8: manual patch for Major_Functional_Group based on specific genus",
+      
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  )
+
+# Step 9: Rearrange for ease of reading:
+Genus_MajorGroup_Key_ALL <- Genus_MajorGroup_Key_ALL %>%
+  select(
+    recorded_taxa_group,
+    estimated_taxa_group,
+    estimated_genus_name,
+    IHH_functional_major_groups_sm,
+    Major_Functional_Group,
+    Assignment_for_Major_Functional_Group
+  )
+    
+# 367 obs., 6 vars.
+# NOW: 381 obs., 3 vars.
+```
+
+#### SAVE GENUS TO MAJOR_FUNCTIONAL_GROUP KEY
+```{r Save this key!}
+Genus_MajorGroup_Key<- Genus_MajorGroup_Key_ALL %>% 
+  select(recorded_taxa_group, estimated_genus_name, estimated_taxa_group, Major_Functional_Group) %>%
+  distinct()
+# 336 obs., 4 varsity.
+
+write.csv(Genus_MajorGroup_Key, "~/ohi_goc_prep/FP/CONAPESCA_Data&Keys/CONAPESCA_Keys/Genus_to_MajorGroup_Key_Feb242026.csv", row.names = FALSE)
+```

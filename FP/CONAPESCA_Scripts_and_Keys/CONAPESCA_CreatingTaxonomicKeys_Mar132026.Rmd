@@ -1,0 +1,1231 @@
+################################################################################
+
+Erica Ferrer, Ph.D.
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(stringi)
+library(purrr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(fuzzyjoin)
+# Visualization
+library(ggplot2)
+library(plotly)
+library(htmlwidgets)
+
+
+setwd("/home/ferrer/ohi_goc_prep/")
+```
+
+
+# PART 1: Filter landings data and create skeleton for species key ------------------------------
+First we need to correctly clean and filter landings data so that we can append species info and extract species info for a key.
+
+## Filtering out key words from landing receipts:
+```{r Load in GoC landings data}
+GOC_Landings<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/GoC_Landings_2000.present_EMF_created.rds"))
+# n = 3716415 obs.
+# NOTE TO SELF: THIS FILE WILL CHANGE WITH CLEAN UP!
+```
+
+```{r Is aleta de aleta an issue? Short answer, no.}
+GOC_Landings %>%
+  rename(recorded_taxa_name = species_name) %>%
+  mutate(
+    aleta_count = stringi::stri_count_fixed(recorded_taxa_name, "ALETA")
+  ) %>%
+  count(aleta_count)
+
+# No, double aleta does not seem to be an issue...
+```
+
+```{r Filter out keywords from recorded_taxa_name to get recorded_taxa_name_clean}
+# 1. Keyword list (excluding ALETA, handled separately) -----------------
+keyword_list <- c(
+  "S.C.", "S/C", "S",
+  "ENTERO", "ENTERA", "IND", "ENT",
+  "FRESCO", "FRESCA", "FCA", "FCO", "FC",
+  "ECO",
+  "CONG", "CONGELADO",
+  "VIVO", "VIVA", "VIVAS", "VIVITA",
+  "DE CULTIVO", "DE CULTIVO VIVO", "ABASTO RANCHO", "RANCHO",
+  "HUEVA DE",
+  "FILETE", "FILETE DE", "ECA", "FILETE DE ECO", "DESHUESADA", "CARNE", "CARNE DE",
+  "DESCABEZADO", "DES", "DSC", "DESC", "DESV", "DESVICERADO",
+  "CABEZA DE", "BUCHE", "BUCHE DE", "TRIPA DE", "COLAS DE", "MANOS DE", "MANOS",
+  "ANCAS DE", "ANCAS", "ANCA",
+  "PIEL DE ECA", "PIEL DE SECA", "PIEL DE", "PIEL",
+  "SECO DE", "SECA", "SECA DE", "SECO", "SECO DE",
+  "COCINERO", "COCIDO", "COCIDA", "COCIDAS", "ASADO",
+  # Remove ALETA from main keywords; handled separately
+  #"ALETA", "ALETA ECA DE", "ALETA FCA DE",
+  "DE ALTA MAR",
+  "CONCHA DE", "CONCHA",
+  "POLVO DE",
+  "CARNADA", "P/CARNADA",
+  "DE AGUA DULCE",
+  "MANTO", "MANTO DE", "PULPA DE", "PULPA FRESCA",
+  "PULPO DE", "TENTACULOS DE", "TUBO DE", "TUBO",
+  "NO APTO PARA EMPAQUE"
+)
+
+# Longest-first ordering
+keyword_list <- keyword_list[order(nchar(keyword_list), decreasing = TRUE)]
+
+# Escape regex meta-characters
+keyword_list_escaped <- stringi::stri_replace_all_regex(
+  keyword_list, "([.|(){}+*?^$\\[\\]\\\\])", "\\\\$1"
+)
+
+# Final regex
+keyword_pattern <- paste0(
+  "(?<![A-Za-z0-9])(",
+  paste(keyword_list_escaped, collapse = "|"),
+  ")(?![A-Za-z0-9])"
+)
+
+
+# 2. Special ALETA phrases (handled separately from other key words) -----------------
+
+special_aleta_adj <- c("BLANCA", "AMARILLA", "CORTA", "AZUL")
+
+remove_aleta_except_special <- function(x) {
+  stringi::stri_replace_all_regex(
+    x,
+    pattern = paste0("\\bALETA\\b(?!\\s+(?:", paste(special_aleta_adj, collapse = "|"), "))"),
+    replacement = "",
+    vectorize_all = FALSE
+  )
+}
+
+
+# 3. MAIN PIPELINE (optimized) -----------------
+
+GOC_Landings_clean <- GOC_Landings %>%
+  
+  # Rename columns
+  rename(
+    recorded_taxa_name = species_name,
+    recorded_taxa_group = main_species_group
+  ) %>%
+  
+  # Extract keywords
+  mutate(
+    keywords_list = stringi::stri_extract_all_regex(recorded_taxa_name, keyword_pattern)
+  ) %>%
+  mutate(keywords_list = map(keywords_list, ~ { length(.x) <- 5; .x })) %>%
+  unnest_wider(keywords_list, names_sep = "_") %>%
+  rename_with(~ paste0("keywords_", 1:5), starts_with("keywords_list_")) %>%
+  
+  # Clean recorded_taxa_name
+  mutate(
+    recorded_taxa_name_clean = recorded_taxa_name %>%
+      remove_aleta_except_special() %>%                      # Remove ALETA unless special
+      stringi::stri_replace_all_regex(keyword_pattern, "") %>% # Remove other keywords
+      stringi::stri_replace_all_regex("\\b(Y|DE|P/)\\b", "") %>% # Remove standalone Y/DE/P/
+      stringi::stri_replace_all_regex("[.,/\\\\]+", " ") %>%      # Remove punctuation
+      str_squish()
+  ) %>%
+  
+  # Extract scientific name
+  mutate(
+    recorded_scientific_name = stringi::stri_extract_first_regex(recorded_taxa_name_clean, "\\(([^)]+)\\)") %>%
+      stringi::stri_replace_all_regex("\\(|\\)", ""),
+    scientific_name_recorded_T.F = !is.na(recorded_scientific_name),
+    recorded_scientific_name = if_else(
+      scientific_name_recorded_T.F,
+      stringi::stri_trans_totitle(recorded_scientific_name),
+      NA_character_
+    )
+  ) %>%
+  
+  # Extract common name
+  mutate(
+    common_name_clean = stringi::stri_trim_both(
+      stringi::stri_replace_first_regex(recorded_taxa_name_clean, "\\s*\\([^)]*\\)", "")
+    ),
+    common_name_clean = tolower(common_name_clean)
+  )
+
+
+# 4. REORDER COLUMNS -----------------
+
+GOC_Landings_clean <- GOC_Landings_clean %>%
+
+  select(
+    # General info
+    state, office_name, landing_site, landing_site_key, landing_site_primary, GoC, lat, long,
+    year, month,
+    receipt_date_fixed, period_start_fixed, period_end_fixed,
+    fleet, acuaculture_production, eu_rnpa, eu_name, vessel_rnpa, vessel_name,
+    
+    # Species info
+    recorded_taxa_group, recorded_taxa_name,
+    
+    # Cleaned / derived names
+    recorded_taxa_name_clean, recorded_scientific_name,
+    scientific_name_recorded_T.F, common_name_clean,
+    
+    # Keywords
+    keywords_1, keywords_2, keywords_3, keywords_4, keywords_5,
+    
+    # Landing details
+    landed_weight, live_weight, value
+ 
+  )
+
+# How many common names are there in this dataset?
+length(unique(GOC_Landings_clean$common_name_clean))
+length(unique(GOC_Landings_clean$recorded_taxa_group))
+# 734 common names (versus 973 with the less comprehensive keywords_list), over 57 taxonomic groups
+```
+
+```{r Check that this worked}
+TEST <- GOC_Landings_clean %>%
+  filter(str_detect(recorded_taxa_name, "ATUN ALETA AMARILLA"))
+```
+# Yes, it seems to have worked!
+
+## Save GOC_Landings_cleaned rds file
+# Revising this as of Mar 25, 2025: Fixing unicore on estimated_species_name
+```{r Save this dataframe - landings keywords & species for top groupings: Nov 10 2025}
+GOC_Landings_clean<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_KeywordsParsed_2000.present_EMF.Mar232026.rds"))
+# 3622776 obs., 34 vars.
+```
+# PART 1 COMPLETE.
+
+
+# PART 2: Create MASTER SPECIES KEY: by merging the skeleton with keys from Mar, & Hem ------------------------------
+```{r Skeleton of master key from GOC_Landings_clean dataframe}
+Master_SpKey_skeleton<- GOC_Landings_clean %>% select(recorded_taxa_group, recorded_taxa_name_clean, common_name_clean, scientific_name_recorded_T.F, recorded_scientific_name) %>% distinct()
+# 807 observations, 5 variables.
+```
+
+```{r Mar and Hem Species Keys}
+Erica_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Species_Keys/Erica_CONAPESCA_SpKey_IMPERFECT_Nov052025.csv")
+# # 600 obs of 17 variables
+
+Hem_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Species_Keys/Hem_CONAPESCA_SpKey_2018.csv")
+ # 8232 obs of 3 variables
+
+Mar_SpKey <- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Species_Keys/Mar_CONAPESCA_SpKey.csv")
+ # 443 obs of 30 variables
+```
+
+```{r Prepare species keys for merging}
+# MAR's KEY - THE IHH KEY
+Mar_SpKey <- Mar_SpKey %>%
+  mutate(common_name = tolower(common_name))
+
+Mar_SpKey_filtered <- Mar_SpKey %>% select(common_name, fishery, highest_taxonomic_id, highest_taxonomic_resolution, species, genus, family, order, class, functional_major_groups_sm= IHH_functional_major_groups_sm)
+
+Mar_SpKey_filtered <- Mar_SpKey_filtered %>%
+  select(common_name, fishery, highest_taxonomic_id, highest_taxonomic_resolution,
+         species, genus, family, order, class, functional_major_groups_sm) %>%
+  rename_with(~ paste0("IHH_", .x))
+# 443 obs of 10 variables
+
+# HEM's KEY
+Hem_SpKey <- Hem_SpKey %>%
+  mutate(common_name = tolower(common_name))
+
+# Fix the sharks...
+Hem_SpKey_filtered <- Hem_SpKey %>%
+  mutate(
+    common_name = if_else(
+      common_name == "tiburon",   # exact match only
+      "tiburon se",
+      common_name
+    )
+  )
+
+# Fix the rockfishes...
+Hem_SpKey_filtered <- Hem_SpKey_filtered %>%
+  mutate(
+    common_name = if_else(
+      common_name == "rocote",   # exact match only
+      "rocote se",
+      common_name
+    )
+  )
+
+# Fix the grunts...
+Hem_SpKey_filtered <- Hem_SpKey_filtered %>%
+  mutate(
+    common_name = if_else(
+      common_name == "ronco",   # exact match only
+      "ronco se",
+      common_name
+    )
+  )
+
+Hem_SpKey_filtered<- Hem_SpKey_filtered %>%
+  select(Hem_common_name= common_name, species) %>% 
+  distinct()
+
+Hem_SpKey_filtered <- Hem_SpKey_filtered %>%
+  mutate(
+    species = if_else(
+      str_detect(Hem_common_name, "\\bse\\b"),  # \\b ensures "se" is a whole word
+      "undetermined",
+      species
+    )
+  )
+
+# Fix the species de ornato...
+Hem_SpKey_filtered <- Hem_SpKey_filtered %>%
+  mutate(
+    species = if_else(
+      Hem_common_name == "especies de ornato",   # exact match only
+      "undetermined",
+      species
+    )
+  )
+
+Hem_SpKey_filtered<- Hem_SpKey_filtered %>%
+  select(Hem_common_name, species) %>%
+  distinct() %>%
+  group_by(Hem_common_name) %>%
+  mutate(species_num = row_number()) %>%
+  ungroup()
+
+# 1235 obs., 3 vars.
+
+Hem_SpKey_filtered <- Hem_SpKey_filtered %>%
+  pivot_wider(
+    names_from = species_num,
+    values_from = species,
+    names_prefix = "Hem_species_"
+  )
+# 695 obs., 21 vars.
+```
+
+```{r Merge}
+merged_SpKey_0 <- left_join(
+  Master_SpKey_skeleton,
+  Mar_SpKey_filtered,
+  by = c("common_name_clean" = "IHH_common_name")
+)
+
+Master_SpKey <- left_join(
+  merged_SpKey_0,
+  Hem_SpKey_filtered,
+  by = c("common_name_clean" = "Hem_common_name")
+)
+# 807 obs., 34 vars.
+```
+
+```{r MASTER SPECIES KEY (not fully cleaned)}
+# write.csv(Master_SpKey, "/home/ferrer/ohi_goc_prep/general/Species_Keys/Master_SpKey_Dec012025.csv", row.names = FALSE)
+```
+
+# PART 2 COMPLETE.
+
+# PART 3: Clean up and simplify the MASTER SPECIES KEY  ------------------------------
+```{r Simplify the master species key}
+# WHAT IS THE LOGIC?
+
+# If scientific_name_recorded_T.F == TRUE, then estimated_species_name = scientific_name_recorded and species_est_certainty = "virtually certain" and species_est_reasoning = "name was recorded in CONAPESCA".
+
+# If scientific_name_recorded_T.F == FALSE, then compare IHH_species to Hem_species_.
+
+# > If Hem_species_1 is NOT NA & IHH_species is NOT NA & IHH_species is a fuzzy match to any of Hem_species_ >> then estimated_species_name = IHH_species, species_est_certainty = "high" and species_est_reasoning = "logical match in both keys".
+
+# > If Hem_species_1 is NOT NA & IHH_species is NOT NA, but IHH_species is NOT a fuzzy match to any of Hem_species_ >> then estimated_species_name = IHH_species, species_est_certainty = "low", and species_est_reasoning = "mismatch between keys".
+
+# > If Hem_species_1 is NA but IHH_species is NOT NA >> then estimated_species_name = IHH_species, species_est_certainty = "high", and  = "match to IHH key".
+
+# > If Hem_species_1 is NOT NA & IHH_species is NA, then consider the species dictated by the rest of Hem's key: if Hem_species_2 is NA, then estimated_species_name = Hem_species_1, species_est_certainty = "high", and species_est_reasoning = "match to Hem's key"; but if Hem_species_2 is not NA, then estimated_species_name = "unknown", species_est_certainty = "medium", and species_est_reasoning = "conflicting matches in Hem's key and no data from IHH" 
+
+
+# APPLY THE LOGIC:
+
+# Hem species columns
+hem_cols <- paste0("Hem_species_", 1:20)
+
+# Compute estimated_species_name, species_est_certainty, and species_est_reasoning
+Master_SpKey_clean <- Master_SpKey %>%
+  rowwise() %>%
+  mutate(
+    hem_values = list(na.omit(c_across(all_of(hem_cols)))),  # all non-NA Hem species
+    
+    # Determine if IHH_species matches any Hem_species_ fuzzily
+    ihh_matches_hem = if(!is.na(IHH_species) & length(hem_values) > 0) {
+      any(stringdist::stringdist(IHH_species, hem_values, method = "jw") < 0.15)
+    } else {
+      FALSE
+    },
+    
+    # Main estimation logic
+    estimated_species_name = case_when(
+      
+      scientific_name_recorded_T.F ~ recorded_scientific_name,  # Case 1
+      
+      !is.na(IHH_species) & length(hem_values) > 0 & ihh_matches_hem ~ IHH_species,  # Case 2
+      
+      !is.na(IHH_species) & length(hem_values) > 0 & !ihh_matches_hem ~ IHH_species, # Case 3
+      
+      !is.na(IHH_species) & length(hem_values) == 0 ~ IHH_species,                   # Case 4
+      
+      is.na(IHH_species) & length(hem_values) == 1 ~ hem_values[1],                  # Case 5a
+      
+      is.na(IHH_species) & length(hem_values) > 1 ~ "unknown",                       # Case 5b
+      
+      TRUE ~ "unknown"
+    ),
+    
+    species_est_certainty = case_when(
+      scientific_name_recorded_T.F ~ "virtually certain",       # Case 1
+      !is.na(IHH_species) & length(hem_values) > 0 & ihh_matches_hem ~ "high confidence",    # Case 2
+      !is.na(IHH_species) & length(hem_values) > 0 & !ihh_matches_hem ~ "low confidence",    # Case 3
+      !is.na(IHH_species) & length(hem_values) == 0 ~ "high confidence",                     # Case 4
+      is.na(IHH_species) & length(hem_values) == 1 ~ "high confidence",                       # Case 5a
+      is.na(IHH_species) & length(hem_values) > 1 ~ "medium confidence",                       # Case 5b
+      TRUE ~ "not applicable"
+    ),
+    
+    species_est_reasoning = case_when(
+      scientific_name_recorded_T.F ~ "name was recorded in CONAPESCA",
+      !is.na(IHH_species) & length(hem_values) > 0 & ihh_matches_hem ~ "logical match in both keys",
+      !is.na(IHH_species) & length(hem_values) > 0 & !ihh_matches_hem ~ "mismatch between keys",
+      !is.na(IHH_species) & length(hem_values) == 0 ~ "match to IHH key",
+      is.na(IHH_species) & length(hem_values) == 1 ~ "match to Hem's key",
+      is.na(IHH_species) & length(hem_values) > 1 ~ "conflicting matches in Hem's key and no data from IHH",
+      TRUE ~ "no data in keys"
+    )
+  ) %>%
+  ungroup() %>%
+  select(-hem_values, -ihh_matches_hem)  # remove temporary helper columns
+```
+
+```{r NORMALIZE UNICODE and RE-ESTIMATE estimated_genus_name}
+#### UNDER CONSTRUCTION: NORMALIZE UNICODE and RE-ESTIMATE estimated_genus_name ####
+Master_SpKey_clean <- Master_SpKey_clean %>%
+  mutate(
+    estimated_species_name = stri_trans_nfkc(estimated_species_name), # normalize Unicode
+    estimated_species_name = trimws(estimated_species_name)           # remove leading/trailing spaces
+  )
+# 807 obs.
+```
+
+
+```{r A few summary stats}
+sum(is.na(Master_SpKey_clean$estimated_species_name)) # 0 rows without a species estimate
+sum(Master_SpKey_clean$estimated_species_name=="unknown") # 246 species unknown
+subset<- Master_SpKey_clean %>%
+  filter(estimated_species_name=="unknown")
+
+sum(is.na(Master_SpKey_clean$species_est_certainty)) # 0 rows without a species certainty estimate
+table(Master_SpKey_clean$species_est_certainty)
+  # high confidence    low confidence medium confidence    not applicable virtually certain 
+  #             317               168                29               217                76 
+
+sum(is.na(Master_SpKey_clean$species_est_reasoning)) # 0 rows without a reasoning
+table(Master_SpKey_clean$species_est_reasoning)
+
+# conflicting matches in Hem's key and no data from IHH 
+#                                                    29 
+#                            logical match in both keys 
+#                                                   134 
+#                                    match to Hem's key 
+#                                                   117 
+#                                      match to IHH key 
+#                                                    66 
+#                                 mismatch between keys 
+#                                                   168 
+#                        name was recorded in CONAPESCA 
+#                                                    76 
+#                                       no data in keys 
+#                                                   217 
+```
+
+```{r Let's review those that are uncertain and clarify them if possible}
+Master_SpKey_unknowns<- Master_SpKey_clean %>% filter(species_est_certainty== "not applicable")
+
+# Okay, a few of these unknowns can probably be resolved with my key, which I would imagine is slightly less reliable than Mar's and Hem's. Use my key to resolve these unknowns and figure out the rest later. (NOTE TO SELF)
+
+# Prepare my key for use:
+Erica_SpKey_filtered<-  Erica_SpKey %>%
+  filter(is.na(recorded_scientific_name)) %>%
+  mutate(recorded_species_name_clean = tolower(recorded_species_name_clean)) %>%
+  rename(Erica_common_name = recorded_species_name_clean, recorded_taxa_group = main_species_group)
+
+Erica_SpKey_filtered<- Erica_SpKey_filtered %>% 
+  select(recorded_taxa_group, Erica_common_name, species_estimated, genus_estimated, family_estimated, source_of_estimate) %>% 
+  distinct()
+# 222 obs., 6 vars.
+
+# Control against many-to-many matches by getting rid of rows in my key that are nearly identical
+Erica_SpKey_filtered <- Erica_SpKey_filtered %>%
+  group_by(recorded_taxa_group, Erica_common_name) %>%
+  slice(1) %>% # keep first match
+  ungroup()
+
+# Only add in my key info when IHH and Hem key info is missing: 
+Master_SpKey_clean <- Master_SpKey_clean %>%
+  # Separate unknowns from knowns
+  mutate(lookup_needed = estimated_species_name == "unknown") %>%
+  
+  # Left join only where lookup_needed is TRUE
+  left_join(
+    Erica_SpKey_filtered,
+    by = c("recorded_taxa_group", "common_name_clean" = "Erica_common_name")
+  ) %>%
+  
+  # Replace estimated_species_name only where it was unknown but a match exists
+  mutate(
+    estimated_species_name = if_else(
+      lookup_needed & !is.na(species_estimated),
+      species_estimated,
+      estimated_species_name
+    ),
+    # Optionally, update the certainty / reasoning
+    species_est_certainty = if_else(
+      lookup_needed & !is.na(species_estimated),
+      "medium confidence",
+      species_est_certainty
+    ),
+    species_est_reasoning = if_else(
+      lookup_needed & !is.na(species_estimated),
+      "match to Erica's key",
+      species_est_reasoning
+    )
+  ) %>%
+  
+  # Remove temporary and unnecessary columns
+  select(-lookup_needed, -species_estimated)
+
+# 807 obs. (as expected.) and 40 vars.
+
+#### UNDER CONSTRUCTION: NORMALIZE UNICODE and RE-ESTIMATE estimated_genus_name ####
+Master_SpKey_clean <- Master_SpKey_clean %>%
+  mutate(
+    estimated_species_name = stri_trans_nfkc(estimated_species_name), # normalize Unicode
+    estimated_species_name = trimws(estimated_species_name)           # remove leading/trailing spaces
+  )
+# 807 obs., 40 vars.
+```
+
+```{r New summary stats}
+sum(Master_SpKey_clean$estimated_species_name=="unknown") # 246 -> 233 species unknown
+
+table(Master_SpKey_clean$species_est_certainty)
+  # high confidence    low confidence medium confidence    not applicable virtually certain 
+  #             317               168                39               207                76 
+
+table(Master_SpKey_clean$species_est_reasoning)
+
+# conflicting matches in Hem's key and no data from IHH 
+#                                                    26 
+#                            logical match in both keys 
+#                                                   134 
+#                                  match to Erica's key 
+#                                                    13 
+#                                    match to Hem's key 
+#                                                   117 
+#                                      match to IHH key 
+#                                                    66 
+#                                 mismatch between keys 
+#                                                   168 
+#                        name was recorded in CONAPESCA 
+#                                                    76 
+#                                       no data in keys 
+#                                                   207
+```
+
+```{r Now extract information about genus and family, where possible}
+# WHAT IS THE LOGIC?
+
+# If species is known:
+# → estimated_genus_name = first word of species
+
+# If species unknown but IHH_genus available:
+# → estimated_genus_name = IHH_genus
+
+# If both unavailable:
+# → estimated_genus_name = genus unknown
+
+# If IHH_family exists:
+# → estimated_family_name = IHH_family
+
+# Else if Erica_family_estimated exists:
+# → estimated_family_name = Erica_family_estimated
+
+# Else if Erica_SpKey gives exactly one family per larger taxonomic grouping
+# → estimated_family_name = Erica_family_estimated
+# → reasoning: “unique family match from Erica's key”
+
+# Else
+# → estimated_family_name = family unknown
+
+
+# APPLY THE LOGIC:
+# --- Build the Erica single-family lookup -------------------------------------
+
+Erica_SpKey_simple <- Erica_SpKey %>% 
+  select(
+    recorded_taxa_group = main_species_group, 
+    Erica_family_estimated = family_estimated
+  ) %>%
+  distinct() %>%
+  group_by(recorded_taxa_group) %>%
+  filter(n_distinct(Erica_family_estimated) == 1) %>%
+  ungroup()
+
+
+Master_SpKey_clean <- Master_SpKey_clean %>%
+  
+  # ----------------------- GENUS LOGIC ----------------------------------------
+  mutate(
+    estimated_genus_name = case_when(
+      !is.na(estimated_species_name) & estimated_species_name != "unknown" ~ 
+        word(estimated_species_name, 1),             # species known → genus = first word
+      !is.na(IHH_genus) ~ IHH_genus,                 # fallback: IHH genus
+      TRUE ~ NA_character_                           # final fallback: genus unknown
+    ),
+    
+    genus_est_reasoning = case_when(
+      !is.na(estimated_species_name) & estimated_species_name != "unknown" ~
+        "genus derived from known species",
+      !is.na(IHH_genus) ~
+        "genus derived from IHH key",
+      TRUE ~
+        "genus unknown"
+    )
+  ) %>%
+  
+  
+  # ----------------------- FAMILY LOGIC ---------------------------------------
+  left_join(Erica_SpKey_simple, by = "recorded_taxa_group") %>%
+  mutate(
+    estimated_family_name = case_when(
+      !is.na(IHH_family) ~ IHH_family,                         # 1. direct from IHH
+      !is.na(Erica_family_estimated) ~ Erica_family_estimated, # 2. unique Erica match
+      !is.na(estimated_genus_name) ~ 
+        "family missing but genus available",                 # 3. genus known but no family
+      TRUE ~ NA_character_                                     # 4. completely unknown
+    ),
+    
+    family_est_reasoning = case_when(
+      !is.na(IHH_family) ~ "family derived from IHH key",
+      !is.na(Erica_family_estimated) ~ "unique family match from Erica's key",
+      !is.na(estimated_genus_name) ~ "family unknown but genus available",
+      TRUE ~ "family unknown"
+    )
+  ) %>%
+  
+  # remove columns that aren't necessary
+  select(-Erica_family_estimated, -genus_estimated, -family_estimated, -source_of_estimate)
+```
+
+```{r Clean MASTER SPECIES KEY}
+write.csv(Master_SpKey_clean, "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Species_Keys/CleanedMaster_SpKey_Mar252026.csv", row.names = FALSE)
+```
+
+# PART 3 COMPLETE. NEW SAVE AS OF Mar 25 2026.
+
+# FIXING MAJOR FUNCTIONAL GROUPS
+# NOTE TO SELF: UNDER CONSTRUCTION (Mar 25 2026)
+
+```{r Load MasterSpKey_pending}
+MasterSpKey_pending <- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Species_Keys/CleanedMaster_SpKey_Mar252026.csv")
+# 807 obs of 41 variables
+
+table(MasterSpKey_pending$recorded_taxa_group)
+```
+
+```{r Assign Major_Functional_Group computationally for all taxa exluding Special_Groups like otras nei ornatos etc.}
+# Split the OTRAS from everything else. They will require additional manual work.
+Special_groups <- c("OTRAS", "ESPECIE GENERICA", "FAUNA", "ORNATO", "PECES DE ORNATO", "NEI")
+
+NONOTRAS_MajorGroupKey <- MasterSpKey_pending %>%
+  filter(!recorded_taxa_group %in% Special_groups) %>%
+  select(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm) %>%
+  distinct(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm, .keep_all = TRUE)
+# 246 obs., 3 vars.
+
+NONOTRAS_MajorGroupKey$Major_Functional_Group = NA_character_  # initialize the Major_Functional_Group column
+NONOTRAS_MajorGroupKey$Assignment_for_Major_Functional_Group = NA_character_  # initialize the Assignment_for_Major_Functional_Group column
+
+# Here's the logic:
+# Step 1 → Assignment based on direct IHH data (strongest signal)
+# Step 2 → GENUS-LEVEL assignment (stronger signal)
+# Step 3 → for genus-level consistency
+# Step 4 → GROUP-LEVEL fallback (only if genus missing)
+
+# STEP 1: Assign Major_Functional_Group values based solely on the values assigned by the IHH major functional groups ----
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  mutate(
+    Major_Functional_Group = case_when(
+      !is.na(IHH_functional_major_groups_sm) ~ IHH_functional_major_groups_sm,
+      TRUE ~ Major_Functional_Group
+    ),
+    Assignment_for_Major_Functional_Group = case_when(
+      !is.na(IHH_functional_major_groups_sm) ~ "Assigned_Step_1: based directly on IHH_functional_major_group assignment for this genus in this group.",
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  )
+
+# STEP 2: Assign Major_Functional_Group values based on genus-level information (strong signal)
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  group_by(estimated_genus_name) %>%
+  mutate(
+    
+    # Determine the most common genus (genus_major) ONLY IF genus info is present (not NA nor NEI)
+    genus_major = {
+      genus_value <- first(estimated_genus_name)  # safer than cur_group()
+
+      if (!is.na(genus_value) && genus_value != "NEI") {
+
+        # Use IHH first (most reliable), fallback to existing Major_Functional_Group
+        x <- IHH_functional_major_groups_sm
+        x <- x[!is.na(x) & x != ""]
+
+        if (length(x) == 0) {
+          x <- Major_Functional_Group
+          x <- x[!is.na(x) & x != ""]
+        }
+
+        if (length(x) == 0) NA_character_ else {
+          names(which.max(table(x)))
+        }
+
+      } else {
+        NA_character_  # cannot derive functional group
+      }
+    },
+
+    # Assign Major_Functional_Group based on genus_major only if missing
+    Major_Functional_Group = case_when(
+      !is.na(genus_major) & is.na(Major_Functional_Group) ~ genus_major,
+      TRUE ~ Major_Functional_Group
+    ),
+
+    # Update assignment label
+    Assignment_for_Major_Functional_Group = case_when(
+      !is.na(genus_major) & is.na(Assignment_for_Major_Functional_Group) & !is.na(Major_Functional_Group) ~
+        "Assigned_Step_2: based on genus-level details; interpolated Major_Functional_Group based on records with matching genus name.",
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  ) %>%
+  ungroup() %>%
+  select(-genus_major)
+
+# STEP 3: Force genus-level consistency (except when genus = NA or NEI) ----
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  # Keep original Major_Functional_Group for comparison
+  mutate(old_Major_Functional_Group = Major_Functional_Group) %>%
+  
+  # Compute genus-level consensus for non-NA/NEI genera
+  group_by(estimated_genus_name) %>%
+  mutate(
+    genus_consensus_group = if(!is.na(first(estimated_genus_name)) & first(estimated_genus_name) != "NEI") {
+      # Get mode of Major_Functional_Group in the genus
+      vals <- Major_Functional_Group[!is.na(Major_Functional_Group)]
+      if(length(vals) == 0) NA_character_ else names(sort(table(vals), decreasing = TRUE))[1]
+    } else {
+      NA_character_
+    }
+  ) %>%
+  ungroup() %>%
+  
+  # Apply the consensus to all rows in the genus (if applicable)
+  mutate(
+    Major_Functional_Group = if_else(
+      !is.na(genus_consensus_group),
+      genus_consensus_group,
+      Major_Functional_Group
+    ),
+    
+    # Update Assignment_for_Major_Functional_Group if the value changed
+    Assignment_for_Major_Functional_Group = if_else(
+      !is.na(genus_consensus_group) &
+        (is.na(old_Major_Functional_Group) | old_Major_Functional_Group != Major_Functional_Group),
+      "Assigned_Step_3: forced genus-level consistency; if genus is equal then assume Major_Functional_Group is equal too.",
+      Assignment_for_Major_Functional_Group
+    )
+  ) %>%
+  select(-old_Major_Functional_Group, -genus_consensus_group)
+
+
+# STEP 4: Assign Major_Functional_Group values based on recorded_taxa_group fallback (weaker signal)
+# > If we don’t know anything yet, borrow a typical value from a reference to IHH_functional_major_groups.
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  group_by(recorded_taxa_group) %>%
+  mutate(
+    
+    # Take the most frequent non-NA value for IHH_functional_major_groups within the group
+    group_major = {
+      x <- IHH_functional_major_groups_sm
+      x <- x[!is.na(x) & x != ""]
+      if (length(x) == 0) NA_character_ else {
+        names(which.max(table(x)))
+      }
+    },
+
+    # Assign only to non-special groups and only if missing
+    Major_Functional_Group = if_else(
+      !(recorded_taxa_group %in% Special_groups) & is.na(Major_Functional_Group),
+      group_major,
+      Major_Functional_Group
+    ),
+
+    # Update assignment label
+    Assignment_for_Major_Functional_Group = if_else(
+      !(recorded_taxa_group %in% Special_groups) & is.na(Assignment_for_Major_Functional_Group) & !is.na(Major_Functional_Group),
+      "Assigned_Step_4: assigned Major_Functional_Group based on the average IHH functional group associated with this recorded_taxa_group.",
+      Assignment_for_Major_Functional_Group
+    )
+  ) %>%
+  ungroup() %>%
+  select(-group_major)
+
+# STEP 5: Enforce consistency for Major_Functional_Group at the recorded_taxa_group level in cases where genus = NA or NEI ----
+# > Now that we have some real assignments, make the group internally consistent.
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  mutate(old_Major_Functional_Group = Major_Functional_Group) %>%
+  
+  group_by(recorded_taxa_group) %>%
+  mutate(
+    taxa_group_consensus = if (any(is.na(estimated_genus_name) | estimated_genus_name == "NEI")) {
+      vals <- Major_Functional_Group[!is.na(Major_Functional_Group) & Major_Functional_Group != "NEI"]
+      if (length(vals) == 0) NA_character_ else names(sort(table(vals), decreasing = TRUE))[1]
+    } else {
+      NA_character_
+    },
+
+    # Apply only when genus or Major_Functional_Group is NA or NEI
+    Major_Functional_Group = if_else(
+      !is.na(taxa_group_consensus) & 
+        # THIS IS THE LINE!!
+        (is.na(estimated_genus_name) | estimated_genus_name == "NEI" | is.na(Major_Functional_Group) | Major_Functional_Group == "NEI"),
+      taxa_group_consensus,
+      Major_Functional_Group
+    ),
+    
+    # Step 5 assignment: robust to NAs
+    Assignment_for_Major_Functional_Group = if_else(
+      !is.na(taxa_group_consensus) &
+        (
+          (is.na(old_Major_Functional_Group) & !is.na(Major_Functional_Group)) |
+          (old_Major_Functional_Group == "NEI" & Major_Functional_Group != "NEI") |
+          (!is.na(old_Major_Functional_Group) & !is.na(Major_Functional_Group) & old_Major_Functional_Group != Major_Functional_Group)
+        ),
+      "Assigned_Step_5: enforced Major_Functional_Group consistency across recorded_taxa_group.",
+      Assignment_for_Major_Functional_Group
+    )
+  ) %>%
+  ungroup() %>%
+  select(-old_Major_Functional_Group, -taxa_group_consensus)
+
+
+# STEP 6: Manual patches for specific taxonomic groups and two typos ----
+unique(NONOTRAS_MajorGroupKey$recorded_taxa_group)
+# List all recorded_taxa_group values where Major_Functional_Group is NA
+unique(NONOTRAS_MajorGroupKey$recorded_taxa_group[is.na(NONOTRAS_MajorGroupKey$Major_Functional_Group)])
+
+# Split_Groups: groups of fish for which it is not possible to assign a taxonomic group with high accuracy based on recorded_taxa_group alone...
+# NOTE TO SELF: COME BACK TO THESE GROUPS WHEN / IF THERE'S TIME. Categorization across groups of fishes are still a little wrong tbh. - Mar 23 2026
+# A note about PETO: I feel pretty confident that PETO is not shark. I think Hem's key for Peto carrito is incorrect...
+# Because of this Lamna is incorrectly assigned as a demersal fish and not a shark.
+SplitGroup_list <- c("MOJARRA", "BAGRE", "CARPA", "PECES ORNATO")
+
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  mutate(
+    # Assign Major_Functional_Group and Assignment_for_Major_Functional_Group in one go:
+    
+    Major_Functional_Group = case_when(
+      
+      # Split groups, cannot be fully categorized:
+      recorded_taxa_group %in% SplitGroup_list & (is.na(estimated_genus_name) | estimated_genus_name == "NEI" | is.na(IHH_functional_major_groups_sm)) ~ "Marine or freshwater fishes NEI",
+      
+      # Specific taxa and groups for which there is no IHH data:
+      recorded_taxa_group == "ANCHOVETA" ~ "Pelagic marine fishes",
+      recorded_taxa_group %in% c("ALGAS", "SARGAZO") ~ "Marine algae",
+      recorded_taxa_group %in% c("PEPINO DE MAR", "ERIZO") ~ "Echinoderms",
+      recorded_taxa_group %in% c("TIBURON", "CAZON") ~ "Sharks",
+      recorded_taxa_group %in% c("CINTILLA") ~ "Pelagic marine fishes",
+      recorded_taxa_group %in% c("TRUCHA") ~ "Marine or freshwater fishes NEI",
+      
+      # Typos:
+      # estimated_genus_name == "Sphoeriodes" ~ "Marine fishes NEI",
+      estimated_genus_name == "Lujtanus" ~ "Demersal marine fishes",
+      TRUE ~ Major_Functional_Group  # keep existing if no condition matches
+    ),
+    
+    Assignment_for_Major_Functional_Group = case_when(
+      # For all manual patch conditions, assign the label
+      (recorded_taxa_group %in% SplitGroup_list & (is.na(estimated_genus_name) | estimated_genus_name == "NEI")) ~ "Assigned_Step_6: manual patch",
+      recorded_taxa_group == "ANCHOVETA" ~ "Assigned_Step_6: manual patch",
+      recorded_taxa_group %in% c("ALGAS", "SARGAZO") ~ "Assigned_Step_6: manual patch",
+      recorded_taxa_group %in% c("PEPINO DE MAR", "ERIZO") ~ "Assigned_Step_6: manual patch",
+      recorded_taxa_group %in% c("TIBURON", "CAZON") ~ "Assigned_Step_6: manual patch",
+      recorded_taxa_group %in% c("CINTILLA") ~ "Assigned_Step_6: manual patch",
+      recorded_taxa_group %in% c("TRUCHA") ~ "Assigned_Step_6: manual patch",
+      # estimated_genus_name == "Sphoeriodes" ~ "Assigned_Step_6: manual patch",
+      estimated_genus_name == "Lujtanus" ~ "Assigned_Step_6: manual patch or override",
+      TRUE ~ Assignment_for_Major_Functional_Group  # keep existing if no condition matches
+    )
+  )
+
+# STEP 3 REPEATED: Reinforce genus-level consistency (except when genus = NA or NEI) ----
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  # Keep original Major_Functional_Group for comparison
+  mutate(old_Major_Functional_Group = Major_Functional_Group) %>%
+  
+  # Compute genus-level consensus for non-NA/NEI genera
+  group_by(estimated_genus_name) %>%
+  mutate(
+    genus_consensus_group = if(!is.na(first(estimated_genus_name)) & first(estimated_genus_name) != "NEI") {
+      # Get mode of Major_Functional_Group in the genus
+      vals <- Major_Functional_Group[!is.na(Major_Functional_Group)]
+      if(length(vals) == 0) NA_character_ else names(sort(table(vals), decreasing = TRUE))[1]
+    } else {
+      NA_character_
+    }
+  ) %>%
+  ungroup() %>%
+  
+  # Apply the consensus to all rows in the genus (if applicable)
+  mutate(
+    Major_Functional_Group = if_else(
+      !is.na(genus_consensus_group),
+      genus_consensus_group,
+      Major_Functional_Group
+    ),
+    
+    # Update Assignment_for_Major_Functional_Group if the value changed
+    Assignment_for_Major_Functional_Group = if_else(
+      !is.na(genus_consensus_group) &
+        (is.na(old_Major_Functional_Group) | old_Major_Functional_Group != Major_Functional_Group),
+      "Assigned_Step_3: forced genus-level consistency; if genus is equal then assume Major_Functional_Group is equal too.",
+      Assignment_for_Major_Functional_Group
+    )
+  ) %>%
+  select(-old_Major_Functional_Group, -genus_consensus_group)
+
+
+# STEP 7: If Major_Functional_Group is NA then Assignment_for_Major_Functional_Group= "could not be assigned" ----
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  mutate(
+    Assignment_for_Major_Functional_Group = if_else(
+      is.na(Major_Functional_Group),
+      "Alert: Major_Functional_Group could not be assigned at present",
+      Assignment_for_Major_Functional_Group
+    )
+  )
+
+
+# STEP 8: Finally, assign estimated_taxa_group based on recorded_taxa_group and force the estimated_taxa_group to be equal for all records with the same genus (so genera like Lutjanus) ---- 
+
+# Initialize the new column
+NONOTRAS_MajorGroupKey$estimated_taxa_group = NA_character_
+
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  
+  # Fill in missing estimated_taxa_group using recorded_taxa_group
+  mutate(
+    estimated_taxa_group = if_else(
+      is.na(estimated_taxa_group),
+      recorded_taxa_group,
+      estimated_taxa_group
+    )
+  ) %>%
+  
+  # Enforce consistency at the genus level, ignoring NA or "NEI"
+  group_by(estimated_genus_name) %>%
+  mutate(
+    genus_consensus_taxa_group = if_else(
+      !is.na(estimated_genus_name) & estimated_genus_name != "NEI",
+      {
+        vals <- estimated_taxa_group[!is.na(estimated_taxa_group)]
+        if (length(vals) == 0) NA_character_ else names(sort(table(vals), decreasing = TRUE))[1]
+      },
+      NA_character_
+    ),
+
+    # Apply consensus only to valid genera
+    estimated_taxa_group = if_else(
+      !is.na(estimated_genus_name) & estimated_genus_name != "NEI",
+      genus_consensus_taxa_group,
+      estimated_taxa_group
+    )
+  ) %>%
+  ungroup() %>%
+  select(-genus_consensus_taxa_group)
+
+# Step 9: Rearrange for ease of reading ----
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  select(
+    recorded_taxa_group,
+    estimated_taxa_group,
+    estimated_genus_name,
+    IHH_functional_major_groups_sm,
+    Major_Functional_Group,
+    Assignment_for_Major_Functional_Group
+  )
+
+# STEP 10: Two manual patches for PETO and MERO
+# NOTE TO SELF: Honestly it would probably be easiest to just manually create a key assignment for the ~57 major groups in the CONAPESCA database... come back to this.
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  mutate(
+    estimated_taxa_group = case_when(
+      recorded_taxa_group == "TIBURON" & estimated_genus_name == "Lamna" ~ "TIBURON",
+      TRUE ~ estimated_taxa_group
+    ),
+    Major_Functional_Group = case_when(
+      recorded_taxa_group == "TIBURON" & estimated_genus_name == "Lamna" ~ "Sharks",
+      TRUE ~ Major_Functional_Group
+    ),
+    Assignment_for_Major_Functional_Group = case_when(
+      recorded_taxa_group == "TIBURON" & estimated_genus_name == "Lamna" ~ 
+        "Manual patch, come back to correctly file PETO and Lamna. Issue can be traced back to Hem's species key.",
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  )
+
+NONOTRAS_MajorGroupKey <- NONOTRAS_MajorGroupKey %>%
+  mutate(
+    estimated_taxa_group = case_when(
+      recorded_taxa_group == "BAQUETA" & estimated_genus_name == "Hyporthodus" ~ "MERO",
+      TRUE ~ estimated_taxa_group
+    ),
+    Major_Functional_Group = case_when(
+      recorded_taxa_group == "BAQUETA" & estimated_genus_name == "Hyporthodus" ~ "Demersal marine fishes",
+      TRUE ~ Major_Functional_Group
+    ),
+    Assignment_for_Major_Functional_Group = case_when(
+      recorded_taxa_group == "BAQUETA" & estimated_genus_name == "Hyporthodus" ~ 
+        "Manual patch, come back to assign BAQUETA with an earlier manual key later on.",
+      TRUE ~ Assignment_for_Major_Functional_Group
+    )
+  )
+    
+# 246 obs., 6 vars.
+table(NONOTRAS_MajorGroupKey$Major_Functional_Group)
+
+          #           Cephalopods                     Crustaceans          Demersal marine fishes 
+          #                     6                               7                              87 
+          #           Echinoderms               Freshwater fishes                    Marine algae 
+          #                     5                               6                               4 
+          #     Marine fishes NEI Marine or freshwater fishes NEI      Molluscs excl. Cephalopods 
+          #                     4                              15                              27 
+          # Pelagic marine fishes                          Sharks                 Shrimps, prawns 
+          #                    40                              31                              14 
+```
+
+```{r Assign Major_Functional_Group manually for OTRAS taxa}
+# Alright, we're going to need to treat the "OTRAS" with no genus as their own special thing. I'll need to assign a genus or Major_Functional_Group manually.
+
+# Split the OTRAS from everything else. They will require additional manual work.
+Special_groups <- Special_groups
+
+OTRAS_MajorGroupKey <- MasterSpKey_pending %>% filter(recorded_taxa_group %in% Special_groups) %>%
+  select(recorded_taxa_group, common_name_clean,
+         estimated_species_name, species_est_certainty, species_est_reasoning,
+         estimated_genus_name, genus_est_reasoning,
+         IHH_functional_major_groups_sm) %>%
+  distinct(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm, common_name_clean, .keep_all = TRUE)
+# 280 obs., 8 vars.
+```
+
+```{r Fill in what's happening with OTRAS based on NON OTRAS}
+# Create a reference dataframe from NONOTRAS:
+Genus_lookup <- NONOTRAS_MajorGroupKey %>%
+  filter(!is.na(estimated_genus_name)) %>%
+  filter(estimated_genus_name != "NEI") %>% # remove all NEI rows as they create a many to many matching error
+  select(
+    estimated_genus_name,
+    estimated_taxa_group,
+    Major_Functional_Group
+  ) %>%
+  distinct()
+# 130 obs., 3 vars.
+
+# Perform a left join to bring in data from the NON-OTRAS data frame:
+OTRAS_MajorGroupKey <- OTRAS_MajorGroupKey %>%
+  left_join(Genus_lookup, by = "estimated_genus_name")
+# 280 obs., 10 vars.
+
+# Lift value from IHH_functional_major_groups_sm to inform Major_Functional_Group wherever possible:
+OTRAS_MajorGroupKey <- OTRAS_MajorGroupKey %>%
+  mutate(
+    Major_Functional_Group = case_when(
+      is.na(Major_Functional_Group) & !is.na(IHH_functional_major_groups_sm) ~ IHH_functional_major_groups_sm,
+      TRUE ~ Major_Functional_Group  # otherwise keep existing value
+    )
+  )
+```
+
+```{r SANITY CHECK}
+# SANITY CHECK: Does Major_Functional_Group = IHH_functional_major_groups_sm in most cases? 
+OTRAS_MajorGroupKey_comparison <- OTRAS_MajorGroupKey %>%
+  mutate(
+    MajorGroup_match = Major_Functional_Group == IHH_functional_major_groups_sm
+  ) %>% 
+  filter(!MajorGroup_match)
+# Yes. 0 observations where these don't match.
+
+# Delete this to keep work space clean:
+rm(OTRAS_MajorGroupKey_comparison)
+```
+
+```{r Separate out the OTRAS that have info about Major_Functional_Group and those that don't}
+OTRAS_MajorGroup_completed.auto<- OTRAS_MajorGroupKey %>%
+  filter(!is.na(Major_Functional_Group))
+
+OTRAS_MajorGroup_completed.auto$Assignment_for_Major_Functional_Group <- c("Assigned based on genus name and IHH functional group")
+# 137 obs., 11 vars.
+
+OTRAS_MajorGroup_incomplete<- OTRAS_MajorGroupKey %>%
+  filter(is.na(Major_Functional_Group))
+# 143 obs., 10 vars.
+
+# Save this key to work on offline.
+```
+
+```{r # Save this key to work on offline}
+# # Save this key to work on offline. Compare this to the key I previously worked on.
+# OTRAS_MajorGroup_completed.manually<- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/OTRAS_MajorGroupKey_COMPLETED.MANUALLY_Mar132026.csv")
+# 
+# # Shave down OTRAS_MajorGroup_incomplete for a correct merge:
+# colnames(OTRAS_MajorGroup_incomplete)
+# OTRAS_MajorGroup_incomplete<- OTRAS_MajorGroup_incomplete %>%
+#   select(-IHH_functional_major_groups_sm, -estimated_taxa_group, -Major_Functional_Group)
+# 
+# # Fill in info to OTRAS_MajorGroup_incomplete from OTRAS_MajorGroup_completed.manually
+# OTRAS_MajorGroup_incomplete <- OTRAS_MajorGroup_incomplete %>%
+#   left_join(
+#     OTRAS_MajorGroup_completed.manually %>%
+#       select(recorded_taxa_group, estimated_taxa_group,
+#              common_name_clean, estimated_species_name,
+#              Manual_Classification_Notes,
+#              ornamentalFLAG_1,
+#              IHH_functional_major_groups_sm,
+#              Major_Functional_Group,
+#              Assignment_for_Major_Functional_Group),
+#     by = c("recorded_taxa_group", "common_name_clean")
+#   )
+# # 145 obs., 10 vars. (should be 143 obs, but charrito creates two duplicates)
+# 
+# test<- anti_join(
+#   OTRAS_MajorGroup_incomplete,
+#   OTRAS_MajorGroup_completed.manually,
+#   by = c("recorded_taxa_group", "common_name_clean")
+# )
+# 
+# # Save this dataframe and work on it offline:
+# write.csv(OTRAS_MajorGroup_incomplete,
+#   "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/OTRAS_MajorGroupKey_INCOMPLETE_Mar252026.csv",
+#   row.names = FALSE
+# )
+# # NOTE TO SELF: Charrito is a weird case here... Come back to this at some point - Mar 13 2026
+```
+
+```{r Load back in the OTRAS completed manually}
+# Work offline complete. Load in completed key.
+OTRAS_MajorGroup_completed.manually<- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/OTRAS_MajorGroupKey_COMPLETED.MANUALLY_Mar252026.csv")
+# 143 obs., 13 vars.
+
+rm(OTRAS_MajorGroup_incomplete)
+```
+
+#### SAVE GENUS TO MAJOR_FUNCTIONAL_GROUP KEY
+```{r Merge keys}
+OTRAS_MajorGroup_complete.merge <- bind_rows(
+  OTRAS_MajorGroup_completed.auto,
+  OTRAS_MajorGroup_completed.manually
+)
+# 280 obs. (as expected) and 13 vars.
+
+# Call this OTRAS_MajorGroupKey and then...
+OTRAS_MajorGroupKey<- OTRAS_MajorGroup_complete.merge
+
+OTRAS_MajorGroupKey$estimated_taxa_group<- "OTRAS"
+
+# ... delete unnecessary dataframes now that we have a merged frame:
+rm(OTRAS_MajorGroup_completed.auto, OTRAS_MajorGroup_completed.manually, OTRAS_MajorGroup_complete.merge)
+
+# NOTE TO SELF REGARDING NATURAL PRODUCTS: Missing a lot of ornamental flags. Come back to this key work when I switch to working on the NP goal.
+```
+
+```{r Merge the OTRAS and the NON-OTRAS keys}
+# Combine the two dataframes
+COMBINED_MajorGroupKey <- bind_rows(NONOTRAS_MajorGroupKey, OTRAS_MajorGroupKey)
+# 526 obs. (as expected)
+
+# Define preferred order (optional)
+preferred_order <- c(
+  "recorded_taxa_group",  "estimated_taxa_group",
+  "common_name_clean", "estimated_species_name", "estimated_genus_name", 
+  "IHH_functional_major_groups_sm",
+  "Major_Functional_Group", "Assignment_for_Major_Functional_Group",
+  "Manual_Classification_Notes", "species_est_certainty", 
+  "species_est_reasoning", "genus_est_reasoning", "ornamentalFLAG_1"
+)
+
+# Reorder columns (only those that exist in combined dataframe)
+COMBINED_MajorGroupKey <- COMBINED_MajorGroupKey[, intersect(preferred_order, colnames(COMBINED_MajorGroupKey))]
+
+COMBINED_MajorGroupKey <- COMBINED_MajorGroupKey %>%
+  mutate(
+    estimated_taxa_group = ifelse(
+      is.na(estimated_taxa_group) & !is.na(recorded_taxa_group),
+      recorded_taxa_group,
+      estimated_taxa_group
+    )
+  )
+
+# test <- COMBINED_MajorGroupKey %>%
+#   select(recorded_taxa_group, estimated_genus_name, common_name_clean) %>%
+#   mutate(
+#     distinct_key = if_else(
+#       recorded_taxa_group %in% Special_groups,
+#       common_name_clean,
+#       NA_character_
+#     )
+#   ) %>%
+#   distinct(recorded_taxa_group, estimated_genus_name, distinct_key, .keep_all = TRUE) %>%
+#   select(-distinct_key)
+# 501 obs.! Good!
+```
+
+```{r Finally, ensure that estimated_genus_name is correctly parsed from estimated_species_name}
+COMBINED_MajorGroupKey <- COMBINED_MajorGroupKey %>%
+  mutate(
+    estimated_genus_name = ifelse(
+      is.na(estimated_genus_name) & !is.na(estimated_species_name),
+      str_extract(estimated_species_name, "^[^ ]+"),  # extract the first word (genus)
+      estimated_genus_name  # keep existing if not NA
+    )
+  )
+
+# Ensure newly filled genus names are unicode normalized:
+COMBINED_MajorGroupKey$estimated_species_name <- stri_trans_nfc(COMBINED_MajorGroupKey$estimated_species_name)
+COMBINED_MajorGroupKey$estimated_genus_name <- stri_trans_nfc(COMBINED_MajorGroupKey$estimated_genus_name)
+```
+
+```{r Save this key!}
+# Save this key to work on offline
+write.csv(
+  COMBINED_MajorGroupKey,
+  "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/MajorGroupKey_Mar252026.csv", row.names = FALSE)
+```
+# COMPLETE ENOUGH FOR NOW! MAR 13 2026, Mar 24 2026, Mar 25 2026

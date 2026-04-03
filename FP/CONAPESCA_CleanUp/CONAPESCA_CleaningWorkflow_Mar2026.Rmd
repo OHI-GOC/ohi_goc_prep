@@ -1,0 +1,2654 @@
+################################################################################ 
+
+For questions contact: Erica Ferrer, Ph.D. at emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################ 
+
+# PRE-WORK ------------------------------
+
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+# STEP 1: Load in CONAPESCA RAW data, attend to records from all of Mexico. ------------------------------
+
+## STEP 1a: Work with CONAPESCA **RAW** data (records from all of Mexico):
+This very first step is completed in the file shared by Juan Carlos: "03_combine_landings_edited.R" file path: /home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/JC_Scripts_EMF.edited/03_combine_landings_edited.R
+
+## STEP 1b: Work with CONAPESCA **STITCHED** data (records from all of Mexico):
+
+A stitched version of these data is available as one single file: "AllMex_landings_2000_present_EMF_edited.rds" file path: /home/shares/ohi/OHI_GOC/goal_prep/fp/juan_carlos/AllMex_landings_2000_present_EMF_edited.rds
+
+```{r Load in CONAPESCA STITCHED data}
+All.Mex_Landings_2000.present<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/juan_carlos/AllMex_landings_2000_present_EMF_edited.rds"))
+# n = 12153879 obs., 20 vars.
+```
+
+
+## STEP 1c: Create weight_kg_corrected column (records from all of Mexico):
+
+```{r Landed weight correction}
+# Kind of looks like sometimes 'landed weight' is 'live weight' and vice versa. Fix this with weight_kg_corrected:
+All.Mex_Landings_2000.present$weight_kg_corrected <- ifelse(
+  All.Mex_Landings_2000.present$live_weight >= All.Mex_Landings_2000.present$landed_weight,
+  All.Mex_Landings_2000.present$live_weight,
+  All.Mex_Landings_2000.present$landed_weight
+)
+# n = 12153879 obs., 21 vars.
+```
+
+## STEP 1d: optional save...
+Pending, if needed.
+
+
+# STEP 2: Filter down CONAPESCA data to states in Northwest Mexico.  ------------------------------
+
+```{r Filter out data from Northwest Mexico}
+length(unique(All.Mex_Landings_2000.present$species_name)) 
+# 2052 unique species in all of Mexico.
+# But, we don't need species from ALL of Mexico, only the GoC region for now - so let's filter by state.
+
+States_of_Interest<- c("BAJA CALIFORNIA", "BAJA CALIFORNIA SUR", "SONORA", "SINALOA", "NAYARIT", "JALISCO")
+
+NW.Mex_Landings <- All.Mex_Landings_2000.present %>% filter(state %in% States_of_Interest)
+# n = 4713144 obs., 21 vars.
+
+length(unique(NW.Mex_Landings$species_name)) 
+# 1827 unique species in States of Interest.
+```
+
+
+# STEP 3: Attach lat-long data to NW Mexico dataframe. [UNDER CONSTRUCTION, Mar 25 2026] ------------------------------
+
+## STEP 3a: Attach lat-long and OHI_region info based on official landing site:
+NOTE TO SELF: Come back to this! The lat long keys are imperfect. We'll want to fix this as much as possible.
+```{r Append lat-long data to sites in Baja BCS Sonora and Sinaloa}
+# Filter OUT sites from Baja that are on the Pacific side using lat-Long file from Mel's repository:
+# NOTE TO SELF: THIS PART IS SUBJECT TO CHANGE once we integrate lat-long data from Hem. Mar 10 2026
+BajaSonora_LatLongKey<- read_csv("/home/frazier/ohi_goc_prep/FP/Exploratory_Research/FIS_TeamResearch/data/Baja_Sonora_states_key.csv")
+colnames(BajaSonora_LatLongKey) <- c("state", "landing_site", "OHI_rgn", "lat", "long", "GoC")
+
+Jalisco_LatLongKey<- read_csv(here("/home/frazier/ohi_goc_prep/FP/Exploratory_Research/FIS_TeamResearch/data/landing_sites_jalisco.csv"))
+colnames(Jalisco_LatLongKey) <- c("landing_site", "CONAPESCA_landing_key", "est_habitat", "lat", "long", "site_notes", "OHI_rgn", "state")
+
+
+#### CLEAN LAT-LONG KEYS: ####
+# Clean the Baja-Sonora key...
+BajaSonora_LatLongKey_clean <- BajaSonora_LatLongKey %>%
+  
+  # Normalize state names:
+  mutate(state = toupper(state)) %>%
+  
+  # Remove any rows where landing_site is NA (NAs cause matching issues later on):
+  filter(!is.na(landing_site)) %>%
+  
+  # Remove any direct duplicates of landing_site:
+  group_by(state, landing_site) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup()
+
+# Look into the rows that were removed in the de duplication of BajaSonora_LatLongKey...
+removed_rows <- anti_join(BajaSonora_LatLongKey, BajaSonora_LatLongKey_clean, 
+                          by = c("landing_site"))
+
+# Convert lat-long entries to numeric entries, accounting for unique cases where the minus (-) is actually an n dash or m dash:
+BajaSonora_LatLongKey_clean <- BajaSonora_LatLongKey_clean %>%
+  mutate(
+    long = as.numeric(str_replace_all(long, "[−–—]", "-")),
+    lat  = as.numeric(str_replace_all(lat, "[−–—]", "-"))
+  )
+
+# Clean the Jalisco key...
+Jalisco_LatLongKey_clean <- Jalisco_LatLongKey %>%
+  # Normalize state names
+  mutate(state = toupper(state)) %>%
+  
+  # Remove any rows where landing_site is NA (NAs cause matching issues later on):
+  filter(!is.na(landing_site)) %>%
+  
+  # Keep only one row per CONAPESCA_landing_key; if duplicate keys exist, keep first
+  group_by(CONAPESCA_landing_key) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup() %>%
+  
+  # Optional: remove any direct duplicates of landing_site if there are rows with NA in the CONAPESCA_landing_key
+  group_by(state, landing_site) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup()
+
+# Look into the rows that were removed in the de duplication of Jalisco_LatLongKey...
+removed_rows <- anti_join(Jalisco_LatLongKey, Jalisco_LatLongKey_clean, 
+                          by = c("CONAPESCA_landing_key", "landing_site"))
+
+# Convert lat-long entries to numeric entries, accounting for unique cases where the minus (-) is actually an n dash or m dash:
+Jalisco_LatLongKey_clean <- Jalisco_LatLongKey_clean %>%
+  mutate(
+    long = as.numeric(str_replace_all(long, "[−–—]", "-")),
+    lat  = as.numeric(str_replace_all(lat, "[−–—]", "-"))
+  )
+
+# Add the "GoC" helpful column here based on a latitude cut off for the Nayarit/Jalisco OHI region, region 9 starting at 20.40895:
+Jalisco_LatLongKey_clean <- Jalisco_LatLongKey_clean %>%
+  mutate(GoC = if_else(lat < 20.40895, "no", NA_character_))
+
+#### MERGE LAT-LONG KEYS TO CREATE MASTER LAT-LONG KEYS: ####
+Mels_LatLongKey_pending <- bind_rows(BajaSonora_LatLongKey_clean, Jalisco_LatLongKey_clean) %>%
+  filter(!is.na(landing_site)) %>%  # remove the NA from this data frame as this will create a many-to-many matching issue later on
+  mutate(long = as.numeric(long))
+# 1176 obs., 9 vars.
+
+# Remove unused data frames:
+rm(BajaSonora_LatLongKey, Jalisco_LatLongKey, removed_rows)
+
+# Take a look
+unique(Mels_LatLongKey_pending$state)
+unique(Mels_LatLongKey_pending$OHI_rgn)
+```
+
+# STEP 3b: Integrate Hem's Lat-Long key ------------------------------
+```{r Loading in Hem's lat-long}
+load("/home/shares/ohi/OHI_GOC/goal_prep/fp/hem_morzaria/georefcatchlocs.rda")
+Hems_LatLongKey0<- georefcatchlocs
+
+rm(georefcatchlocs)
+
+# Explore Hem's key
+colnames(Hems_LatLongKey0)
+
+# table(Hems_LatLongKey0$NOM_LOC) # This is the equivalent of landing_site.
+# table(Hems_LatLongKey0$NOM_ENT) # Okay, so fishery_office_ent is essentially the state. We can match by this column.
+# 
+# table(Hems_LatLongKey0$fishery_office)
+# table(Hems_LatLongKey0$fishery_office_ent) # Okay, so fishery_office_ent is also the state? I think this is the state of the fishery office. Ignore for now.
+
+# Before we can merge we need to re-name some columns:
+colnames(Hems_LatLongKey0)<- c("catch_code", "rnp_code", "landing_site", "state", "fishery_office", "fishery_office_ent", "lat_deci_Hem", "lon_deci_Hem" )
+```
+
+```{r Look through Hem's key}
+Hems_LatLongKey_simple<- Hems_LatLongKey0 %>% 
+  select(state, landing_site, fishery_office, lat_deci_Hem, lon_deci_Hem)
+# Could include or exclude fishery_office. These offices are no longer used by CONAPESCA.
+
+Hems_LatLongKey_simple<- Hems_LatLongKey_simple %>% 
+  distinct()
+# 829 obs.
+
+length(unique(Hems_LatLongKey_simple$landing_site))
+# 691 unique landing sites, at least by name, in Hem's key
+
+length(unique(Mels_LatLongKey_pending$landing_site))
+# 1068 "unique" landing sites, at least by name, in Mel's key
+
+# Let's take a closer look at landing sites with the same name but different lat-longs in both keys. Are they at least in the same state? Are their lat-longs similar?
+Site_duplicates_HemsKey <- Hems_LatLongKey_simple %>%
+  select(state, landing_site, fishery_office) %>%
+  distinct() %>%
+  group_by(state, landing_site) %>%
+  filter(n() > 1)
+# From this it is clear that Hem's key is assigning a unique lat-long value to every combination of state, landing_site, AND fishery_office. This creates a situation where we might have more than one unique combination of lat-long values per state and landing_site (due to multiple fishery offices); however, the lat-long values are fairly similar in most cases....
+
+Site_duplicates_OHIKey<- Mels_LatLongKey_pending[
+  duplicated(Mels_LatLongKey_pending[, c("state", "landing_site")]) |
+  duplicated(Mels_LatLongKey_pending[, c("state", "landing_site")], fromLast = TRUE),
+]
+# 0 duplicates. Yay!
+
+# EXAMPLE:
+subset<- Hems_LatLongKey_simple %>%
+  filter(landing_site== "EL SIARIC")
+# Lat-longs are all pretty similar here. I think it makes sense to just kind of pick one combo and move on. 
+
+# TAKING WHAT WE CAN FROM HEM'S KEY:
+# Let's take one representative value for lat-long from Hem's key and flag any duplicate site lat-longs that are more than 1 degree apart:
+
+# Define thresholds
+threshold_alert <- 2      # alert if differences > 2 degrees
+threshold_low <- 1        # low confidence if differences > 1 degree
+threshold_medium <- 0.5   # medium confidence if differences > 0.5 degree
+
+# Step 1: Compute lat/lon ranges and assign confidence levels
+Hems_LatLong_flags <- Hems_LatLongKey_simple %>%
+  group_by(state, landing_site) %>%
+  summarise(
+    lat_range = max(lat_deci_Hem, na.rm = TRUE) - min(lat_deci_Hem, na.rm = TRUE),
+    lon_range = max(lon_deci_Hem, na.rm = TRUE) - min(lon_deci_Hem, na.rm = TRUE),
+    lat_long_confidence = case_when(
+      lat_range > threshold_alert | lon_range > threshold_alert ~
+        "alert 3: multiple lat-long values in Hem's key that are more than 2 degrees apart",
+      lat_range > threshold_low | lon_range > threshold_low ~
+        "alert 2: multiple lat-long values in Hem's key that are more than 1 degree apart",
+      lat_range > threshold_medium | lon_range > threshold_medium ~
+        "alert 1: multiple lat-long values in Hem's key that are more than 0.5 degree apart",
+      TRUE ~ "high confidence"
+    ),
+    .groups = "drop"
+  )
+
+# Step 2: Keep a representative lat-long (first occurrence)
+Hems_LatLongKey_compressed <- Hems_LatLongKey_simple %>%
+  group_by(state, landing_site) %>%
+  slice(1) %>%
+  ungroup()
+
+# Step 3: Merge the confidence/alert information
+Hems_LatLongKey_compressed <- Hems_LatLongKey_compressed %>%
+  left_join(Hems_LatLong_flags %>% select(state, landing_site, lat_long_confidence),
+            by = c("state", "landing_site"))
+
+# SANITY CHECK: Looks good!
+print(Hems_LatLongKey_compressed)
+# 724 obs. of 5 variables
+
+# SANITY CHECK: Number of unique state + landing_site combinations
+n_unique_sites <- Hems_LatLongKey_compressed %>%
+  distinct(state, landing_site) %>%
+  nrow()
+# 724 unique state-landing_site combinations.
+
+# remove dataframes to keep workspace clean:
+rm(Hems_LatLong_flags, Hems_LatLongKey_simple, 
+   Site_duplicates_HemsKey, Site_duplicates_OHIKey,
+   subset)
+```
+
+```{r Create a backbone of a key to merge to}
+Hems_LatLongKey_compressed # 724 obs. of 6 variables
+Mels_LatLongKey_pending # 1176 obs. of 9 variables
+
+# Shave down Mel's key:
+Mels_LatLongKey_simple<- Mels_LatLongKey_pending %>%
+  select(state, landing_site, lat, long, OHI_rgn, GoC, est_habitat, site_notes)
+colnames(Mels_LatLongKey_simple)<- c("state", "landing_site", "lat_Mel", "lon_Mel", "OHI_region_draft", "GoC", "est_habitat", "site_notes_Mel")
+# 1176 obs. of 8 variables
+table(Mels_LatLongKey_simple$GoC)
+# 400 sites in the GoC, 588 sites likely not in the GoC
+
+# Create a backbone to merge to...
+colnames(NW.Mex_Landings)
+
+LatLong_merge.skeleton<- NW.Mex_Landings %>%
+  select(state, landing_site) %>%
+  distinct()
+# 2046 distinct state-landingsite combos in (NW Mexico) that need to be filled using information from Hem's key or Mel's key. Privilege information from Hem's key.
+
+# LOGIC:
+# Take information from Hem's key and Mels key to populate the LatLong_merge.skeleton but in a preferential order. First, populate LatLong_merge.skeleton with information from Mel's key. Then, if landing_site information is available from Hem's key, supersede the state and landing_site info given by Mel's key. 
+# If the lat-long values from Hem's key are non-NA and > 2 degrees different from Mel's non-NA lat-long values assign a lat.long_confidence of "low confidence, the lat-long values in Hem's key do not match the lat-long values in Mel's key by more than 2 degrees.
+
+# Start with the skeleton
+LatLong_merged <- LatLong_merge.skeleton %>%
+  # Join Mel's key first (preferential population)
+  left_join(Mels_LatLongKey_simple, by = c("state", "landing_site")) %>%
+  # Join Hem's key
+  left_join(Hems_LatLongKey_compressed %>%
+              select(state, landing_site, lat_deci_Hem, lon_deci_Hem, lat_long_confidence),
+            by = c("state", "landing_site")) %>%
+  mutate(
+    # Determine if Hem should override Mel
+    use_HemsKey = !is.na(lat_deci_Hem) & !is.na(lon_deci_Hem),
+    
+    # Compute difference between Hem and Mel
+    lat_diff = ifelse(!is.na(lat_deci_Hem) & !is.na(lat_Mel), abs(lat_deci_Hem - lat_Mel), 0),
+    lon_diff = ifelse(!is.na(lon_deci_Hem) & !is.na(lon_Mel), abs(lon_deci_Hem - lon_Mel), 0),
+    
+    # Decide final lat/lon
+    lat_final = case_when(
+      use_HemsKey & lat_diff <= 2 & lon_diff <= 2 ~ lat_deci_Hem,  # Hem overrides when reasonable
+      TRUE ~ lat_Mel  # Otherwise, keep Mel
+    ),
+    lon_final = case_when(
+      use_HemsKey & lat_diff <= 2 & lon_diff <= 2 ~ lon_deci_Hem,
+      TRUE ~ lon_Mel
+    ),
+    
+    # Decide final confidence
+    lat_long_confidence = case_when(
+      use_HemsKey & (lat_diff > 2 | lon_diff > 2) ~
+        "alert 4: the lat-long values in Hem's key do not match the lat-long values in Mel's key by more than 2 degrees",
+      use_HemsKey & (lat_diff <= 2 & lon_diff <= 2) ~ lat_long_confidence,  # keep Hem's original
+      TRUE ~ NA_character_  # default when using Mel or no Hem info
+    )
+  )
+
+# Great! Seems like this worked. 
+table(LatLong_merged$lat_long_confidence)
+table(LatLong_merged$GoC)
+
+#                             alert 1: multiple lat-long values in Hem's key that are more than 0.5 degree apart 
+#                                                                                                             21 
+#                               alert 2: multiple lat-long values in Hem's key that are more than 1 degree apart 
+#                                                                                                             19 
+#                              alert 3: multiple lat-long values in Hem's key that are more than 2 degrees apart 
+#                                                                                                             11 
+# alert 4: the lat-long values in Hem's key do not match the lat-long values in Mel's key by more than 2 degrees 
+#                                                                                                             40 
+#                                                                                                high confidence 
+#                                                                                                            499
+```
+
+```{r Clean up key before export}
+LatLongKey_finalized<- LatLong_merged
+# 2046 obs., 13 vars.
+
+colnames(LatLongKey_finalized)
+
+LatLongKey_finalized<- LatLongKey_finalized %>% 
+  select(state, landing_site, GoC, est_habitat, 
+         lat_final, lon_final, lat_long_confidence, lat_deci_Hem, lon_deci_Hem, lat_Mel, lon_Mel, 
+         OHI_region_draft, site_notes_Mel)
+
+colnames(LatLongKey_finalized)<- c("state", "landing_site", "inside_GOC", "est_habitat", "lat_final", "lon_final", "FLAGS", "HemKey_lat", "HemKey_lon", "MelKey_lat", "MelKey_lon", "OHI_region_draft", "site_notes_Mel")
+
+sum(is.na(LatLongKey_finalized$lat_final))
+# 680 out of 2026 sites are missing lat-long info. Primarily in Sinaloa and Nayarit, which makes some sense for our purposes.
+
+subset<- LatLongKey_finalized %>% 
+  filter(is.na(lat_final))
+table(subset$state)
+    # BAJA CALIFORNIA BAJA CALIFORNIA SUR             JALISCO             NAYARIT             SINALOA              SONORA 
+    #              54                  17                  25                 193                 324                  67
+
+# remove dataframes to keep workspace clean:
+rm(subset, 
+   Hems_LatLongKey0, Hems_LatLongKey, Hems_LatLongKey_compressed, Hems_LatLong_flags, Hems_LatLongKey_simple,
+   BajaSonora_LatLongKey, BajaSonora_LatLongKey_clean,
+   Jalisco_LatLongKey, Jalisco_LatLongKey_clean,
+   LatLong_merge.skeleton, LatLong_merged,
+   Mels_LatLongKey_pending, Mels_LatLongKey_simple)
+
+rm(n_unique_sites, threshold_alert, threshold_low, threshold_medium)
+```
+
+```{r Export this new lat-long key}
+# Save this dataframe:
+write.csv(LatLongKey_finalized, "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Sites_LatLongKey_Apr22026.csv", row.names = FALSE)
+# 2046 obs., 13 vars.
+```
+
+# NOT TO SELF: This integration should move to the .rmd file "CONAPESCA_CreatingLatLongKey_Mar2026.Rmd" [PENDING, Apr 2 2026]
+found /home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys
+
+# NOTE TO SELF: Will want to regenerate fishery landings files with new lat-long data. - Mar 25 2026. [COMPLETE Apr 2 2026.]
+
+# STEP 3c: Add lat-long and OHI_region info to landings data ------------------------------
+```{r OHI LatLongKey_finalized and RegionKey_pending}
+# Final lat-long key (subject to change as Apr 2 2026):
+LatLongKey_finalized<- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Sites_LatLongKey_Apr22026.csv")
+# 2046 obs., 13 vars.
+
+# My regional key (temporary, subject to change, UNDER CONSTRUCTION):
+RegionKey_pending<- read_csv(here("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/RegionKey_UNDERCONSTRUCTION_Mar102026.csv"))
+# 14 obs., 6 vars.
+# Previously: RegionKey_UNDERCONSTRUCTION_Dec012025.csv
+
+colnames(RegionKey_pending)
+colnames(RegionKey_pending) <- c("state", "OHI_region_draft", "OHI_rgn_number", "OHI_rgn_name", "exclude_rgn", "OHI_rgn_notes")
+```
+
+```{r Append lat-long and OHI_region info to landings data}
+# Append lat-long info to landings data:
+temp_df <- NW.Mex_Landings %>%
+  left_join(
+    LatLongKey_finalized,
+    by = c("state", "landing_site")  # matching columns
+  )
+# 4713144 obs., 32 vars.
+
+table(temp_df$inside_GOC)
+# 1090368 "no" not in the GOC.
+
+# Append RegionKey_pending info to landings data:
+temp_df <- temp_df %>%
+  left_join(
+    RegionKey_pending,
+    by = c("state", "OHI_region_draft")  # matching columns
+  )
+# 4713144 obs., 36 vars.
+table(temp_df$inside_GOC)
+# 1090368 "no" not in the GOC - same as before - as we'd expect!
+
+colnames(temp_df)
+
+# Looking into the exclude_rgn column:
+test<- temp_df %>%
+  filter(exclude_rgn=="exclude")
+
+table(test$inside_GOC)
+table(test$state)
+table(test$OHI_rgn_number)
+  # BCS_Region_3_4_TBD  Region_1_2_Baja_TBD Region_9_Jalisco_TBD 
+  #             184929                39899               156952 
+
+
+NW.Mex_Landings<- temp_df
+# 4713144 obs., 36 vars.
+
+# Delete temp_df, not needed anymore.
+rm(temp_df)
+```
+
+## STEP 3d: Save the NW Mexico landings appended with lat-long info in a separate .rds file:
+```{r Save the Northwest Mexico dataframe: Mar 11 2026}
+saveRDS(NW.Mex_Landings, file="/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/NWMex_Landings_2000.present_EMF.Apr22026.rds")
+# 4713144 obs., 36 vars.
+```
+
+# STEP 4: Filter down to sites in the GOC based on lat-long data. ------------------------------
+# Updated to include lat-longs from Hem's key as of April 2 2026.
+
+```{r Load NW.Mex_Landings if needed}
+NW.Mex_Landings<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/NWMex_Landings_2000.present_EMF.Apr22026.rds"))
+# 4713144 obs., 36 vars.
+```
+
+## STEP 4a: Exclude all sites that definitely AREN'T in the Gulf, leave the others for now...
+NOTE TO SELF: Additional research will be required for some landing sites. Details pending additional lat-long key work. See notes here (as of Mar 11 2026): https://docs.google.com/document/d/1ANHEdRi8aWC0qLNaM1_c_nLtn5GihTFgHDcU96bry5Y/edit?tab=t.0
+```{r filter down data to only the GOC}
+# Generate filtered landings data for the GoC:
+GOC_Landings <- NW.Mex_Landings %>%
+  filter(inside_GOC != "no" | is.na(inside_GOC))
+# 3622776 obs., 35 vars.
+
+# Check that this all makes sense:
+length(unique(GOC_Landings$species_name))
+length(unique(GOC_Landings$main_species_group))
+# 1703 unique species from 57 main species groups in the Gulf of California, keeping in mind that these are not really SPECIES (per se) but rather log-book entries for species.
+
+# trim dataframe if desired:
+colnames(GOC_Landings)
+
+GOC_Landings<- GOC_Landings %>%
+  select(-c(HemKey_lat, HemKey_lon,
+            MelKey_lat, MelKey_lon,
+            site_notes_Mel)) %>%
+  rename(est_latlon_FLAG= FLAGS,
+         est_lat= lat_final,
+         est_lon= lon_final)
+# 3622776 obs., 31 vars. (-5 columns)
+```
+NOW 1703 unique species in the Gulf of California according to Juan Carlos' version of the CONAPESCA data base, keeping in mind that these are not really SPECIES, per se, but rather log-book entries for species.
+
+## STEP 4b: Save the GOC_Landings dataframe as a separate .rds file:
+```{r Save the GOC_Landings dataframe: Mar 11 2026}
+saveRDS(GOC_Landings, file="/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_2000.present_EMF.Apr22026.rds")
+# 3622776 obs., 31 vars.
+# Previous iteration: GOC_FIS.landings_CLEAN_as.of.Dec092025.rds
+```
+
+```{r Clean workspace as needed}
+# remove dataframes (as needed) to keep workspace clean:
+rm(All.Mex_Landings_2000.present, LatLongKey_finalized, RegionKey_pending)
+```
+
+
+# > IF SKIPPING STEPS 1-4 - curation of raw data files and the landings dataframe, then move to: : ------------------------------
+
+# STEP 5: Separate out key words from the official record for common name. ------------------------------
+
+# Step 5a: Load in GOC_Landings dataframe
+```{r Load GOC_Landings if needed}
+GOC_Landings<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_2000.present_EMF.Apr22026.rds"))
+# 3622776 obs., 31 vars.
+```
+
+Keeping in mind that some key terms reflect animal parts but are actually part of the species common name like "aleta de" versus "aleta blanca"
+
+** QUICK SANITY CHECK: Is "aleta de aleta" an issue? Short answer is no; "aleta de aleta" does not seem to be an issue.
+GOC_Landings %>%
+  rename(recorded_taxa_name = species_name) %>%
+  mutate(
+    aleta_count = stringi::stri_count_fixed(recorded_taxa_name, "ALETA")
+  ) %>%
+  count(aleta_count)
+
+```{r Filter out keywords from recorded_taxa_name to get recorded_taxa_name_clean}
+
+# PART A. Keyword list [UNDER CONSTRUCTION] -----------------
+
+# NOTE: Keyword list excludes "ALETA" which is handled separately.
+
+Keyword_list <- c(
+# Processing state or product form (e.g., frozen, full fish, filleted, beheaded, dried, etc.):
+  "S.C.", "S/C", "S",
+  "FRESCO", "FRESCA", "FCA", "FCO", "FC",
+  "ECO",
+  "CONG", "CONGELADO",
+  "SECO DE", "SECA", "SECA DE", "SECO", "SECO DE",
+  "COCINERO", "COCIDO", "COCIDA", "COCIDAS", "ASADO",
+  "ENTERO", "ENTERA", "IND", "ENT",
+  "FILETE", "FILETE DE", "ECA", "FILETE DE ECO", "DESHUESADA", "CARNE", "CARNE DE",
+  "DESCABEZADO", "DES", "DSC", "DESC", "DESV", "DESVICERADO",
+
+# Animal parts:
+  "MANTO", "MANTO DE",
+  "PULPA DE", "PULPA FRESCA", "PULPO DE", 
+  "POLVO DE",
+  "TENTACULOS DE", "TUBO DE", "TUBO",
+  "CABEZA DE", "BUCHE", "BUCHE DE", "TRIPA DE", "COLAS DE", "MANOS DE", "MANOS",
+  "ANCAS DE", "ANCAS", "ANCA",
+  "PIEL DE ECA", "PIEL DE SECA", "PIEL DE", "PIEL",
+
+# Remove ALETA from main keywords; we'll handle these keywords separately:
+  #"ALETA", "ALETA ECA DE", "ALETA FCA DE"
+
+# Shells and pearls:
+  "CONCHA DE", "CONCHA", "CONCHA NACAR",
+  "PERLAS", "MEDIAS PERLAS",
+
+# From where / habitat type:
+  "DE ALTA MAR",
+  "DE AGUA DULCE",
+
+# Live culture or cultivation techniques:
+  "VIVO", "VIVA", "VIVAS", "VIVITA",
+  "DE CULTIVO", "DE CULTIVO VIVO", "CULTIVADAS",
+  "ABASTO RANCHO", "RANCHO",
+
+# Eggs:
+  "HUEVA DE",
+
+# Used as bait:
+  "CARNADA", "P/CARNADA",
+
+# Other:
+  "NO APTO PARA EMPAQUE"
+)
+
+# 81 keywords as of Mar 23 2026.
+
+# Order the key words longest first (note that this is necessary for the next steps):
+Keyword_list <- Keyword_list[order(nchar(Keyword_list), decreasing = TRUE)]
+
+# Escape regex meta-characters:
+Keyword_list_escaped <- stringi::stri_replace_all_regex(
+  Keyword_list, "([.|(){}+*?^$\\[\\]\\\\])", "\\\\$1"
+)
+
+# Final regex:
+Keyword_pattern <- paste0(
+  "(?<![A-Za-z0-9])(",
+  paste(Keyword_list_escaped, collapse = "|"),
+  ")(?![A-Za-z0-9])"
+)
+
+
+# PART B. Flag special "ALETA" phrases (handled differently from other key words) -----------------
+special_aleta_cases <- c("BLANCA", "AMARILLA", "CORTA", "AZUL")
+
+remove_aleta_except_special <- function(x) {
+  stringi::stri_replace_all_regex(
+    x,
+    pattern = paste0("\\bALETA\\b(?!\\s+(?:", paste(special_aleta_cases, collapse = "|"), "))"),
+    replacement = "",
+    vectorize_all = FALSE
+  )
+}
+
+# NOTE TO SELF: How did I get this list of key words originally? I think I started out with some preliminary version of the separate, parse functionality, quickly spotted the beginnings of a keywords list and then grew the list over time. Come back to this at some point to recreate this early part of the workflow to document it (reproducibility).
+```
+
+# STEP 5b: Separate out keywords from the original landing record using the parse regex in PART C:
+```{r Separate keywords from landing record based on parse function}
+
+# PART C. MAIN PARSING PIPELINE -----------------
+# RUN TIME= 5-6 min, optimized but still computationally heavy
+
+GOC_Landings_parsed <- GOC_Landings %>%
+  
+  # Rename columns:
+  rename(
+    recorded_taxa_name = species_name,
+    recorded_taxa_group = main_species_group
+  ) %>%
+  
+  # Extract keywords:
+  mutate(
+    keywords_list = stringi::stri_extract_all_regex(recorded_taxa_name, Keyword_pattern)
+  ) %>%
+  mutate(keywords_list = map(keywords_list, ~ { length(.x) <- 5; .x })) %>%
+  unnest_wider(keywords_list, names_sep = "_") %>%
+  rename_with(~ paste0("keywords_", 1:5), starts_with("keywords_list_")) %>%
+  
+  # Clean recorded_taxa_name:
+  mutate(
+    recorded_taxa_name_clean = recorded_taxa_name %>%
+      remove_aleta_except_special() %>%                      # Remove ALETA unless special
+      stringi::stri_replace_all_regex(Keyword_pattern, "") %>% # Remove other keywords
+      stringi::stri_replace_all_regex("\\b(Y|DE)\\b", "") %>%   # Remove standalone modifiers like Y / DE
+      stringi::stri_replace_all_regex("P\\s*/\\s*", "") %>%       # remove P/ or P /
+      stringi::stri_replace_all_regex("[.,/\\\\]+", " ") %>%      # Remove punctuation
+      str_squish()
+  ) %>%
+  
+  # Extract scientific name:
+  mutate(
+    recorded_scientific_name = stringi::stri_extract_first_regex(recorded_taxa_name_clean, "\\(([^)]+)\\)") %>%
+      stringi::stri_replace_all_regex("\\(|\\)", ""),
+    scientific_name_recorded_T.F = !is.na(recorded_scientific_name),
+    recorded_scientific_name = if_else(
+      scientific_name_recorded_T.F,
+      stringi::stri_trans_totitle(recorded_scientific_name),
+      NA_character_
+    )
+  ) %>%
+  
+  # Extract common name:
+  mutate(
+    common_name_clean = stringi::stri_trim_both(
+      stringi::stri_replace_first_regex(recorded_taxa_name_clean, "\\s*\\([^)]*\\)", "")
+    ),
+    common_name_clean = tolower(common_name_clean)
+  )
+# 3622776 obs., 40 vars.
+
+
+# PART D. Trim and reorder columns -----------------
+colnames(GOC_Landings_parsed)
+
+GOC_Landings_parsed <- GOC_Landings_parsed %>%
+
+  select(
+    # General info from record:
+    state, office_name, landing_site, landing_site_key, 
+    est_lat, est_lon, est_latlon_FLAG, inside_GOC, est_habitat,
+    year, month,
+    receipt_date_fixed, period_start_fixed, period_end_fixed,
+    fleet, acuaculture_production, eu_rnpa, eu_name, vessel_rnpa, vessel_name,
+    
+    # Species info from record:
+    recorded_taxa_group, recorded_taxa_name,
+    
+    # Cleaned and derived names:
+    recorded_taxa_name_clean, recorded_scientific_name,
+    scientific_name_recorded_T.F, common_name_clean,
+    
+    # Keywords that have been parsed:
+    keywords_1, keywords_2, keywords_3, keywords_4, keywords_5,
+    
+    # Landing details from record:
+    value, landed_weight, live_weight, weight_kg_corrected,
+    
+    # OHI region and notes:
+    OHI_rgn_number, OHI_region_draft ,OHI_rgn_name, OHI_rgn_notes, exclude_rgn
+ 
+  )
+# 3622776 obs., 40 vars.
+
+# How many common names are there in this data frame?
+length(unique(GOC_Landings_parsed$common_name_clean))
+length(unique(GOC_Landings_parsed$recorded_taxa_group))
+# NOW 732 common names (previously 973 with the less comprehensive keywords_list), over 57 taxonomic groups
+```
+
+## VIEW ALL KEY WORDS... SANITY CHECKS: Did this work as expected? Does the Keyword_list need more work?
+```{r SANITY CHECK 1: Investigating Keywords}
+# Extract all unique keywords from keyword columns 1 through 5. Delete exact duplicates. 
+Keyword_vector <- GOC_Landings_parsed %>%
+  select(keywords_1:keywords_5) %>%
+  unlist() %>%
+  unique() %>%
+  na.omit()
+
+# Why is Keyword_vector shorter than main Keyword_list?
+setdiff(Keyword_list, Keyword_vector)
+# 8 keywords that aren't featured in the parsed data set:
+# "FILETE DE ECO", "PIEL DE ECA", "MANTO DE", "TUBO DE", "RANCHO", "BUCHE", "ANCAS", "ECO", "ECA"    
+
+# Example for "TUBO DE"
+GOC_Landings_parsed %>%
+  select(recorded_taxa_name) %>%
+  filter(str_detect(recorded_taxa_name, regex("TUBO", ignore_case = TRUE)))
+
+# Example for "RANCHO"
+GOC_Landings_parsed %>%
+  select(recorded_taxa_name) %>%
+  filter(str_detect(recorded_taxa_name, regex("RANCHO", ignore_case = TRUE)))
+
+# Longest-first ordering in the regex ensures: multi-word phrases match fully BEFORE matching component words.
+# Component words will not appear separately in the extraction. So, for example, "VIVO P/ABASTO RANCHO" gets abstracted as "VIVO" and "ABASTO RANCHO" before "RANCHO" can be extracted.
+
+# >> This is why my unique keyword vector has fewer elements than your list of 81 — some keywords are never extracted as standalone because they are “absorbed” into longer matches.
+```
+
+```{r SANITY CHECK 2: Did we properly keywords and modifiers from recorded_taxa_name_clean?}
+# Look for "DE" or "P/" as a full word
+DE_remaining <- GOC_Landings_parsed %>%
+  filter(str_detect(recorded_taxa_name_clean, "\\bDE\\b"))
+P_remaining <- GOC_Landings_parsed %>%
+  filter(str_detect(recorded_taxa_name_clean, "\\bP\\b"))
+
+# Count how many rows
+nrow(DE_remaining)
+nrow(P_remaining)
+# Count = 0, good.
+
+# Rows where "NACAR" appears anywhere (case-insensitive)
+NACAR_remaining <- GOC_Landings_parsed %>%
+  filter(str_detect(recorded_taxa_name_clean, regex("NACAR", ignore_case = TRUE)))
+
+# Count how many rows
+nrow(NACAR_remaining)
+# Count = 0, good.
+
+# Any keyword column containing NACAR (case-insensitive)
+NACAR_as_keyword <- GOC_Landings_parsed %>%
+  filter(
+    str_detect(keywords_1, regex("NACAR", ignore_case = TRUE)) |
+    str_detect(keywords_2, regex("NACAR", ignore_case = TRUE)) |
+    str_detect(keywords_3, regex("NACAR", ignore_case = TRUE)) |
+    str_detect(keywords_4, regex("NACAR", ignore_case = TRUE)) |
+    str_detect(keywords_5, regex("NACAR", ignore_case = TRUE))
+  )
+
+# Count rows
+nrow(NACAR_as_keyword)
+
+# Optional: preview
+head(NACAR_as_keyword %>% select(recorded_taxa_name, keywords_1:keywords_5))
+# Looks great! 
+
+# Remove these dataframes to keep workspace clear:
+rm(DE_remaining, P_remaining, NACAR_remaining, NACAR_as_keyword)
+```
+
+```{r SANITY CHECK 3: Checking on the unique ALETA cases}
+# QUICK SANITY CHECK: did this work for taxa like yellow-fin and blue-fin tuna?
+test <- GOC_Landings_parsed %>%
+  filter(str_detect(recorded_taxa_group, "ATUN"))
+# 15374 obs.
+
+table(test$common_name_clean)
+#  Yes, parsing seems to have worked!
+
+# Remove this dataframe:
+rm(test)
+```
+
+# STEP 5c: Save the GOC_Landings_parsed dataframe as a separate .rds file - OPTIONAL:
+```{r Save this dataframe - landings with keywords: Mar 23 2026}
+colnames(GOC_Landings_parsed)
+# Looks good! Go ahead and save.
+
+# saveRDS(GOC_Landings_parsed, file="/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_KeywordsParsed_2000.present_EMF.Apr22026.rds")
+# 3622776 obs., 40 vars.
+```
+
+NOTE TO SELF: How did I get this list of key words originally? I think I started out with some preliminary version of the parse functionality and logic. From there, I think I quickly started to separate out a keywords list, the list grew over time, and I moved to this more sophisticated parse function. Come back to this at some point to recreate and / or document how one could accomplish this early part of the workflow. Document the original workflow or present a solution for the sake of reproducibility.
+
+
+# > IF SKIPPING STEP 5 - parsing keywords, then move to: ------------------------------
+
+# STEP 6: Merge the curated GOC_Landings_parsed (now ) with the most-up-to-date species key (MasterSpKey_pending). ------------------------------
+
+## STEP 6a: Load in GOC_Landings_parsed dataframe (and rename to GOC_Landings_cleaned):
+```{r Load GOC_Landings_parsed if needed}
+GOC_Landings_parsed<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_KeywordsParsed_2000.present_EMF.Apr22026.rds"))
+# 3622776 obs., 40 vars.
+```
+
+```{r rename to GOC_Landings_cleaned}
+GOC_Landings_species<- GOC_Landings_parsed
+
+# Remove dataframes (as appropriate) to keep workspace clean:
+rm(GOC_Landings_parsed)
+rm(GOC_Landings)
+```
+
+
+```{r Load MasterSpKey_pending}
+MasterSpKey_pending <- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Species_Keys/CleanedMaster_SpKey_Mar252026.csv")
+# 807 obs of 41 variables
+```
+
+```{r Shave down the size of Master_SpKey_pending}
+colnames(MasterSpKey_pending)
+
+Master_SpKey_simple<- MasterSpKey_pending %>% 
+  select(recorded_taxa_group, recorded_taxa_name_clean, common_name_clean,
+         estimated_species_name, species_est_certainty, estimated_genus_name, estimated_family_name,
+         IHH_order, IHH_class, IHH_functional_major_groups_sm, IHH_fishery)
+# 807 obs., 11 vars.
+```
+
+## STEP 6b: Merge GOC_Landings_cleaned with Master_SpKey_simple:
+```{r Merge GOC landings with Master_SpKey_simple}
+GOC_Landings_species <- GOC_Landings_species %>%
+  left_join(
+    Master_SpKey_simple,
+    by = c(
+      "recorded_taxa_group",
+      "recorded_taxa_name_clean",
+      "common_name_clean"
+    )
+  )
+# n = 3622776 obs. as before, now 48 vars.
+```
+
+```{r Trim GOC_Landings_species as needed}
+colnames(GOC_Landings_species)
+
+GOC_Landings_species <- GOC_Landings_species %>%
+  select(
+    # Location:
+    state, office_name, landing_site, landing_site_key,
+    est_lat, est_lon, est_latlon_FLAG, inside_GOC, est_habitat,
+    
+    # Time:
+    year, month, receipt_date_fixed, period_start_fixed, period_end_fixed,
+    
+    # Fleet and vessel info:
+    fleet, acuaculture_production, eu_rnpa, eu_name, vessel_rnpa, vessel_name,
+    
+    # Taxa, recorded and cleaned names:
+    recorded_taxa_group, recorded_taxa_name, recorded_taxa_name_clean,
+    recorded_scientific_name, scientific_name_recorded_T.F, common_name_clean,
+    
+    # Keywords:
+    keywords_1, keywords_2, keywords_3, keywords_4, keywords_5,
+    
+    # Taxa details, estimated:
+    estimated_species_name, species_est_certainty, estimated_genus_name, estimated_family_name,
+    
+    # Catch and value:
+    landed_weight, live_weight, weight_kg_corrected, value,
+    
+    # OHI region details:
+    OHI_rgn_number, OHI_region_draft, OHI_rgn_name, OHI_rgn_notes, exclude_rgn,
+    
+    # Classification (IHH):
+    IHH_order, IHH_class, IHH_functional_major_groups_sm, IHH_fishery
+  )
+```
+
+
+## STEP 6c: Save GOC_Landings_species (keywords parsed with species) as separate .rds file - OPTIONAL:
+```{r Save this dataframe - GOC landings with keywords with species names as of Mar 11 2026}
+# saveRDS(GOC_Landings_species, file="/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_Parsed.wSpecies_2000.present_EMF.Apr22026.rds")
+# n = 3622776 obs., 48 vars.
+```
+
+
+# STEP 7: Merge the GOC_Landings_species with the most up-to-date group key (MajorGroupKey_pending) to create GOC_Landings_classed. ------------------------------
+
+# NOTE TO SELF: Species key is up-to-date and so is MajorGroupKey_pending as of - Mar 25 2026
+To learn more about how this key was created, see: CONAPESCA_CreatingTaxonomicKeys_Mar132026.rmd
+
+```{r Load in GOC data as needed}
+GOC_Landings_species<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_Parsed.wSpecies_2000.present_EMF.Apr22026.rds"))
+# 3622776 obs. 48 vars.
+```
+
+```{r Load in revised MajorGroupKey_pending}
+MajorGroupKey_pending<- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/MajorGroupKey_Mar252026.csv")
+# 526 obs. 13 vars.
+```
+
+```{r Complicated merge landings data with MajorGroupKey_pending}
+Special_groups <- c("OTRAS", "ESPECIE GENERICA", "FAUNA", "ORNATO", "PECES DE ORNATO", "NEI")
+
+#STEP 1: Join in non-OTRAS, simple join
+# For non-otra taxa, we only want to look up based on the recorded_taxa_group and estimated_genus_name. From that look-up we want to assign Major_Functional_Group, Assignment_for_Major_Functional_Group
+NONOTRAS_MajorGroupKey_lookup <- MajorGroupKey_pending %>%
+  filter(!recorded_taxa_group %in% Special_groups) %>%
+  select(-c("common_name_clean", "IHH_functional_major_groups_sm", "estimated_species_name", "Manual_Classification_Notes", "species_est_certainty", "species_est_reasoning", "genus_est_reasoning", "ornamentalFLAG_1")) %>%
+  distinct(
+    recorded_taxa_group,
+    estimated_genus_name,
+    .keep_all = TRUE
+  )
+
+# 219 obs. 5 vars.
+  
+join_NormalGroups <- GOC_Landings_species %>%
+  filter(!recorded_taxa_group %in% Special_groups) %>%
+  left_join(
+    NONOTRAS_MajorGroupKey_lookup,
+    by = c("recorded_taxa_group","estimated_genus_name")
+  )
+# 3101927 obs. (the majority of the data, as expected) and 51 vars (+3 new vars).
+
+# SANITY CHECK
+subset<- join_NormalGroups %>% filter(is.na(Major_Functional_Group))
+table(subset$recorded_taxa_group)
+# 0 obs. Great!
+
+# STEP 2: JOIN IN OTRAS
+# In contrast: for otras taxa, we want to look up based on the recorded_taxa_group and common_name_clean. From that look-up we want to assign estimated_taxa_group, estimated_species_name, species_est_certainty, species_est_reasoning, estimated_genus_name, genus_est_reasoning, Major_Functional_Group, Assignment_for_Major_Functional_Group, Manual_Classification_Notes, and ornamentalFLAG_1
+OTRAS_MajorGroupKey_lookup <- MajorGroupKey_pending %>%
+  filter(recorded_taxa_group %in% Special_groups) %>%
+  distinct(
+    recorded_taxa_group,
+    common_name_clean,
+    .keep_all = TRUE
+  )
+# 278 obs. 13 vars.
+
+join_SpecialGroups <- GOC_Landings_species %>%
+  filter(recorded_taxa_group %in% Special_groups) %>%
+  left_join(
+    OTRAS_MajorGroupKey_lookup,
+    by = c("recorded_taxa_group", "common_name_clean"),
+    suffix = c("", "_new")
+  ) %>%
+  mutate(
+    across(
+      ends_with("_new"),
+      ~ .,
+      .names = "{sub('_new$', '', .col)}"
+    )
+  )
+
+join_SpecialGroups <- join_SpecialGroups %>%
+  select(-ends_with("_new"))
+
+# 520849 obs. (as expected) and 55 vars. (+7 new vars).
+
+# STEP 3:
+GOC_Landings_classed <- bind_rows(join_NormalGroups, join_SpecialGroups)
+# 3622776 obs. (as expected) and 55 vars.
+```
+
+## STEP 7a: Assign new class for ANCHOVETA and SARDINA = "Small pelagic marine fishes"
+
+```{r What if we assign and pull out small pelagic fishes?}
+unique(GOC_Landings_classed$recorded_taxa_group)
+
+# Small pelagics
+Small_Pelagics<- c("ANCHOVETA", "SARDINA") 
+
+GOC_Landings_classed <- GOC_Landings_classed %>%
+  mutate(
+    Major_Functional_Group = case_when(
+      recorded_taxa_group %in% Small_Pelagics ~ "Anchovy & Sardine (small pelagics)",
+      Major_Functional_Group == "Pelagic marine fishes" ~ "Pelagic marine fish (excl. anchovy & sardine)",
+      TRUE ~ Major_Functional_Group
+    )
+  )
+# 3622776 obs. (as expected) and 55 vars.
+
+table(GOC_Landings_classed$Major_Functional_Group)
+
+           # Anchovy & Sardine (small pelagics)                                   Cephalopods 
+           #                              89647                                         88211 
+           #                        Crustaceans                        Demersal marine fishes 
+           #                             195881                                       1561744 
+           #                  Diadromous fishes                                   Echinoderms 
+           #                               7393                                         12075 
+           #                  Freshwater fishes                                       Jellies 
+           #                             242354                                         15978 
+           #                       Marine algae                             Marine fishes NEI 
+           #                               1723                                         13372 
+           #    Marine or freshwater fishes NEI                            Marine species NEI 
+           #                             134361                                         26719 
+           #         Molluscs excl. Cephalopods                         Other freshwater taxa 
+           #                             174768                                          2563 
+           #         Other marine invertebrates Pelagic marine fish (excl. anchovy & sardine) 
+           #                                 15                                        320186 
+           #                             Sharks                               Shrimps, prawns 
+           #                             171047                                        561207 
+           #                            unknown 
+           #                               3519 
+
+# SANITY CHECK: Which records are captured by the "Marine or freshwater fishes NEI" category?
+subset<- GOC_Landings_classed %>% 
+  filter(Major_Functional_Group=="Marine or freshwater fishes NEI")
+# 134361 obs. from 2000 to 2025 (makes sense).
+min(subset$year)
+max(subset$year)
+
+table(subset$est_habitat)
+table(subset$common_name_clean)
+table(subset$recorded_taxa_group)
+# Nice! These look like taxa that, as expected, could be freshwater or marine (BAGRE, CARPA, MOJARRA, TRUCHA). More information required to make an educated guess. 
+
+  # BAGRE   CARPA MOJARRA  TRUCHA 
+  # 36378     407   95130    2446 
+# Mostly freshwater taxa.
+```
+
+# SANITY CHECK: How many records have we accounted for with MajorGroupKey_pending? ----
+```{r SANITY CHECK: How many records have we accounted for with our MajorGroupKey_pending?}
+table(GOC_Landings_classed$Major_Functional_Group)
+subset<- GOC_Landings_classed %>% filter(is.na(Major_Functional_Group))
+table(subset$recorded_taxa_group)
+# OTRAS 
+#    13 
+# This shows that 13 out of all (n=3622776) entries are missing a Major_Functional_Group assignment;
+# And, we know that out of all obs., 3519 are classified as "unknown" and 26719 "Marine species NEI" as their Major_Functional_Group.
+```
+
+```{r Summarize landing records and total biomass per Major_Functional_Group}
+# Summarize landing records and total biomass per Major_Functional_Group, including NAs as "N/A"
+# Ensure NAs are included in the factor
+GOC_Landings_classed$Major_Functional_Group[is.na(GOC_Landings_classed$Major_Functional_Group)] <- "N/A"
+GOC_Landings_classed$IHH_functional_major_groups_sm[is.na(GOC_Landings_classed$IHH_functional_major_groups_sm)] <- "N/A"
+
+# Summarize REVISED landing records and biomass:
+NEW.LandingsPercent_summary <- GOC_Landings_classed %>%
+  # Convert NA to a level so it's counted
+  mutate(Major_Functional_Group = ifelse(
+    is.na(Major_Functional_Group),
+    "NA",
+    Major_Functional_Group
+  )) %>%
+  group_by(Major_Functional_Group) %>%
+  summarise(
+    NEW.Percent_TotLandingRecords = round(n() / nrow(GOC_Landings_classed) * 100, 1),
+    NEW.Percent_TotalBiomass = round(
+      sum(weight_kg_corrected, na.rm = TRUE) / sum(GOC_Landings_classed$weight_kg_corrected, na.rm = TRUE) * 100,
+      1
+    ),
+    .groups = "drop"
+  ) %>%
+  # Sort descending by biomass
+  arrange(desc(NEW.Percent_TotalBiomass))
+
+NEW.LandingsPercent_summary
+# This suggests that, from 2000 to 2025, < 1% of all landing records and < 0.05% of all biomass come from taxa that are NOT classified to the Major_Functional_Group level. The rest come from major functional groups like demersal fish and shrimp. I can live with this! 
+
+# What did these numbers look like before based on IHH groupings?
+# Build summary table with counts, percent of landing records, and percent of total biomass
+
+OLD.LandingsPercent_summary <- GOC_Landings_classed %>%
+  mutate(IHH_functional_major_groups_sm = ifelse(
+    is.na(IHH_functional_major_groups_sm),
+    "NA",
+    IHH_functional_major_groups_sm
+  )) %>%
+  group_by(IHH_functional_major_groups_sm) %>%
+  summarise(
+    OLD.Percent_TotLandingRecords = round(n() / nrow(GOC_Landings_classed) * 100, 1),
+    OLD.Percent_TotBiomass = round(
+      sum(weight_kg_corrected, na.rm = TRUE) / sum(GOC_Landings_classed$weight_kg_corrected, na.rm = TRUE) * 100, 
+      1
+    ),
+    .groups = "drop"
+  )
+
+# Join these two tables to compare.
+library(fuzzyjoin)
+
+# Perform fuzzy join using string distance
+MERGED.LandingsPercent_summary <- stringdist_left_join(
+  NEW.LandingsPercent_summary,
+  OLD.LandingsPercent_summary, 
+  by = c("Major_Functional_Group" = "IHH_functional_major_groups_sm"),
+  method = "jw",           # Jaro-Winkler distance (good for names)
+  max_dist = 0.2,          # Adjust threshold as needed (0 = exact, ~0.2 = close match)
+  distance_col = "dist"    # Optional: keep the match distance
+) %>%
+  arrange(dist)             # Optional: sort by closest match
+
+
+# Reorder columns
+MERGED.LandingsPercent_summary <- MERGED.LandingsPercent_summary %>%
+  select(
+    Major_Functional_Group,
+    OLD.Percent_TotBiomass,
+    NEW.Percent_TotalBiomass,
+    OLD.Percent_TotLandingRecords,
+    NEW.Percent_TotLandingRecords
+  ) %>%
+  # Order rows:
+  arrange(
+    # Then by OLD percent landing records descending
+    desc(OLD.Percent_TotBiomass)
+  )
+
+# Save this dataframe:
+# write.csv(MERGED.LandingsPercent_summary, "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_CleanUp/Catch_byTaxaGroup_summarytable_Apr22026.csv", row.names = FALSE)
+```
+
+## STEP 7b: Save GOC_Landings_classed (keywords parsed with species names and major taxanomic group) as separate .rds file - OPTIONAL:
+```{r Save this dataframe - GOC landings with keywords with species names and major taxonomic group as of Mar 25 2026}
+# saveRDS(GOC_Landings_classed, file="/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_Parsed.wSpecies&MajorGroups_2000.present_EMF.Apr22026.rds")
+# 3622776 obs., 55 vars.
+```
+
+```{r Remove dataframes to keep workspace clean}
+rm(join_NormalGroups, join_SpecialGroups,
+   MERGED.LandingsPercent_summary, NEW.LandingsPercent_summary, OLD.LandingsPercent_summary,
+   NONOTRAS_MajorGroupKey_lookup, OTRAS_MajorGroupKey_lookup)
+```
+
+# STEP 8: Take a look into key taxonomic groups. ------------------------------
+```{r Load dataframe if needed}
+GOC_Landings_classed<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_Parsed.wSpecies&MajorGroups_2000.present_EMF.Apr22026.rds"))
+# 3622776 obs. 55 vars.
+
+subset<- GOC_Landings_classed %>% filter(recorded_taxa_group == "PETO")
+# Note, PETO is definitely a fish but not clear if its pelagic or demersal fish; it also identified in Hem's key as a shark, which I think is a mis ID. Currently catalogued as demersal.
+```
+
+## STEP 8a: Let's look into ALL groups from GOC_Landings_classed:
+```{r Plot catch by major_functional_group over time}
+# SUMARRY TABLE:
+summary_MajorFunctionalGroup <- GOC_Landings_classed %>%
+  group_by(year, Major_Functional_Group) %>%
+  summarise(
+    total_catch_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+unique(summary_MajorFunctionalGroup$Major_Functional_Group)
+
+Groups_to_Exclude<- c("Shrimps, prawns", "Anchovy & Sardine (small pelagics)", "unknown", "N/A")
+
+summary_MajorFunctionalGroup %>%
+  filter(year < 2025) %>%
+  filter(!Major_Functional_Group %in% Groups_to_Exclude) %>%
+ggplot(aes(x = year, y = total_catch_kg, fill = Major_Functional_Group)) +
+  geom_area(alpha = 0.9) +
+  scale_fill_viridis_d(option = "turbo") +
+  labs(
+    x = "Year",
+    y = "Catch (kg)",
+    fill = "Functional Group",
+    title = "Catch by Major Functional Group Over Time"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+## STEP 8b: Pull out small pelagics (anchovy and sardine) and plot:
+```{r Pull out small pelagic fishes anchovy and sardine}
+table(GOC_Landings_classed$Major_Functional_Group)
+
+# Plot major groups excluding catch from small pelagic fishes, freshwater taxa, and unknown taxa:
+Groups_to_Exclude<- c("Anchovy & Sardine (small pelagics)", "Freshwater fishes", "Diadromous fishes", "Other freshwater taxa", "Marine or freshwater fishes NEI",  NA, "unknown")
+
+# level the Major_Functional_Groups so they plot correctly:
+summary_MajorFunctionalGroup$Major_Functional_Group <- factor(
+  summary_MajorFunctionalGroup$Major_Functional_Group,
+  levels = c(
+
+  # Mostly freshwater:
+    "Marine or freshwater fishes NEI",
+    "Diadromous fishes",
+    "Freshwater fishes",
+    "Other freshwater taxa",
+  
+  # (Marine) misc:
+    "Marine algae",
+    "Marine species NEI",
+    "unknown",
+    
+  # Marine inverts:
+    "Shrimps, prawns",
+    "Crustaceans",
+    "Molluscs excl. Cephalopods",
+    "Cephalopods",
+    "Jellies",
+    "Echinoderms",
+    "Other marine invertebrates",
+    
+  # Marine fish:
+    "Marine fishes NEI",
+    "Anchovy & Sardine (small pelagics)",
+    "Pelagic marine fish (excl. anchovy & sardine)",
+    "Sharks",
+    "Demersal marine fishes"
+  )
+)
+
+summary_MajorFunctionalGroup %>%
+  filter(year>= 2018 & year < 2025) %>%
+  filter(!Major_Functional_Group %in% Groups_to_Exclude) %>%
+ggplot(aes(x = year, y = total_catch_kg, fill = Major_Functional_Group)) +
+  geom_area(alpha = 0.9) +
+  scale_fill_viridis_d(option = "turbo") +
+  labs(
+    x = "Year",
+    y = "Catch (kg)",
+    fill = "Functional Group",
+    title = "Catch by Major Functional Group Over Time",
+    subtitle = "Excluding small pelagic fish, suspected freshwater, and unknown taxa"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+## STEP 8c: Let's look into jellies:
+```{r Isolate jellies}
+# BEFORE THE FIX (on Mar 13):
+# Something weird is happening with the merge. The capitalization is off, etc. Common name clean is not quite right, it's not lowercase so the merge doesn't work and we can't locate jellyfish.
+     #           Cephalopods                Crustaceans     Demersal marine fishes          Diadromous fishes 
+     #                 88211                     195861                    1583704                       7393 
+     #           Echinoderms          Freshwater fishes               Marine algae          Marine fishes NEI 
+     #                 12072                      70644                       1723                     326723 
+     #    Marine species NEI Molluscs excl. Cephalopods      Other freshwater taxa Other marine invertebrates 
+     #                 26719                     153540                       2562                         15 
+     # Pelagic marine fishes                     Sharks            Shrimps, prawns                    unknown 
+     #                379493                     171073                     561207                       3519 
+
+# Create a vector of keywords
+Jellyfish_keywords <- c("bola", "cañon", "canon", "aguamala", "medusa", "stomolophus")
+
+# Filter using regex with ignore case
+GOC_Landings_jellies <- GOC_Landings_classed %>%
+  filter(grepl(paste(Jellyfish_keywords, collapse = "|"), common_name_clean, ignore.case = TRUE))
+# 15978 obs. Found them!
+
+GOC_Landings_jellies <- GOC_Landings_classed %>%
+  filter(Major_Functional_Group== "Jellies")
+# 15978 obs. Yes, this works as expected!
+
+table(GOC_Landings_jellies$recorded_taxa_group)
+table(GOC_Landings_jellies$recorded_taxa_name_clean)
+
+table(GOC_Landings_classed$Major_Functional_Group)
+
+# AFTER THE FIX (Mar 24 2026): Looks good!
+
+#            Anchovy & Sardine (small pelagics)                                   Cephalopods                                   Crustaceans 
+#                                         89647                                         88211                                        195868 
+#                        Demersal marine fishes                             Diadromous fishes                                   Echinoderms 
+#                                       1561183                                          7393                                         12075 
+#                             Freshwater fishes                                       Jellies                                  Marine algae 
+#                                        240988                                         15978                                          1723 
+#                             Marine fishes NEI               Marine or freshwater fishes NEI                            Marine species NEI 
+#                                         13372                                        133614                                         26719 
+#                    Molluscs excl. Cephalopods                         Other freshwater taxa                    Other marine invertebrates 
+#                                        172866                                          2563                                            15 
+# Pelagic marine fish (excl. anchovy & sardine)                                        Sharks                               Shrimps, prawns 
+#                                        319873                                        166561                                        560968 
+#                                       unknown 
+#                                          3519 
+```
+
+```{r Plot jellies over time}
+summary_Jellies <- GOC_Landings_jellies %>%
+  group_by(year) %>%
+  summarise(
+    total_landings_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    n_records = n(),
+    .groups = "drop"
+  )
+
+ggplot(summary_Jellies, aes(x = year, y = total_landings_kg)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Jellyfish Landings Over Time",
+    x = "Year",
+    y = "Total Landed Weight (kg)"
+  ) +
+  theme_bw()
+```
+
+```{r SANITY CHECK into Molluscs excl. Cephalopods}
+subset<- GOC_Landings_classed %>% 
+  filter(Major_Functional_Group=="Molluscs excl. Cephalopods")
+# 172866 obs.
+
+table(subset$estimated_species_name)
+table(subset$estimated_genus_name)
+table(subset$recorded_taxa_group)
+# These all look good, except for otras. What are otras in this case?
+
+subset<- subset %>% 
+  filter(recorded_taxa_group=="OTRAS")
+# 21274 obs.
+
+table(subset$recorded_taxa_name_clean)
+# Okay, looks good.
+```
+
+
+## STEP 8b: Let's look into ornamentals:
+```{r Ornamentals}
+table(GOC_Landings_classed$ornamentalFLAG_1)
+   #    NO POSSIBLY      YES 
+   # 22119    20521     1634 
+  # And a lot of NAs
+
+summary_Ornamentals <- GOC_Landings_classed %>%
+  filter(ornamentalFLAG_1=="YES") %>%
+  group_by(year) %>%
+  summarise(
+    total_landings_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    n_records = n(),
+    .groups = "drop"
+  )
+
+ggplot(summary_Ornamentals, aes(x = year, y = total_landings_kg)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Ornamentals - Landings Over Time (DRAFT)",
+    x = "Year",
+    y = "Total Landed Weight (kg)"
+  ) +
+  theme_bw()
+```
+
+```{r SANITY CHECK: Check in on NAs}
+table(GOC_Landings_classed$Major_Functional_Group)
+# 2965 "NA"s (and 3519 "unknown")
+
+# Let's take a look at those NAs
+subset<- GOC_Landings_classed %>%
+  filter(Major_Functional_Group=="N/A")
+# 2965 obs.
+
+table(subset$recorded_taxa_group)
+         # LOBINA           OTRAS PECES DE ORNATO 
+         #   1063            1895               7 
+```
+
+# STEP 9: FLAG and estimate landings from AQUACULTURE based on a series of logical rules. ------------------------------
+I think aquaculture and mariculture in the region is being vastly under-counted and under-reported.
+Let's implement a series of rules to estimate if records are associated with aquaculture or not.
+
+```{r Load in dataframe if needed}
+GOC_Landings_classed<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_Parsed.wSpecies&MajorGroups_2000.present_EMF.Mar252026.rds"))
+# 3622776 obs. 49 vars.
+
+colnames(GOC_Landings_classed)
+```
+
+## VIEW: ALL KEY WORDS... Does this list need more work?
+```{r Investigating Keywords}
+# Extract all unique keywords from keyword columns 1 through 5. Delete exact duplicates. 
+Keyword_vector <- GOC_Landings_classed %>%
+  select(keywords_1:keywords_5) %>%
+  unlist() %>%
+  unique() %>%
+  na.omit()
+
+Keyword_vector
+```
+
+## STEP 9a: FLAG AQUACULTURE:
+
+```{r Create a GOC_Landings_aquaculture dataframe}
+GOC_Landings_aquaculture<- GOC_Landings_classed
+
+GOC_Landings_aquaculture$est_aquaculture_production<- c(NA)
+# n = 3622776 obs., 50 vars.
+```
+
+First, let's flag landing site names that are associated with aquaculture.
+```{r Estimate likelihood of aquaculture based on name of landing site}
+#### FLAG 1 - Flag aquaculture based on landing site name (3 flag levels: YES, NO, POSSIBLY): ####
+GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
+  
+  # Normalize original report
+  mutate(
+    acuaculture_production_norm = str_to_lower(str_trim(acuaculture_production))
+  ) %>%
+  
+  # Step 1: landing site flag with YES / POSSIBLY / NO
+  mutate(
+    aquacultureFLAG_landing.site = case_when(
+      str_detect(landing_site, regex("\\(CULT\\.?\\)|CULTIVADORES|ESTANQUE|VIVEROS", ignore_case = TRUE)) ~ "YES",
+      str_detect(landing_site, regex("DREN|DRENES|BORDO|PREDIO", ignore_case = TRUE)) ~ "POSSIBLY",
+      TRUE ~ "NO"
+    )
+  ) %>%
+  
+  # Drop helper column:
+  select(-acuaculture_production_norm)
+
+# SANITY CHECK:
+# Check that we pulled out landing sites that make sense:
+table(GOC_Landings_aquaculture$aquacultureFLAG_landing.site)
+
+ #      NO POSSIBLY      YES 
+ # 3606674    13876     2226 
+
+GOC_Landings_aquaculture %>%
+  filter(aquacultureFLAG_landing.site %in% c(
+    "YES",
+    "POSSIBLY"
+  )) %>%
+  distinct(landing_site) %>%
+  arrange(landing_site)
+# 75 sites that mostly all make sense to me! If an organism came from one of these sites I would assume it was a farmed species, even if the record was NOT marked as aquaculture.
+
+# Let's review these sites manually:
+# write.csv(
+#   GOC_Landings_aquaculture %>%
+#     filter(est_aquaculture_production != "uncertain") %>%
+#     distinct(landing_site, acuaculture_production, est_aquaculture_production, est_aquaculture_certainty, aquacultureFLAG_landing.site),
+#   "/home/ferrer/ohi_goc_prep/FP/Exploratory_Research/MAR_ExploratoryResearch/AquacultureSite_ClassificationCheck_Mar122026.csv",
+#   row.names = FALSE
+# )
+# After a manual review, this logic seems okay for now... let's see how this affects of estimates of aquaculture.
+```
+
+Next, let's implement rules based on key words and taxa:
+```{r Flagging aquaculture landings based on key words}
+colnames(GOC_Landings_aquaculture)
+table(GOC_Landings_aquaculture$recorded_taxa_group)
+table(GOC_Landings_aquaculture$estimated_taxa_group)
+
+#### FLAG 2 - Flag aquaculture based on key words, Aquaculture_keywords [LIST IS PENDING REVIEW / UNDER CONSTRUCTION] ####
+Aquaculture_keywords<- c(
+  "DE CULTIVO", "DE CULTIVO VIVO", "CULTIVADAS", "ABASTO RANCHO", "RANCHO", "PERLAS", "MEDIAS PERLAS"
+)
+
+# Flag rows with aquaculture keywords:
+GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
+mutate(
+  aquacultureFLAG_keywords = case_when(
+    rowSums(across(keywords_1:keywords_5, ~ str_to_upper(str_trim(.x)) %in% Aquaculture_keywords), na.rm = TRUE) > 0 ~ "YES",
+    TRUE ~ "NO"
+  )
+)
+
+table(GOC_Landings_aquaculture$aquacultureFLAG_keywords)
+# 111955 observations explicitly flagged as aquaculture due to key words.
+```
+
+```{r Flag common aquaculture taxa like oysters and tilapia}
+#### FLAG 3 - Flag known and likely aquaculture taxa [LIST IS PENDING REVIEW / UNDER CONSTRUCTION] ####
+# In theory, names could come from a number of columns: estimated_taxa_group, recorded_taxa_group, recorded_taxa_name, common_name_clean
+
+table(GOC_Landings_aquaculture$estimated_taxa_group)
+table(GOC_Landings_aquaculture$common_name_clean)
+
+Possible_AquacultureTaxa <- c("OSTION", "JUREL", "CAMARON", "CARPA", "MOJARRA", "TRUCHA", "ALMEJA", "ABULON", "ALGAS") # estimated_taxa_group
+Definite_AquacultureTaxa <- c("TILAPIA") # common_name_clean
+
+GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
+  mutate(
+    aquacultureFLAG_specific.taxa = case_when(
+      str_to_upper(str_trim(common_name_clean)) %in% Definite_AquacultureTaxa ~ "YES",
+      str_to_upper(str_trim(recorded_taxa_group)) %in% Possible_AquacultureTaxa ~ "POSSIBLY",
+      TRUE ~ "NO"
+    )
+  )
+
+table(GOC_Landings_aquaculture$aquacultureFLAG_specific.taxa)
+
+# Numbers BEFORE revision on Mar 24 2026:
+#   NO          POSSIBLY    YES 
+#   3408840     41066       172870 
+
+# Numbers AFTER revision on Mar 24 2026:
+#      NO POSSIBLY      YES 
+# 2561375   888531   172870 
+# Just as many yeses (makes sense) and now more possibles. 
+```
+
+Create a combined aquaculture flag based on the previous three flags: aquacultureFLAG_landing.site, aquacultureFLAG_keywords, aquacultureFLAG_specific.taxa
+
+Here's the logic for the combined flag:
+• If at least one flag is "YES", then flags indicate aquaculture is highly likely (my YES flags are pretty robust at this point)
+• If one more flags is "POSSIBLY", then flags indicate the record is possibly aquaculture but not certain
+• If combined flag is "NO", then flags do not indicate aquaculture
+
+```{r Create a combined aquaculture flag}
+#### FLAG 4 - Create a combined aquaculture flag based on the previous three flags ####
+GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
+  mutate(
+    aquacultureFLAG_combined = case_when(
+      if_any(c(aquacultureFLAG_landing.site,
+               aquacultureFLAG_keywords,
+               aquacultureFLAG_specific.taxa), ~ .x == "YES") ~ "YES",
+      
+      if_any(c(aquacultureFLAG_landing.site,
+               aquacultureFLAG_keywords,
+               aquacultureFLAG_specific.taxa), ~ .x == "POSSIBLY") ~ "POSSIBLY",
+      
+      TRUE ~ "NO"
+    )
+  )
+
+# SANITY CHECK:
+subset<- GOC_Landings_aquaculture %>% filter(aquacultureFLAG_landing.site=="YES")
+table(subset$aquacultureFLAG_combined)
+# 2226 YES. Excellent. This worked, it matches the total length of the subset df as expected.
+```
+
+## STEP 9b: ESTIMATE AQUACULTURE:
+Here is the logic and set of decisions designed to estimate aquaculture:
+• If original report for acuaculture_production = "yes" & aquaculture_flags = "yes", then aquaculture_estimate = "aquaculture" & confidence = "high; flags agree with original report" 
+• If original report for acuaculture_production = "no" & aquaculture_flags = "no", then aquaculture_estimate = "not aquaculture" & certainty = "high; flags agree with original report"
+
+• If original report = "no" & aquaculture_flags = "yes", then aquaculture_estimate = "likely aquaculture" & certainty = "medium; flags suggest most likely aquaculture but original report says no" 
+• If original report = "no" & aquaculture_flags = "possibly", then aquaculture_estimate = "possibly aquaculture" & certainty = "low; flags suggest possibly aquaculture but original report says no"
+
+• If original report = NA & aquaculture_flags = "yes", then aquaculture_estimate = "likely aquaculture" & certainty = "high; no data from the original report but flags suggest most likely aquaculture"
+• If original report = NA & aquaculture_flags = "possibly", then aquaculture_estimate = "possibly aquaculture" & certainty = "low; no data from the original report but flags suggest possibly aquaculture"
+• If original report = NA & aquaculture_flags = "no", then aquaculture_estimate = "unlikely aquaculture" & certainty = "medium-high; no data from the original report but flags suggest probably not aquaculture"
+
+Decision Table:
+Report   aquacultureFLAG_combined  aquaculture_estimate    certainty
+  yes       NO                        aquaculture	            high; no flags but original report says aquaculture
+  yes       YES                       aquaculture             high; flags agree with original report
+  no        NO                        not aquaculture         high; flags agree with original report
+  no        YES	                      likely aquaculture	    medium; flags suggest most likely aquaculture but original report says no
+  no        POSSIBLY                  possibly aquaculture    low; flags suggest possibly aquaculture but original report says no
+  NA        YES                       likely aquaculture      medium-high; no data from original report but flags suggest most likely aquaculture
+  NA        POSSIBLY                  possibly aquaculture    low; no data from original report but flags suggest possibly aquaculture
+  NA        NO                        unlikely aquaculture    medium-high; no data from original report but flags suggest probably not aquaculture
+
+```{r Generate estimates and confidence values}
+#### Estimate aquaculture and confidence values based on the comparison of aquacultureFLAG_combined versus the official report: ####
+GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
+  mutate(
+    # Normalize original report for consistency (low case font):
+    acuaculture_original.report = str_to_lower(str_trim(acuaculture_production)),
+    
+    # Final estimate based on original report and combined flags
+    est_aquaculture_production = case_when(
+      
+      # Original report = yes (regardless of flags)
+      acuaculture_original.report == "yes" ~ "aquaculture",
+      
+      # Original report = no & flags = NO
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "NO" ~ "not aquaculture",
+      
+      # Original report = no & flags = YES
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "YES" ~ "likely aquaculture",
+      
+      # Original report = no & flags = POSSIBLY
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "POSSIBLY" ~ "possibly aquaculture",
+      
+      # Original report = NA & flags = YES
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "YES" ~ "likely aquaculture",
+      
+      # Original report = NA & flags = POSSIBLY
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "POSSIBLY" ~ "possibly aquaculture",
+      
+      # Original report = NA & flags = NO
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "NO" ~ "unlikely aquaculture",
+      
+      # Fallback for any other case
+      TRUE ~ "uncertain"
+    ),
+    
+    # Certainty messages corresponding to the estimate
+    est_aquaculture_certainty = case_when(
+      
+      acuaculture_original.report == "yes" & aquacultureFLAG_combined == "YES" ~ "virtually certain; flags agree with original report",
+      acuaculture_original.report == "yes" & aquacultureFLAG_combined == "NO" ~ "high; no flags for aquaculture but original report says it is",
+      acuaculture_original.report == "yes" & aquacultureFLAG_combined == "POSSIBLY" ~ "virtually certain; flags agree with original report",
+      
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "NO" ~ "virtually certain; flags agree with original report",
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "YES" ~ "medium; flags suggest likely aquaculture but original report says no; suspect record is misreported",
+      acuaculture_original.report == "no" & aquacultureFLAG_combined == "POSSIBLY" ~ "low; flags suggest possibly aquaculture but original report says no; record could be misreported",
+      
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "YES" ~ "high; no data from original report but flags suggest likely aquaculture",
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "POSSIBLY" ~ "low; no data from original report but flags suggest possibly aquaculture",
+      is.na(acuaculture_original.report) & aquacultureFLAG_combined == "NO" ~ "medium-high; no data from original report but flags suggest unlikely aquaculture",
+      TRUE ~ "not enough information to assign aquaculture estimate"
+    )
+  ) %>%
+  
+  # Drop the helper normalization column
+  select(-acuaculture_original.report)
+
+# SANITY CHECK:
+table(GOC_Landings_aquaculture$est_aquaculture_production)
+
+# Numbers BEFORE revision on Mar 24 2026:
+         # aquaculture   likely aquaculture      not aquaculture possibly aquaculture unlikely aquaculture 
+         #       17496               281612              2622445                37649               663574 
+
+# Numbers AFTER revision on Mar 24 2026:
+         # aquaculture   likely aquaculture      not aquaculture possibly aquaculture unlikely aquaculture 
+         #       17496               281620              2141156               791707               390797 
+               
+subset<- GOC_Landings_aquaculture %>% filter(acuaculture_production==c("yes"))
+table(subset$est_aquaculture_production) 
+# Excellent, 100% of the aquaculture explicitly reported as aquaculture is estimated to be aquaculture (n= 17496).
+
+min(subset$year)
+max(subset$year)
+# Very weird the official aquaculture reports only go from 2006 to 2017
+
+subset<- GOC_Landings_aquaculture %>% filter(est_aquaculture_production==c("aquaculture", "likely aquaculture"))
+# 149503 obs. The data set grows a lot!
+
+# Re-level est_aquaculture_production to be a little more logical:
+GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
+  mutate(
+    est_aquaculture_production = factor(
+      est_aquaculture_production,
+      levels = c(
+        "aquaculture",
+        "likely aquaculture",
+        "possibly aquaculture",
+        "unlikely aquaculture",
+        "not aquaculture"
+      )
+    )
+  )
+
+# 3622776 obs., 55 vars.
+```
+
+```{r Summarize reported aquaculture versus estimated aquaculture}
+table(GOC_Landings_aquaculture$acuaculture_production)
+table(GOC_Landings_aquaculture$est_aquaculture_production)
+
+Reported.Aquaculture_summary<- GOC_Landings_aquaculture %>% 
+  filter(acuaculture_production== c("yes")) %>%
+  filter(year >= 2014, year <= 2024) %>%
+  select(year, weight_kg_corrected, value) %>%
+  group_by(year) %>%
+  summarize(reported_annual_catch= sum(weight_kg_corrected, na.rm = TRUE),
+            reported_annual_value= sum(value, na.rm = TRUE))
+
+Estimated.Aquaculture_summary<- GOC_Landings_aquaculture %>% 
+  filter(est_aquaculture_production== c("aquaculture", "likely aquaculture")) %>%
+  filter(year >= 2014, year <= 2024) %>%
+  select(year, weight_kg_corrected, value) %>%
+  group_by(year) %>%
+  summarize(est_annual_catch= sum(weight_kg_corrected, na.rm = TRUE),
+            est_annual_value= sum(value, na.rm = TRUE))
+
+Aquaculture_summary<- Estimated.Aquaculture_summary %>%
+  left_join(Reported.Aquaculture_summary, by = "year") %>%
+  select(year, reported_annual_catch, est_annual_catch, reported_annual_value, est_annual_value)
+```
+
+```{r Plot reported aquaculture versus estimated aquaculture}
+ggplot(Aquaculture_summary, aes(x = year)) +
+  geom_line(aes(y = est_annual_catch, color = "Estimated catch"), linewidth = 1.2) +
+  geom_point(aes(y = est_annual_catch, color = "Estimated catch"), size = 2) +
+  
+  geom_line(aes(y = reported_annual_catch, color = "Reported catch"), linewidth = 1.2) +
+  geom_point(aes(y = reported_annual_catch, color = "Reported catch"), size = 2) +
+  
+  scale_color_manual(
+    values = c(
+      "Estimated catch" = "#1b9e77",
+      "Reported catch" = "#d95f02"
+    )
+  ) +
+  labs(
+    x = "Year",
+    y = "Catch (kg)",
+    color = "",
+    title = "Estimated vs Reported Aquaculture"
+  ) +
+  theme_minimal(base_size = 14) +
+  scale_x_continuous(breaks = Aquaculture_summary$year) # ensures every year is a tick
+
+```
+Notice the spike in landings from 2017-2018? Of course, how could you miss it.
+This jump coincides (temporally) with a change in reporting associated with the raw data itself. 
+Data pre-2018 is reported here: mex_conapesca_avisos_2000_2019.rds
+Data 2018 and onward is reported here: mex_conapesca_apertura_2018_present.rds
+> NOTE TO SELF: Consult with Juan Carlos about these two datasets. What is fundamentally different about them?
+
+
+# STEP 10: FLAG and estimate landings from FRESHWATER based on a series of logical rules. ------------------------------
+```{r Flag freshwater landings}
+table(GOC_Landings_aquaculture$Major_Functional_Group)
+
+#### FLAG 5 - Flag freshwater based on keywords, Freshwater_keywords [LIST IS PENDING REVIEW / UNDER CONSTRUCTION] ####
+
+Freshwater_keywords<- c(
+  "DE AGUA DULCE"
+)
+
+#### FLAG 6 - Flag freshwater based on key taxa, Known_FreshwaterTaxa [LIST IS PENDING REVIEW / UNDER CONSTRUCTION] ####
+
+Known_FreshwaterTaxa<- c(
+  "tilapia",
+  "rana", "rana toro",
+  "trucha",
+  "bagre canal"
+)
+
+# UNDER CONSTRUCTION: Mar 25 2026
+#### REMOVE FRESHWATER GENERA WE ARE NOT INTERESTED ####
+# genus_exclude<- c(
+#   "Cyprinus", # common carp; strictly freshwater.
+#   "Macrobrachium", # freshwater prawns/shrimps; mostly freshwater.
+#   "Hypophthalmichthys", # Asian carp; freshwater.
+#   "Chirostoma", # “charales,” endemic to freshwater lakes in Mexico.
+#   "Carassius", # goldfish/crucian carp; freshwater.
+#   "Micropterus", # black bass; freshwater.
+#   "Lepomis", # sunfish; freshwater.
+#   "Cyprinodon", # pupfish; freshwater.
+#   "Rana", # frogs
+#   "NEI", # not classed yet
+#   "Especies", # not specific enough to be anything
+#   NA # not classed
+#   )
+
+#### FLAG 7 & 8 - Flag freshwater based on est_habitat type and Major_Functional_Group [UNDER CONSTRUCTION: Re-ESTIMATED Mar 24 2026] ####
+
+# Flag freshwater rows based on keywords (FLAGS 5 and 6), info from the IHH key, and estimated habitat type (based on landing site):
+Definite_FreshwaterGroups<- c("Freshwater fishes", "Other freshwater taxa")
+Possible_FreshwaterGroups<- c("Marine or freshwater fishes NEI")
+
+GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
+  mutate(
+    freshwater_flag = case_when(
+      # Definite freshwater: any definite criteria
+      (common_name_clean %in% Known_FreshwaterTaxa) |
+      (rowSums(across(keywords_1:keywords_5, ~ .x %in% Freshwater_keywords), na.rm = TRUE) > 0) |
+      (est_habitat == "freshwater") |
+      (Major_Functional_Group %in% Definite_FreshwaterGroups) ~ "YES",
+      
+      # Possible freshwater: broader/uncertain criteria
+      (Major_Functional_Group %in% Possible_FreshwaterGroups) ~ "POSSIBLY",
+      
+      # Otherwise, not freshwater
+      TRUE ~ "NO"
+    )
+  )
+
+table(GOC_Landings_aquaculture$freshwater_flag)
+# 297559 observations flagged as YES definitely "freshwater" based on freshwater keywords, the taxa common name, landing site, or Major_Functional_Group. Other entries, like "MOJARRA" could go either way and are flagged as possibly freshwater.
+
+ #      NO POSSIBLY      YES 
+ # 3229063    96154   297559 
+```
+
+```{r SANITY CHECK: Do the things flagged as freshwater make sense?}
+# Lot's of Mojarra moved into the possible freshwater category...
+subset<- GOC_Landings_aquaculture %>%
+  filter(freshwater_flag=="YES")
+# 297559 obs.
+
+table(subset$recorded_taxa_group)
+
+# ALMEJA           BAGRE         BANDERA         BAQUETA       BERRUGATA          BESUGO         CAMARON         CARACOL 
+#             509           30692            1594               1               1               1            1749               1 
+#           CARPA          CHARAL         CORVINA     GUACHINANGO           JAIBA           JUREL        LANGOSTA      LANGOSTINO 
+#           36418            2047               9               4               2               3             134            1065 
+#        LENGUADO            LISA          LOBINA         MOJARRA          ORNATO           OTRAS           PARGO PECES DE ORNATO 
+#               1            3078           30480          180527               2            7771               7              21 
+#           PULPO          ROBALO         SARDINA          SIERRA         TIBURON          TRUCHA 
+#               3            1321              14               3              11              90 
+
+# Some of these observations don't make a ton of sense, frankly - like octopus, sardine, jurel, and camaron. Let's take a closer look...
+
+subset2<- subset %>%
+  filter(recorded_taxa_group %in% c("ALMEJA", "CAMARON", "JAIBA", "JUREL", "PULPO", "SARDINA"))
+
+table(subset2$estimated_taxa_group)
+table(subset2$keywords_1)
+
+# Hm. But they are all flagged with the keyword "DE AGUA DUCLE" so yeah, that makes sense.
+# Except octopus. Here I think the lat-long key is just wrong.
+```
+
+
+```{r SANITY CHECK: Do the records classed as aquaculture make sense?}
+# SANITY CHECK:
+table(GOC_Landings_aquaculture$est_aquaculture_production)
+subset<- GOC_Landings_aquaculture %>% filter(est_aquaculture_production == "likely aquaculture")
+
+table(subset$freshwater_flag)
+# Note that 173625 out of 281612 (~62%) records that are "likely aquaculture" are also flagged as freshwater species - things like tilapia, trout, and frogs.
+table(subset$recorded_taxa_name_clean)
+# The marine aquaculture species include shrimp, snapper, jacks, lots of bivalves and snails.
+
+subset2<- subset %>% filter(recorded_taxa_name_clean=="JUREL")
+# NOTE TO SELF: Yes, these data for Jurel look really nice. These are definitely aquaculture jacks. Flags are doing a decent job so far!
+```
+
+```{r Reorder and rename columns in GOC_Landings_aquaculture in new df GOC_Landings_sorted}
+GOC_Landings_sorted <- GOC_Landings_aquaculture %>%
+  rename(reported_aquaculture_production = acuaculture_production,
+         reported_fleet = fleet) %>%
+  relocate(
+    reported_aquaculture_production,
+    aquacultureFLAG_landing.site,
+    aquacultureFLAG_keywords,
+    aquacultureFLAG_specific.taxa,
+    aquacultureFLAG_combined,
+    est_aquaculture_production,
+    est_aquaculture_certainty,
+    est_habitat,
+    freshwater_flag,
+    reported_fleet,
+    .after = last_col()
+  )
+# 3622776 obs., 56 vars.
+```
+
+# STEP 11: Estimate SECTOR based on record details, estimated genera, estimated Major Functional Group, aquaculture flags, and freshwater flags. ------------------------------
+```{r Estimate sector}
+
+#### ESTIMATE MOST LIKELY SECTOR based on report info and flags: ####
+
+GOC_Landings_sorted <- GOC_Landings_sorted %>%
+  mutate(
+    # Helper columns
+    is_aquaculture = est_aquaculture_production %in% c("aquaculture", "likely aquaculture"),
+    is_likely.wildcatch = est_aquaculture_production %in% c("unlikely aquaculture", "not aquaculture", "possibly aquaculture"),
+    
+    # Implement logic to estimate sector
+    sector_estimate_draft = case_when(
+      
+      #### FRESHWATER SECTORS: ####
+      freshwater_flag == "YES" & is_aquaculture ~ "freshwater: aquaculture",
+      freshwater_flag == "YES" & is_likely.wildcatch &  reported_fleet == "small_scale" ~ "freshwater: small-scale capture",
+      freshwater_flag == "YES" & is_likely.wildcatch &  reported_fleet == "large_scale" ~ "freshwater: large-scale capture",
+      freshwater_flag == "YES" ~ "freshwater: specific sector yet to be classified",
+      
+      #### MARINE SECTORS: ####
+      freshwater_flag == "NO" & is_aquaculture ~ "marine: aquaculture",
+      freshwater_flag == "NO" & is_likely.wildcatch & reported_fleet == "small_scale" ~ "marine: small-scale capture",
+      freshwater_flag == "NO" & is_likely.wildcatch & reported_fleet == "large_scale" ~ "marine: large-scale capture",
+      freshwater_flag == "NO" ~ "marine: specific sector yet to be classified",
+      
+      #### UNCERTAIN / POSSIBLE FRESHWATER: ####
+      freshwater_flag == "POSSIBLY" & is_aquaculture ~ 
+        "freshwater or marine: aquaculture",
+      freshwater_flag == "POSSIBLY" & is_likely.wildcatch & reported_fleet == "small_scale" ~ 
+        "freshwater or marine: small-scale capture",
+      freshwater_flag == "POSSIBLY" & is_likely.wildcatch & reported_fleet == "large_scale" ~ 
+        "freshwater or marine: large-scale capture",
+      freshwater_flag == "POSSIBLY" ~ 
+        "freshwater or marine: specific sector yet to be classified",
+      
+      # Catch-all safeguard
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(-is_aquaculture, -is_likely.wildcatch)
+
+# SANITY CHECK:
+table(GOC_Landings_sorted$sector_estimate_draft)
+
+# Estimates BEFORE reclassification work to species key like MOJARRA (Mar 24 2026):
+         # freshwater: aquaculture         freshwater: wild capture freshwater: yet to be classified    marine: large-scale fisheries 
+         #                  175109                           127130                             1054                           142404 
+         #     marine: mariculture    marine: small-scale fisheries     marine: yet to be classified 
+         #                  123999                           964673                          2088407 
+
+# Estimates AFTER reclassification work (Mar 24 2026):
+                 #         freshwater or marine: aquaculture                  freshwater or marine: large-scale capture 
+                 #                                      1843                                                        478 
+                 # freshwater or marine: small-scale capture freshwater or marine: specific sector yet to be classified 
+                 #                                     31528                                                      62305 
+                 #                   freshwater: aquaculture                            freshwater: large-scale capture 
+                 #                                    174541                                                         19 
+                 #           freshwater: small-scale capture           freshwater: specific sector yet to be classified 
+                 #                                     26374                                                      96625 
+                 #                       marine: aquaculture                                marine: large-scale capture 
+                 #                                    122732                                                     141931 
+                 #               marine: small-scale capture               marine: specific sector yet to be classified 
+                 #                                    947425                                                    2016975 
+
+table(GOC_Landings_sorted$est_aquaculture_production)
+table(GOC_Landings_sorted$freshwater_flag)
+table(GOC_Landings_sorted$reported_fleet)
+
+# Re-level
+GOC_Landings_sorted <- GOC_Landings_sorted %>%
+  mutate(
+    sector_estimate_draft = factor(
+      sector_estimate_draft,
+      levels = c(
+        "marine: specific sector yet to be classified",
+        "marine: large-scale capture",
+        "marine: small-scale capture",
+        "marine: aquaculture",
+        "freshwater: aquaculture",
+        "freshwater: small-scale capture",
+        "freshwater: large-scale capture",
+        "freshwater: specific sector yet to be classified",
+        "freshwater or marine: aquaculture",
+        "freshwater or marine: small-scale capture",
+        "freshwater or marine: large-scale capture",
+        "freshwater or marine: specific sector yet to be classified"
+      )
+    )
+  )
+```
+
+```{r Summarize by sector}
+# ESTIMATED:
+SectorLandings_summary <- GOC_Landings_sorted %>% 
+  filter(year >= 2014, year <= 2024) %>%
+  select(year, weight_kg_corrected, value, sector_estimate_draft) %>%
+  group_by(year, sector_estimate_draft) %>%
+  summarize(
+    est_annual_catch_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    est_annual_value    = sum(value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Convert to metric tons
+  mutate(est_annual_catch_mton = est_annual_catch_kg / 1000) %>%
+  # Compute percent of annual total catch
+  group_by(year) %>%
+  mutate(percent_AnnualTotCatch = round(100 * est_annual_catch_kg / sum(est_annual_catch_kg, na.rm = TRUE))) %>%
+  ungroup()
+
+# Okay great. So from this we can see that the following sectors make up only 0-1% of total catch. I feel comfortable ignoring them then for the purposing of assessing food provising (maybe a different story for natural products) - Mar 24 2026.
+# Small contributions from:
+# freshwater: small-scale capture
+# freshwater: large-scale capture
+# freshwater: specific sector yet to be classified
+# freshwater or marine: aquaculture
+# freshwater or marine: small-scale capture
+# freshwater or marine: large-scale capture
+# freshwater or marine: specific sector yet to be classified
+
+table(SectorLandings_summary$sector_estimate_draft)
+```
+
+```{r Plot each sector of interest over time}
+# SECTORS OF INTEREST:
+Sectors_of_Interest<- c("marine: specific sector yet to be classified" , "marine: small-scale capture", "marine: large-scale capture" , "marine: aquaculture", "freshwater: aquaculture")
+  
+# Define colors for each sector (fleet distinction = lighter for small-scale)
+sector_colors <- c(
+  # Marine (blues)
+  "marine: specific sector yet to be classified"       = "#cce0ff",  # very light blue for unknown
+  "marine: small-scale capture"                       = "#6699cc",  # medium blue
+  "marine: large-scale capture"                       = "#336699",  # darker blue
+  "marine: aquaculture"                               = "#33cccc",  # teal/aquaculture cue
+  
+  # Freshwater (warm shades)
+  "freshwater: aquaculture"                          = "#ff9933"  # bright orange
+  # "freshwater: specific sector yet to be classified" = "#ffe0cc",  # light orange for unknown - IGNORE THIS SECTOR FOR NOW.
+  # "freshwater: small-scale capture"                  = "#ff6666",  # strong red/orange - IGNORE THIS SECTOR FOR NOW.
+  # "freshwater: large-scale capture"                  = "#ffb366",  # lighter orange/yellow - IGNORE THIS SECTOR FOR NOW.
+  
+  # Freshwater or Marine (grey and purple shades) - IGNORE FOR NOW.
+  # "freshwater or marine: specific sector yet to be classified"  = "#e0e0e0",  # light grey
+  # "freshwater or marine: small-scale capture"                    = "#b399cc",  # light purple
+  # "freshwater or marine: large-scale capture"                    = "#8040a0",  # medium purple
+  # "freshwater or marine: aquaculture"                             = "#999999"   # neutral grey
+)
+
+# Plot
+Landings_bySector_plot<- SectorLandings_summary %>%
+  filter(year >= 2018) %>%
+  filter(sector_estimate_draft %in% Sectors_of_Interest) %>%
+  ggplot(aes(x = year, y = est_annual_catch_mton, fill = sector_estimate_draft)) +
+  
+  # Area plot with slight border for separation
+  geom_area(alpha = 0.9, color = "white", linewidth = 0.2) +
+  
+  # Manual fill palette
+  scale_fill_manual(
+    values = sector_colors,
+    name = "Sector"
+  ) +
+  
+  # Labels
+  labs(
+    x = "Year",
+    y = "Estimated Annual Catch (metric tons)",
+    title = "Estimated Catch by Sector",
+    subtitle = "Filtered for 2018 onwards; dropped sectors that contributed < 1% total catch"
+  ) +
+  
+  # Minimal theme and sleek styling
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey85"),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 13, color = "grey30")
+  ) +
+  
+  # Optional: better legend layout
+  guides(
+    fill = guide_legend(nrow = 3, byrow = TRUE, title.position = "top")
+  )
+
+Landings_bySector_plot
+```
+
+Looks great! Save this plot.
+```{r Save Landings_bySector_plot}
+# Save the plot as a high-resolution PNG
+ggsave(
+  filename = "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_CleanUp/Catch_bySector_plot_Mar242026.png",
+  plot = Landings_bySector_plot,
+  width = 10,       # width in inches
+  height = 6,       # height in inches
+  dpi = 300         # resolution
+)
+```
+
+So that's estimated. What about what was actually reported?
+```{r Plot what was actually reported}
+colnames(GOC_Landings_sorted)
+
+GOC_Landings_sorted <- GOC_Landings_sorted %>%
+  mutate(
+    sector_estimate_reported = case_when(
+      
+      # More specific first
+      reported_aquaculture_production == "yes" & reported_fleet == "small_scale" ~ "small-scale aquaculture",
+      
+      # General aquaculture
+      reported_aquaculture_production == "yes" ~ "aquaculture",
+      
+      # Fisheries by fleet
+      reported_fleet == "small_scale" ~ "small-scale fisheries",
+      reported_fleet == "large_scale" ~ "large-scale fisheries",
+      
+      # Fallback for missing/unknown
+      TRUE ~ "yet to be classified"
+    )
+  )
+
+# SANITY CHECK:
+table(GOC_Landings_sorted$sector_estimate_reported)
+         # aquaculture large-scale fisheries small-scale fisheries  yet to be classified 
+         #        17496                142431               1052851               2409998 
+
+# Re-level
+GOC_Landings_sorted <- GOC_Landings_sorted %>%
+  mutate(
+    sector_estimate_reported = factor(
+      sector_estimate_reported,
+      levels = c(
+        "aquaculture",
+        "yet to be classified",
+        "small-scale fisheries",
+        "large-scale fisheries"
+      )
+    )
+  )
+
+# REPORTED:
+SectorLandings_summary_REPORTED<- GOC_Landings_sorted %>% 
+  filter(year >= 2014, year <= 2024) %>%
+  select(year, sector_estimate_reported, weight_kg_corrected, value) %>%
+  group_by(year, sector_estimate_reported) %>%
+  summarize(est_annual_catch_kg= sum(weight_kg_corrected, na.rm = TRUE),
+            est_annual_value= sum(value, na.rm = TRUE))
+
+SectorLandings_summary_REPORTED$est_annual_catch_mton <- SectorLandings_summary_REPORTED$est_annual_catch_kg/1000
+
+table(SectorLandings_summary_REPORTED$sector_estimate_reported)
+
+# Plot
+REPORTEDLandings_bySector_plot<- SectorLandings_summary_REPORTED %>%
+  filter(year >= 2018) %>%
+  ggplot(aes(x = year, y = est_annual_catch_mton, fill = sector_estimate_reported)) +
+  
+  # Area plot with slight border for separation
+  geom_area(alpha = 0.9, color = "white", linewidth = 0.2) +
+  
+  # Labels
+  labs(
+    x = "Year",
+    y = "Reported Annual Catch (metric tons)",
+    title = "Catch by Reported Sector",
+    subtitle = "Filtered for 2018 onwards"
+  ) +
+  
+  # Minimal theme and sleek styling
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey85"),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 13, color = "grey30")
+  ) +
+  
+  # Optional: better legend layout
+  guides(
+    fill = guide_legend(nrow = 3, byrow = TRUE, title.position = "top")
+  )
+
+REPORTEDLandings_bySector_plot
+```
+
+```{r Save the GOC_Landings_sorted dataframe}
+# saveRDS(GOC_Landings_sorted, file="/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_Parsed.Keyed.&SectorSorted_2000.present_EMF.Mar242026.rds")
+# 3622776 obs., 58 vars.
+```
+
+
+# STEP 12: Filter out freshwater & aquaculture landings from marine wild-capture and save these data frames as separate files. [UNDER CONSTRUCTION] ------------------------------
+# Files are not currently save as separate .rds files. Might want to change this. - Mar 23 2026
+```{r Filter out freshwater and MAR species}
+
+#### FRESHWATER
+Freshwater_Landings <- GOC_Landings_aquaculture %>%
+  filter(freshwater_flag)
+# 286013 obs., 50 vars
+
+FreshFisheries_Landings <- GOC_Landings_aquaculture %>%
+  filter(freshwater_flag & !aquacultureFLAG_keywords)
+# 280355 obs., 50 vars
+
+FreshAquaculture_Landings <- GOC_Landings_aquaculture %>%
+  filter(freshwater_flag & aquacultureFLAG_keywords)
+# 5658 obs., 50 vars
+
+#### MARINE - WILD CATCH AND MARICULTURE
+Mariculture_Landings <- GOC_Landings_aquaculture %>%
+  filter(!freshwater_flag & aquacultureFLAG_keywords)
+# 130432 obs., 50 vars
+
+MarineFisheries_Landings <- GOC_Landings_aquaculture %>%
+  filter(!(aquacultureFLAG_keywords | freshwater_flag))
+# 3143018 obs., 50 vars
+
+sum(is.na(MarineFisheries_Landings$OHI_Region_No))
+table(MarineFisheries_Landings$OHI_Region_No)
+# Seems like all entries have an OHI region number...
+```
+NOTE TO SELF: There could still be some freshwater species hiding in here. For example, the "MOJARRA" general category is mixed freshwater and marine demersal fish.
+
+# STEP 13: Interrogate the economic unit (eu_rnpa) and vessel (vessel_name) columns. ------------------------------
+
+```{r Load in dataframe if needed}
+GOC_Landings_sorted<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_Parsed.Keyed.&SectorSorted_2000.present_EMF.Mar242026.rds"))
+# 3622776 obs. 58 vars.
+```
+
+```{r FILTER OUT MARINE SECTORS OF INTEREST:}
+# FILTER OUT MARINE SECTORS OF INTEREST: ----
+MarineFisherySectors<- c("marine: specific sector yet to be classified" , "marine: small-scale capture", "marine: large-scale capture")
+
+GOC_Landings_mar.fisheries<- GOC_Landings_sorted %>% 
+  filter(sector_estimate_draft %in% MarineFisherySectors)
+# 3106331 obs., 58 vars.
+
+range(GOC_Landings_mar.fisheries$year)
+```
+
+```{r First look}
+length(unique(GOC_Landings_mar.fisheries$eu_name))
+# 5002 unique economic units in the dataframe.
+
+length(unique(GOC_Landings_mar.fisheries$eu_rnpa))
+# 4647 unique permits given to economic units in the dataframe.
+
+length(unique(GOC_Landings_mar.fisheries$vessel_name))
+# 2141 unique vessel names in the dataframe.
+
+length(unique(GOC_Landings_mar.fisheries$vessel_rnpa))
+# 2134 unique vessel permit numbers in the dataframe.
+
+# So, for the most part, each vessel is registered to a unique vessel permit.'
+
+# How many of the 3229063 total observations have no economic unit name associated with them? Only ~2% of all records.
+GOC_Landings_mar.fisheries %>%
+  count(eu_name == "NO DISPONIBLE")
+# 68018 / 3106331
+
+# How many of all observations have no vessel name associated with them? About 50% of all records.
+GOC_Landings_mar.fisheries %>%
+  count(vessel_rnpa == "00000000")
+# 1612403 / 3106331
+
+# This tells us that about half of all records have no information about the fishers' vessel, but nearly all have permit info.
+```
+
+```{r Testing some ideas}
+table(GOC_Landings_mar.fisheries$reported_aquaculture_production)
+
+subset_aquaculture<- GOC_Landings_mar.fisheries %>%
+  filter(reported_aquaculture_production == "yes")
+
+vector_aquaculture<- unique(subset_aquaculture$landing_site)
+
+subset2<- GOC_Landings_mar.fisheries %>%
+  filter(eu_name == "SCPP PUNTA TIBURON, S DE RL DE CV")
+table(subset2$reported_aquaculture_production)
+# It looks like this particular economic unit (possibly a cooperative?) does not work in aquaculture. 
+
+subset3<- GOC_Landings_mar.fisheries %>%
+  filter(eu_name == "SCPP DE SERV LA CAIMANERA SC DE RL")
+table(subset3$reported_aquaculture_production)
+# Notice that some of these economic units say nothing about aquaculture, whereas others do. 
+
+rm(subset_aquaculture, subset2, subset3)
+```
+Let's leave this section under construction. I'm not totally sure what to do with this yet. But it will impact how and if we can calculate CPUE.
+
+Waiting to here back from Juan Carlos is if there is a key or roster for economic units...
+
+```{r Let's plot missing data over time}
+# Summarize missing vessel IDs over time
+vessel_missing_over_time <- GOC_Landings_mar.fisheries %>%
+  mutate(missing_vessel = is.na(vessel_rnpa) | vessel_rnpa == "00000000" | vessel_rnpa == "0000000_") %>%
+  group_by(year) %>%   # Replace 'year' with your time column
+  summarise(
+    total = n(),
+    missing_count = sum(missing_vessel),
+    missing_percent = 100 * missing_count / total
+  )
+
+# Plot missing vessel prevalence over time
+ggplot(vessel_missing_over_time, aes(x = year, y = missing_percent)) +
+  geom_line(color = "orange", size = 1.2) +
+  geom_point(color = "tomato", size = 2) +
+  labs(
+    title = "Prevalence of Missing Vessel IDs Over Time",
+    x = "Year",
+    y = "Percentage of Records Missing Vessel ID"
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +
+  theme_bw()
+
+# Vessel data is missing throughout the time series.
+
+# Plot the opposite: what's not missing?
+vessel_present_over_time <- GOC_Landings_mar.fisheries %>%
+  mutate(missing_vessel = is.na(vessel_rnpa) | vessel_rnpa == "00000000" | vessel_rnpa == "0000000_") %>%
+  group_by(year) %>%
+  summarise(
+    total = n(),
+    present_count = sum(!missing_vessel),
+    present_percent = 100 * present_count / total
+  )
+
+ggplot(vessel_present_over_time, aes(x = year, y = present_percent)) +
+  geom_line(color = "steelblue", size = 1.2) +
+  geom_point(color = "navy", size = 2) +
+  
+  labs(
+    title = "Proportion of Records WITH Vessel IDs Over Time",
+    x = "Year",
+    y = "Percentage of Records with Vessel ID"
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +
+  theme_bw()
+
+# Plot the opposite: what's not missing?
+eu_present_over_time <- GOC_Landings_mar.fisheries %>%
+  mutate(missing_eu = eu_name == "NO DISPONIBLE") %>%
+  group_by(year) %>%
+  summarise(
+    total = n(),
+    present_count = sum(!missing_eu),
+    present_percent = 100 * present_count / total
+  )
+
+ggplot(eu_present_over_time, aes(x = year, y = present_percent)) +
+  geom_line(color = "lavender", size = 1.2) +
+  geom_point(color = "orchid", size = 2) +
+  
+  labs(
+    title = "Proportion of Records WITH EU Details Over Time",
+    x = "Year",
+    y = "Percentage of Records with EU details"
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +
+  theme_bw()
+```
+
+```{r Investigate vessel names since 2018}
+GOC_Landings_vessels<- GOC_Landings_mar.fisheries %>%
+  filter(year >= 2018)
+# 1104876 obs., 58 vars.
+
+length(unique(GOC_Landings_vessels$vessel_name))
+# 1297 unique vessel names in the dataframe.
+length(unique(GOC_Landings_vessels$vessel_rnpa))
+# 1279 unique vessel permit numbers in the dataframe.
+
+# So, for the most part, each vessel is registered to a unique vessel permit.'
+
+# How many of the 1104876 total observations have no economic unit name associated with them? Essentially 0% of records.
+GOC_Landings_vessels %>%
+  count(eu_name == "NO DISPONIBLE")
+# 4 / 1104876
+
+# How many of all observations have no vessel permit associated with them? 86% of all records.
+GOC_Landings_vessels %>%
+  count(vessel_rnpa == "00000000" | vessel_rnpa == "0000000_" | is.na(vessel_rnpa))
+# 947599 / 1104876
+
+# How many of all observations have no vessel NAME associated with them? About 86% of all records.
+# Okay, so we know vessel name alone won't be a good estimator for CPUE...
+GOC_Landings_vessels %>%
+  count(is.na(vessel_name))
+# 947599 / 1104876
+
+# Take a look at a random assortment of rnpas versus names to understnad what's missing and what's not:
+subset <- GOC_Landings_vessels %>%
+  filter(is.na(vessel_name)) %>%
+  select(vessel_rnpa, vessel_name, eu_name, eu_rnpa) %>%
+  distinct() %>%
+  slice_sample(n = 200)
+```
+
+```{r Testing some ideas}
+colnames(GOC_Landings_vessels)
+
+# Case studies:
+subset <- GOC_Landings_vessels %>%
+  filter(eu_rnpa == "2508005234")
+
+length(unique(subset$vessel_name))
+# 9 vessels registered to this economic unit permit
+
+subset2<- GOC_Landings_vessels %>%
+  filter(eu_rnpa =="0203010103")
+
+length(unique(subset2$vessel_name))
+# 1 vessel name registered to this economic unit permit
+length(unique(subset2$eu_name))
+# 1 name for this economic unit
+unique(subset2$vessel_rnpa)
+# 1 vessel permit for this economic unit, 0000000_
+
+range(subset2$year)
+# From 2018 to 2025
+unique(subset2$recorded_taxa_name_clean)
+# Across several taxa
+unique(subset2$sector_estimate_reported)
+# And all small-scale (or unclassified)
+```
+
+```{r Estimate CPUE per economic unit 2018-2024}
+# Let's look through unit Economic Units. All records have a non-NA economic unit (at least since 2018)
+EconomicUnits_df <- GOC_Landings_vessels %>%
+  distinct(eu_rnpa)    # Keeps unique values as a one-column tibble
+
+GOC_Landings_vessels %>%
+  count(is.na(eu_rnpa))
+
+# Estimate Catch per economic unit 2018-2024: summarize weight_kg_corrected by eu_rnpa per year
+
+CatchPerEU_summary <- GOC_Landings_vessels %>%
+  filter(year >= 2018 & year <= 2024) %>%   # filter the years
+  group_by(year, eu_rnpa) %>%              # group by year and economic unit
+  summarize(
+    total_catch_kg = sum(weight_kg_corrected, na.rm = TRUE)  # sum catch, ignore NAs
+  ) %>%
+  ungroup()  # remove grouping after summarizing
+
+# Next, pull out the eu_rnpas that are present in all years 2018-2025. Using these eu_rnpas only, estimate the total catch of Major_Taxa_Group divided by the total eu_rnpa per year
+
+# Step 1: Identify eu_rnpa present in all years
+eu_all_years <- GOC_Landings_vessels %>%
+  filter(year >= 2018 & year <= 2025) %>%
+  group_by(eu_rnpa) %>%
+  summarize(years_present = n_distinct(year), .groups = "drop") %>%
+  filter(years_present == 8) %>%    # 2018–2025 = 8 years
+  pull(eu_rnpa)                     # get vector of eu_rnpa
+# 1003 eu.rnpas are present in all years 2018-2025
+
+# Step 2: Filter data to only include these eu_rnpa
+filtered_data <- GOC_Landings_vessels %>%
+  filter(eu_rnpa %in% eu_all_years, year >= 2018 & year <= 2025)
+
+# Step 3: Summarize catch by Major_Functional_Group per year
+CPUE_summary <- filtered_data %>%
+  group_by(year, Major_Functional_Group) %>%
+  summarize(
+    total_catch_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    n_eu = n_distinct(eu_rnpa),                    # number of economic units that year
+    catch_per_eu = total_catch_kg / n_eu          # divide total catch by number of units
+  ) %>%
+  ungroup()
+
+# Looking promising! Let's plot it...
+```
+
+```{r Plot CPUE for Small Pelagics}
+# Filter for Small Pelagics
+SmallPelagic_CPUE <- CPUE_summary %>%
+  filter(year <=2024) %>%
+  filter(Major_Functional_Group == "Anchovy & Sardine (small pelagics)")
+
+# Plot catch per economic unit over time for Small Pelagics
+SmallPelagic_CPUE %>%
+ggplot(aes(x = year, y = catch_per_eu)) +
+  geom_line(color = "pink", size = 1.2) +
+  geom_point(color = "tomato", size = 2) +
+  labs(
+    title = "CPUE of Small Pelagics per Economic Unit (2018-2024)",
+    x = "Year",
+    y = "Catch per Economic Unit (kg)"
+  ) +
+  theme_bw()
+
+# PLOT FOR ALL GROUPS, excluding Small Pelagics:
+# Remove NAs or 'unknown' if you don’t want them cluttering the plot
+CPUE_plot_data <- CPUE_summary %>%
+  filter(!is.na(Major_Functional_Group), Major_Functional_Group != "unknown")
+
+CPUE_plot_data %>%
+  filter(!Major_Functional_Group=="Anchovy & Sardine (small pelagics)") %>%
+  
+ggplot(aes(x = year, y = catch_per_eu, color = Major_Functional_Group)) +
+  geom_line(size = 1.1) +
+  geom_point(size = 2) +
+  labs(
+    title = "CPUE per Economic Unit by Functional Group (2018-2025)",
+    x = "Year",
+    y = "Catch per Economic Unit (kg)",
+    color = "Functional Group"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+# More granular: Plot Cephalopods
+Cephalopods_CPUE <- CPUE_summary %>%
+  filter(year <=2024) %>%
+  filter(Major_Functional_Group == "Cephalopods")
+
+# Plot catch per economic unit over time
+ggplot(Cephalopods_CPUE, aes(x = year, y = catch_per_eu)) +
+  geom_line(color = "gold", size = 1.2) +
+  geom_point(color = "salmon", size = 2) +
+  labs(
+    title = "CPUE of Cephalopods per Economic Unit (2018-2024)",
+    x = "Year",
+    y = "Catch per Economic Unit (kg)"
+  ) +
+  theme_bw()
+
+# More granular: Plot Demersal marine fishes
+DemersalFishes_CPUE <- CPUE_summary %>%
+  filter(year <=2024) %>%
+  filter(Major_Functional_Group == "Demersal marine fishes")
+
+# Plot catch per economic unit over time
+ggplot(DemersalFishes_CPUE, aes(x = year, y = catch_per_eu)) +
+  geom_line(color = "goldenrod", size = 1.2) +
+  geom_point(color = "brown", size = 2) +
+  labs(
+    title = "CPUE of Demersal marine fishes per Economic Unit (2018-2024)",
+    x = "Year",
+    y = "Catch per Economic Unit (kg)"
+  ) +
+  theme_bw()
+
+# More granular: Plot Pelagic marine fishes
+PelagicFishes_CPUE <- CPUE_summary %>%
+  filter(year <=2024) %>%
+  filter(Major_Functional_Group == "Pelagic marine fish (excl. anchovy & sardine)")
+
+# Plot catch per economic unit over time
+ggplot(PelagicFishes_CPUE, aes(x = year, y = catch_per_eu)) +
+  geom_line(color = "pink", size = 1.2) +
+  geom_point(color = "purple", size = 2) +
+  labs(
+    title = "CPUE of Pelagic marine fish (excl. anchovy & sardine) per Economic Unit (2018-2024)",
+    x = "Year",
+    y = "Catch per Economic Unit (kg)"
+  ) +
+  theme_bw()
+```
+
+
+# > WORK THAT HAS YET TO BE FULLY SORTED / INTEGRATED.  ------------------------------
+
+# STEP 14: Re-generate time series (from 2004-2024) per genus to use in CMSY [FIRST DRAFT COMPLETE; UNDER CONSTRUCTION]
+
+```{r Load GOC_Landings_sorted dataframe as needed}
+# GOC_Landings_sorted<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_Parsed.Keyed.&SectorSorted_2000.present_EMF.Mar242026.rds"))
+# 3622776 obs., 58 vars.
+# ^ Use this dataframe once its correctly updated next week. - Mar 25 2026
+
+GOC_Landings_classed<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_Parsed.wSpecies&MajorGroups_2000.present_EMF.Mar252026.rds"))
+# 3622776 obs., 49 vars.
+```
+
+```{r Sort by species}
+#### REMOVE FRESHWATER AND RARE GENERA ####
+table(GOC_Landings_classed$estimated_genus_name)
+# Some of these genera don't appear very often. I want to filter genera for which we have more than 10 years worth of data and > 10 records per year.
+
+# Summarize per genus and year
+Genera_summary <- GOC_Landings_classed %>%
+  filter(!is.na(estimated_genus_name)) %>%
+  select(estimated_genus_name, Major_Functional_Group, year) %>%
+  group_by(estimated_genus_name, Major_Functional_Group, year) %>%
+  summarise(
+    n_records = n(),
+    .groups = "drop"
+  )
+
+table(Genera_summary$Major_Functional_Group)
+
+FreshwaterTaxa<- c("Freshwater fishes", "Other freshwater taxa")
+
+# Count how many years have more than 10 records, and remove those genera with fewer than 10 years of 10 records:
+Genera_filtered <- Genera_summary %>%
+  filter(!estimated_genus_name %in% c("unknown", "NEI")) %>%
+  filter(!Major_Functional_Group %in% FreshwaterTaxa) %>%
+  filter(n_records > 10) %>%
+  group_by(estimated_genus_name, Major_Functional_Group) %>%
+  summarise(n_years = n(), .groups = "drop") %>%
+  filter(n_years > 10)
+# 100 obs. / genera and 3 vars.
+
+Genera_of_Interest<- Genera_filtered$estimated_genus_name
+```
+
+```{r Filter dataset to generate time series for Genera_of_Interest}
+# Keep only genera that meet the criteria in the main dataset
+GOC_Landings_cmsy <- GOC_Landings_classed %>%
+  filter(estimated_genus_name %in% Genera_of_Interest)
+# 2363080 obs., 49 vars.
+```
+
+```{r Generate time series}
+colnames(GOC_Landings_cmsy)
+
+CMSY.Landings_summary <- GOC_Landings_cmsy %>%
+  # Ensure genus is not NA
+  filter(!is.na(estimated_genus_name)) %>%
+  group_by(year, estimated_genus_name, Major_Functional_Group) %>%
+  summarise(
+    total_biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),  # total biomass
+    total_revenue    = sum(value, na.rm = TRUE),               # total revenue
+    .groups = "drop"
+  ) %>%
+  arrange(year, estimated_genus_name)
+
+# View the summary
+print(summary_table)
+```
+
+# Okay! Timeseries are ready, kind of. I still need to integrate the new lat-long key and potentially filter / refine estimates for the GOC region but the infrastructure to generate time series per genus is in. - Mar 25 2026
+
+# PURG: Looks mostly good except for (Hyporthodus niphobles v. Hyporthodus), (Eucinostomus argenteus), and NEI taxa.
+```{r Looking into to Hyporthodus niphobles}
+# There is something really weird happening with a few of these genera.
+# ... Turns out its an encoding issue.
+
+table(GOC_Landings_sorted$estimated_genus_name)
+
+subset<- GOC_Landings_sorted %>% 
+  filter(Major_Functional_Group== "Demersal marine fishes")
+table(subset$estimated_genus_name)
+
+subset2<- subset %>%
+  filter(grepl("Hyporthodus", estimated_genus_name))
+
+subset2 <- subset %>%
+  mutate(estimated_genus_name = stri_trans_nfkc(estimated_genus_name)) %>%
+  filter(estimated_genus_name == "Hyporthodus niphobles")
+# Okay, so there is something very weird about this encoding here.
+```
+# Might be worth regenerating MasterSpKey with normalized unicode (stri_trans_nfkc). Although, to be perfectly honest, I don't think it will affect out fishery estimates at all if we code by genus.
+# Okay, I did this.
+
+
+# STEP 15: Generate aquaculture list
+```{r Generate aquaculture list}
+GOC_Landings_sorted<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_Parsed.Keyed.&SectorSorted_2000.present_EMF.Mar242026.rds"))
+# 3622776 obs., 58 vars.
+# ^ Use this dataframe once its correctly updated next week. - Mar 25 2026
+
+table(GOC_Landings_sorted$sector_estimate_draft)
+
+GOC_Landings_aquaculture<- GOC_Landings_sorted %>%
+  filter(year > 2017) %>%
+  filter(sector_estimate_draft=="marine: aquaculture")
+# 106474 obs.
+
+table(GOC_Landings_aquaculture$common_name_clean)
+table(GOC_Landings_aquaculture$Major_Functional_Group)
+
+# Investigate weird entries
+subset<- GOC_Landings_aquaculture %>%
+  filter(year > 2017) %>%
+  filter(Major_Functional_Group== "Sharks")
+
+subset2<- GOC_Landings_aquaculture %>%
+  filter(year > 2017) %>%
+  filter(Major_Functional_Group== "Crustaceans")
+
+subset3<- GOC_Landings_aquaculture %>%
+  filter(year > 2017) %>%
+  filter(Major_Functional_Group== "Shrimps, prawns")
+
+table(subset3$aquacultureFLAG_keywords)
+
+# "CULT" does not signal aquaculture
+
+GOC_Landings_shrimp<- GOC_Landings_sorted %>%
+  filter(year > 2017) %>%
+  filter(Major_Functional_Group== "Shrimps, prawns")
+# 203596 obs.
+
+GOC_Landings_shrimp<- GOC_Landings_shrimp %>%
+  filter(year == 2024)
+
+subset<- GOC_Landings_shrimp %>%
+  filter(eu_rnpa== "1802003184")
+
+table(GOC_Landings_shrimp$aquacultureFLAG_combined)
+```
+
+STOPPED HERE, Mar 25 2026
