@@ -1,10 +1,49 @@
-# >> PICK 2: CMSY Stock Assesments <<
-Must run CMSY on personal machine. Can generate the main files here though. 
+# CMSY Stock Assesments
+# NOTE: Must run CMSY on personal machine. Can generate the main files here though. 
 
+################################################################################ 
+
+For questions contact: Erica Ferrer, Ph.D. at emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################ 
+
+# PRE-WORK ------------------------------
+
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+## Review Instructional Files:
 ```{r Review the CMSY protocol developed by Ferrer et al. (2021)}
 # Absolute path to your PDF
 pdf_path <- normalizePath(
-  "~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Copy of Ferrer et al. (2021) CMSY Protocol.pdf",
+  "~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_InstructionalFiles/Copy of Ferrer et al. (2021) CMSY Protocol.pdf",
   winslash = "/", mustWork = TRUE
 )
 
@@ -15,391 +54,80 @@ file_url <- paste0("file:///", URLencode(pdf_path, reserved = TRUE))
 browseURL(file_url)
 ```
 
-# GENERATING FILES 1 & 2 FROM SCRATCH
+# LOAD FILE 1 - Landings Timeseries  ------------------------------
+- ABOUT FILE 1: File with annual landings in kg (and n_count observations) grouped by year per "stock". 
+- Here, stock is defined as the total population of GENUS X fished within the Gulf of California from Baja to northern Jalisco, not including landings from the Pacific.
+- I’m going to run CMSY at the genus level. I actually think it’s a safer more reliable bet than species-level info and because – in many cases – fishermen seem to target taxa of the same genus interchangeably.
+- This file was created in /home/ferrer/ohi_goc_prep/FP/CONAPESCA_CleanUp/CONAPESCA_CleaningWorkflow_Mar2026.Rmd
 
-NOTES TO SELF - Dec 09 2025:
+```{r File 1 - Stock Timeseries (JC data)}
+CMSY_Landings_file1<- read_csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_LandingsPerGenera_Apr032026.csv")
+# 2346 obs., 6 vars.
 
-FILE 1: Create a file with annual landings in kg (and n_count observations) grouped by year per "stock". Here, stock is defined as the total population of GENUS X fished within the Gulf of California from Baja to northern Jalisco, not including landings from the Pacific.
+# Name estimated_genus_name to be "Stock
+colnames(CMSY_Landings_file1)
+CMSY_Landings_file1 <- CMSY_Landings_file1 %>%
+  rename(Stock = estimated_genus_name)
+```
 
-- At present, we have had some issues with keying out species and landing_sites. Thus, whatever timeseries we have here is likely to be an UNDERESTIMATE of total landings for all genera in the GoC. I plan to re-make this file (File 1) in the new year once we have more key info.
+```{r Save this file as UNDER CONSTRUCTION so I can work with it offline and use it to generate priors}
+write.csv(CMSY_Landings_file1, row.names= FALSE,
+          "/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Generating_Model_Priors/Priors_Data/File1_Landings_UNDERCONSTRUCTION_Apr032026.csv")
+```
 
-- For now, I’m going to run CMSY at the genus level for now, since I actually think it’s a safer more reliable bet than species-level info and because – in many cases – fishermen seem to target taxa of the same genus interchangeably.
-
+# Create FILE 2 - Metadata & Model Priors  ------------------------------
 FILE 2: Create a file with OHI_Region, Stock, Group = Name, English Name, Scientific Name, Source, and a whole bunch of year columns that you populate using the various R files shared by Alfredo. This file can probably be trimmed down but for now I recommend formatting it exactly as it appears from before.
 
-# Create FILE 1 - Timeseries
-```{r File 1 - Stock Timeseries (JC data)}
-# Load file, only if needed:
-GoC_Landings_for_CMSY<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
-
-GoC_Landings_for_CMSY_original<- GoC_Landings_for_CMSY
-
-# GoC_Landings_for_CMSY<- Landings_GoC_NoFresh.NoMariculture
-# 3163120 obs., 50 vars.
-```
-
-```{r Basic checks ahead of CMSY}
-# Some basic checks:
-table(GoC_Landings_for_CMSY$fleet)
-# large_scale small_scale 
-#      142404      975060 
-
-table(GoC_Landings_for_CMSY$acuaculture_production) 
-# no aquaculture. As expected!
-
-table(GoC_Landings_for_CMSY$freshwater_flag) 
-# no freshwater flags. As expected!
-
-table(GoC_Landings_for_CMSY$GoC) 
-table(GoC_Landings_for_CMSY$GulfCal) 
-# Everything in Gulf of California, that we know of!
-
-table(GoC_Landings_for_CMSY$year)
-# Plenty of data years 2000-2025
-
-unique(GoC_Landings_for_CMSY$estimated_genus_name) 
-# Okay. There are a few genera we're going to toss...
-```
-
-```{r Basic filters ahead of CMSY}
-#### REMOVE FRESHWATER GENERA WE ARE NOT INTERESTED ####
-genus_exclude<- c(
-  "Cyprinus", # common carp; strictly freshwater.
-  "Macrobrachium", # freshwater prawns/shrimps; mostly freshwater.
-  "Hypophthalmichthys", # Asian carp; freshwater.
-  "Chirostoma", # “charales,” endemic to freshwater lakes in Mexico.
-  "Carassius", # goldfish/crucian carp; freshwater.
-  "Micropterus", # black bass; freshwater.
-  "Lepomis", # sunfish; freshwater.
-  "Cyprinodon", # pupfish; freshwater.
-  "Rana", # frogs
-  "NEI", # not classed yet
-  "Especies", # not specific enough to be anything
-  NA # not classed
-  )
-
-# Flag genera to exclude:
-GoC_Landings_for_CMSY <- GoC_Landings_for_CMSY %>%
-  mutate(
-    exclude_flag = if_else(
-      !is.na(estimated_genus_name) & estimated_genus_name %in% genus_exclude,
-      TRUE,
-      FALSE
-    )
-  )
-
-subset<- GoC_Landings_for_CMSY %>% filter(exclude_flag== TRUE)
-# Dropping 710533 out of 3163120 total records (~22%) for now. A lot of these are NEI that will be classed in the new year!
-
-GoC_Landings_for_CMSY<- GoC_Landings_for_CMSY %>% filter(exclude_flag== FALSE)
-# 2452587 obs., 51 vars.
-
-
-#### REMOVE RARE GENERA ####
-table(GoC_Landings_for_CMSY$estimated_genus_name)
-# Some of these genera don't appear very often. I want to filter genera for which we have more than 10 years worth of data and > 10 records per year.
-
-# Summarize per genus and year
-Genus_summary <- GoC_Landings_for_CMSY %>%
-  filter(!is.na(estimated_genus_name)) %>%
-  group_by(estimated_genus_name, year) %>%
-  summarise(
-    n_records = n(),
-    .groups = "drop"
-  )
-
-# Count how many years have more than 10 records, and remove those genera with fewer than 10 years of 10 records:
-Genus_filtered <- Genus_summary %>%
-  filter(n_records > 10) %>%
-  group_by(estimated_genus_name) %>%
-  summarise(n_years = n(), .groups = "drop") %>%
-  filter(n_years > 10)
-
-Genera_of_Interest<- Genus_filtered$estimated_genus_name
-# 98 remaining genera
-
-# Keep only genera that meet the criteria in the main dataset
-GoC_Landings_for_CMSY <- GoC_Landings_for_CMSY %>%
-  filter(estimated_genus_name %in% Genera_of_Interest)
-# 2225315 obs., 51 vars.
-
-#### Filter out OHI Region = NA ####
-sum(is.na(GoC_Landings_for_CMSY$OHI_Region_No))
-# Not applicable, all entries have an OHI Region number.
-```
-
-```{r Mitigate genera key issues}
-# NOTE TO SELF: Clean this up in the new year. This is a band aid solution to larger key issues.
-
-#### GENUS KEY ####
-# NOTE TO SELF: Return to this when needed (Dec 09 2025). Returned the next day, Dec 10 2025.
-Genus_MajorGroup_Key <- GoC_Landings_for_CMSY %>%
-  select(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm) %>%
-  distinct(recorded_taxa_group, estimated_genus_name, IHH_functional_major_groups_sm, .keep_all = TRUE)
-# 161 obs.
-
-# See the issue here? One genus could be associated with multiple recorded_taxa_groups. We need the unique combination of estimated_genus_name & recorded_taxa_group to key out the larger dataset. But, in the end, we'll want to be able to group by ESTIMATED_taxa_group to avoid issues of splitting the catch from a single genus across two larger groups.
-
-# ---- Create Major_Functional_Group values based IHH major functional groups assigned to recorded_taxa_group ----
-
-# Step 1: Assign one Major_Functional_Group per recorded_taxa_group, respecting the "OTRAS" category as inherently different.
-Genus_MajorGroup_Key <- Genus_MajorGroup_Key %>%
-  group_by(recorded_taxa_group) %>%
-  mutate(
-    # Step 1: assign group-level functional group only for non-OTRAS
-    group_major = {
-      tbl <- table(IHH_functional_major_groups_sm)
-      tbl <- tbl[!is.na(names(tbl)) & names(tbl) != ""]
-      if(length(tbl) == 0) NA_character_ else names(tbl)[which.max(tbl)]
-    },
-    Major_Functional_Group = if_else(
-      recorded_taxa_group != "OTRAS",
-      group_major,
-      NA_character_
-    )
-  ) %>%
-  ungroup() %>%
-  select(-group_major) %>%
-  
-  # Step 2: assign genus-level functional group (including OTRAS)
-  group_by(estimated_genus_name) %>%
-  mutate(
-    genus_major = {
-      # Use either already assigned Major_Functional_Group or fallback to IHH_functional_major_groups_sm
-      tbl <- table(
-        c(
-          Major_Functional_Group[!is.na(Major_Functional_Group)],
-          IHH_functional_major_groups_sm[!is.na(IHH_functional_major_groups_sm)]
-        )
-      )
-      if(length(tbl) == 0) NA_character_ else names(tbl)[which.max(tbl)]
-    },
-    Major_Functional_Group = if_else(
-      is.na(Major_Functional_Group),
-      genus_major,
-      Major_Functional_Group
-    )
-  ) %>%
-  ungroup() %>%
-  select(-genus_major)
-  
-# Step 3: Enforce genus-level consistency for Major_Functional_Group
-Genus_MajorGroup_Key <- Genus_MajorGroup_Key %>%
-  group_by(estimated_genus_name) %>%
-  mutate(
-    # Only apply to genera that appear more than once
-    Major_Functional_Group = if(n() > 1) {
-      # Choose the most frequent functional group within the genus
-      tbl <- table(Major_Functional_Group)
-      tbl <- tbl[names(tbl) != "" & names(tbl) != "NA"]
-      if(length(tbl) == 0) NA_character_ else names(tbl)[which.max(tbl)]
-    } else {
-      Major_Functional_Group
-    }
-  ) %>%
-  ungroup()
-  
-# Step 4: Manual patches for specific taxonomic groups
-Genus_MajorGroup_Key <- Genus_MajorGroup_Key %>%
-  mutate(
-    Major_Functional_Group = case_when(
-      recorded_taxa_group == "ALGAS" ~ "Marine algae",
-      recorded_taxa_group %in% c("PETO", "TIBURON", "CAZON") ~ "Sharks",
-      TRUE ~ Major_Functional_Group
-    )
-  )
-
-# Step 5: Assign estimated_taxa_group by looking at the most common recorded_taxa_group for each genus
-Genus_MajorGroup_Key <- Genus_MajorGroup_Key %>%
-  group_by(estimated_genus_name) %>%
-  mutate(
-    # Count the most frequent recorded_taxa_group for this genus
-    most_common_group = {
-      tbl <- table(recorded_taxa_group)
-      names(tbl)[which.max(tbl)]
-    },
-    estimated_taxa_group = most_common_group
-  ) %>%
-  ungroup() %>%
-  select(-most_common_group)
-    
-# 161 obs., 4 vars.
-
-# TEST<- Genus_MajorGroup_Key %>%
-#   select(estimated_genus_name,  Major_Functional_Group) %>%
-#   distinct()
-# 98 obs. = 98 genera, as expected.
-
-Genus_MajorGroup_Key<- Genus_MajorGroup_Key %>% 
-  select(recorded_taxa_group, estimated_genus_name, estimated_taxa_group, Major_Functional_Group) %>% 
-  distinct()
-# 134 obs., 3 vars.
-
-# MERGE this key to the larger dataset
-GoC_Landings_for_CMSY <- left_join(
-  GoC_Landings_for_CMSY,
-  Genus_MajorGroup_Key,
-  by = c("recorded_taxa_group", "estimated_genus_name")
-)
-# 2225315 obs., 53 vars. as expected!
-
-# A few quick sanity checks:
-subset<- GoC_Landings_for_CMSY %>% filter(is.na(Major_Functional_Group))
-sum(is.na(GoC_Landings_for_CMSY$Major_Functional_Group))
-table(GoC_Landings_for_CMSY$estimated_taxa_group)
-sum(is.na(GoC_Landings_for_CMSY$estimated_taxa_group))
-```
-
-```{r Save GoC_Landings_for_CMSY to be used for weighting scores later}
-# I want to maintain this exact dataframe since it was filtered, etc.
-# saveRDS(GoC_Landings_for_CMSY, "/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_Landings_for_CMSY_Dec102025.rds")
-```
-
-```{r Summary table}
-# Turn off scientific notation:
-options(scipen = 999)
-
-# Create timeseries FILE 1:
-colnames(GoC_Landings_for_CMSY)
-unique(GoC_Landings_for_CMSY$estimated_genus_name)
-
-TotalLandings_AnnualSummary_byGenus <- GoC_Landings_for_CMSY %>%
-  select(year, estimated_genus_name, weight_kg_corrected) %>%
-  group_by(year, estimated_genus_name) %>%
-  summarise(
-    Total_Landed_Biomass = sum(weight_kg_corrected, na.rm = TRUE),
-    n_Records = n(),
-    .groups = "drop"  # optional: ungroup after summarising
-  )
-# 2401 obs., 4 vars.
-
-TotalLandings_AnnualSummary_byGenus <- GoC_Landings_for_CMSY %>%
-  select(year, Major_Functional_Group, estimated_taxa_group, estimated_genus_name, weight_kg_corrected) %>%
-  group_by(year, Major_Functional_Group, estimated_taxa_group, estimated_genus_name) %>%
-  summarise(
-    Total_Landed_Biomass = sum(weight_kg_corrected, na.rm = TRUE),
-    n_Records = n(),
-    .groups = "drop"  # optional: ungroup after summarising
-  )
-# 2401 obs., 6 vars. GOOD!!!
-
-table(TotalLandings_AnnualSummary_byGenus$Major_Functional_Group)
-#                   Cephalopods                   Crustaceans        Demersal marine fishes             Diadromous fishes                  Marine algae 
-#                            26                            41                          1153                            26                            23 
-# Miscellaneous aquatic animals    Molluscs excl. Cephalopods         Pelagic marine fishes                        Sharks               Shrimps, prawns 
-#                            44                           222                           472                           269                           125 
-# Lots of demersal marine fishes!
-
-File1_df<- TotalLandings_AnnualSummary_byGenus
-
-# Re-name column
-colnames(File1_df)[colnames(File1_df) == "estimated_genus_name"] <- "Stock"
-colnames(File1_df)[colnames(File1_df) == "year"] <- "Year"
-
-# Finally, and just for now, filter out data from 2025
-# NOTE TO SELF: Come back to this in subsequent updates, once we have full data for 2025.
-File1_df<- File1_df %>% filter(Year<2025)
-
-CMSY_GenusKey<- File1_df %>% 
-  select(Major_Functional_Group, estimated_taxa_group, Stock) %>%
-  distinct()
-```
-
-## SAVE FILE 1
-```{r SAVE FILE 1 & CMSY Genus Key}
-# 
-write.csv(File1_df, "~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Input_Files/File1_Dec092025.csv", row.names = FALSE)
-# write.csv(CMSY_GenusKey, "~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Instructional_Files/CMSY_GenusKey_Dec102025.csv", row.names = FALSE)
-```
-
-# Create FILE 2 - Metadata & Model Priors
 ```{r Create File 2 based on File 1}
-# STEP 1:
+# STEP 1: CREATE CMSY_Metadata_file2
 # Which taxa (stocks) do we want to account for in our File 2?
-Stock_names<- unique(File1_df$Stock)
-# 98 unique genera / stocks
-
-## Read in the column names of File 2 from Ferrer et al. (2022) CSV file
-headers <- names(read.csv("FIS/v2025/OHI_CMSY_Scores/Instructional_Files/CMSY_File2_BluePrint_Dec092025.csv", nrows = 1))
-
-## Create an empty dataframe with the same headers
-File2_df <- data.frame(matrix(ncol = length(headers), nrow = 0))
-colnames(File2_df) <- headers
-
-## Add Stock_names to the 'Stock' column
-File2_df <- File2_df[1:length(Stock_names), ]  # Expand rows
-File2_df$Stock <- Stock_names
-
-## Reset rownames / the index column
-rownames(File2_df) <- NULL
-
-
-# STEP 2: TRIME AND RENAME AS NECESSARY
-# Trim some of the columns off this file: only if necessary.
-
-# Re-name columns: only if necessary.
-# colnames(File2_df)[colnames(File2_df) == "Keep"] <- "Yes_Run"
-# colnames(File2_df)[colnames(File2_df) == "stb.low"] <- "st_b.low"
-# colnames(File2_df)[colnames(File2_df) == "stb.hi"] <- "st_b.hi"
-
-
-# STEP 3: FILL AS NECESSARY
-# Fill in some of the columns off this file:
-File2_df$Region <- c("GOC")
-File2_df$Class <- c("TBD")
-File2_df$Source <- c("JC_data")
-File2_df$btype <- c("None")
-File2_df$force.cmsy <- c("TRUE")
-
-
-# STEP 4:
-# For species with less than 10 years of data, do not keep (Sufficient_No_Years = 0)
-StockYears_per_Taxa <- File1_df %>%
-  group_by(Stock) %>%
-  summarise(n_Stock_Years = n_distinct(Year), .groups = "drop")
-
-StockYears_per_Taxa <- StockYears_per_Taxa %>%
-  mutate(Sufficient_No_Years = ifelse(n_Stock_Years < 10, 0, 1))
-
-# How many stocks will we be keeping based on number of years?
-table(StockYears_per_Taxa$Sufficient_No_Years)
-# All of them, which makes sense since we already applied this filter above.
-
-##  Add this information to the File 2 dataframe: join StockYears_per_Taxa to File2_df by "Stock", bringing in the filled Sufficient_No_Years column
-File2_df <- File2_df %>%
-  select(-Sufficient_No_Years) %>%  # Remove empty column to avoid duplicates
-  left_join(
-    StockYears_per_Taxa %>% select(Stock, Sufficient_No_Years),
-    by = "Stock"
-  )
-
-# STEP 5: ADD IN THE GENUS KEY INFO
-CMSY_GenusKey_distinct<- Genus_MajorGroup_Key %>% 
-  select(estimated_genus_name, estimated_taxa_group) %>%
+Stock_names<- CMSY_Landings_file1 %>%
+  select(Stock, Major_Functional_Group, estimated_taxa_group) %>%
   distinct()
+# 99 unique genera / stocks.
 
-File2_df <- File2_df %>%
-  left_join(
-    CMSY_GenusKey_distinct,
-    by = c("Stock"="estimated_genus_name")
-  )
+## Read in the column names from blueprint of File 2.
+file2_blueprint <- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_InstructionalFiles/CMSY_File2_BluePrint_Apr032026.csv")
+file2_headers <- names(file2_blueprint)
 
-# STEP 6:
-# Re-order columns: only if necessary.
+## Create an empty dataframe with the same file2_headers
+CMSY_Metadata_file2 <- data.frame(matrix(ncol = length(file2_headers), nrow = length(Stock_names$Stock)))
+colnames(CMSY_Metadata_file2) <- file2_headers
+
+# STEP 2: FILL CMSY_Metadata_file2
+## Populate CMSY_Metadata_file2 with info from Stock_names and file2_blueprint
+CMSY_Metadata_file2$Stock <- Stock_names$Stock
+CMSY_Metadata_file2$Major_Functional_Group <- Stock_names$Major_Functional_Group
+CMSY_Metadata_file2$estimated_taxa_group <- Stock_names$estimated_taxa_group
+
+# Fill in some of the columns off this file:
+CMSY_Metadata_file2$Region <- file2_blueprint$Region
+CMSY_Metadata_file2$Source <- file2_blueprint$Source
+CMSY_Metadata_file2$Comment <- file2_blueprint$Comment
+
+CMSY_Metadata_file2$Sufficient_No_Years <- TRUE
+CMSY_Metadata_file2$Yes_Run <- c("Yes")
+CMSY_Metadata_file2$btype <- c("None")
+CMSY_Metadata_file2$force.cmsy <- c("TRUE")
 ```
+
+```{r Save this file as UNDER CONSTRUCTION so I can work with it offline and use it to generate priors}
+write.csv(CMSY_Metadata_file2, row.names= FALSE,
+          "/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Generating_Model_Priors/Priors_Data/File2_Metadata_UNDERCONSTRUCTION_Apr032026.csv")
+```
+
 
 ## SAVE FILE 2 BLUE PRINT
 ```{r SAVE FILE 2 UNDER CONSTRUCTION}
-write.csv(File2_df, "~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Input_Files/File2_UNDER_CONSTRUCTION_Dec092025.csv", row.names = FALSE)
+write.csv(CMSY_Metadata_file2, "~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Input_Files/File2_UNDER_CONSTRUCTION_Apr032026.csv", row.names = FALSE)
 ```
 NEXT STEPS: Fill in the rest of file 2, namely the model priors, using the ancillary files shared with me by Alfredo (Ferrer et al., 2022)
-NOTE TO SELF: These model priors are likely to change in the new year but will do for now.
 
 Did some work offline on my local machine (not available for viewing here... yet). This work will help fill out File 2.
 
 ```{r Read in additional files to complete file 2}
 # Read in file if necessary:
-#File2_df <- read.csv("~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Input_Files/File2_UNDER_CONSTRUCTION_Dec092025.csv")
+#CMSY_Metadata_file2 <- read.csv("~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Input_Files/File2_UNDER_CONSTRUCTION_Apr032026.csv")
 
 ## Additional files needed to file in the metadata
 Priors_Pristine.Biomass <- read.csv("~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Model_Priors/Priors_StartingBiomass_fromFAOdata_DRAFT_Dec092025.csv")
@@ -416,14 +144,14 @@ to_lower_df <- function(df) {
 }
 ```
 
-```{r Stitch these dataframes together to create complete File2_df}
-File2_df        <- to_lower_df(File2_df)
+```{r Stitch these dataframes together to create complete CMSY_Metadata_file2}
+CMSY_Metadata_file2        <- to_lower_df(CMSY_Metadata_file2)
 Priors_Pristine.Biomass  <- to_lower_df(Priors_Pristine.Biomass)
 Priors_Int.Year <- to_lower_df(Priors_Int.Year)
 Priors_Resilience <- to_lower_df(Priors_Resilience)
 
 ## MERGE: PRISTINE BIOMASS PRIORS
-File2_df_merged <- File2_df %>% 
+CMSY_Metadata_file2_merged <- CMSY_Metadata_file2 %>% 
   left_join(
     Priors_Pristine.Biomass %>% select(estimated_taxa_group, st_b.low, st_b.hi),
     by = "estimated_taxa_group",
@@ -438,7 +166,7 @@ File2_df_merged <- File2_df %>%
 # NOTE TO SELF: Our priors for pristine biomass, and the FAO timeseries that underly them, are fairly sparse as in missing several major taxonomic groups (like sardine). Return to this in the new year.
 
 ## MERGE: INT YEAR PRIORS
-File2_df_merged <- File2_df_merged %>%
+CMSY_Metadata_file2_merged <- CMSY_Metadata_file2_merged %>%
   left_join(
     Priors_Int.Year %>% 
       select(estimated_taxa_group, int_yr, StartYear, EndYear),
@@ -454,7 +182,7 @@ File2_df_merged <- File2_df_merged %>%
 ## MERGE: INT END CONDITIONS PRIORS
 # NOTE TO SELF: Based on the naming conventions within this file I actually think these are the priors for intermediate and ending biomass. I'll circle back to this and iron out the true meaning and utility of these particular priors in the new year.
 # Join and fill missing values
-File2_df_merged <- File2_df_merged %>%
+CMSY_Metadata_file2_merged <- CMSY_Metadata_file2_merged %>%
   left_join(
     Priors_IntEnd.Conditions,
     by = "estimated_taxa_group",
@@ -470,7 +198,7 @@ File2_df_merged <- File2_df_merged %>%
 
 
 ## MERGE: RESILIENCE PRIORS
-File2_df_merged <- File2_df_merged %>%
+CMSY_Metadata_file2_merged <- CMSY_Metadata_file2_merged %>%
   left_join(
     Priors_Resilience %>% select(estimated_taxa_group, Resilience, Resilience_Source),
     by = "estimated_taxa_group",
@@ -483,7 +211,7 @@ File2_df_merged <- File2_df_merged %>%
 ```
 
 ```{r Finally lets clean up File 2 before saving and running CMSY}
-File2_df_merged<- File2_df_merged %>% 
+CMSY_Metadata_file2_merged<- CMSY_Metadata_file2_merged %>% 
   select(Region, Stock, Landings_Datasource=Source, 
          StartYear, EndYear, int_yr,
          btype,
@@ -498,7 +226,7 @@ File2_df_merged<- File2_df_merged %>%
          Yes_Run, Comment)
 
 # Fill in the Yes_Run column based on model priors:
-File2_df_merged <- File2_df_merged %>%
+CMSY_Metadata_file2_merged <- CMSY_Metadata_file2_merged %>%
   mutate(
     Yes_Run = if_else(
       is.na(Resilience) | is.na(int_b.low) | is.na(st_b.low) | is.na(end_b.low),
@@ -512,7 +240,7 @@ File2_df_merged <- File2_df_merged %>%
     )
   )
 
-sum(File2_df_merged$Yes_Run==1)
+sum(CMSY_Metadata_file2_merged$Yes_Run==1)
 # 38 stocks to run!
 
 # NOTES ON NAMING, Dec 10 2025:
@@ -525,7 +253,7 @@ sum(File2_df_merged$Yes_Run==1)
 Landings_CMSY_TEST <- Landings_GoC_NoFresh.NoMariculture %>%
   mutate(estimated_genus_name = tolower(estimated_genus_name))
 
-CMSY_Stocks <- File2_df_merged %>%
+CMSY_Stocks <- CMSY_Metadata_file2_merged %>%
   filter(Yes_Run == 1) %>%
   pull(Stock) %>%
   unique()
@@ -555,14 +283,14 @@ Landings_CMSY_summary
 
 ## SAVE FILE 2 COMPLETE
 ```{r SAVE FILE 2 COMPLETE}
-write.csv(File2_df_merged, "~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Input_Files/File2_Dec092025.csv", row.names = FALSE)
+write.csv(CMSY_Metadata_file2_merged, "~/ohi_goc_prep/FP/FIS/v2025/OHI_CMSY_Scores/Input_Files/File2_Dec092025.csv", row.names = FALSE)
 ```
 
 ```{r How much of FP will these CMSY stocks account for?}
 Landings_CMSY_TEST <- Landings_GoC_NoFresh.NoMariculture %>%
   mutate(estimated_genus_name = tolower(estimated_genus_name))
 
-CMSY_Stocks <- File2_df_merged %>%
+CMSY_Stocks <- CMSY_Metadata_file2_merged %>%
   filter(Yes_Run == 1) %>%
   pull(Stock) %>%
   unique()
