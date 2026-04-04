@@ -1,0 +1,405 @@
+---
+title: "Mangrove Habitat Condition and Trend - Gulf of California OHI"
+author: "Austin Martinez"
+date: 03/26/2026
+format: 
+  html:
+    code-fold: show
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+
+
+```{r}
+# Load in Libraries
+library(sf)
+library(dplyr)
+library(here)
+library(terra)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tmap)
+```
+
+```{r}
+# Read in OHI region boundaries
+ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |> st_make_valid()
+
+# Read in mangrove area shape files
+mangrove_1981 <- st_read(here("BD", "HAB", "hab_mangroves", "v2025","austin_mangroves", "austin_mangrove_data", "mangroves_veg_map", "pnoc1981gw", "pnoc1981gw.shp"))
+mangrove_2005 <- st_read(here("BD", "HAB", "hab_mangroves", "v2025","austin_mangroves", "austin_mangrove_data", "mangroves_veg_map", "pnoc2005gw", "pnoc2005gw.shp"))
+mangrove_2010 <- st_read(here("BD", "HAB", "hab_mangroves", "v2025","austin_mangroves", "austin_mangrove_data", "mangroves_veg_map", "pnoc2010gw", "pnoc2010gw.shp"))
+mangrove_2015 <- st_read(here("BD", "HAB", "hab_mangroves", "v2025","austin_mangroves", "austin_mangrove_data", "mangroves_veg_map", "pn_oc2015gw", "pn_oc2015gw.shp"))
+mangrove_2020 <- st_read(here("BD", "HAB", "hab_mangroves", "v2025","austin_mangroves", "austin_mangrove_data", "mangroves_veg_map", "pn_oc2020gw", "pn_oc2020gw.shp"))
+
+# Read in greenness data
+greenness <- st_read(here("BD", "HAB", "hab_mangroves", "v2025","austin_mangroves", "austin_mangrove_data", "mangrove_greenness", "mantend_gw", "mantend_gw.shp"))
+
+```
+
+```{r}
+# Make all mangrove layers have the same CRS as OHI regions
+mangrove_1981 <- st_transform(mangrove_1981, st_crs(ohi_regions))
+mangrove_2005 <- st_transform(mangrove_2005, st_crs(ohi_regions))
+mangrove_2010 <- st_transform(mangrove_2010, st_crs(ohi_regions))
+mangrove_2015 <- st_transform(mangrove_2015, st_crs(ohi_regions))
+mangrove_2020 <- st_transform(mangrove_2020, st_crs(ohi_regions))
+
+# Make greenness layer have the same CRS as OHI regions
+greenness <- st_transform(greenness, st_crs(ohi_regions))
+
+```
+
+
+## Step 1
+
+To measure condition we compare current habitat distributions to historic distributions (1970/1980 in this case).
+
+For each OHI region summarize the area of mangrove for each of the years of data. The spreadsheet at the end should include the variables:
+
+```{r}
+# There are not just mangroves in this data
+print(unique(mangrove_1981$Descrip))
+
+# Takes 35 mins to run
+# Intersect each year with OHI regions, calculate area, and convert to km2
+rgns_1981 <- st_intersection(mangrove_1981, ohi_regions) |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6, year = 1981)
+
+rgns_2005 <- st_intersection(mangrove_2005, ohi_regions) |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6, year = 2005)
+
+rgns_2010 <- st_intersection(mangrove_2010, ohi_regions) |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6, year = 2010)
+
+rgns_2015 <- st_intersection(mangrove_2015, ohi_regions) |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6, year = 2015)
+
+rgns_2020 <- st_intersection(mangrove_2020, ohi_regions) |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6, year = 2020)
+
+# Filter for only 
+rgns_1981 <- rgns_1981 |> filter(Descrip %in% c("Manglar", "Manglar perturbado"))
+rgns_2005 <- rgns_2005 |> filter(Descrip %in% c("Manglar", "Manglar perturbado"))
+rgns_2010 <- rgns_2010 |> filter(Descrip %in% c("Manglar", "Manglar perturbado"))
+rgns_2015 <- rgns_2015 |> filter(Descrip %in% c("Manglar", "Manglar perturbado"))
+rgns_2020 <- rgns_2020 |> filter(Descrip %in% c("Manglar", "Manglar perturbado"))
+```
+
+
+```{r}
+# Combine and summaries area per region per year
+area_by_year <- bind_rows(rgns_1981, rgns_2005, rgns_2010, rgns_2015, rgns_2020) |>
+  st_drop_geometry() |>
+  group_by(rgn_id, year) |>
+  summarise(area_km2 = sum(area_km2, na.rm = TRUE), .groups = "drop")
+```
+
+Then we can find condition for each region by dividing 2020 data by 1970/1980 data.
+
+```{r}
+# Dividing 2020 data by 1981 data to get condition
+condition <- area_by_year |>
+  filter(year %in% c(1981, 2020)) |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  mutate(condition = `2020` / `1981`)
+print(condition)
+```
+
+## Step 2
+
+```{r}
+# Subtract each of the year rasters from historic (1981)
+change_2005 <- area_by_year |> 
+  filter(year %in% c(1981, 2005)) |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  mutate(area_change = `2005` - `1981`)
+
+change_2010 <- area_by_year |> 
+  filter(year %in% c(1981, 2010)) |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  mutate(area_change = `2010` - `1981`)
+
+change_2015 <- area_by_year |> 
+  filter(year %in% c(1981, 2015)) |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  mutate(area_change = `2015` - `1981`)
+
+change_2020 <- area_by_year |> 
+  filter(year %in% c(1981, 2020)) |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  mutate(area_change = `2020` - `1981`)
+```
+
+
+```{r fig.width = 15, fig.height =8}
+# Concatenate data frames
+all_years_change <- bind_rows(
+  change_2005 |> mutate(year = 2005),
+  change_2010 |> mutate(year = 2010),
+  change_2015 |> mutate(year = 2015),
+  change_2020 |> mutate(year = 2020)
+) 
+
+# Plot the change over the years for each region
+all_years_change |>
+  mutate(rgn_id = gsub("_", " ", rgn_id)) |>
+  ggplot(aes(x = year, y = area_change, color = rgn_id, group = rgn_id)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = c(
+    "Region 2" = "green",
+    "Region 3" = "forestgreen",
+    "Region 4" = "red",
+    "Region 6" = "orange",
+    "Region 7" = "purple",
+    "Region 8" = "dodgerblue",
+    "Region 9" = "chocolate"
+  )) +
+  labs(title = "Mangrove Area Change from 1981",
+       y = "Change in Area (km²)", x = "Year", color = "Region") +
+  theme_bw()
+```
+
+## Trend
+
+We also need to get some idea of whether mangroves are getting better/worse in more recent years.
+
+Use the above data to measure the yearly change in mangrove area each region across years.
+
+```{r}
+# measure the yearly change in mangrove area each region across years.
+yearly_change <- area_by_year |>
+  group_by(rgn_id) |>
+  arrange(year) |>
+  mutate(annual_change = area_km2 - lag(area_km2)) |>
+  filter(!is.na(annual_change))
+
+kable(yearly_change, col.names = c("Region", "Year", "Area (km²)", "Annual Change (km²)"), digits = 4) |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  row_spec(seq(0, nrow(yearly_change), by = 7), extra_css = "border-bottom: 1px solid black;")
+```
+
+But also, lets explore using the trend in greenness data (see #71). Summarize the amount of increasing/decreasing/constant in each ohi region and see if it makes sense to use this as a measure of trend.
+
+```{r}
+# Takes 30 mins to run
+# Summarize the amount of increasing/decreasing/constant in each ohi region
+greenness_trend <- st_intersection(greenness, ohi_regions) |>
+  st_drop_geometry() |>
+  group_by(rgn_id, direccion) |>
+  summarise(total_ha = sum(ha, na.rm = TRUE), .groups = "drop")
+```
+
+
+```{r}
+# Translate Decremento/Incremento to english and remove "_" from region names
+greenness_trend |>
+  mutate(
+    rgn_id = gsub("_", " ", rgn_id),
+    direccion = case_when(
+      direccion == "Decremento" ~ "Decrease",
+      direccion == "Incremento" ~ "Increase"
+    )
+  ) |>
+  # Create a ktable
+  kable(col.names = c("Region", "Direction", "Total Area (ha)"), digits = 4) |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  row_spec(seq(0, nrow(greenness_trend), by = 2), extra_css = "border-bottom: 1px solid black;")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Comparing results to other data
+
+### Using the Conabio data you have been looking at: Summarize for each region and year the area of mangroves that are disturbed vs. non-disturbed (I want to see if these can be used to assess condition and/or trend)
+
+```{r}
+# Summarize for each region and year the area of mangroves that are disturbed vs. non-disturbed
+area_by_year_disturbed <- bind_rows(rgns_1981, rgns_2005, rgns_2010, rgns_2015, rgns_2020) |>
+  st_drop_geometry() |>
+  group_by(rgn_id, year, Descrip) |>
+  summarise(area_km2 = sum(area_km2, na.rm = TRUE), .groups = "drop")
+
+```
+
+
+### Summarize these data: global mangrove watch: https://zenodo.org/records/6894273 by region for 1996 (or the earliest year) and 2020. If this is a big difficult nightmare, let me know, and we will think about whether we really want these data.
+
+```{r}
+# Reading in the tiles data from zenodo
+tiles <- st_read(here("BD", "HAB", "hab_mangroves", "v2025","austin_mangroves", "austin_mangrove_data", "gmw_v3_tiles.geojson"))
+# Matching CRS to ohi_regions
+tiles <- st_transform(tiles, st_crs(ohi_regions))
+# Shows which tiles intersect ohi_regions 
+needed_tiles <- st_filter(tiles, ohi_regions)
+```
+
+```{r}
+# This map displays where those tiles are
+library(tmap)
+tm_shape(needed_tiles) +
+  tm_polygons(col = "lightpink", fill = "lightpink", fill_alpha = 0.1) +
+tm_shape(ohi_regions) +
+  tm_borders(col = "blue")
+```
+
+```{r}
+# Read in zenodo data for 1996
+gmw_1996 <- st_read(here("BD", "HAB", "hab_mangroves", "v2025","austin_mangroves", "austin_mangrove_data", "zenodo_mangrove" , "gmw_v3_1996_vec", "gmw_v3_1996_vec.shp"))
+
+# Match gmw_1996 CRS to ohi_regions
+gmw_1996 <- st_transform(gmw_1996, st_crs(ohi_regions))
+
+# Intersect gmw_1996 with OHI regions, calculate area, and convert to km2
+rgns_gmw_1996 <- st_intersection(gmw_1996, ohi_regions) |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6, year = 1996)
+```
+
+
+```{r}
+# Read in zenodo data for 2020
+gmw_2020 <- st_read(here("BD", "HAB", "hab_mangroves", "v2025","austin_mangroves", "austin_mangrove_data", "zenodo_mangrove" , "gmw_v3_2020_vec", "gmw_v3_2020_vec.shp"))
+
+# Match gmw_2020 CRS to ohi_regions
+gmw_2020 <- st_transform(gmw_2020, st_crs(ohi_regions))
+
+# Intersect gmw_2020 with OHI regions, calculate area, and convert to km2
+rgns_gmw_2020 <- st_intersection(gmw_2020, ohi_regions) |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6, year = 2020)
+```
+```{r}
+# Summarize GMW area by region and year
+gmw_area <- bind_rows(rgns_gmw_1996, rgns_gmw_2020) |>
+  st_drop_geometry() |>
+  group_by(rgn_id, year) |>
+  summarise(area_km2 = sum(area_km2, na.rm = TRUE), .groups = "drop")
+```
+
+```{r}
+# Compare 2020 CONABIO vs 2020 GMW
+compare_2020 <- area_by_year |>
+  filter(year == 2020) |>
+  rename(conabio_km2 = area_km2) |>
+  left_join(gmw_area |> filter(year == 2020) |> rename(zenodo_gmw_2020_km2 = area_km2), by = "rgn_id") |>
+  select(rgn_id, conabio_km2, zenodo_gmw_2020_km2)
+
+# Make a nice Ktable
+kable(compare_2020, digits = 4, col.names = c("Region", "CONABIO 2020 (km²)", "GMW 2020 (km²)")) |>
+  kable_styling(bootstrap_options = c("striped", "bordered"))
+```
+
+
+```{r}
+# Compare 1981 CONABIO vs 1996 GMW
+compare_historic <- area_by_year |>
+  filter(year == 1981) |>
+  rename(conabio_1981_km2 = area_km2) |>
+  left_join(gmw_area |> filter(year == 1996) |> rename(zenodo_gmw_1996_km2 = area_km2), by = "rgn_id") |>
+  select(rgn_id, conabio_1981_km2, zenodo_gmw_1996_km2)
+
+# Make a nice Ktable
+kable(compare_historic, digits = 4, col.names = c("Region", "CONABIO 1981 (km²)", "GMW 1996 (km²)")) |>
+  kable_styling(bootstrap_options = c("striped", "bordered"))
+```
+
+
+### Summarize Hem's mangrove data by region: /home/shares/ohi/OHI_GOC/_raw_data/mangrove_Hem/USV_AGRUPADO and compare the number of hectares to the CONABIO data for 2020.
+
+```{r}
+# Read in Hem's data
+hem_mangroves <- st_read(here("BD", "HAB", "hab_mangroves", "v2025","austin_mangroves", "austin_mangrove_data", "USV_AGRUPADO", "USV_AGRUPADO.shp"))
+
+# Match hem_mangroves CRS to ohi_regions
+hem_mangroves <- st_transform(hem_mangroves, st_crs(ohi_regions))
+
+# Filter out layers that aren't "MANGLAR" and make it valid
+hem_mangroves_only <- hem_mangroves |>
+  filter(DESCRIP_AG %in% c(
+    "MANGLAR")) |>
+  st_make_valid()
+
+# Intersect hem_mangroves_only with OHI regions, calculate area, and convert to km2
+rgns_hem <- st_intersection(hem_mangroves_only, ohi_regions) |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6)
+
+# Print first 5 rows
+head(rgns_hem)
+```
+
+```{r}
+# Fine the sum mangrove area per region
+hem_area <- rgns_hem |>
+  st_drop_geometry() |>
+  group_by(rgn_id) |>
+  summarise(area_km2 = sum(area_km2, na.rm = TRUE), .groups = "drop")
+```
+
+```{r}
+# Compare the Hem's data to the Conabio 2020 data
+compare_hem_2020 <- area_by_year |>
+  filter(year == 2020) |>
+  rename(conabio_km2 = area_km2) |>
+  left_join(hem_area |> rename(hem_km2 = area_km2), by = "rgn_id") |>
+  select(rgn_id, conabio_km2, hem_km2)
+
+# Make a nice Ktable
+compare_hem_2020 |>
+  kable(digits = 4, col.names = c("Region", "CONABIO 2020 (km²)", "Hem (km²)")) |>
+  kable_styling(bootstrap_options = c("striped", "bordered"))
+```
+
+```{r}
+# convert to hectares
+compare_hem_2020_h <- compare_hem_2020 |>
+  mutate(
+    conabio_ha = conabio_km2 * 100,
+    hem_ha = hem_km2 * 100
+  ) |>
+  select(rgn_id, conabio_ha, hem_ha)
+
+# Make a nice Ktable
+compare_hem_2020_h |>
+  kable(digits = 4, col.names = c("Region", "CONABIO 2020 (ha)", "Hem (ha)")) |>
+  kable_styling(bootstrap_options = c("striped", "bordered"))
+```
+
+
+
+```{r}
+tmap_mode("view")
+
+tm_shape(hem_mangroves_only) +
+  tm_polygons(fill = "red", col = "red", lwd = .2) +
+  tm_layout(title = "Hem's Data")
+```
+
+```{r}
+tm_shape(rgns_2020) +
+  tm_polygons(fill = "blue", col = "blue", lwd = .2) +
+  tm_layout(title = "CONABIO Data")
+```
+
+```{r}
+tm_shape(rgns_gmw_2020) +  
+  tm_polygons(fill = "green", col = "green", lwd = .2) +
+  tm_layout(title = "Zenodo (gmw) Data")
+```
+
+
