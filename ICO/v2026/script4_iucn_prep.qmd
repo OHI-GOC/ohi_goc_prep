@@ -45,6 +45,18 @@ Using the IUCN API, we accessed the full IUCN species list. With some minor form
 
 iucn_sid \| kingdom \| phylum \| class \| order \| family \| genus \| sciname \| subpopulation \| category
 
+The Status of this sub-goal (X~ICO~) is then the % of iconic species in each threat category (as defined by the IUCN Red List), such that:
+
+$$X_{ICO} = \frac{\displaystyle\sum_{category}S_{cat}*w_{cat}}{\displaystyle\sum_{category}S_{cat}}$$
+
+where for each IUCN threat category:
+
+-   *S~cat~* is the number of assessed species in the category
+-   *w~cat~* is the status weight assigned for that category (note, these are the inverse of the risk value used in the SPP calculations):
+-   'LC' = 1.0, 'NT' = 0.8, 'VU' = 0.6, 'EN' = 0.4, 'CR' = 0.2, 'EX' = 0.0
+
+ICO trend is calculated in a similar manner, but weightings are assigned according to IUCN population trend: 'Decreasing' = -0.5, 'Stable' = 0.0, 'Increasing' = +0.5.
+
 ## Download Species List from IUCN
 
 Get total species list, using the IUCN API.
@@ -108,52 +120,22 @@ names(mexico_data)
 
 mexico_data_df <- bind_rows(mexico_data$assessments) %>% 
   dplyr::select(-scopes) # since all are Global, 1
+```
 
-library(dplyr)
-library(stringr)
 
-target_species <- c(
-  "Tivela planulata", "Megapitaria aurantiaca", "Megapitaria squalida",
-  "Penaeus vannamei", "Penaeus stylirostris", "Penaeus californiensis",
-  "Penaeus brevirostris", "Pinna rugosa", "Atrina tuberculosa",
-  "Atrina maura", "Pteria sterna", "Pinctada mazatlanica",
-  "Chione californiensis", "Chione undatella", "Ilochione subrugosa",
-  "Coryphaena hippurus", "Kajikia audax", "Tetrapturus audax",
-  "Makaira nigricans", "Makaira ampla", "Istiompax indica",
-  "Makaira indica", "Tetrapturus albidus", "Kajikia albida",
-  "Istiophorus platypterus", "Istiophorus albicans", "Xiphias gladius",
-  "Tetrapturus angustirostris", "Rhincodon typus", "Sphyrna",
-  "Mycteroperca", "Hyporthodus", "Stereolepis", "Epinephelus",
-  "Lutjanus peru", "Balistes polylepis", "Cynoscion othonopterus",
-  "Leuresthes sardina", "Zostera marina", "Distichlis palmeri",
-  "Pachycereus pringlei", "Rhizophora mangle", "Totoaba macdonaldi",
-  "Zalophus californianus", "Phocoena sinus", "Tursiops truncatus",
-  "Stenella attenuata", "Stenella longirostris", "Stenella coeruleoalba",
-  "Delphinus delphis", "Delphinus capensis", "Lagenorhynchus obliquidens",
-  "Grampus griseus", "Caretta caretta", "Chelonia agassizii",
-  "Chelonia mydas", "Eretmochelys imbricata", "Lepidochelys olivacea",
-  "Dermochelys coriacea", "Orcinus orca", "Physeter macrocephalus",
-  "Balaenoptera musculus", "Balaenoptera physalus", "Megaptera novaeangliae",
-  "Eschrichtius robustus", "Larus livens", "Thalasseus elegans",
-  "Larus heermanni", "Endomychura craveri", "Sula leucogaster",
-  "Sula nebouxii", "Fregata magnificens", "Pandion haliaetus",
-  "Pelecanus occidentalis", "Mobula", "Dosidicus gigas",
-  "Crocodylus acutus", "Myotis vivesi", "Pavona gigantea",
-  "Pavona clavus", "Porites panamensis", "Pocillopora verrucosa",
-  "Pocillopora damicornis", "Pocillopora meandrina"
-)
+```{r}
+target_species <- unique(especies_iconicas_scinames$sci_nombre)
 
-# Build a regex pattern from the genus/species names
+# making a regex pattern from the genus/species names
 pattern <- paste(target_species, collapse = "|")
 
 mexico_focal <- mexico_data_df %>%
   filter(str_detect(taxon_scientific_name, regex(pattern, ignore_case = TRUE)))
 
-# See which of your targets were found
 found <- target_species[sapply(target_species, function(sp) 
   any(str_detect(mexico_focal$taxon_scientific_name, regex(sp, ignore_case = TRUE))))]
 
-# See which were NOT found
+# see which were NOT found
 missing <- setdiff(target_species, found)
 missing
 
@@ -166,10 +148,12 @@ missing
 ```
 
 
+### Obtain IUCN Assessments for each year
+
 I want to see change over time, so...
 
 ```{r}
-years <- 2000:2025
+years <- 2010:2025
 
 mexico_all_years <- purrr::map(years, function(yr) {
   Sys.sleep(0.5)
@@ -181,6 +165,85 @@ mexico_all_years <- purrr::map(years, function(yr) {
 unique(mexico_all_years$taxon_scientific_name)
 ```
 
+
+### Assign condition weights
+
+```{r}
+especies_iconicas_scinames_join <- especies_iconicas_scinames %>% 
+  rename(taxon_scientific_name = sci_nombre)
+
+# *w~cat~* is the status weight assigned for that category (note, these are the inverse of the risk value used in the SPP calculations):
+# -   'LC' = 1.0, 'NT' = 0.8, 'VU' = 0.6, 'EN' = 0.4, 'CR' = 0.2, 'EX' = 0.0
+
+unique(mexico_all_years$red_list_category_code) #  [1] "VU"    "LR/nt" "LR/lc" "CR"    "LC"    "EN"    "NT"    "NE"    "DD"    "NR"   
+# "Lower Risk" (LR) is a formerly used category in the IUCN Red List (version 2.3, 1994-2000) for species not currently threatened with extinction. It was superseded by the Near Threatened (NT) and Least Concern (LC) categories. It was historically subdivided into Conservation Dependent (LR/cd), Near Threatened (LR/nt), and Least Concern (LR/lc).
+# Therefore, they should be treated as such: LR/nt -> NT, and LR/lc -> LC
+
+#### when we only assess 2010:2025, we do not have the issue of LR. But I will leave this information in case we ever want to go earlier than 2010.
+
+mexico_all_years_w_condition <- mexico_all_years %>% 
+  # full_join(especies_iconicas_scinames_join) %>% 
+  dplyr::select(-scopes) %>% # since all are Global, 1
+  mutate(w_cat = case_when(
+    
+    red_list_category_code %in% c("LC","LR/lc") ~ 1.0,
+    red_list_category_code %in% c("NT","LR/nt") ~ 0.8,
+    red_list_category_code == "VU" ~ 0.6,
+    red_list_category_code == "EN" ~ 0.4,
+    red_list_category_code == "CR" ~ 0.2,
+    red_list_category_code == "EX" ~ 0.0,
+    # red_list_category_code == "DD" ~ 99,
+    TRUE ~ NA
+    
+  ))
+
+```
+
+### Deal with DD
+
+Search for literature regarding these species.
+
+```{r}
+## see which are NAs (meaning that they were NR (Not Recognized), NE (Not Evaluated), or DD (Data Deficient))
+
+nas_mexico_all_years_w_condition <- mexico_all_years_w_condition %>% 
+  filter(is.na(w_cat)) # note that all are DD or are not even considered by IUCN, none are NR or NE
+
+unique(nas_mexico_all_years_w_condition$taxon_scientific_name)
+
+# DD:
+#  [1] "Istiompax indica"             "Tetrapturus angustirostris"  
+#  [3] "Epinephelus quinquefasciatus" "Stenella longirostris"       
+#  [5] "Orcinus orca"                 "Dosidicus gigas"             
+#  [7] "Hyporthodus exsul"            "Hyporthodus niphobles"       
+#  [9] "Hyporthodus drummondhayi"     "Mycteroperca tigris"         
+# [11] "Mycteroperca phenax"          "Mycteroperca prionura"       
+# [13] "Mycteroperca xenarcha"
+
+# All, when joining w ICO list before assigning conidtion:
+#  [1] "Istiompax indica"             "Tetrapturus angustirostris"  
+#  [3] "Epinephelus quinquefasciatus" "Stenella longirostris"       
+#  [5] "Orcinus orca"                 "Dosidicus gigas"             
+#  [7] "Hyporthodus exsul"            "Hyporthodus niphobles"       
+#  [9] "Hyporthodus drummondhayi"     "Mycteroperca tigris"         
+# [11] "Mycteroperca phenax"          "Mycteroperca prionura"       
+# [13] "Mycteroperca xenarcha"        "Tivela planulata"            
+# [15] "Megapitaria aurantiaca"       "Megapitaria squalida"        
+# [17] "Penaeus vannamei"             "Penaeus stylirostris"        
+# [19] "Penaeus californiensis"       "Penaeus brevirostris"        
+# [21] "Pinna rugosa"                 "Atrina tuberculosa"          
+# [23] "Atrina maura"                 "Pteria sterna"               
+# [25] "Pinctada mazatlanica​​"         "Chione californiensis"       
+# [27] "Chione undatella"             "Ilochione subrugosa"         
+# [29] "Tetrapturus albidus"          "Sphyrna "                    
+# [31] "Mycteroperca "                "Hyporthodus "                
+# [33] "Stereolepis "                 "Epinephelus "                
+# [35] "Distichlis palmeri"           "Delphinus capensis"          
+# [37] "Lagenorynchus obliquidens"    "Chelonia agassizi"           
+# [39] "Eretmochelys imbricata"       "Lepidochelys olivacea"       
+# [41] "Larus heermani"               "Endomychura craveri"         
+# [43] "Pandion haeliatus"            "Mobula "    
+```
 
 
 

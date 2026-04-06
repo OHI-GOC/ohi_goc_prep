@@ -30,6 +30,12 @@ The Iconic Species (ICO) subgoal of Sense of Place captures the condition of ico
 
 In this first script, we will be bringing in the list developed by the Expert Working Group and assigning each species to a OHI GoC Region (1-9) based on a species occurence (presence and absence) database from Dr. Hem Nalini Morzaria-Luna.
 
+```{r}
+library(tidyverse)
+library(here)
+library(janitor)
+```
+
 
 ## Read in list
 
@@ -43,7 +49,13 @@ especies_iconicas <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/
 
 ```{r}
 especies_iconicas_scinames <- especies_iconicas %>% 
-  mutate(sci_nombre = str_replace_all(sci_nombre, "spp.",""))
+  mutate(sci_nombre = str_replace_all(sci_nombre, "spp.",""),
+         sci_nombre = str_trim(sci_nombre, side = "both"))
+
+target_species <- unique(especies_iconicas_scinames$sci_nombre)
+
+# making a regex pattern from the genus/species names
+pattern <- paste(target_species, collapse = "|")
 ```
 
 
@@ -51,7 +63,117 @@ especies_iconicas_scinames <- especies_iconicas %>%
 
 
 ```{r}
+clean_species_occurrence <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/clean_species_ocurrence_hem_2018.csv")) %>% 
+  filter(wordnum %in% "2") %>% 
+  dplyr::select(old_name, lat, lon, source) %>% 
+  mutate(old_name = str_trim(old_name, side = "both"))
+```
 
+
+```{r}
+ico_clean_species_occurrence <- clean_species_occurrence  %>%
+  filter(str_detect(old_name, regex(pattern, ignore_case = TRUE)))
+
+setdiff(unique(ico_clean_species_occurrence$old_name), target_species)
+
+setdiff(target_species, unique(ico_clean_species_occurrence$old_name))
+#  [1] "Penaeus brevirostris"      "Pinctada mazatlanica​​"     
+#  [3] "Ilochione subrugosa"       "Tetrapturus albidus"      
+#  [5] "Sphyrna "                  "Mycteroperca "            
+#  [7] "Hyporthodus "              "Stereolepis "             
+#  [9] "Epinephelus "              "Lagenorynchus obliquidens"
+# [11] "Chelonia agassizi"         "Larus heermani"           
+# [13] "Endomychura craveri"       "Pandion haeliatus"        
+# [15] "Mobula "   
+```
+
+Many of the target species not in the occurrence database are the general genera, not the species name, so we can ignore those.  However, for species names, we need to look deeper at missing occurrence data.
+
+So, we need to look specifically at "Penaeus brevirostris", "Ilochione subrugosa", "Pinctada mazatlanica", "Tetrapturus albidus", "Lagenorynchus obliquidens", "Chelonia agassizi", "Larus heermani", "Endomychura craveri", "Pandion haeliatus".
+
+However, I know for a fact that Pinctada mazatlanica is in both dataframes.  So I am going to see if I can fix the regex...
+
+```{r}
+clean_string <- function(x) {
+  x %>% 
+    str_replace_all("[^[:ascii:]]", " ") %>%  # replace non-ASCII with space
+    str_replace_all("\\s+", " ") %>%  # collapse multiple spaces
+    str_trim(side = "both")
+}
+
+# re-clean both sides
+target_species_clean <- clean_string(target_species)
+
+ico_clean_species_occurrence <- clean_species_occurrence %>% 
+  mutate(old_name = clean_string(old_name))
+
+# now check again
+setdiff(target_species_clean, unique(ico_clean_species_occurrence$old_name)) # great, no Pinctada!!!
+
+#  [1] "Penaeus brevirostris"      "Ilochione subrugosa"      
+#  [3] "Tetrapturus albidus"       "Sphyrna"                  
+#  [5] "Mycteroperca"              "Hyporthodus"              
+#  [7] "Stereolepis"               "Epinephelus"              
+#  [9] "Lagenorynchus obliquidens" "Chelonia agassizi"        
+# [11] "Larus heermani"            "Endomychura craveri"      
+# [13] "Pandion haeliatus"         "Mobula" 
+```
+
+
+*ICO List --> old species name on occurrence df:*
+
+Penaeus brevirostris --> Farfantepenaeus brevirostris (old genus)
+Ilochione subrugosa --> missing, not even the genus name
+Tetrapturus albidus --> missing, not even the genus name
+Lagenorynchus obliquidens --> Lagenorhynchus obliquidens, (note "h" in occurrence dataset)
+Chelonia agassizi --> missing, but could be synonymous as Chelonia mydas (since it is a subspecies of green turtle).  However, the NORMA lists them separately. But, they are listed with the same risk category on the NORMA, so for now, let's just use Chelonia mydas overall.
+Larus heermani --> Larus heermanni (note the double "n"s)
+Endomychura craveri --> missing, not even the genus name
+Pandion haeliatus --> Pandion haliaetus (note different species name spelling)
+
+
+But I am realizing here that the occurrence data likely has the correct spelling, and my ICO list must be incorrect.  So let's update the iconic species list.
+
+
+```{r}
+clean_species_occurrence <- clean_species_occurrence %>%
+  mutate(old_name = clean_string(old_name)) %>%
+  mutate(old_name = case_when(
+    old_name == "Farfantepenaeus brevirostris" ~ "Penaeus brevirostris",
+    TRUE ~ old_name
+  ))
+
+especies_iconicas_scinames <- especies_iconicas_scinames %>%
+  mutate(sci_nombre = clean_string(sci_nombre)) %>%
+  mutate(sci_nombre = case_when(
+    sci_nombre == "Lagenorynchus obliquidens" ~ "Lagenorhynchus obliquidens",
+    sci_nombre == "Chelonia agassizi" ~ "Chelonia mydas",
+    sci_nombre == "Larus heermani" ~ "Larus heermanni",
+    sci_nombre == "Pandion haeliatus" ~ "Pandion haliaetus",
+    TRUE ~ sci_nombre
+  ))
+```
+
+
+Now, let us re-run the filtering using the pattern:
+
+```{r}
+target_species <- unique(especies_iconicas_scinames$sci_nombre)
+
+# making a regex pattern from the genus/species names
+pattern <- paste(target_species, collapse = "|")
+
+ico_clean_species_occurrence <- clean_species_occurrence  %>%
+  filter(str_detect(old_name, regex(pattern, ignore_case = TRUE)))
+
+setdiff(unique(ico_clean_species_occurrence$old_name), target_species)
+
+setdiff(target_species, unique(ico_clean_species_occurrence$old_name))
+
+## now, we are only missing these, most of which are just genus names:
+# [1] "Ilochione subrugosa" "Tetrapturus albidus" "Sphyrna"            
+# [4] "Mycteroperca"        "Hyporthodus"         "Stereolepis"        
+# [7] "Epinephelus"         "Endomychura craveri" "Mobula"
 ```
 
 
@@ -59,11 +181,50 @@ especies_iconicas_scinames <- especies_iconicas %>%
 ## Assign OHI GoC Region ID
 
 ```{r}
+library(sf)
+library(mapview)
 
+ico_clean_species_occurrence_sf <- ico_clean_species_occurrence %>% 
+  st_as_sf(coords = c("lon", "lat"), # making sf object
+           crs = 4326, # WGS84
+           remove = FALSE)
 ```
 
+First, group by region and unite the polygons for inland 10km with the marine polygons.
+```{r}
+## intersect with inland_10:
+inland_10 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer","inland_10km_goc.shp"))
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
 
+st_crs(inland_10) == st_crs(regions_marine) # TRUE
 
+marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>% 
+  dplyr::select(rgn_id, geometry) %>% 
+  group_by(rgn_id) %>% 
+  summarize(
+    geometry = st_union(geometry)
+  )
+
+mapview(marine_and_inland10)
+```
+
+Now, we can intersect with the `marine_and_inland10` so that each species occurrence is assigned an OHI GoC Region ID.
+```{r}
+# intersect with GoC
+ico_clean_species_occurrence_goc_rgnid <- st_intersection(st_transform(ico_clean_species_occurrence_sf, st_crs(marine_and_inland10)), marine_and_inland10)
+```
+
+We can group by rgn_id and determine how many times a species was found in that region.
+
+```{r}
+ico_species_occurrence_total_per_rgn <- ico_clean_species_occurrence_goc_rgnid %>% 
+  group_by(rgn_id, old_name) %>% 
+  summarize(
+    n_occurrence = n()
+  ) %>% 
+  ungroup()
+```
 
 
 
