@@ -1327,3 +1327,99 @@ write.csv(GenusFamily_key_clean, row.names = FALSE, file= "/home/ferrer/ohi_goc_
 ```
 # Key work ends here. Filled in last 8 missing families mannually offline.
 See: /home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/FAOFamilyKey_COMPLETE_Apr042026.csv
+
+# AQUACULTURE KEY UNDER CONSTRUCTION [Apr 4 2026]
+```{r Load data}
+GOC_Landings_marine<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_MARINE_2000.present_EMF.Apr032026.rds"))
+# 3312602 obs., 62 vars.
+
+Mariculture_Sectors<- c("marine: aquaculture")
+
+GOC_MaricultureProduction<- GOC_Landings_marine %>% 
+  filter(sector_estimate_draft %in% Mariculture_Sectors)
+# 105932 obs., 62 vars.
+
+range(GOC_MaricultureProduction$year)
+```
+
+```{r Create genus to family key for use in AQUACULTURE}
+GenusFamily_key <- GOC_MaricultureProduction %>%
+  select(estimated_genus_name, estimated_family_name, estimated_taxa_group, Major_Functional_Group) %>%
+  distinct()
+
+AllGenera <- unique(GenusFamily_key$estimated_genus_name)
+
+# TAXIZE: Careful, this takes a couple minutes to run. Don't re-run unknown you need to.
+# Taxize_Family_key <- tax_name(AllGenera, get = "family", db = "ncbi")
+Taxize_Family_key <- Taxize_Family_key %>%
+  rename(family_from_taxize = family)
+
+
+# Clean the key, taking the most common non-NA value for estimated_taxa_group, estimated_family_name, and Major_Functional_Group per genera:
+
+GenusFamily_key_clean <- GenusFamily_key %>%
+  # Identify placeholder genera
+  mutate(
+    is_placeholder = is.na(estimated_genus_name) | 
+                     estimated_genus_name %in% c("NEI", "unknown")
+  ) %>%
+  
+  # Group by genus for aggregation, keeping placeholders separate
+  group_by(estimated_genus_name, is_placeholder) %>%
+  mutate(
+    # Pick most common values only for real genera
+    Major_Functional_Group = if(!first(is_placeholder)) {
+      candidates <- Major_Functional_Group[!is.na(Major_Functional_Group)]
+      if(length(candidates) == 0) NA else names(sort(table(candidates), decreasing = TRUE))[1]
+    } else {
+      Major_Functional_Group
+    },
+    
+    estimated_taxa_group = if(!first(is_placeholder)) {
+      candidates <- estimated_taxa_group[!is.na(estimated_taxa_group) & estimated_taxa_group != "OTRAS"]
+      if(length(candidates) == 0 && "OTRAS" %in% estimated_taxa_group) "OTRAS"
+      else if(length(candidates) == 0) NA
+      else names(sort(table(candidates), decreasing = TRUE))[1]
+    } else {
+      estimated_taxa_group
+    },
+    
+    # Use the correct column name
+    family_from_previous_keys = if(!first(is_placeholder)) {
+      candidates <- estimated_family_name[!is.na(estimated_family_name)]
+      if(length(candidates) == 0) NA else names(sort(table(candidates), decreasing = TRUE))[1]
+    } else {
+      estimated_family_name
+    }
+  ) %>%
+  ungroup() %>%
+  select(-is_placeholder) %>%
+  
+  # Join with Taxize lookup
+  left_join(
+    Taxize_Family_key %>% select(query, family_from_taxize),
+    by = c("estimated_genus_name" = "query")
+  ) %>%
+  
+  # Fill new_estimated_family_name using previous keys first, then Taxize if NA, NEI, or unknown
+  mutate(
+    new_estimated_family_name = if_else(
+      is.na(family_from_previous_keys) | 
+      family_from_previous_keys %in% c("NEI", "unknown", "family missing but genus available"),
+      family_from_taxize,
+      family_from_previous_keys
+    ),
+    
+    # Create reasoning column
+    new_family_est_reasoning = case_when(
+      !is.na(family_from_previous_keys) & !family_from_previous_keys %in% c("NEI", "unknown") ~ 
+        "family name was estimated from previous keys",
+      !is.na(family_from_taxize) ~ "family name was estimated from genus name using taxize function",
+      TRUE ~ "family name will need to be logged manually"
+    )
+  )
+# 113 obs., 4 vars.
+
+# Great! Export this key (integrate later): call it FAO Family Key
+# write.csv(GenusFamily_key_clean, row.names = FALSE, file= "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/AquacultureFamilyKey_INCOMPLETE_Apr042026.csv")
+```
