@@ -28,4 +28,204 @@ The Iconic Species (ICO) subgoal of Sense of Place captures the condition of ico
 (2) = script2_norma059.qmd, script3_cites_prep.qmd, script4_iucn_prep.qmd
 (3) = script5_ico_current_status.qmd
 
-In this fifth script, we will be 
+In this fifth script, we will be assigning the condition weights to each species in this order:
+
+NOM -> literature -> IUCN -> CITES
+
+
+To so do, lets bring in the cleaned intermediate weights for each species from each source.
+
+
+## ICO List
+
+```{r}
+ico_spp_rgnid <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","ico_species_rgnid_040626.csv"))
+
+colnames(ico_spp_rgnid)
+
+ico_spp_rgnid_complete <- ico_spp_rgnid %>%  # so that every species and region has the years 2010:2025
+  mutate(year = NA) %>% 
+  arrange(taxon_scientific_name, rgn_id) %>%
+  group_by(taxon_scientific_name, rgn_id) %>% 
+  complete(year = 2010:2025) %>% 
+  filter(!is.na(year)) # because I introduced year as NA, I need to remove it now.
+
+length(unique(ico_spp_rgnid$taxon_scientific_name)) # 117
+```
+
+
+## NOM-059-SEMARNAT-2010
+
+```{r}
+nom059_condition_ico_spp <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","nom059_condition_ico_spp_040726.csv"))
+
+colnames(nom059_condition_ico_spp)
+# [1] "taxon_scientific_name" "year"                  "categoria_de_riesgo"  
+# [4] "w_cat_nom059"          "rgn_id"                "nombres_comunes" 
+
+```
+
+
+## IUCN
+
+```{r}
+iucn_condition_ico_spp <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","iucn_condition_ico_spp_040726_only_ico.csv"))
+
+colnames(iucn_condition_ico_spp)
+# [1] "taxon_scientific_name"  "rgn_id"                 "year"                  
+# [4] "red_list_category_code" "w_cat_iucn"       
+```
+
+
+## CITES
+
+```{r}
+cites_condition_ico_spp <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","cites_condition_ico_spp_040726.csv"))
+
+colnames(cites_condition_ico_spp)
+# [1] "taxon_scientific_name" "appendix_listing"      "year"                 
+# [4] "rgn_id"                "w_cat_cites"  
+```
+
+## Merge
+
+```{r}
+ico_spp_all_conditions <- full_join(ico_spp_rgnid_complete, nom059_condition_ico_spp) %>% # should have the same # of obs since NOM gives a 1 to all iconic species not on the list (v2026: 9648)
+  full_join(cites_condition_ico_spp) %>%  
+  full_join(iucn_condition_ico_spp) #by = c("taxon_scientific_name","rgn_id","year"))
+
+# species on the red list try to get reassessed every 5-10 years, but for this case we can say if the year is after the assessment and no changes have been made, give that species in that region and subsequent years the same red list category.
+ico_spp_all_conditions_iucnfill <- ico_spp_all_conditions %>% 
+  arrange(taxon_scientific_name, rgn_id, year) %>%
+  group_by(taxon_scientific_name, rgn_id) %>% 
+  fill(w_cat_iucn, .direction = "down") %>% # leaving the iucn `red_list_category_code` unfilled to represent which years did not have a new IUCN assessment.
+  ungroup()
+```
+
+## Current status
+
+```{r}
+# first, we need to assign only one risk category weight (w_cat) for each species, rgn it occurs, and year.
+ico_spp_finalize_risk <- ico_spp_all_conditions_iucnfill %>% 
+  mutate(w_cat = case_when(
+    
+    w_cat_nom059 == 1.0 & !is.na(w_cat_iucn) ~ w_cat_iucn, 
+    w_cat_nom059 == 1.0 & is.na(w_cat_iucn) & !is.na(w_cat_cites) ~ w_cat_cites,
+    TRUE ~ w_cat_nom059
+    
+  ))
+
+# check the logic for everything that has w_cat_nom059 = 1. 
+check_no_risk <- ico_spp_finalize_risk %>% 
+  filter(w_cat_nom059 == 1.0)
+```
+
+Now that the logic is sound, lets average the values across all species in each region. 
+
+```{r}
+# first, I am just curious at how many species there are in each region. Based on the occurrence data, just merely for me to see.
+ico_spp_per_rgn <- ico_spp_finalize_risk %>% 
+  group_by(rgn_id) %>% 
+  summarise(
+    n_species = n_distinct(taxon_scientific_name)
+  )
+
+# now, let us determine the value for each region and year.
+ico_mean_value_per_rgn <- ico_spp_finalize_risk %>% 
+  summarise(
+    mean_value = mean(w_cat),
+    .by = c(year, rgn_id)
+  ) %>% 
+  mutate(current_status = mean_value * 100) %>% 
+  ungroup()
+
+
+```
+
+### Write to Mazu
+
+```{r}
+write_csv(ico_mean_value_per_rgn, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/output","ico_mean_risk_status_per_region_040726.csv"))
+```
+
+
+
+```{r}
+library(plotly)
+
+## for plotting:
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+ico_plotly <- plotly::plot_ly(
+  ico_mean_value_per_rgn, 
+  x = ~year, 
+  y = ~current_status, 
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Risk Status: average condition (risk status score) for all iconic species occurring in each region",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(ico_mean_value_per_rgn$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+ico_plotly
+```
+
+## Explore each region
+
+Let's look at Region 1, which is doing the worst, and see why.
+
+```{r}
+ico_clean_species_occurrence_sf <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","ico_clean_species_occurrence_sf.shp"))
+ico_clean_species_occurrence_goc_rgnid <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","ico_clean_species_occurrence_goc_rgnid.shp"))
+
+mapview(ico_clean_species_occurrence_sf)
+
+# hm, I am seeing a lot of totoaba in region 1, which has a w_cat = 0.25 for all years... 
+ico_clean_species_occurrence_sf_totoaba <- ico_clean_species_occurrence_goc_rgnid %>% 
+  filter(old_name %in% "Totoaba macdonaldi")
+mapview(ico_clean_species_occurrence_sf_totoaba, zcol = "rgn_id")
+```
+
+```{r}
+## lets take a look at the frequency of occurrence of species in Region 1 (even though that does not have an impact on the current status)
+ico_species_occurrence_total_per_rgn <- ico_clean_species_occurrence_goc_rgnid %>% 
+  group_by(rgn_id, old_name) %>% 
+  summarize(
+    n_occurrence = n()
+  ) %>% 
+  ungroup()
+
+## WOW! So many vaquita, which also across all years have a risk status of 0.25! 
+ico_clean_species_occurrence_sf_vaquita <- ico_clean_species_occurrence_goc_rgnid %>% 
+  filter(old_name %in% "Phocoena sinus")
+mapview(ico_clean_species_occurrence_sf_vaquita, zcol = "rgn_id")
+
+## lets look at the gulf corvina, which was the second most occurring in Region 1, to see if other regions also contain it:
+ico_clean_species_occurrence_sf_gulfcorvina <- ico_clean_species_occurrence_goc_rgnid %>% 
+  filter(old_name %in% "Cynoscion othonopterus")
+mapview(ico_clean_species_occurrence_sf_gulfcorvina, zcol = "rgn_id")
+# they do, but it is the other two lowest scores as well: Region 2 and Region 5.
+```
+
+It appears that Region 1 contains many endemic species that are also at a high risk of extinction.
+

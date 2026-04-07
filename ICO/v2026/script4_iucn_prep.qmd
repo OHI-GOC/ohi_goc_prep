@@ -107,37 +107,36 @@ rl_check_api()
 rl_countries()
 
 # 158 Mexico MX
-mexico_data <- rl_countries(code = "MX", latest = TRUE)
-
-mexico_2023 <- rl_countries(code = "MX", year_published = 2023)
-mexico_2024 <- rl_countries(code = "MX", year_published = 2024)
-
+# mexico_data <- rl_countries(code = "MX", latest = TRUE)
+# mexico_2023 <- rl_countries(code = "MX", year_published = 2023)
+# mexico_2024 <- rl_countries(code = "MX", year_published = 2024)
+# str(mexico_data)
+# names(mexico_data)
+# mexico_data_df <- bind_rows(mexico_data$assessments) %>% 
+#   dplyr::select(-scopes) # since all are Global, 1
 ```
 
+Use the list of Iconic Species to pull IUCN Assessments:
 ```{r}
-str(mexico_data)
-names(mexico_data)
+ico_spp_rgnid <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","ico_species_rgnid_040626.csv"))
 
-mexico_data_df <- bind_rows(mexico_data$assessments) %>% 
-  dplyr::select(-scopes) # since all are Global, 1
-```
-
-
-```{r}
-target_species <- unique(especies_iconicas_scinames$sci_nombre)
+target_species <- unique(ico_spp_rgnid$taxon_scientific_name)
 
 # making a regex pattern from the genus/species names
 pattern <- paste(target_species, collapse = "|")
+```
 
-mexico_focal <- mexico_data_df %>%
-  filter(str_detect(taxon_scientific_name, regex(pattern, ignore_case = TRUE)))
 
-found <- target_species[sapply(target_species, function(sp) 
-  any(str_detect(mexico_focal$taxon_scientific_name, regex(sp, ignore_case = TRUE))))]
-
-# see which were NOT found
-missing <- setdiff(target_species, found)
-missing
+```{r}
+# mexico_focal <- mexico_data_df %>%
+#   filter(str_detect(taxon_scientific_name, regex(pattern, ignore_case = TRUE)))
+# 
+# found <- target_species[sapply(target_species, function(sp) 
+#   any(str_detect(mexico_focal$taxon_scientific_name, regex(sp, ignore_case = TRUE))))]
+# 
+# # see which were NOT found
+# missing <- setdiff(target_species, found)
+# missing
 
 #  [1] "Tivela planulata"       "Megapitaria aurantiaca" "Megapitaria squalida"   "Penaeus vannamei"      
 #  [5] "Penaeus stylirostris"   "Penaeus californiensis" "Penaeus brevirostris"   "Pinna rugosa"          
@@ -162,28 +161,31 @@ mexico_all_years <- purrr::map(years, function(yr) {
 }) %>% 
   bind_rows()
 
-unique(mexico_all_years$taxon_scientific_name)
+iucn <- unique(mexico_all_years$taxon_scientific_name)
+ico_spp <- unique(ico_spp_rgnid$taxon_scientific_name)
+setdiff(ico_spp, iucn) # 42 spp are missing...
 ```
 
 
 ### Assign condition weights
 
 ```{r}
-especies_iconicas_scinames_join <- especies_iconicas_scinames %>% 
-  rename(taxon_scientific_name = sci_nombre)
-
 # *w~cat~* is the status weight assigned for that category (note, these are the inverse of the risk value used in the SPP calculations):
 # -   'LC' = 1.0, 'NT' = 0.8, 'VU' = 0.6, 'EN' = 0.4, 'CR' = 0.2, 'EX' = 0.0
 
-unique(mexico_all_years$red_list_category_code) #  [1] "VU"    "LR/nt" "LR/lc" "CR"    "LC"    "EN"    "NT"    "NE"    "DD"    "NR"   
+unique(mexico_all_years$red_list_category_code) # 2010-2025: [1] "LC" "NT" "VU" "CR" "DD" "EN"
+
+# when including 200-2025: [1] "VU"    "LR/nt" "LR/lc" "CR"    "LC"    "EN"    "NT"    "NE"    "DD"    "NR"   
 # "Lower Risk" (LR) is a formerly used category in the IUCN Red List (version 2.3, 1994-2000) for species not currently threatened with extinction. It was superseded by the Near Threatened (NT) and Least Concern (LC) categories. It was historically subdivided into Conservation Dependent (LR/cd), Near Threatened (LR/nt), and Least Concern (LR/lc).
 # Therefore, they should be treated as such: LR/nt -> NT, and LR/lc -> LC
 
 #### when we only assess 2010:2025, we do not have the issue of LR. But I will leave this information in case we ever want to go earlier than 2010.
 
 mexico_all_years_w_condition <- mexico_all_years %>% 
-  # full_join(especies_iconicas_scinames_join) %>% 
   dplyr::select(-scopes) %>% # since all are Global, 1
+  inner_join(ico_spp_rgnid) %>%
+  dplyr::select(taxon_scientific_name, year_published, rgn_id, red_list_category_code) %>% 
+  distinct() %>% # needed because some years had multiple assessments with different assessment ids but for the same species, with the same risk category.  For example, 2011 Coryphaena hippurus.
   mutate(w_cat = case_when(
     
     red_list_category_code %in% c("LC","LR/lc") ~ 1.0,
@@ -198,9 +200,27 @@ mexico_all_years_w_condition <- mexico_all_years %>%
   ))
 
 mexico_all_years_w_condition_clean <- mexico_all_years_w_condition %>% 
-  dplyr::select(taxon_scientific_name, year_published, red_list_category_code, w_cat)
+  dplyr::select(taxon_scientific_name, rgn_id, year = year_published, red_list_category_code, w_cat_iucn = w_cat) 
 
-# write_csv(mexico_all_years_w_condition_clean, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","iucn_condition_ico_spp_040626.csv"))
+old_mexico_all_years_w_condition_clean <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","iucn_condition_ico_spp_040626.csv"))
+
+setdiff(unique(mexico_all_years_w_condition_clean$taxon_scientific_name), unique(old_mexico_all_years_w_condition_clean$taxon_scientific_name))
+# [1] "Larus heermanni"            "Lagenorhynchus obliquidens"
+# [3] "Pandion haliaetus"  
+
+
+setdiff(unique(old_mexico_all_years_w_condition_clean$taxon_scientific_name), unique(mexico_all_years_w_condition_clean$taxon_scientific_name))
+#  [1] "Mobula birostris"            "Epinephelus adscensionis"   
+#  [3] "Hyporthodus drummondhayi"    "Epinephelus guttatus"       
+#  [5] "Epinephelus morio"           "Epinephelus striatus"       
+#  [7] "Hyporthodus flavolimbatus"   "Hyporthodus mystacinus"     
+#  [9] "Mycteroperca acutirostris"   "Mycteroperca bonaci"        
+# [11] "Mycteroperca interstitialis" "Mycteroperca microlepis"    
+# [13] "Mycteroperca phenax"         "Mycteroperca tigris"        
+# [15] "Mycteroperca venenosa"       "Hyporthodus cifuentesi"     
+# [17] "Mobula hypostoma"            "Mobula mobular" 
+
+# write_csv(mexico_all_years_w_condition_clean, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","iucn_condition_ico_spp_040726_only_ico.csv"))
 ```
 
 ### Deal with DD
