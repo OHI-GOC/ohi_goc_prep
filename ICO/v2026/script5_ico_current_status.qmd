@@ -69,7 +69,7 @@ colnames(nom059_condition_ico_spp)
 ## IUCN
 
 ```{r}
-iucn_condition_ico_spp <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","iucn_condition_ico_spp_040726_only_ico.csv"))
+iucn_condition_ico_spp <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","iucn_condition_ico_spp_041326_only_ico.csv"))
 
 colnames(iucn_condition_ico_spp)
 # [1] "taxon_scientific_name"  "rgn_id"                 "year"                  
@@ -80,7 +80,7 @@ colnames(iucn_condition_ico_spp)
 ## CITES
 
 ```{r}
-cites_condition_ico_spp <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","cites_condition_ico_spp_040726.csv"))
+cites_condition_ico_spp <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","cites_condition_ico_spp_041326.csv"))
 
 colnames(cites_condition_ico_spp)
 # [1] "taxon_scientific_name" "appendix_listing"      "year"                 
@@ -117,7 +117,11 @@ ico_spp_finalize_risk <- ico_spp_all_conditions_iucnfill %>%
     ## need to double check the ones that are not on the norma, but are listed as at risk IUCN or CITEs, do a quick run through.  Especially because IUCN includes Atlantic and Pacific.  Need to account for regional differences.
     
   ))
+```
 
+Only there are some special cases...bring those into [Special Cases IUCN: Lista](https://docs.google.com/spreadsheets/d/1D6VWMVoEhhkJf7aqx0DaqKFaP6XKi8OW1fAR9l_XfhA/edit?gid=2131308524#gid=2131308524).
+
+```{r}
 # check the logic for everything that has w_cat_nom059 = 1. 
 check_no_risk <- ico_spp_finalize_risk %>% 
   filter(w_cat_nom059 == 1.0) 
@@ -145,24 +149,76 @@ check_no_risk_w_cites1 <- check_no_risk %>%
 #%>% 
  # filter(is.na(w_cat_iucn))
 unique(check_no_risk_w_cites1$taxon_scientific_name)
-# [1] "Pachycereus pringlei" "Sphyrna lewini"       "Sphyrna mokarran"    
-# [4] "Sphyrna zygaena" 
+# [1] "Pachycereus pringlei" "Pandion haliaetus"    "Sphyrna lewini"       "Sphyrna mokarran"    
+# [5] "Sphyrna zygaena"  
 # <https://docs.google.com/spreadsheets/d/1D6VWMVoEhhkJf7aqx0DaqKFaP6XKi8OW1fAR9l_XfhA/edit?gid=2124372570#gid=2124372570> 
 
 ```
+
+#### Special cases
+
+For the cases when the norma does not have them on the list and IUCN/CITES do not have them as Least Concern or not on an Appendix list, we went through them each and ensured that the IUCN assessment was referring to the Gulf of California population, not just the Atlantic etc.  And that it made sense to use CITES. 
+
+```{r}
+## IUCN
+special_cases_iucn <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int/special_cases_IUCN_lista_de_especies_iconicas.csv")) %>% 
+  janitor::clean_names()
+
+special_cases_iucn_outcome <- special_cases_iucn %>% 
+  dplyr::select(taxon_scientific_name = sci_nombre, what_should_we_use)
+
+## CITES
+special_cases_cites <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int/special_cases_CITES_lista_de_especies_iconicas.csv")) %>% 
+  janitor::clean_names()
+
+special_cases_cites_outcome <- special_cases_cites %>% 
+  dplyr::select(taxon_scientific_name = sci_nombre, what_should_we_use) %>% 
+  filter(!is.na(what_should_we_use))
+
+## CITES and IUCN special cases together
+special_cases_outcome <- bind_rows(special_cases_cites_outcome, special_cases_iucn_outcome)
+  
+  
+```
+
+#### Fix assigned weights
+
+```{r}
+# fixing weights to account for some species that are assessed on the global level for IUCN vs those that are assessed regionally.  The iconic species that were assessed regionally for IUCN we deferred to IUCN, otherwise we deferred to the NORMA 059.
+
+# note that as of v2026 on 04/13/26, in the Special Cases CITES: Lista de especies icónicas, none of them should defer to CITES. Only the Mexican giant cactus needs special fixing after the IUCN cases have been fixed.
+
+ico_spp_finalize_risk_fix_specialcases <- ico_spp_finalize_risk %>% 
+  
+  left_join(special_cases_outcome) %>% 
+  
+  mutate(w_cat = case_when(
+    
+    w_cat_nom059 == 1.0 & w_cat_iucn < 1 & what_should_we_use == "iucn" ~ w_cat_iucn, 
+    w_cat_nom059 == 1.0 & w_cat_iucn < 1 & what_should_we_use == "nom059" ~ w_cat_nom059,
+    w_cat_nom059 == 1.0 & w_cat_cites < 1 & what_should_we_use == "iucn" ~ w_cat_iucn, 
+    w_cat_nom059 == 1.0 & w_cat_cites < 1 & what_should_we_use == "nom059" ~ w_cat_nom059,
+    w_cat_nom059 == 0.25 & w_cat_iucn == 0.12 ~ w_cat_iucn,
+    TRUE ~ w_cat
+    
+  ))
+```
+
+
+#### Avg the values
 
 Now that the logic is sound, lets average the values across all species in each region. 
 
 ```{r}
 # first, I am just curious at how many species there are in each region. Based on the occurrence data, just merely for me to see.
-ico_spp_per_rgn <- ico_spp_finalize_risk %>% 
+ico_spp_per_rgn <- ico_spp_finalize_risk_fix_specialcases %>% 
   group_by(rgn_id) %>% 
   summarise(
     n_species = n_distinct(taxon_scientific_name)
   )
 
 # now, let us determine the value for each region and year.
-ico_mean_value_per_rgn <- ico_spp_finalize_risk %>% 
+ico_mean_value_per_rgn <- ico_spp_finalize_risk_fix_specialcases %>% 
   summarise(
     mean_value = mean(w_cat),
     .by = c(year, rgn_id)
@@ -176,7 +232,7 @@ ico_mean_value_per_rgn <- ico_spp_finalize_risk %>%
 ### Write to Mazu
 
 ```{r}
-write_csv(ico_mean_value_per_rgn, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/output","ico_mean_risk_status_per_region_040726.csv"))
+write_csv(ico_mean_value_per_rgn, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/output","ico_mean_risk_status_per_region_041326.csv"))
 ```
 
 
@@ -207,7 +263,7 @@ ico_plotly <- plotly::plot_ly(
   mode = "lines+markers"
 ) %>% 
   layout(
-    title = "Risk Status: average condition (risk status score) for all iconic species occurring in each region",
+    title = "CURRENT STATUS: average condition (risk status score) for all iconic species occurring in each region",
     xaxis = list(title = "Año // Year"),
     yaxis = list(title = "Puntaje // Percent (out of 100)")
   ) %>%
