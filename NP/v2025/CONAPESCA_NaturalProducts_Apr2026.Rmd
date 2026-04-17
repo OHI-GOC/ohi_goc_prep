@@ -1,0 +1,244 @@
+################################################################################ 
+
+For questions contact: Erica Ferrer, Ph.D. at emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################ 
+
+# PRE-WORK ------------------------------
+
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/NP/v2025/")
+```
+
+```{r Load GOC_Landings_marine if needed}
+GOC_Landings_marine<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_MARINE_2000.present_EMF.Apr032026.rds"))
+# 3312602 obs., 62 vars.
+```
+
+
+# AQUARIUM TRADE SPECIES: LIVE ORNAMENTAL FISH AND INVERTS ------------------------------
+
+```{r FILTER OUT ORNAMENTALS}
+table(GOC_Landings_marine$ornamentalFLAG_1)
+   #    NO POSSIBLY      YES 
+   # 19477    20524     1602 
+
+# Let's assume that the records are most accurate since 2018.
+
+GOC_OrnamentalLandings<- GOC_Landings_marine %>% 
+  filter(ornamentalFLAG_1 %in% c("YES", "POSSIBLY"))
+# 22126 obs., 62 vars.
+
+range(GOC_OrnamentalLandings$year)
+```
+
+```{r Look into flagged ornamental taxa}
+# Taking the information I've gleaned here to refine my sector estimates above.
+table(GOC_OrnamentalLandings$estimated_genus_name)
+table(GOC_OrnamentalLandings$Major_Functional_Group)
+table(GOC_OrnamentalLandings$estimated_genus_name)
+
+# Investigate Major_Taxonomic_Group unknown:
+subset <- GOC_OrnamentalLandings %>% 
+  filter(Major_Functional_Group %in% c("unknown"))
+# 1168 obs., 62 vars.
+
+table(subset$recorded_taxa_group)
+table(subset$common_name_clean)
+# Makes sense; all ornamental species, primarily ornamental fishes.
+```
+
+
+
+```{r Estimate likelihood of aquaculture based on name of landing_site and eu_name}
+#### FLAG 2 - Flag ornamentals based on EU and landing_site keywords (3 levels: YES, NO, POSSIBLY): ####
+
+# Clues from landing_site and eu_name
+LandingSite_strong.clues<- c("CULTIVADORES", "ESTANQUE", "VIVEROS", "ACUACULTURA") 
+
+LandingSite_clues<- c("CULT", "DREN", "BORDO", "PREDIO")
+
+EUname_clues<- c("ACUICOLA", "FARMS", "MARICULTURA",
+                        "MARICULTIVOS",
+                        "AGROACUICOLA", "AGRICOLA",
+                        "ACUACULTURA", "AQUACULTURE",
+                        "GRANJA", "GRANJA CAMARONERA",
+                        "RANCHO")
+
+# Build regex patterns dynamically
+LandingSite_strong_pattern <- paste0("\\b(", paste(LandingSite_strong.clues, collapse = "|"), ")\\b")
+LandingSite_weak_pattern <- paste0("\\b(", paste(LandingSite_clues, collapse = "|"), ")\\b")
+EUname_pattern <- paste0("\\b(", paste(EUname_clues, collapse = "|"), ")\\b")
+
+GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
+  
+  mutate(
+    acuaculture_production_norm = str_to_lower(str_trim(acuaculture_production))
+  ) %>%
+  
+  mutate(
+    aquacultureFLAG_site.details = case_when(
+      str_detect(landing_site, regex(LandingSite_strong_pattern, ignore_case = TRUE)) ~ "YES",
+      str_detect(landing_site, regex(LandingSite_weak_pattern, ignore_case = TRUE)) ~ "POSSIBLY",
+      str_detect(eu_name, regex(EUname_pattern, ignore_case = TRUE)) ~ "POSSIBLY",
+      TRUE ~ "NO"
+    )
+  ) %>%
+  
+  select(-acuaculture_production_norm)
+
+# SANITY CHECK:
+# Check that we pulled out landing sites that make sense:
+table(GOC_Landings_aquaculture$aquacultureFLAG_site.details)
+
+ #      NO POSSIBLY      YES 
+ # 3606674    13876     2226 
+
+# AFTER MY FIX ON APR 3 2026: 
+ #      NO POSSIBLY      YES 
+ # 3497614   125023      139
+ # Right off the bat this seems good. Fewer NO, more possibly, less dirrect YES. Don't want to be OVERLY CONFIDENT in this estimate.
+
+subset<- GOC_Landings_aquaculture %>%
+  filter(aquacultureFLAG_site.details %in% c(
+    "YES",
+    "POSSIBLY"
+  )) %>%
+  distinct(landing_site, eu_name, aquacultureFLAG_site.details) %>%
+  arrange(landing_site, eu_name)
+# 1406 sites that mostly all make sense to me! If an organism came from one of these sites I would assume it was a farmed species, even if the record was NOT marked as aquaculture.
+```
+
+```{r}
+#### FLAG 3 - Flag ornamentals based on preparation keywords (3 levels: YES, NO, POSSIBLY): ####
+
+Prep_clues <- c(
+# Processing state or product form (e.g., filleted, beheaded, dried, etc.):
+  "CONG", "CONGELADO",
+  "SECO DE", "SECA", "SECA DE", "SECO", "SECO DE",
+  "COCINERO", "COCIDO", "COCIDA", "COCIDAS", "ASADO",
+  "ENTERO", "ENTERA", "IND", "ENT",
+  "FILETE", "FILETE DE", "ECA", "FILETE DE ECO", "DESHUESADA", "CARNE", "CARNE DE",
+  "DESCABEZADO", "DES", "DSC", "DESC", "DESV", "DESVICERADO",
+
+# Animal parts:
+  "MANTO", "MANTO DE",
+  "PULPA DE", "PULPA FRESCA", "PULPO DE", 
+  "POLVO DE",
+  "TENTACULOS DE", "TUBO DE", "TUBO",
+  "CABEZA DE", "BUCHE", "BUCHE DE", "TRIPA DE", "COLAS DE", "MANOS DE", "MANOS",
+  "ANCAS DE", "ANCAS", "ANCA",
+  "PIEL DE ECA", "PIEL DE SECA", "PIEL DE", "PIEL",
+
+# Fins
+  "ALETA", "ALETA ECA DE", "ALETA FCA DE",
+
+# Shells and pearls:
+  "CONCHA DE", "CONCHA", "CONCHA NACAR",
+  "PERLAS", "MEDIAS PERLAS",
+
+# Live culture or cultivation techniques:
+  "VIVO", "VIVA", "VIVAS", "VIVITA",
+  "DE CULTIVO", "DE CULTIVO VIVO", "CULTIVADAS",
+  "ABASTO RANCHO", "RANCHO",
+
+# Eggs:
+  "HUEVA DE",
+
+# Used as bait:
+  "CARNADA", "P/CARNADA"
+)
+
+
+# Build regex patterns dynamically
+LandingSite_strong_pattern <- paste0("\\b(", paste(LandingSite_strong.clues, collapse = "|"), ")\\b")
+LandingSite_weak_pattern <- paste0("\\b(", paste(LandingSite_clues, collapse = "|"), ")\\b")
+EUname_pattern <- paste0("\\b(", paste(EUname_clues, collapse = "|"), ")\\b")
+
+GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
+  
+  mutate(
+    acuaculture_production_norm = str_to_lower(str_trim(acuaculture_production))
+  ) %>%
+  
+  mutate(
+    aquacultureFLAG_site.details = case_when(
+      str_detect(landing_site, regex(LandingSite_strong_pattern, ignore_case = TRUE)) ~ "YES",
+      str_detect(landing_site, regex(LandingSite_weak_pattern, ignore_case = TRUE)) ~ "POSSIBLY",
+      str_detect(eu_name, regex(EUname_pattern, ignore_case = TRUE)) ~ "POSSIBLY",
+      TRUE ~ "NO"
+    )
+  ) %>%
+  
+  select(-acuaculture_production_norm)
+
+# SANITY CHECK:
+# Check that we pulled out landing sites that make sense:
+table(GOC_Landings_aquaculture$aquacultureFLAG_site.details)
+
+ #      NO POSSIBLY      YES 
+ # 3606674    13876     2226 
+
+# AFTER MY FIX ON APR 3 2026: 
+ #      NO POSSIBLY      YES 
+ # 3497614   125023      139
+ # Right off the bat this seems good. Fewer NO, more possibly, less dirrect YES. Don't want to be OVERLY CONFIDENT in this estimate.
+
+subset<- GOC_Landings_aquaculture %>%
+  filter(aquacultureFLAG_site.details %in% c(
+    "YES",
+    "POSSIBLY"
+  )) %>%
+  distinct(landing_site, eu_name, aquacultureFLAG_site.details) %>%
+  arrange(landing_site, eu_name)
+# 1406 sites that mostly all make sense to me! If an organism came from one of these sites I would assume it was a farmed species, even if the record was NOT marked as aquaculture.
+```
+
+
+# PEARLS, NACRE, and SEASHELLS ------------------------------
+
+
+# SHARK FINS ------------------------------
+
+
+# FISH RESIDUES: fish heads, stomachs, bladder, etc. ------------------------------
+
+
+# FISH OIL, FISH MEAL ------------------------------
+Assume that ~70% forage fish is used for fish oil fish meal
+
+```{r Pull out forage fish}
+
+```
+
+```{r Apply 70% conversion}
+
+```
+
+# ALGAE ------------------------------
