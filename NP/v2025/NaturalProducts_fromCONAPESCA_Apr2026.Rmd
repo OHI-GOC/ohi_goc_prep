@@ -36,116 +36,339 @@ library(htmltools)
 setwd("/home/ferrer/ohi_goc_prep/NP/v2025/")
 ```
 
-```{r Load GOC_Landings_marine if needed}
-GOC_Landings_marine<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_MARINE_2000.present_EMF.Apr032026.rds"))
-# 3312602 obs., 62 vars.
+```{r Outdated natural products key}
+NPKey_pending<- read.csv('/home/ferrer/ohi_goc_prep/NP/v2025/NP_Keys/NP_MasterList_UNDER CONSTRUCTION_Nov132025.csv')
 ```
 
+```{r Load Mex.Pacific_Landings_sector if needed}
+GOC_Landings_sector<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_SectorSorted_2000.present_EMF.Apr032026.rds"))
+# 3598085 obs., 62 vars.
+```
+
+```{r Filter for marine sectors}
+table(GOC_Landings_sector$sector_estimate_draft)
+
+Possible_Sectors<- c("marine: aquaculture", "marine: fishery sector yet to be classified", 
+                        "marine: large-scale capture", "marine: small-scale capture",
+                        "freshwater or marine: large-scale capture", "freshwater or marine: fishery sector yet to be classified",
+                        "freshwater or marine: small-scale capture", "freshwater or marine: aquaculture")
+
+GOC_MarineLandings<- GOC_Landings_sector %>% 
+  filter(sector_estimate_draft %in% Possible_Sectors)
+# 3312602 obs., 62 vars.
+
+table(GOC_MarineLandings$keywords_1)
+
+# Filter out things from freshwater:
+GOC_MarineLandings <- GOC_MarineLandings %>%
+  filter(!if_any(starts_with("keywords"), ~ !is.na(.) & . == "DE AGUA DULCE"))
+# 3303634 obs., 62 vars.
+```
+
+# Flag all things that are very likely to be natural products based on key terms...
+```{r Estimate likelihood of ornamentals based on name of landing_site and eu_name}
+#### FLAG - Flag things that are very likely to be natural products based on landing_site, keywords, key groups, and key taxa (2 levels: YES, NO, MAYBE): ####
+
+# Clues from keywords:
+table(GOC_MarineLandings$keywords_1)
+
+# Keywords often linked to natural products:
+Keyword_strong.clues<- c("VIVO", "VIVA", "VIVAS", "VIVITA", # living / live
+                         
+                         # Used as bait:
+                         "CARNADA", "P/CARNADA",
+
+                         # Shells and pearls:
+                         "CONCHA DE", "CONCHA", "CONCHA NACAR",
+                         "PERLAS", "MEDIAS PERLAS",
+                         # Fin:
+                         "ALETA", "ALETA ECA DE", "ALETA FCA DE",
+                         
+                         # Animal parts:
+                         "MANTO", "MANTO DE",
+                         "PULPA DE", "PULPA FRESCA", "PULPO DE", 
+                         "POLVO DE",
+                         "TENTACULOS DE", "TUBO DE", "TUBO",
+                         "CABEZA DE", "BUCHE", "BUCHE DE", "TRIPA DE", "COLAS DE", "MANOS DE", "MANOS",
+                         "ANCAS DE", "ANCAS", "ANCA",
+                         "PIEL DE ECA", "PIEL DE SECA", "PIEL DE", "PIEL",
+                         
+                         # Dried things:
+                         "SECO DE", "SECA", "SECA DE", "SECO", "SECO DE"
+)
+
+# Keywords sometimes linked to natural products:
+Keyword_weak.clues<- c("DE CULTIVO", "DE CULTIVO VIVO", "CULTIVADAS",
+                       "ABASTO RANCHO", "RANCHO",
+                       # Eggs:
+                       "HUEVA DE")
+
+# Keywords typically linked to FOOD, not natural products
+Keyword_opposite.clues<- c(
+  # Processing state or product form (e.g., frozen, full fish, filleted, beheaded, dried, etc.):
+  "S.C.", "S/C", "S",
+  "FRESCO", "FRESCA", "FCA", "FCO", "FC",
+  "ECO",
+  "CONG", "CONGELADO",
+  "COCINERO", "COCIDO", "COCIDA", "COCIDAS", "ASADO",
+  "ENTERO", "ENTERA", "IND", "ENT",
+  "FILETE", "FILETE DE", "ECA", "FILETE DE ECO", "DESHUESADA", "CARNE", "CARNE DE",
+  "DESCABEZADO", "DES", "DSC", "DESC", "DESV", "DESVICERADO"
+)
+
+# Clues from landing_site and eu_name:
+LandingSite_clues<- c("CULTIVADORES", "ESTANQUE", "VIVEROS", "ACUACULTURA") 
+
+# Clues from recorded_taxa_group:
+table(GOC_MarineLandings$recorded_taxa_group)
+TaxaGroup_strong.clues<- c("PECES DE ORNATO", "ORNATO") 
+
+# OTRAS that could be ornamental fishes:
+TaxaName_strong.clues<- c("PAYASO", "PECES ORNATO", "CABALLITO MAR", 
+                            "ESTRELLA MAR", "ESTRELLA LIMPIADORA", "GALLETA MAR", "CARACOL",
+                            "HACHA")
+
+colnames(GOC_MarineLandings)
+
+# Build regex patterns dynamically
+Keyword_strong.pattern <- paste0("\\b(", paste(Keyword_strong.clues, collapse = "|"), ")\\b")
+Keyword_weak.pattern <- paste0("\\b(", paste(Keyword_weak.clues, collapse = "|"), ")\\b")
+Keyword_opposite.pattern <- paste0("\\b(", paste(Keyword_opposite.clues, collapse = "|"), ")\\b")
+LandingSite_pattern <- paste0("\\b(", paste(LandingSite_clues, collapse = "|"), ")\\b")
+TaxaGroup_pattern <- paste0("\\b(", paste(TaxaGroup_strong.clues, collapse = "|"), ")\\b")
+TaxaName_pattern <- paste0("\\b(", paste(TaxaName_strong.clues, collapse = "|"), ")\\b")
+
+
+GOC_Possible.NPLandings <- GOC_MarineLandings %>%
+  
+  mutate(
+    NP.Keyword_FLAG = case_when(
+      if_any(keywords_1:keywords_5, ~ str_detect(.x, regex(Keyword_strong.pattern, ignore_case = TRUE))) ~ "YES",
+      if_any(keywords_1:keywords_5, ~ str_detect(.x, regex(Keyword_weak.pattern, ignore_case = TRUE))) ~ "MAYBE",
+      if_any(keywords_1:keywords_5, ~ str_detect(.x, regex(Keyword_opposite.pattern, ignore_case = TRUE))) ~ "NO",
+      TRUE ~ "NO"
+    ),
+    NP.Site_FLAG = case_when(
+      str_detect(landing_site, regex(LandingSite_pattern, ignore_case = TRUE)) ~ "YES",
+      TRUE ~ "NO"
+    ),
+    NP.Group_FLAG = case_when(
+      str_detect(recorded_taxa_group, regex(TaxaGroup_pattern, ignore_case = TRUE)) ~ "YES",
+      TRUE ~ "NO"
+    ), 
+    NP.TaxaName_FLAG = case_when(
+      str_detect(recorded_taxa_name_clean, regex(TaxaName_pattern, ignore_case = TRUE)) ~ "YES",
+      TRUE ~ "NO"
+    ),
+    # Previously made ornamental flag:
+      NP.PreviousOrnamental_FLAG = case_when(
+        ornamentalFLAG_1 == "YES" ~ "YES",
+        ornamentalFLAG_1 == "POSSIBLY" ~ "MAYBE",
+        TRUE ~ "NO"
+        )
+  )
+
+# Now exclude any entries that don't have at least one YES flag.
+GOC_Possible.NPLandings <- GOC_Possible.NPLandings %>%
+  filter(
+    if_any(
+      starts_with("NP"),
+      ~ . == "YES"
+    )
+  )
+# 107256 obs. of 66 vars.
+```
+
+```{r Make an alive or dead column}
+test<- GOC_Possible.NPLandings %>%
+  filter(recorded_taxa_name_clean=="PAYASO")
+
+Dead_keywords<- c(
+  
+  # Frozen, filleted, beheaded, dried, fresh, etc.
+  "S.C.", "S/C", "S",
+  "ECO",
+  "CONG", "CONGELADO",
+  "COCINERO", "COCIDO", "COCIDA", "COCIDAS", "ASADO",
+  "FILETE", "FILETE DE", "ECA", "FILETE DE ECO", "DESHUESADA", "CARNE", "CARNE DE",
+  "DESCABEZADO", "DES", "DSC", "DESC", "DESV", "DESVICERADO",
+  
+  # Dried:
+  "SECO DE", "SECA", "SECA DE", "SECO", "SECO DE",
+  
+  # Shells and pearls:
+  "CONCHA DE", "CONCHA", "CONCHA NACAR",
+  "PERLAS", "MEDIAS PERLAS",
+  
+  # Fin:
+  "ALETA", "ALETA ECA DE", "ALETA FCA DE",
+  
+  # Animal parts:
+  "MANTO", "MANTO DE",
+  "PULPA DE", "PULPA FRESCA", "PULPO DE", 
+  "POLVO DE",
+  "TENTACULOS DE", "TUBO DE", "TUBO",
+  "CABEZA DE", "BUCHE", "BUCHE DE", "TRIPA DE", "COLAS DE", "MANOS DE", "MANOS",
+  "ANCAS DE", "ANCAS", "ANCA",
+  "PIEL DE ECA", "PIEL DE SECA", "PIEL DE", "PIEL"
+)
+
+Alive_keywords<- c("VIVO", "VIVA", "VIVAS", "VIVITA") # living / live
+
+# Assign alive, dead, unknown based on keywords:
+GOC_Possible.NPLandings <- GOC_Possible.NPLandings %>%
+  mutate(
+    Alive.Dead = case_when(
+      
+      # DEAD FIRST (safer precedence)
+      if_any(keywords_1:keywords_5,
+             ~ str_detect(.x, str_c(Dead_keywords, collapse = "|"))) ~ "dead",
+      
+      # ALIVE
+      if_any(keywords_1:keywords_5,
+             ~ str_detect(.x, str_c(Alive_keywords, collapse = "|"))) ~ "alive",
+      
+      # DEFAULT
+      TRUE ~ "unknown"
+    )
+  )
+
+# Assign bait column:
+  
+  # Used as bait:
+  "CARNADA", "P/CARNADA",
+  
+  # Whole fish? Not sure...
+    "ENTERO", "ENTERA", "IND", "ENT",
+    "FRESCO", "FRESCA", "FCA", "FCO", "FC",
+```
 
 # AQUARIUM TRADE SPECIES: LIVE ORNAMENTAL FISH AND INVERTS ------------------------------
 Run list of species through AI and flag any species that are almost ALWAYS ornamentals.
 
 ```{r Check ornamentals flag}
-table(GOC_Landings_marine$ornamentalFLAG_1)
-   #    NO POSSIBLY      YES 
-   # 19477    20524     1602 
+table(GOC_Possible.NPLandings$ornamentalFLAG_1)
+      # NO POSSIBLY      YES 
+      #  1    19726     1602
 
-# Let's assume that the records are most accurate since 2018.
+table(GOC_Possible.NPLandings$NP.PreviousOrnamental_FLAG)
+# MAYBE    NO   YES 
+# 19726 85928  160
+# Looks good!
+```
 
-GOC_OrnamentalLandings<- GOC_Landings_marine %>% 
-  filter(ornamentalFLAG_1 %in% c("YES", "POSSIBLY"))
-# 22126 obs., 62 vars.
+```{r Pull out possible ornamentals}
+colnames(GOC_Possible.NPLandings)
+table(GOC_Possible.NPLandings$Alive.Dead)
 
-range(GOC_OrnamentalLandings$year)
+GOC_Possible.OrnamentalLandings<- GOC_Possible.NPLandings %>%
+  filter(
+    (NP.PreviousOrnamental_FLAG %in% c("YES", "MAYBE") |
+       NP.Group_FLAG %in% c("YES", "MAYBE") |
+       NP.TaxaName_FLAG %in% c("YES", "MAYBE")) &
+      Alive.Dead %in% c("alive", "unknown")
+  )
+           
+# 20107 obs. of 67 vars.
+
+table(GOC_Possible.OrnamentalLandings$Alive.Dead)
+  # alive unknown 
+  #   430   19677 
 ```
 
 ```{r Look into flagged ornamental taxa}
 # Taking the information I've gleaned here to refine my sector estimates above.
-table(GOC_OrnamentalLandings$estimated_genus_name)
-table(GOC_OrnamentalLandings$Major_Functional_Group)
-table(GOC_OrnamentalLandings$estimated_genus_name)
+table(GOC_Possible.OrnamentalLandings$estimated_genus_name)
+table(GOC_Possible.OrnamentalLandings$Major_Functional_Group)
+table(GOC_Possible.OrnamentalLandings$recorded_taxa_name_clean)
 
 # Investigate Major_Taxonomic_Group unknown:
-subset <- GOC_OrnamentalLandings %>% 
+subset <- GOC_Possible.OrnamentalLandings %>% 
   filter(Major_Functional_Group %in% c("unknown"))
 # 1168 obs., 62 vars.
 
 table(subset$recorded_taxa_group)
 table(subset$common_name_clean)
-# Makes sense; all ornamental species, primarily ornamental fishes.
+# Makes sense; all ornamental species.
 ```
 
-```{r Estimate likelihood of aquaculture based on name of landing_site and eu_name}
-#### FLAG 2 - Flag ornamental taxa based on EU and landing_site keywords (3 levels: YES, NO, POSSIBLY): ####
+```{r Pull out the taxa most likely to be sold alive for the aquarium trade}
+# Very likely: 
+# CABALLITO MAR → seahorse (very commonly traded live in marine aquariums)
+# PAYASO → clownfish (Amphiprion spp.), one of the most common aquarium fish globally
+# PECES ORNATO → literally “ornamental fish,” a general aquarium trade category
 
-# Clues from landing_site and eu_name
-LandingSite_strong.clues<- c("CULTIVADORES", "ESTANQUE", "VIVEROS", "ACUACULTURA") 
+# Somewhat likely:
+# CARACOL CHINO / CHINO NEGRO / CHINO ROSA / CHINO ROSADO → likely nerite-type snails (widely sold for algae control)
+# CARACOL TURBO FLUCTUOSO → turbo snails (classic reef aquarium cleaners)
+# CARACOL OLIVO → olive snails, sometimes kept in marine tanks
+# CARACOL MARGARITA → margarita snails (cold/temperate marine aquariums)
+# CARACOL UÑA / CARACOL UÑA → uncertain ID, but likely small ornamental snail types
+# CARACOL CHILE / CARACOL BURRO / CARACOL PANOCHA → less standard names, but still plausibly marine snails traded as live clean-up organisms depending on region
+# ESTRELLA LIMPIADORA → “cleaner star” / sand-sifting or detritus-feeding sea stars (commonly sold in marine aquariums)
 
-LandingSite_clues<- c("CULT", "DREN", "BORDO", "PREDIO")
+# Not likely:
+# ESTRELLA MAR → sea stars (some species are aquarium-kept but not common)
+# GALLETA MAR → sand dollar / sea biscuit (sometimes sold live but difficult to maintain)
+# HACHA CHINA / HACHA LARGA / CALLO HACHA → scallops or bivalves; occasionally live in holding systems but not typical aquarium pets
+# MADRE PERLA → pearl oyster; generally not an aquarium species
 
-EUname_clues<- c("ACUICOLA", "FARMS", "MARICULTURA",
-                        "MARICULTIVOS",
-                        "AGROACUICOLA", "AGRICOLA",
-                        "ACUACULTURA", "AQUACULTURE",
-                        "GRANJA", "GRANJA CAMARONERA",
-                        "RANCHO")
+AquariumTrade_LikelyTaxa<- c("CABALLITO MAR", "PAYASO", "PECES ORNATO")
+AquariumTrade_PossibleTaxa<- c("CARACOL CHINO", "CARACOL CHINO NEGRO", "CARACOL CHINO ROSA", "CARACOL CHINO ROSADO",
+                               "CARACOL TURBO FLUCTUOSO", "CARACOL OLIVO", "CARACOL MARGARITA",
+                               "CARACOL UÑA", "CARACOL CHILE", "CARACOL BURRO", "CARACOL PANOCHA",
+                               "ESTRELLA LIMPIADORA")
+AquariumTrade_UnlikelyTaxa<- c("ESTRELLA MAR", "GALLETA MAR",
+                               "HACHA CHINA", "HACHA LARGA", "CALLO HACHA",
+                               "MADRE PERLA")
 
-# Build regex patterns dynamically
-LandingSite_strong_pattern <- paste0("\\b(", paste(LandingSite_strong.clues, collapse = "|"), ")\\b")
-LandingSite_weak_pattern <- paste0("\\b(", paste(LandingSite_clues, collapse = "|"), ")\\b")
-EUname_pattern <- paste0("\\b(", paste(EUname_clues, collapse = "|"), ")\\b")
-
-GOC_Landings_aquaculture <- GOC_Landings_aquaculture %>%
-  
+# Assign ornamental likely or unlikely:
+GOC_Possible.OrnamentalLandings <- GOC_Possible.OrnamentalLandings %>%
   mutate(
-    acuaculture_production_norm = str_to_lower(str_trim(acuaculture_production))
-  ) %>%
-  
-  mutate(
-    aquacultureFLAG_site.details = case_when(
-      str_detect(landing_site, regex(LandingSite_strong_pattern, ignore_case = TRUE)) ~ "YES",
-      str_detect(landing_site, regex(LandingSite_weak_pattern, ignore_case = TRUE)) ~ "POSSIBLY",
-      str_detect(eu_name, regex(EUname_pattern, ignore_case = TRUE)) ~ "POSSIBLY",
-      TRUE ~ "NO"
+    AquariumTradeLikely = case_when(
+      recorded_taxa_name_clean %in% AquariumTrade_LikelyTaxa ~ "YES",
+      recorded_taxa_name_clean %in% AquariumTrade_PossibleTaxa ~ "MAYBE",
+      recorded_taxa_name_clean %in% AquariumTrade_UnlikelyTaxa ~ "NO",
+      TRUE ~ "unknown"
     )
-  ) %>%
-  
-  select(-acuaculture_production_norm)
+  )
+# 20107 obs., 69 vars.
 
-# SANITY CHECK:
-# Check that we pulled out landing sites that make sense:
-table(GOC_Landings_aquaculture$aquacultureFLAG_site.details)
-
- #      NO POSSIBLY      YES 
- # 3606674    13876     2226 
-
-# AFTER MY FIX ON APR 3 2026: 
- #      NO POSSIBLY      YES 
- # 3497614   125023      139
- # Right off the bat this seems good. Fewer NO, more possibly, less dirrect YES. Don't want to be OVERLY CONFIDENT in this estimate.
-
-subset<- GOC_Landings_aquaculture %>%
-  filter(aquacultureFLAG_site.details %in% c(
-    "YES",
-    "POSSIBLY"
-  )) %>%
-  distinct(landing_site, eu_name, aquacultureFLAG_site.details) %>%
-  arrange(landing_site, eu_name)
-# 1406 sites that mostly all make sense to me! If an organism came from one of these sites I would assume it was a farmed species, even if the record was NOT marked as aquaculture.
+GOC_OrnamentalLandings<- GOC_Possible.OrnamentalLandings %>%
+  filter(AquariumTradeLikely %in% c("YES", "MAYBE"))
+# 15292 obs., 69 vars.
 ```
 
+```{r Plot ornamentals}
+# Summary table by region and year:
+Ornamentals_summary <- GOC_OrnamentalLandings %>%
+  group_by(OHI_rgn_number, year, recorded_taxa_name_clean) %>%
+  summarize(annual_prod_kg = sum(weight_kg_corrected))
+# 462 obs., 4 vars.
+
+# Plot over time:
+Ornamentals_summary %>%
+  filter(recorded_taxa_name_clean %in% c("PECES ORNATO", "PAYASO")) %>%
+  filter(year >= 2018 & year < 2025) %>%
+  
+  ggplot(aes(x = year, y = annual_prod_kg, color= recorded_taxa_name_clean)) +
+  geom_line() +
+  
+  facet_wrap(~ OHI_rgn_number, scales = "free_y") +
+  
+  labs(x = "Year", y = "Production (kg)",
+       title = "Aquarium Trade / Production of Live Ornamental Taxa [DRAFT]") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+# Residues
 ```{r Residues}
-#### FLAG 3 - Flag preparation keywords (3 levels: YES, NO, POSSIBLY): ####
+#### FLAG - Flag residues keywords (3 levels: YES, NO): ####
 
 Residues_keywords <- c(
-# Processing state or product form (e.g., filleted, beheaded, dried, etc.):
-  "SECO DE", "SECA", "SECA DE", "SECO", "SECO DE",
-  "COCINERO", "COCIDO", "COCIDA", "COCIDAS", "ASADO",
-  "ENTERO", "ENTERA", "IND", "ENT",
-  "FILETE", "FILETE DE", "ECA", "FILETE DE ECO", "DESHUESADA", "CARNE", "CARNE DE",
-  "DESCABEZADO", "DES", "DSC", "DESC", "DESV", "DESVICERADO",
-
-# Animal parts:
+  # Animal parts:
   "MANTO", "MANTO DE",
   "PULPA DE", "PULPA FRESCA", "PULPO DE", 
   "POLVO DE",
@@ -154,41 +377,44 @@ Residues_keywords <- c(
   "ANCAS DE", "ANCAS", "ANCA",
   "PIEL DE ECA", "PIEL DE SECA", "PIEL DE", "PIEL")
 
+GOC_Possible.NPLandings <- GOC_Possible.NPLandings %>%
+  mutate(
+    ResiduesLikely = case_when(
+      if_any(keywords_1:keywords_5, ~ .x %in% Residues_keywords) ~ "YES",
+      TRUE ~ "NO"
+    )
+  )
 
+GOC_Possible.Residues<- GOC_Possible.NPLandings %>%
+  filter(ResiduesLikely %in% c("YES"))
 
+table(GOC_Possible.Residues$Major_Functional_Group)
+# Lots of cephalopods, demersal fish, and crustaceans
+# NOTE TO SELF: Don't forget Aleta though!! This DOES NOT include Aleta ... yet - Apr 30 2026
+```
 
-Live_keywords <- c(
-# Live culture or cultivation techniques:
-  "VIVO", "VIVA", "VIVAS", "VIVITA",
-  "DE CULTIVO", "DE CULTIVO VIVO", "CULTIVADAS",
-  "ABASTO RANCHO", "RANCHO")
+```{r Plot residues}
+# Summary table by region and year:
+Residues_summary <- GOC_Possible.Residues %>%
+  group_by(OHI_rgn_number, year, Major_Functional_Group) %>%
+  summarize(annual_prod_kg = sum(weight_kg_corrected))
+# 342 obs., 4 vars.
 
-Eggs_keywords <- c(
-# Eggs:
-  "HUEVA DE")
-
-
-
-# SANITY CHECK:
-# Check that we pulled out landing sites that make sense:
-table(GOC_Landings_aquaculture$aquacultureFLAG_site.details)
-
- #      NO POSSIBLY      YES 
- # 3606674    13876     2226 
-
-# AFTER MY FIX ON APR 3 2026: 
- #      NO POSSIBLY      YES 
- # 3497614   125023      139
- # Right off the bat this seems good. Fewer NO, more possibly, less dirrect YES. Don't want to be OVERLY CONFIDENT in this estimate.
-
-subset<- GOC_Landings_aquaculture %>%
-  filter(aquacultureFLAG_site.details %in% c(
-    "YES",
-    "POSSIBLY"
-  )) %>%
-  distinct(landing_site, eu_name, aquacultureFLAG_site.details) %>%
-  arrange(landing_site, eu_name)
-# 1406 sites that mostly all make sense to me! If an organism came from one of these sites I would assume it was a farmed species, even if the record was NOT marked as aquaculture.
+# Plot over time:
+Residues_summary %>%
+  filter(year >= 2018 & year < 2025) %>%
+  
+  ggplot(aes(x = year, y = annual_prod_kg, color= Major_Functional_Group)) +
+  geom_line() +
+  
+  facet_wrap(~ OHI_rgn_number, scales = "free_y") +
+  
+  labs(x = "Year", y = "Production (kg)",
+       title = "Residues Production over Time [DRAFT]") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
 ```
 
 # BAIT ------------------------------
@@ -198,19 +424,56 @@ Bait_keywords <- c(
   "CARNADA", "P/CARNADA"
 )
 
-GOC_BaitProduction <- GOC_Landings_marine %>%
-  filter(if_any(keywords_1:keywords_5, ~ . %in% Bait_keywords))
-  
+GOC_Possible.NPLandings <- GOC_Possible.NPLandings %>%
+  mutate(
+    BaitLikely = case_when(
+      if_any(keywords_1:keywords_5, ~ .x %in% Bait_keywords) ~ "YES",
+      TRUE ~ "NO"
+    )
+  )
+
+GOC_BaitLandings<- GOC_Possible.NPLandings %>%
+  filter(BaitLikely %in% c("YES"))
+# 15292 obs., 70 vars.
+
+table(GOC_BaitLandings$Major_Functional_Group)
+           # Anchovy & Sardine (small pelagics)                                   Crustaceans 
+           #                               1874                                           110 
+           #             Demersal marine fishes Pelagic marine fish (excl. anchovy & sardine) 
+           #                                117                                         13191 
 ```
 
+```{r Plot bait production}
+# Summary table by region and year:
+Bait_summary <- GOC_BaitLandings %>%
+  group_by(OHI_rgn_number, year, Major_Functional_Group) %>%
+  summarize(annual_prod_kg = sum(weight_kg_corrected))
+# 108 obs., 4 vars.
+
+# Plot over time:
+Bait_summary %>%
+  filter(year >= 2018 & year < 2025) %>%
+  
+  ggplot(aes(x = year, y = annual_prod_kg, color= Major_Functional_Group)) +
+  geom_line() +
+  
+  facet_wrap(~ OHI_rgn_number, scales = "free_y") +
+  
+  labs(x = "Year", y = "Production (kg)",
+       title = "Bait Production over Time [DRAFT]") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
 
 # PEARLS, NACRE, and SEASHELLS ------------------------------
-```{r Shells}
+```{r Take 1 Shells}
 Shells_keywords <- c(
 # Shells:
   "CONCHA DE", "CONCHA")
 
-GOC_ShellProduction <- GOC_Landings_marine %>%
+GOC_ShellProduction <- GOC_MarineLandings %>%
   filter(if_any(keywords_1:keywords_5, ~ . %in% Shells_keywords))
 
 table(GOC_ShellProduction$estimated_genus_name)
@@ -221,7 +484,7 @@ table(GOC_ShellProduction$estimated_genus_name)
 #           5 
 
 # Investigating whether or not the shell is separate from the animal:
-test<- GOC_Landings_marine %>% 
+test<- GOC_MarineLandings %>% 
   filter(eu_rnpa== "0301000089" & year== 2000)
 # kinda seems like catch for shell is logged separately than catch for flesh, which is good. Means I should filter out catches of shell from final fisheries estimates.
 
@@ -229,23 +492,82 @@ Pearls_keywords <- c(
   # Pearls
   "PERLAS", "MEDIAS PERLAS", "CONCHA NACAR")
 
-GOC_PearlProduction <- GOC_Landings_marine %>%
+GOC_PearlProduction <- GOC_MarineLandings %>%
   filter(if_any(keywords_1:keywords_5, ~ . %in% Pearls_keywords))
+```
+
+```{r Take 2 Shells and pearls}
+# Apr 30 2026: 
+
+Shells_keywords <- c(
+# Shells:
+  "CONCHA DE", "CONCHA")
+
+Pearls_keywords <- c(
+  # Pearls
+  "PERLAS", "MEDIAS PERLAS", "CONCHA NACAR")
+
+GOC_Possible.NPLandings <- GOC_Possible.NPLandings %>%
+  mutate(
+    ShellProduction = case_when(
+      if_any(keywords_1:keywords_5, ~ .x %in% Shells_keywords) ~ "YES",
+      TRUE ~ "NO"
+      ),
+    PearlNacreProduction = case_when(
+      if_any(keywords_1:keywords_5, ~ .x %in% Pearls_keywords) ~ "YES",
+      TRUE ~ "NO"
+    )
+  )
+# 107256 obs., 72 vars.
+
+GOC_ShellProduction<- GOC_Possible.NPLandings %>%
+  filter(ShellProduction %in% c("YES"))
+# 5859 obs., 70 vars.
+table(GOC_ShellProduction$Major_Functional_Group)
+
+GOC_PearlProduction<- GOC_Possible.NPLandings %>%
+  filter(PearlNacreProduction %in% c("YES"))
+# 18 obs., 70 vars.
+# Note, registered pearl production is too small to be meaningful...
+table(GOC_PearlProduction$Major_Functional_Group)
+```
+
+```{r Plot shell production}
+# Summary table by region and year:
+ShellProduction_summary <- GOC_ShellProduction %>%
+  group_by(OHI_rgn_number, year, Major_Functional_Group) %>%
+  summarize(annual_prod_kg = sum(weight_kg_corrected))
+# 142 obs., 4 vars.
+
+# Plot over time:
+ShellProduction_summary %>%
+  filter(year >= 2018 & year < 2025) %>%
+  
+  ggplot(aes(x = year, y = annual_prod_kg, color= Major_Functional_Group)) +
+  geom_line() +
+  
+  facet_wrap(~ OHI_rgn_number, scales = "free_y") +
+  
+  labs(x = "Year", y = "Production (kg)",
+       title = "Shell Production over Time [DRAFT]") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
 ```
 
 
 # SHARK FINS ------------------------------
 ```{r Shark fins}
-
 Sharkfin_keywords <- c(
 # Fins
   "ALETA", "ALETA DE", "ALETA ECA DE", "ALETA FCA DE")
 
-GOC_SharkFinProduction <- GOC_Landings_marine %>%
+GOC_SharkFinProduction <- GOC_MarineLandings %>%
   filter(if_any(keywords_1:keywords_5, ~ . %in% Sharkfin_keywords))
 # No shark fin?
 
-GOC_SharkFinProduction <- GOC_Landings_marine %>%
+GOC_SharkFinProduction <- GOC_MarineLandings %>%
   filter(Major_Functional_Group == "Sharks")
 
 table(GOC_SharkFinProduction$keywords_2)
