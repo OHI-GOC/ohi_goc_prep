@@ -1,0 +1,167 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# Sentido de Pertenencia: Lasting Special Places
+
+## Cultural and archaelogical sites
+
+*Overview*
+This includes archaeological sites, such as the shell middens near Puerto Peñasco. These locations have existence, cultural, and educational value. Condition of the archaeological site is determined by whether the agency, National Institute of Anthropology and History (INAH).
+
+*Why the INAH?*
+[From their website for archaeological sites:](https://www.inah.gob.mx/zonas-arqueologicas)
+
+> "The National Institute of Anthropology and History (INAH) oversees 194 archaeological sites and one paleontological site open to the public throughout the country, 365 days a year. The following are exempt from the entrance fee: seniors over 60, children under 13, retirees, pensioners, people with disabilities, active teachers and students, as well as interns or researchers with INAH permission to conduct studies related to the museums, monuments, and archaeological sites referred to in this article. National and foreign visitors residing in Mexico who visit museums, monuments, and archaeological sites on Sundays are also exempt from this fee. (Art. 288 of the Federal Law of Fees.)"
+
+[From their website for historical monuments:](https://monumentoshistoricos.inah.gob.mx/index.php)
+
+> "The need to preserve, study, and disseminate the nation's historical heritage, expressed by the Federal Government of Lázaro Cárdenas, led to the creation of the National Institute of Anthropology and History (INAH) on February 3, 1939.
+
+> One of INAH's primary functions was the oversight, conservation, and restoration of the Republic's archaeological, historical, and artistic monuments, as well as the objects found within them. To this end, the Department of Colonial Monuments was created and divided into two parts: the Directorate of Pre-Hispanic Monuments and the Directorate of Colonial Monuments.
+
+> Around 1973, the Department of Colonial Monuments was incorporated into the newly created Directorate of Historical Monuments, and six years later it was dissolved.
+
+> In 1989, the Directorate of Historical Monuments underwent a restructuring and became the National Coordination of Historical Monuments, whose specific tasks include the conservation, restoration, protection, cataloging, research, and dissemination of the nation's built historical heritage. To carry them out, it has the following areas: National Coordination, Technical Support Directorate, Authorizations and Inspections Directorate, Authorizations and Inspections Subdirectorate, Support for Registration and Linkage of Historical Monuments Subdirectorate, Administrative Subdirectorate, Catalog and Zones Subdirectorate, Research Subdirectorate, Supervision of External Projects and Works Subdirectorate, Information Technology Unit and the Unit for Attention to Buildings in the Face of Natural Disasters."
+
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+```
+
+
+## Read in archaeological sites the EWG identified as special in the GoC
+
+```{r}
+lsp_list_ewg_v3 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/identifying_lasting_special_places_collapsed_lsp_protections_v3.csv")) %>% 
+  janitor::clean_names()
+
+ewg_cultural_site_list <- lsp_list_ewg_v3 %>% 
+  filter(protection_should_be %in% "INAH") %>% 
+  mutate(long = as.numeric(long),
+         lat = as.numeric(lat)) %>% 
+  st_as_sf(
+    coords = c("long", "lat"), # making sf object
+    crs = 4326, # WGS84
+    remove = FALSE
+  )
+
+mapview(ewg_cultural_site_list)
+```
+
+### Limit to the GoC 
+
+First, read in the marine and land polygons.
+```{r}
+ohi_rgns <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) 
+
+mapview(ohi_rgns, zcol = "rgn_id")
+```
+
+Now, we can intersect with `ohi_rgns` so that each site is assigned an OHI GoC Region ID.
+```{r}
+# intersect with GoC
+ewg_cultural_site_list_goc_rgnid <- st_intersection(st_transform(ewg_cultural_site_list, st_crs(ohi_rgns)), ohi_rgns)
+
+mapview(ewg_cultural_site_list_goc_rgnid, zcol = "rgn_id") 
+```
+
+
+## Bring in all sites in the GoC managed by the INAH
+
+```{r}
+INAH_aechaeological_sites <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/INAH_archaeological_sites_v2026.csv")) %>% 
+  janitor::clean_names() %>% 
+  mutate(long = as.numeric(long),
+         lat = as.numeric(lat)) %>% 
+  st_as_sf(
+    coords = c("long", "lat"), # making sf object
+    crs = 4326, # WGS84
+    remove = FALSE
+  )
+
+mapview(ewg_cultural_site_list, col.regions = "blue") + mapview(INAH_aechaeological_sites, col.regions = "brown")
+```
+
+
+## Determine if there is overlap between the EWG and INAH sites
+
+I chose to do this spatially, in case the names between the sites do not match up exactly.
+
+```{r}
+# buffer dive sites by 10000m
+ewg_cultural_site_list_buffered <- st_buffer(
+  st_transform(ewg_cultural_site_list_goc_rgnid, st_crs(INAH_aechaeological_sites)),
+  dist = 10000
+)
+
+INAH_aechaeological_sites_buffered <- st_buffer(INAH_aechaeological_sites, dist = 10000)
+
+mapview(ewg_cultural_site_list_buffered) + mapview(INAH_aechaeological_sites_buffered, col.regions = "red")
+```
+
+
+```{r}
+# spatial join to the non-dissolved layer (all_protected) to keep protected area names
+ewg_archaeological_sites_protected <- st_join(
+  ewg_cultural_site_list_buffered,
+  INAH_aechaeological_sites_buffered,
+  join = st_intersects,
+  left = TRUE  # keep all sites, even those outside of INAH sites
+) %>%
+  mutate(in_INAH_directory = !is.na(nombre)) %>% 
+  mutate(overall_condition = ifelse(in_INAH_directory == "TRUE", 1, 0)) 
+
+ewg_archaeological_sites_condition <- ewg_archaeological_sites_protected %>% 
+  dplyr::select(lasting_special_place_lsp, rgn_id, in_INAH_directory, nombre_INAH = nombre, overall_condition, link, significado, relevancia_cultural, costo_pesos_nonresidences) %>% 
+  st_drop_geometry()
+
+## only 2 are currently managed by INAH.
+```
+
+# Condition per region
+
+```{r}
+rgn_ewg_archaeological_sites_condition <- ewg_archaeological_sites_condition %>% 
+  group_by(rgn_id) %>% 
+  summarize(
+    condition = mean(overall_condition, na.rm = TRUE)
+  ) %>% 
+  ungroup()
+```
+
+## Write to Mazu
+
+```{r}
+write_csv(ewg_archaeological_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/ewg_archaeological_sites_condition.csv"))
+write_csv(rgn_ewg_archaeological_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/rgn_ewg_archaeological_sites_condition.csv"))
+```
+
+
+
+
+
+
+
+

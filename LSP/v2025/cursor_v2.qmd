@@ -1,0 +1,288 @@
+---
+title: "OHI GoC: LSP points, protected areas, SIMEC *i*-efectividad"
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+execute:
+  warning: true
+  message: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(fig.align = "center")
+```
+
+## Goal
+
+Filter collapsed LSP rows (protected area + SIMEC/RAMSAR), test whether each point **intersects** WDPA or HEM land ANPs (`st_intersects`), attach SIMEC scores via the EWG list, then output **`rgn_id`**, **`lasting_special_place_lsp`**, **`condition`**: SIMEC score if present, `1` = Ramsar-only in EWG, `0` = other PA, `NA` = outside both layers.
+
+```{r libraries}
+library(tidyverse)
+library(here)
+library(janitor)
+library(sf)
+library(mapview)
+mapviewOptions(fgb = FALSE)
+```
+
+## Paths (`here`)
+
+```{r paths}
+WDPA_SHP <- here::here("/home/lecuona/OHI_Intro/ohi_goc_prep/LSP/v2025/output/WDPA_Jan2025_shp_clipped_all.shp")
+
+COLLAPSED_CSV <- here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/identifying_lasting_special_places_collapsed_lsp_protections.csv")
+
+SIMEC_CSV <- here("/home/shares/ohi/OHI_GOC/_raw_data/SIMEC/identifying_lasting_special_places_SIMEC.csv")
+
+EWG_LIST_CSV <- here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/LSP_list_ewg_mentioned_protected_areas_v1_042426.csv")
+
+HEM_ANP_SHP <- here(
+  "/home/shares/ohi/OHI_GOC/spatial/from_hem_POEM_ANP/232_ANP-ITRF08_16062025",
+  "232_ANP-ITRF08_16062025.shp"
+)
+```
+
+## Read tables
+
+```{r read-data}
+i_efectividad_raw <- read_csv(SIMEC_CSV, show_col_types = FALSE) %>%
+  clean_names()
+
+ewg_protected_areas_list <- read_csv(EWG_LIST_CSV, show_col_types = FALSE) %>%
+  clean_names()
+
+if (!"only_ramsar_site" %in% names(ewg_protected_areas_list)) {
+  ewg_protected_areas_list$only_ramsar_site <- NA_character_
+}
+
+i_efectividad_w_ewg_list <- full_join(
+  i_efectividad_raw,
+  ewg_protected_areas_list,
+  by = c("nombre" = "i_efectividad_name")
+)
+
+collapsed_raw <- read_csv(COLLAPSED_CSV, show_col_types = FALSE, na = c("", "NA")) %>%
+  clean_names()
+
+if ("ohi_go_c_region" %in% names(collapsed_raw) && !"ohi_goc_region" %in% names(collapsed_raw)) {
+  collapsed_raw <- collapsed_raw %>% rename(ohi_goc_region = ohi_go_c_region)
+}
+```
+
+## LSP points to test (protected area + SIMEC/RAMSAR, valid coords)
+
+```{r lsp-points}
+lsp_pa <- collapsed_raw %>%
+  filter(
+    str_detect(protection_should_be, regex("protected\\s*area", ignore_case = TRUE)),
+    str_detect(protection_condition_determined_by, regex("SIMEC|RAMSAR", ignore_case = TRUE))
+  ) %>%
+  mutate(
+    lat = parse_number(as.character(lat)),
+    long = parse_number(as.character(long))
+  ) %>%
+  filter(!is.na(lat), !is.na(long))
+
+lsp_pts <- lsp_pa %>%
+  st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+```
+
+## WDPA + HEM polygons as one layer (`pa_all`)
+
+Polygon **geometry** decides inclusion; names are only for joining SIMEC / Ramsar flags afterward.
+
+```{r pa-layers}
+stopifnot(file.exists(WDPA_SHP), file.exists(HEM_ANP_SHP))
+
+wdpa <- st_read(WDPA_SHP, quiet = TRUE) %>%
+  st_transform(4326) %>%
+  st_make_valid()
+
+hem_protected_anps <- st_read(HEM_ANP_SHP, quiet = TRUE) %>%
+  st_transform(4326) %>%
+  st_make_valid() %>%
+  clean_names() %>%
+  filter(
+    estados %in% c(
+      "Baja California Sur", "Jalisco", "Baja California", "Sonora", "Nayarit", "Sinaloa",
+      "Baja California y Baja California Sur", "B.C., B.C.S., Sonora y Sinaloa", "Jalisco y Nayarit"
+    )
+  )
+
+# first matching name column in each layer — edit vectors if your fields differ
+wdpa_col <- intersect(c("NAME", "name", "NAME_1"), names(wdpa)) %>% .[1]
+hem_col <- intersect(c("nombre", "nom_anp", "NOM_N1", "name"), names(hem_protected_anps)) %>% .[1]
+if (is.na(wdpa_col)) stop("Set a label column for WDPA (see wdpa names: ", paste(names(wdpa), collapse = ", "), ")")
+if (is.na(hem_col)) stop("Set a label column for HEM (see hem names)")
+
+pa_wdpa <- wdpa %>%
+  transmute(
+    pa_label = as.character(.data[[wdpa_col]]),
+    pa_source = "wdpa"
+  )
+pa_hem <- hem_protected_anps %>%
+  transmute(
+    pa_label = as.character(.data[[hem_col]]),
+    pa_source = "hem_anp"
+  )
+pa_all <- bind_rows(pa_wdpa, pa_hem)
+```
+
+## EWG + SIMEC lookups (and Ramsar-only flag per `wdpa_key`)
+
+Match on a **normalised** name string (lowercase, no accents) so labels from either layer can meet `wdpa_orig_name` in the EWG file.
+
+```{r name-key}
+# one place to normalise text for joins
+norm_name <- function(x) {
+  x %>%
+    as.character() %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_squish() %>%
+    str_to_lower()
+}
+```
+
+```{r ewg-simec-ramsar}
+simec_scores <- i_efectividad_raw %>%
+  transmute(
+    simec_key = str_squish(str_to_upper(nombre)),
+    i_efectividad = as.numeric(i_efectividad),
+    ano_reporte,
+    vinculo_reporte
+  ) %>%
+  filter(!is.na(simec_key), simec_key != "")
+
+ewg_match <- ewg_protected_areas_list %>%
+  mutate(
+    wdpa_key = norm_name(wdpa_orig_name),
+    simec_key = ifelse(
+      is.na(i_efectividad_name) | i_efectividad_name %in% c("", "NA", "na"),
+      NA_character_,
+      str_squish(str_to_upper(i_efectividad_name))
+    )
+  ) %>%
+  filter(!is.na(wdpa_key), wdpa_key != "", wdpa_key != "na") %>%
+  group_by(wdpa_key) %>%
+  slice(1) %>%
+  ungroup() %>%
+  dplyr::select(wdpa_key, simec_key)
+
+ramsar_y <- function(x) str_to_lower(str_squish(as.character(x))) %in%
+  c("y", "yes", "true", "1", "s", "sí", "si")
+
+ewg_ramsar_keys <- ewg_protected_areas_list %>%
+  mutate(
+    wdpa_key = norm_name(wdpa_orig_name),
+    is_ramsar_only = ramsar_y(only_ramsar_site) &
+      (is.na(i_efectividad_name) | i_efectividad_name %in% c("", "NA", "na"))
+  ) %>%
+  filter(!is.na(wdpa_key), wdpa_key != "", wdpa_key != "na") %>%
+  group_by(wdpa_key) %>%
+  summarize(is_ramsar_only = any(is_ramsar_only, na.rm = TRUE)) %>%
+  ungroup()
+```
+
+## Spatial join + SIMEC scores
+
+```{r join-intersect}
+joined <- st_join(lsp_pts, pa_all, join = st_intersects, left = TRUE) %>%
+  mutate(wdpa_key = norm_name(pa_label))
+
+with_simec <- joined %>%
+  left_join(ewg_match, by = "wdpa_key") %>%
+  left_join(ewg_ramsar_keys, by = "wdpa_key") %>%
+  mutate(
+    # if EWG did not match, try polygon label as SIMEC nombre
+    simec_key = ifelse(
+      !is.na(simec_key),
+      simec_key,
+      ifelse(is.na(pa_label), NA_character_, str_squish(str_to_upper(pa_label)))
+    ),
+    is_ramsar_only = replace_na(is_ramsar_only, FALSE)
+  ) %>%
+  left_join(simec_scores, by = "simec_key")
+```
+
+## Summary + `condition` + output columns
+
+```{r summary}
+lsp_summary <- with_simec %>%
+  #st_drop_geometry() %>%
+  group_by(ohi_goc_region, type_of_lsp, lasting_special_place_lsp, lat, long) %>%
+  summarize(
+    in_pa_poly = any(!is.na(pa_label)),
+    pa_names = paste(unique(na.omit(pa_label)), collapse = " | "),
+    pa_sources = paste(unique(na.omit(pa_source)), collapse = ", "),
+    i_efectividad_best = {
+      v <- i_efectividad[!is.na(i_efectividad)]
+      if (length(v)) max(v) else NA_real_
+    },
+    any_ramsar_only = any(is_ramsar_only, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    condition = case_when(
+      !in_pa_poly ~ NA_real_,
+      !is.na(i_efectividad_best) ~ as.numeric(i_efectividad_best),
+      any_ramsar_only ~ 1,
+      in_pa_poly ~ 0,
+      TRUE ~ NA_real_
+    )
+  )
+
+mapview(lsp_summary, zcol = "in_pa_poly")
+
+lsp_condition <- lsp_summary %>%
+  transmute(
+    rgn_id = parse_number(as.character(ohi_goc_region)),
+    lasting_special_place_lsp,
+    condition
+  )
+```
+
+## Quick checks
+
+```{r counts}
+lsp_summary %>%
+  count(in_pa_poly, name = "n_rows")
+```
+
+```{r missing-simec-not-ramsar}
+lsp_summary %>%
+  filter(in_pa_poly, is.na(i_efectividad_best), !any_ramsar_only) %>%
+  select(lasting_special_place_lsp, pa_names, pa_sources, condition)
+```
+
+## Map
+
+```{r map, fig.width = 8, fig.height = 6}
+mapview(wdpa, layer.name = "WDPA", col.regions = "blue", alpha.regions = 0.35) +
+  mapview(hem_protected_anps, layer.name = "HEM ANP", col.regions = "green") +mapview(lsp_summary, zcol = "in_pa_poly")
+```
+
+## Main result
+
+```{r result}
+lsp_condition
+```
+
+```{r objects}
+result_pts_sf <- with_simec
+# write_csv(lsp_condition, here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "lsp_condition.csv"))
+```
+
+Objects: **`lsp_condition`**, **`lsp_summary`**, **`result_pts_sf`**, **`i_efectividad_w_ewg_list`**.

@@ -1,0 +1,351 @@
+---
+title: "LSP points, WDPA overlap, and SIMEC *i*-efectividad"
+subtitle: "Gulf of California — OHI GoC"
+format:
+  html:
+    toc: true
+    code-fold: false
+execute:
+  echo: true
+  warning: true
+  message: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+knitr::opts_chunk$set(
+  fig.align = "center",
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+## Purpose
+
+This report does two things for Lasting Special Place (LSP) observations that are expected to be **governed in part by a CONANP protected area** (the "protected area + SIMEC/RAMSAR" rows in the collapsed LSP list):
+
+1. **Spatial test** — do the point coordinates fall **inside** a polygon in the WDPA layer you use for the Gulf of California?
+2. **Effectiveness score** — for points that land in a named protected area, link the polygon to the EWG protected-areas list, then attach the **SIMEC *i*-efectividad** overall score (the `i_efectividad` value in the SIMEC export) for the matching CONANP site.
+
+The **EWG list** is the bridge: it links OHI-friendly names and `wdpa_orig_name` (to match the shapefile) to the **uppercase `i_efectividad_name`** that lines up with **SIMEC `nombre`**.
+
+## Configuration: file paths with `here()`
+
+`here::here()` is used the same way as in your other OHI prep chunks: full paths under `/home/shares/...` are passed as a single first argument so the file resolves to the share, not the local R project root. If a file is missing, update the string to match your share (or set an environment variable in a local-only setup script).
+
+```{r}
+#| label: paths
+
+# WDPA shapefile (Gulf of California clip) — override with env if you use a different build
+WDPA_SHP <- here::here(
+    "/home/lecuona/OHI_Intro/ohi_goc_prep/LSP/v2025/output/WDPA_Jan2025_shp_clipped_all.shp"
+  )
+
+
+# Collapsed LSP table: change the file name if your share uses the long "Identifying…" title
+COLLAPSED_CSV <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/identifying_lasting_special_places_collapsed_lsp_protections.csv"
+)
+
+# Raw SIMEC *i*-efectividad (per CONANP area) — same pattern as your working analysis
+SIMEC_CSV <- here::here(
+  "/home/shares/ohi/OHI_GOC/_raw_data/SIMEC/identifying_lasting_special_places_SIMEC.csv"
+)
+
+# EWG list: which LSP rows map to which WDPA / SIMEC names
+EWG_LIST_CSV <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/LSP_list_ewg_mentioned_protected_areas_v1_042426.csv"
+)
+```
+
+## Load packages
+
+We use **{tidyverse}** for data work, **{here}** for paths, **{sf}** for spatial operations, **{mapview}** for a quick map, and **{janitor}** to turn ragged CSV headers into consistent `snake_case` so the code is easier to read and less likely to break on spaces or odd column names.
+
+```{r}
+#| label: packages
+#| message: false
+
+library(tidyverse)
+library(here)
+library(janitor)
+library(sf)
+library(mapview)
+mapview::mapviewOptions(fgb = FALSE) # more reliable in some browsers / RStudio viewers
+```
+
+## Read the three CSVs
+
+Each table is read with `read_csv(here::here("..."))` and then `janitor::clean_names()`. That renames columns like `Protection should be:` to `protection_should_be`, so the rest of the document uses **snake_case** only.
+
+```{r}
+#| label: read-csvs
+
+# 1) i-efectividad for each CONANP protected area (one row per `nombre`)
+i_efectividad_raw <- readr::read_csv(SIMEC_CSV, show_col_types = FALSE) |>
+  janitor::clean_names()
+
+# 2) EWG list: links wdpa name, i_efectividad_name, and LSP context
+ewg_protected_areas_list <- readr::read_csv(EWG_LIST_CSV, show_col_types = FALSE) |>
+  janitor::clean_names()
+
+# 3) Optional but useful: see which SIMEC sites are in the EWG list and which are not
+#    (full_join keeps all rows from both sides; `by` matches SIMEC `nombre` to EWG `i_efectividad_name`)
+i_efectividad_w_ewg_list <- full_join(
+  i_efectividad_raw,
+  ewg_protected_areas_list,
+  by = c("nombre" = "i_efectividad_name")
+)
+
+# 4) Collapsed LSPs + protection types
+collapsed_raw <- readr::read_csv(COLLAPSED_CSV, show_col_types = FALSE, na = c("", "NA")) |>
+  janitor::clean_names()
+
+# janitor can turn "OHI GoC Region" into ohi_go_c_region or ohi_goc_region — unify for downstream code
+if ("ohi_go_c_region" %in% names(collapsed_raw) && !"ohi_goc_region" %in% names(collapsed_raw)) {
+  collapsed_raw <- collapsed_raw |>
+    dplyr::rename(ohi_goc_region = ohi_go_c_region)
+}
+```
+
+The `full_join` is the same join you use elsewhere: it is **not** used directly in the point-in-polygon step, but it is a good place to spot **typos** or **missing** CONANP names between the SIMEC export and the EWG list.
+
+## Filter to "protected area" rows with SIMEC / RAMSAR
+
+We only want rows where the team said the LSP should be protected as a **protected area** and the condition is tied to **SIMEC** and/or **RAMSAR** (`protection_condition_determined_by`). `parse_number()` on latitude and longitude turns free text like "Need follow up" into `NA` so those points are dropped before making an `sf` object.
+
+```{r}
+#| label: filter-lsp-points
+
+# If this errors, inspect names(collapsed_raw) after a column rename in the source sheet
+lsp_pa <- collapsed_raw |>
+  filter(
+    str_detect(
+      protection_should_be,
+      regex("protected\\s*area", ignore_case = TRUE) # e.g. "Protected area" or "Protected area + …"
+    ),
+    str_detect(
+      protection_condition_determined_by,
+      regex("SIMEC|RAMSAR", ignore_case = TRUE) # your sheet often has "SIMEC/RAMSAR" in one cell
+    )
+  ) |>
+  mutate(
+    # keep both as numbers; any non-numeric cell becomes NA
+    lat = readr::parse_number(as.character(lat)),
+    long = readr::parse_number(as.character(long))
+  ) |>
+  filter(
+    !is.na(lat), !is.na(long), is.finite(lat), is.finite(long)
+  )
+
+# sf: WGS84; we keep lat/long columns for the summary table
+lsp_pts <- lsp_pa |>
+  st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+
+mapview(lsp_pts)
+```
+
+## Helper: normalise names for matching
+
+Shapefile **NAME** fields and the EWG **wdpa_orig_name** can differ in accents and spacing. This function makes a **lowercase, accent-stripped** key for joining.
+
+```{r}
+#| label: helper-norm
+
+norm_name <- function(x) {
+  x |>
+    as.character() |>
+    stringi::stri_trans_general("Latin-ASCII") |>
+    str_squish() |>
+    str_to_lower()
+}
+```
+
+## Load WDPA and pick a label field
+
+The join to points needs one text field from the polygon that should line up with `wdpa_orig_name` in the EWG file. Standard WDPA fields are tried in order; if your layer uses another name, add it to the vector or set the column by hand after `st_read()`.
+
+```{r}
+#| label: read-wdpa
+
+# If the layer is global, use FILTER_WDPA to keep e.g. Mexico / a bounding box
+# FILTER_WDPA <- function(x) dplyr::filter(x, .data$iso3 == "MEX")
+FILTER_WDPA <- function(x) x
+
+WDPA_NAME_CANDIDATES <- c("NAME", "name", "NAME_1", "orig_name", "OrigName", "DESIG_T", "desig_t")
+
+if (!file.exists(WDPA_SHP)) {
+  stop("Shapefile not found: ", WDPA_SHP, " — set WDPA_GOC_SHP or edit paths in the first chunk.")
+}
+
+wdpa <- st_read(WDPA_SHP, quiet = TRUE) |>
+  FILTER_WDPA() |>
+  st_transform(4326) |> # same CRS as the LSP points
+  st_make_valid() # avoids invalid-geometry failures in joins
+
+first_non_null_col <- function(df, candidates) {
+  hit <- intersect(candidates, names(df))
+  if (length(hit) < 1) {
+    stop(
+      "Add a column name to WDPA_NAME_CANDIDATES. First 20 names: ",
+      paste(head(names(df), 20), collapse = ", ")
+    )
+  }
+  hit[[1]]
+}
+
+wdpa_name_field <- first_non_null_col(wdpa, WDPA_NAME_CANDIDATES)
+wdpa$wdpa_label <- wdpa[[wdpa_name_field]] |> as.character()
+```
+
+## Build the EWG crosswalk and the SIMEC score lookup
+
+From the **EWG list** (not the full join), we build a table: `wdpa_key` (for matching the shapefile label) and `simec_key` (for matching `i_efectividad_raw$nombre` in uppercase). Sites in the EWG list with no `i_efectividad_name` (e.g. some Ramsar-only lines) get a missing `simec_key` and will not pick up a score until names are fixed.
+
+From **i_efectividad_raw** we build a small `simec_scores` table: one **i_efectividad** (the overall score) per `simec_key`.
+
+```{r}
+#| label: ewg-simec-lookup
+
+ewg_match <- ewg_protected_areas_list |>
+  transmute(
+    wdpa_orig_name = as.character(wdpa_orig_name),
+    i_efectividad_name = as.character(i_efectividad_name),
+    wdpa_key = norm_name(wdpa_orig_name),
+    simec_key = str_squish(str_to_upper(
+      ifelse(
+        is.na(i_efectividad_name) | i_efectividad_name %in% c("", "NA", "na"),
+        NA_character_,
+        i_efectividad_name
+      )
+    ))
+  ) |>
+  filter(!is.na(wdpa_key), wdpa_key != "na", wdpa_key != "") |>
+  group_by(wdpa_key) |>
+  slice(1) |> # one row per key; change to a stricter rule if keys duplicate
+  ungroup()
+
+simec_scores <- i_efectividad_raw |>
+  transmute(
+    simec_key = str_squish(str_to_upper(nombre)),
+    i_efectividad = as.numeric(i_efectividad), # overall *i*-efectividad index
+    ano_reporte,
+    vinculo_reporte
+  ) |>
+  filter(!is.na(simec_key), simec_key != "")
+```
+
+## Point in polygon, then attach *i*-efectividad
+
+`st_join(..., join = st_within)` returns a **left** join: every LSP point is kept. If a point lies in **no** polygon, `wdpa_label` is `NA`. If it lies in **overlapping** polygons, you can get **more than one** row per point until the summary step below.
+
+If coastal points sit **on a boundary** and return "outside" when you expect "inside", switch to `join = st_intersects` in the `st_join` call.
+
+```{r}
+#| label: spatial-join
+
+joined <- st_join(
+  lsp_pts,
+  dplyr::select(wdpa, wdpa_label, wdpa_name_field = !!rlang::sym(wdpa_name_field)),
+  join = st_within,
+  left = TRUE
+)
+
+joined$wdpa_key <- norm_name(joined$wdpa_label)
+
+matched_ewg <- joined |>
+  left_join(ewg_match, by = "wdpa_key") # bring in simec_key from EWG when the WDPA name matches
+
+# If the EWG row was missing, try the raw polygon label as a SIMEC `nombre` (some layers use the same spelling)
+with_simec <- matched_ewg |>
+  mutate(
+    simec_key = case_when(
+      !is.na(simec_key) ~ simec_key,
+      !is.na(wdpa_label) ~ str_squish(str_to_upper(wdpa_label)),
+      TRUE ~ NA_character_
+    )
+  ) |>
+  left_join(simec_scores, by = "simec_key", suffix = c("", "_simec"))
+```
+
+## One row per LSP (roll up overlapping polygons)
+
+Multiple matches are **pasted** in `wdpa_names`. The first non-missing **i_efectividad** is taken; if you need min, max, or a rule for nested PAs, change the `summarise` block.
+
+```{r}
+#| label: summary-table
+
+lsp_summary <- with_simec |>
+  st_drop_geometry() |>
+  group_by(
+    ohi_goc_region, # from clean_names() of "OHI GoC Region" — if the name differs, use the output of names(lsp_pa)
+    type_of_lsp,
+    lasting_special_place_lsp,
+    lat,
+    long
+  ) |>
+  summarise(
+    in_wdpa_poly = any(!is.na(wdpa_label)),
+    wdpa_names = paste(unique(na.omit(wdpa_label)), collapse = " | "),
+    i_efectividad = {
+      x <- i_efectividad[!is.na(i_efectividad)]
+      if (length(x)) x[[1]] else NA_real_
+    },
+    i_efectividad_all = list(na.omit(unique(i_efectividad))),
+    ano_reporte = {
+      a <- ano_reporte[!is.na(ano_reporte)]
+      if (length(a)) a[[1]] else NA_real_
+    },
+    .groups = "drop"
+  )
+```
+
+The read step above renames `ohi_go_c_region` to `ohi_goc_region` when only the former exists, so the `group_by` below should be stable. If another column still fails, run `names(lsp_pa)` after `filter` and adjust the `group_by` list to match your `clean_names()` output.
+
+## Map and tables
+
+```{r}
+#| label: map
+#| fig-width: 8
+#| fig-height: 6
+
+mv <- mapview(wdpa, layer.name = "WDPA") +
+  mapview(lsp_pts, layer.name = "LSP (SIMEC/RAMSAR PA)", col.regions = "darkred")
+mv
+```
+
+```{r}
+#| label: tab-in-out
+
+lsp_summary |>
+  count(in_wdpa_poly, name = "n_lsp_rows")
+```
+
+Points that are **inside** a WDPA polygon but have **no** SIMEC score are often: **Ramsar-only** lines in the EWG list, **Loreto II**-style new designations, or a **name mismatch** between the shapefile and `wdpa_orig_name`. Those are the rows to fix in the EWG list or the shapefile name field, not in this join.
+
+```{r}
+#| label: tab-missing-simec
+
+lsp_summary |>
+  filter(in_wdpa_poly, is.na(i_efectividad)) |>
+  dplyr::select(lasting_special_place_lsp, wdpa_names)
+```
+
+## Objects to use later in the session
+
+- `i_efectividad_w_ewg_list` — diagnostic full join between SIMEC and EWG.
+- `result_pts_sf` — one row per LSP × polygon hit, with geometry.
+- `lsp_summary` — one row per LSP point, with a single reported `i_efectividad` when available.
+
+```{r}
+#| label: export-objects
+
+result_pts_sf <- with_simec
+# readr::write_csv(lsp_summary, here::here("output", "lsp_wdpa_simec_summary.csv"))
+```
+
+---
+
+*End of report.*
