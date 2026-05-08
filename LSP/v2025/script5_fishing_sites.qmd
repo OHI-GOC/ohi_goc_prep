@@ -46,8 +46,11 @@ library(mapview)
 lsp_list_ewg_v3 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/identifying_lasting_special_places_collapsed_lsp_protections_v3.csv")) %>% 
   janitor::clean_names()
 
-ewg_fishing_site_list <- lsp_list_ewg_v3 %>% 
-  filter(protection_should_be %in% c("TURFs + refugia", "TURFs + fishing refuge (specific to squid?)","TURFs + fishing refuge (specific to clam?)")) %>%
+lsp_list_ewg_v4 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/identifying_lasting_special_places_collapsed_lsp_protections_v4.csv")) %>% 
+  janitor::clean_names()
+
+ewg_fishing_site_list <- lsp_list_ewg_v4 %>% 
+  filter(type_of_lsp %in% c('"Important fishing areas, could have fishing refuges (zonas de refugio pesquero or ZRP)"')) %>%
   mutate(long = as.numeric(long),
          lat = as.numeric(lat)) %>% 
   filter(!is.na(long)) %>% 
@@ -60,18 +63,225 @@ ewg_fishing_site_list <- lsp_list_ewg_v3 %>%
 mapview(ewg_fishing_site_list)
 ```
 
+### Assign regions
 
-## Determine if priority fishing sites fall within ZRPs or TURFs
+First, read in the marine and land polygons.
+```{r}
+ohi_rgns <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) 
+
+# mapview(ohi_rgns, zcol = "rgn_id")
+```
+
+Now, we can intersect with `ohi_rgns` so that each site is assigned an OHI GoC Region ID.
+```{r}
+# intersect with GoC
+ewg_fishing_site_list_goc_rgnid <- st_intersection(st_transform(ewg_fishing_site_list, st_crs(ohi_rgns)), ohi_rgns)
+
+mapview(ewg_fishing_site_list_goc_rgnid, zcol = "rgn_id") 
+```
+
+
+## Determine if priority fishing sites fall within ZRPs or TURFs or codified regulation
+
+### ZRPs
+
+```{r}
+tnc_zrps_raw <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/TNC_geoportal_fishing_refuge_zones/d2026/Zonas_Refugios_Pesqueros_-8805549763229037385.geojson")) %>% 
+  janitor::clean_names()
+
+mapview(tnc_zrps_raw, col.regions = "blue") + mapview(ewg_fishing_site_list, col.regions = "black")
+```
+
+```{r}
+# for mexico CRS
+inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
+
+# buffer fishing sites by 1000m
+ewg_fishing_site_buffered <- st_buffer(
+  st_transform(ewg_fishing_site_list_goc_rgnid, st_crs(inland_50)),
+  dist = 1000
+)
+#mapview(ewg_fishing_site_buffered)
+
+# spatial join to the non-dissolved layer (all_protected) to keep protected area names
+ewg_fishing_site_condition_zrp <- st_join(
+  st_transform(ewg_fishing_site_buffered, st_crs(tnc_zrps_raw)),
+  st_make_valid(tnc_zrps_raw),
+  join = st_intersects,
+  left = TRUE  # keep all sites, even those outside of protected areas
+) %>%
+  mutate(in_zrp = !is.na(name)) %>%
+  rename(zrp_name = name) %>% 
+  mutate(zrp_condition = ifelse(in_zrp == "TRUE", 100, 0)) %>% 
+  dplyr::select(rgn_id, lasting_special_place_lsp, in_zrp, zrp_condition) %>% 
+  distinct()
+```
+
+
+### TURFs
+
+This cooperative data is from authors Eréndira Aceves-Bueno ,Mateja Nenadovic,India Dove,Claire Atkins-Davis,Juan Salvador Aceves-Bueno,Abel Trejo-Ramirez,Cristina Rivas-Ochoa,Salvador Rodriguez-Van Dyck,Amy Hudson Weaver, from the paper *Sustaining small-scale fisheries through a nation-wide Territorial Use Rights in Fisheries system* published in 2023.
+
+<https://journals.plos.org/plosone/article/figure?id=10.1371/journal.pone.0286739.g003>
+<https://ereaceves.shinyapps.io/Tapp>
+
+Unfortunately these are not easily downloadable, but using the interactive Shiny app, we can determine visually whether the iconic fishing site lies within a TURF. 
+
+As of now, only the `lasting_special_place_lsp` == "Yaqui and Mayo People have historic (and current) important fishing camps at Sonora-Sinala border. RCB" lies within a TURF.  
+
+Specifically, SON	S.C.P.P. PROGRESO DE BACOREGUIS	59.5021330485373	CAMARON DE ESTERO (Penaeus spp.), 	SON	S.C.P.P. PUNTA COLORADA	10.1437898288521	CAMARON DE ESTERO (Penaeus spp.), 	SON	S.C.P.P. BAHIA DE LA ACEITUNA	10.9384359771656	CAMARON DE ESTERO (Penaeus spp.), 	SON	S.C.P.P. SYLVIA RAMIREZ	6.25839729540253	CAMARON DE ESTERO (Penaeus spp.), SON	S.C.P.P. ENSENADA DEL COROBOCHA	18.5936130597429	CAMARON DE ESTERO (Penaeus spp.), SON	S.C.P.P. BAHIA DE SIALIBOCA	18.761539480154	CAMARON DE ESTERO (Penaeus spp.), SIN	S.C.P.P. BAHIA DE JITZAMURI	29.5269278412638	CAMARON DE ESTERO (Penaeus spp.), SON	S.C.P.P. PESCADORES AUTENTICOS DEL JITZAMURI	16.9434518590803	CAMARON DE ESTERO (Penaeus spp.), 	SON	S.C.P.P. INDIGENAS UNIDOS DE BACOREHUIS	13.0599505730419	CAMARON DE ESTERO (Penaeus spp.), 	SIN	S.C.P.P. DREN CINCO	7.5655624022361	CAMARON DE ESTERO (Penaeus spp.), SIN	S.C.P.P. PACIOTECOLA	14.0565957834506	CAMARON DE ESTERO (Penaeus spp.), SIN	S.C.P.P. ESTRELLA DEL NORTE	14.3260790098044	CAMARON DE ESTERO (Penaeus spp.), 	SIN	S.C.P.P. IGNACIO SARMIENTO	12.6098901269236	CAMARON DE ESTERO (Penaeus spp.).
+
+```{r}
+ewg_fishing_site_condition_turf <- ewg_fishing_site_condition_zrp %>% 
+  mutate(in_turf = ifelse(lasting_special_place_lsp == "Yaqui and Mayo People have historic (and current) important fishing camps at Sonora-Sinala border. RCB", TRUE, FALSE)) %>% 
+  mutate(overall_condition = ifelse(in_turf == "TRUE", 100, zrp_condition))
+```
+
+
+
+## Intersect with protected areas
+
+```{r}
+# buffer fishing sites by 1000m
+ewg_fishing_site_buffered <- st_buffer(
+  st_transform(ewg_fishing_site_list_goc_rgnid, st_crs(inland_50)),
+  dist = 1000
+)
+
+ewg_fishing_site_condition_ANP <- st_join(
+  st_transform(ewg_fishing_site_condition_turf, st_crs(all_protected)),
+  all_protected %>% dplyr::select(name, geometry),
+  join = st_intersects,
+  left = TRUE  # keep all sites, even those outside of protected areas
+) %>%
+  mutate(in_protected_area = !is.na(name)) %>%
+  rename(protected_area_name = name) 
+
+# quick checks for sanity
+mapview(ewg_fishing_site_condition_ANP, zcol = "in_protected_area") + mapview(all_protected, col.regions = "pink")
+table(ewg_fishing_site_condition_ANP$in_protected_area)
+table(ewg_fishing_site_condition_ANP$protected_area_name)
+table(ewg_fishing_site_condition_ANP$lasting_special_place_lsp) # multiple observations for each site.
+```
+
+The only problem is that if a buffered site overlaps multiple protected areas, `st_join()` will return one row per match, giving us duplicate sites. So that is something to keep in mind.
+
+### i-efectividad for each dive site in a protected area
+
+```{r}
+i_efectividad_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SIMEC/identifying_lasting_special_places_SIMEC.csv")) %>% 
+  janitor::clean_names()
+
+unique(i_efectividad_raw$nombre)
+unique(ewg_fishing_site_condition_ANP$protected_area_name)
+```
+
+### Fuzzy matching the protected area names
+
+```{r}
+library(stringdist)
+library(stringi)
+
+# normalize protected area names...uppercase, remove accents, remove common filler words
+normalize_name <- function(x) {
+  x %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%  # remove accents
+    str_to_upper() %>%
+    str_remove_all("\\bPARQUE NACIONAL\\b|\\bPARQUE\\b|\\bNACIONAL\\b|\\bZONA MARINA\\b|\\bARCHIPIELAGO\\b") %>%
+    str_squish()  # remove extra whitespace left behind
+}
+
+# make normalized versions for matching
+i_efectividad_norm <- i_efectividad_raw %>%
+  mutate(nombre_norm = normalize_name(nombre))
+
+fishing_sites_norm <- ewg_fishing_site_condition_ANP %>%
+  mutate(protected_area_norm = normalize_name(protected_area_name))
+
+# fuzzy match: for each dive site protected area name, find the closest match in i_efectividad
+matches <- stringdist::amatch(
+  fishing_sites_norm$protected_area_norm,
+  i_efectividad_norm$nombre_norm,
+  method = "jw", # Jaro-Winkler works well for place names
+  maxDist = 0.2 # adjust threshold as needed; lower = stricter
+)
+```
+
+
+```{r}
+# attach matched nombre from i_efectividad back to dive sites
+fishing_sites_matched <- fishing_sites_norm %>%
+  mutate(
+    nombre_matched = i_efectividad_norm$nombre[matches],
+    nombre_norm_matched = i_efectividad_norm$nombre_norm[matches]
+  )
+
+# inspect the matches before joining
+# join them!!!
+fishing_sites_w_SIMEC <- fishing_sites_matched %>%
+  left_join(
+    i_efectividad_raw,
+    by = c("nombre_matched" = "nombre")
+  ) %>% 
+  mutate(protected_area_condition = ifelse(!is.na(i_efectividad), i_efectividad, NA),
+         protected_area_condition = ifelse(protected_area_name == "Humedales del Delta del Río Colorado", max(i_efectividad_raw$i_efectividad), protected_area_condition), # this Ramsar site has a management plan in place: https://rsis.ramsar.org/?f%5B0%5D=region_en_s%3ANorth+America&f%5B1%5D=managementPlanAvailable_i%3A-1&q=Mexico#map  https://docs.google.com/spreadsheets/d/1RwNTzRZdBIDtzi7d1ceFxhNmVghN47NxTgrhZV8O2SM/edit?gid=1116165746#gid=1116165746
+        protected_area_condition = ifelse(nombre_matched == "CABO PULMO", 0, protected_area_condition) # CABO PULMO IS NO TAKE!!!!
+         ) %>%
+  group_by(lasting_special_place_lsp) %>% 
+  summarize(protected_area_condition = mean(protected_area_condition, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  st_drop_geometry()
+
+## note that "LA PIEDRA DE LA VIRGEN, / O PIEDRA DEL CRISTO DEL MAR.  Important for the huichol people, they recognize as the point of origin of their people (https://visitnayarit.travel/en/blog-nayarit-en/tatei-haramara-the-origin-of-the-world-according-to-the-wixarika-worldview/) (JGH)" is fully protected by Hauxa Manaka Pact for the Preservation and Development of Wixarika Culture (2008) and UNESCO (as of 2025).
+```
+
+
 
 ## Condition for each fishing site
 
-# Condition per region
+```{r}
+final_ewg_fishing_site_condition <- ewg_fishing_site_condition_turf %>% 
+  left_join(fishing_sites_w_SIMEC) %>% 
+  mutate(overall_condition = ifelse(overall_condition == 0, protected_area_condition, overall_condition)) %>% 
+  st_drop_geometry()
+```
+
+### Codified regulation
+
+None of the sites are not protected in some way by ZRPs, TURFs, or ANPs.  So we will not have to estimate a condition score based on codified protections, though some resources to do so in the future are here:
+
+#### Clams (almejas)
+
+[Official Mexican Standard NOM-014-SAG/PESC-2015, Specifications to regulate the use of geoduck clam ( panopea generosa and panopea globosa ) in waters of federal jurisdiction of the Pacific Ocean coast and Gulf of California.](https://dof.gob.mx/nota_detalle_popup.php?codigo=5398036)
+
+[2022 Anuncian implementación de veda temporal para Almeja Chocolata](https://www.gob.mx/imipas/prensa/anuncian-implementacion-de-veda-temporal-para-almeja-chocolata?idiom=es)
+
+[Catarina Clam](https://www.gob.mx/imipas/es/articulos/almeja-catarina-208871?idiom=es)
+
+[2021 CARACTERIZACIÓN DE LA PESQUERÍA DE LA ALMEJA BLANCA (DOSINIA PONDEROSA) EN LA REGIÓN DE PUERTO PEÑASCO, SONORA, MÉXICO.](https://fisheryprogress.org/sites/default/files/documents_actions/Annex%2004%20Rep%20Final-Almeja_Blanaca%20Nov2021.pdf)
+
+#### Squid
+
+[Low management score from Seafood Watch.](https://www.seachoice.org/wp-content/uploads/2015/06/MBA_SeafoodWatch_JumboSquidMexicoReport.pdf)
+
+
+## Condition per region
+
+```{r}
+rgn_final_ewg_fishing_site_condition <- final_ewg_fishing_site_condition %>% 
+  group_by(rgn_id) %>% 
+  summarize(
+    condition = mean(overall_condition, na.rm = TRUE)
+  ) %>% 
+  ungroup()
+```
+
 
 ## Write to Mazu
 
 ```{r}
-write_csv(fishing_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/fishing_sites_condition.csv"))
-write_csv(rgn_fishing_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/rgn_fishing_sites_condition.csv"))
+write_csv(final_ewg_fishing_site_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/fishing_sites_condition.csv"))
+write_csv(rgn_final_ewg_fishing_site_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/rgn_fishing_sites_condition.csv"))
 ```
 
 
