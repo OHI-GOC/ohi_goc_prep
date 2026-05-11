@@ -1,0 +1,202 @@
+---
+title: 'OHI GoC 2025: Clean Waters - Pathogens'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Clean Waters: Pathogens
+
+The Clean Waters goal aims to capture the degree to which local waters are unpolluted by human-made causes based on the various contamination impacts it has on those that enjoy the Gulf.
+
+This was because experts agreed that pollution has negative impacts on the ecological health of the system, human health for those who enjoy swimming in the GoC, and also food quality, such as the levels of heavy metals in fish.
+
+In this subgoal, we will specifically be addressing the levels of enterococcus in coastal sites over time. The ideal state is that the waters are completely unpolluted and safe for both humans and organisms living in the ecosystem.
+
+$$current\ status\ _{pathogen} = 1 - \frac{NPM\ _{current} - NPM\ _{ideal}}{NPM\ _{maximum} - NPM\ _{ideal}}$$
+
+
+*The ideal reference point is zero pollution, meaning the status score = 1 when waters are completely clean, and approaches 0 as contamination increases to the legal maximum for beach suitability.*
+
+Note that NPM is an acronym for "Número más probable" per 100mL, which is how enterococcus is measured in water samples.
+
+|*NMP Enterococos / 100ml	| Clasificación de la playa |
+| De 0 a 200              | 	Apta                    | 
+| Mayor de 200            | 	No Apta                 | 
+
+Where "apta" means "suitable."  
+
+---
+
+Therefore, these are the values for $$NPM\ _{ideal}$$ and $$NPM\ _{maximum}$$:
+
+$$NPM\ _{ideal} = 0 \ NPM\ _{100mL}$$
+
+$$NPM\ _{ideal} = 200\ NPM\ _{100mL}$$
+That being said, [according to the the California State Water Resources Control Board and BWTF:](https://sandiego.surfrider.org/news/diving-into-the-science-behind-blue-water-task-force)
+
+- “Low” Enterococcus counts (0-35 MPN/100mL) are safe for human contact. 
+- “Medium” Enterococcus counts (36-104 MPN/100mL) the beach is still considered safe but caution is still advised. If the 30-day average MPN results for a beach exceed 35 it is considered unsafe for recreation.
+- “High” Enterococcus counts (over 104 MPN/100mL) exceed the state safety standards and it is advised to avoid contact with the water. 
+
+
+So we could make NPM_max = 104 MPN per 100mL. 
+
+More information on enterococcus as FIB is available in this paper, [Byappanahalli et al. 2012](https://pmc.ncbi.nlm.nih.gov/articles/PMC3510518/).
+
+```{r}
+library(tidyverse) 
+library(sf)
+library(janitor)
+library(here)
+library(mapview)
+```
+
+## Read in the data
+
+```{r}
+playas_limpias_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONAGUA_playas_limpias/d2026/Playas_Limpias_Digitized_Data_Current_2022_2025.csv"))
+```
+
+### Clean coordinates
+
+```{r}
+dms_to_dd <- function(dms_string) {
+  # remove degree symbol, minutes, seconds markers and cardinal direction
+  dms_string %>%
+    str_trim() %>%
+    # extract the numeric components and direction
+    str_match("(\\d+)°(\\d+)'([\\d.]+)''\\s*(Norte|Sur|Este|Oeste)") %>%
+    as_tibble(.name_repair = "minimal") %>%
+    set_names(c("full", "deg", "min", "sec", "dir")) %>%
+    mutate(
+      across(c(deg, min, sec), as.numeric),
+      # convert to decimal degrees
+      dd = deg + min/60 + sec/3600,
+      # make negative if South or West
+      dd = if_else(dir %in% c("Sur", "Oeste"), -dd, dd)
+    ) %>%
+    pull(dd)
+}
+
+# apply it!!
+playas_limpias_coord <- playas_limpias_raw %>%
+  mutate(
+    lat = dms_to_dd(latitud),
+    lon = dms_to_dd(longitud)
+  ) %>% 
+  st_as_sf(coords = c("lon", "lat"), # making sf object
+           crs = 4326, # WGS84
+           remove = FALSE)
+
+mapview(playas_limpias_coord)
+```
+
+
+
+### Assign OHI rgns
+
+First, group by region and unite the polygons for inland 10km with the marine polygons.
+```{r}
+## intersect with inland_10:
+inland_10 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer","inland_10km_goc.shp"))
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+
+st_crs(inland_10) == st_crs(regions_marine) # TRUE
+
+marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>% 
+  dplyr::select(rgn_id, geometry) %>% 
+  group_by(rgn_id) %>% 
+  summarize(
+    geometry = st_union(geometry)
+  )
+
+mapview(marine_and_inland10)
+```
+
+Now, we can intersect with the `marine_and_inland10` so that each playa is assigned an OHI GoC Region ID.
+```{r}
+# intersect with GoC
+playas_limpias_rgnid <- st_intersection(st_transform(playas_limpias_coord, st_crs(marine_and_inland10)), marine_and_inland10)
+
+mapview(playas_limpias_rgnid, zcol = "rgn_id")
+
+st_write(playas_limpias_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/int","playas_limpias_rgnid.gpkg"))
+```
+
+
+## Calculate current status
+
+### Confirm that all three seasons are sampled for each site
+
+```{r}
+annual_regional <- seasonal_site %>%
+  group_by(año, fed_ent, season) %>%
+  summarise(
+    seasonal_score = mean(score),        # average sites within season
+    seasonal_nmp   = exp(mean(log(geomean_nmp))),
+    n_beaches      = n_distinct(playa),
+    .groups        = "drop"
+  ) %>%
+  group_by(año, fed_ent) %>%
+  summarise(
+    annual_score  = mean(seasonal_score),
+    n_seasons     = n_distinct(season),
+    worst_season  = season[which.min(seasonal_score)],
+    worst_score   = min(seasonal_score),
+    .groups       = "drop"
+  ) %>%
+  mutate(
+    # Flag incomplete years
+    complete_year = n_seasons == 3,
+    score_pct     = round(annual_score * 100, 1),
+    annual_risk   = case_when(
+      annual_score >= 1 - log1p(35)  / log1p(200) ~ "low",
+      annual_score >= 1 - log1p(104) / log1p(200) ~ "medium",
+      TRUE                                          ~ "high"
+    )
+  )
+
+# Check for incomplete years
+annual_regional %>%
+  filter(!complete_year) %>%
+  select(año, fed_ent, n_seasons)
+```
+
+### Average the MPN per 100mL for each OHI Region and season
+
+```{r}
+
+```
+
+
+### Calculate the pressure score for each season, year, and region
+
+```{r}
+
+```
+
+### Average across the seasons for each region and year
+
+```{r}
+
+```
+
+
+
