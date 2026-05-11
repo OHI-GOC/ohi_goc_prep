@@ -22,7 +22,17 @@ editor_options:
 
 # Sentido de Pertenencia: Lasting Special Places
 
+**Script 4 — INAH-linked cultural LSPs.** We isolate rows whose protection pathway should run through INAH, spatially crosswalk them against INAH’s published inventory (large buffers so naming drift does not bite us), then layer federal protected-area polygons + SIMEC for places that also fall inside ANPs. Anything still orphaned picks up a modest codified score grounded in how incomplete statutory coverage can be for paleontological heritage.
+
+**Contents**
+
+1. Filter `ewg_lsp_inventory_prepared.csv` for INAH obligations; intersect with OHI regions.
+2. Load `INAH_archaeological_sites.csv`, buffer-match both ways.
+3. Smaller-buffer overlap with `all_protected`, fuzzy SIMEC joins, merge paths, average per region, export CSVs.
+
 ## Cultural and archaelogical sites
+
+Long-form justification (INAH mandates, quotes) lives in the bullets beneath; executable steps resume once libraries attach.
 
 *Overview*
 This includes archaeological sites, such as the shell middens near Puerto Peñasco. These locations have existence, cultural, and educational value. Condition of the archaeological site is determined by whether the agency, National Institute of Anthropology and History (INAH).
@@ -53,11 +63,14 @@ library(mapview)
 
 ## Read in archaeological sites the EWG identified as special in the GoC
 
+Filter `protection_should_be == INAH`, coerce coordinates, promote to `sf` so later joins inherit CRS-aware buffering.
+
 ```{r}
-lsp_list_ewg_v3 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/identifying_lasting_special_places_collapsed_lsp_protections_v3.csv")) %>% 
+lsp_google_sheets_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets"
+lsp_list_ewg <- read_csv(file.path(lsp_google_sheets_dir, "ewg_lsp_inventory_prepared.csv")) %>% 
   janitor::clean_names()
 
-ewg_cultural_site_list <- lsp_list_ewg_v3 %>% 
+ewg_cultural_site_list <- lsp_list_ewg %>% 
   filter(protection_should_be %in% "INAH") %>% 
   mutate(long = as.numeric(long),
          lat = as.numeric(lat)) %>% 
@@ -73,6 +86,8 @@ mapview(ewg_cultural_site_list)
 ### Limit to the GoC 
 
 First, read in the marine and land polygons.
+
+Clip cultural sites to official `goc_ohi_rgns.shp` extents so `rgn_id` stays comparable with every other script.
 ```{r}
 ohi_rgns <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) 
 
@@ -90,8 +105,10 @@ mapview(ewg_cultural_site_list_goc_rgnid, zcol = "rgn_id")
 
 ## Bring in all sites in the GoC managed by the INAH
 
+Google Sheets export `INAH_archaeological_sites.csv` becomes another point layer—brown markers when juxtaposed against EWG blues.
+
 ```{r}
-INAH_aechaeological_sites <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/INAH_archaeological_sites_v2026.csv")) %>% 
+INAH_aechaeological_sites <- read_csv(file.path(lsp_google_sheets_dir, "INAH_archaeological_sites.csv")) %>% 
   janitor::clean_names() %>% 
   mutate(long = as.numeric(long),
          lat = as.numeric(lat)) %>% 
@@ -108,6 +125,8 @@ mapview(ewg_cultural_site_list_goc_rgnid, col.regions = "blue") + mapview(INAH_a
 ### Determine if there is overlap between the EWG and INAH sites
 
 I chose to do this spatially, in case the names between the sites do not match up exactly.
+
+Ten-kilometre buffers emulate fuzzy attribution when CSV labels disagree but geography almost certainly aligns.
 
 ```{r}
 # buffer dive sites by 10000m
@@ -142,9 +161,13 @@ ewg_archaeological_sites_condition <- ewg_archaeological_sites_protected_INAH %>
 
 ### Determine if there is overlap between the EWG sites and protected areas
 
+Even INAH-listed heritage often sits inside biosphere reserves—this branch captures SIMEC-backed stewardship where it applies.
+
 #### Bring in protected areas
 
 This aggregated layer was built using Hem's layer of ANPs, and WDPA's protected area polygons downloaded in January 2025.
+
+We reuse `all_goc_protected_areas_2025.shp` from the WDPA+HEM fusion referenced earlier in the dive-site workflow.
 
 ```{r}
 all_protected <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/protected _areas_wdpa_and_hem", "all_goc_protected_areas_2025.shp"))
@@ -152,6 +175,8 @@ mapview(all_protected)
 ```
 
 ### Intersect with protected areas
+
+Switch to 500 m buffers for ANP intersections—tight enough for meaningful overlap stats without exploding polygon counts.
 
 ```{r}
 ## NEW BUFFER that is smaller:
@@ -182,8 +207,10 @@ The only problem is that if a buffered site overlaps multiple protected areas, `
 
 #### i-efectividad for each dive site in a protected area
 
+(Text still says “dive site” historically—here it is archaeological overlap.) Pull SIMEC rows from `google_sheets/simec_i_efectividad_anp_2025.csv` before fuzzy joins.
+
 ```{r}
-i_efectividad_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SIMEC/identifying_lasting_special_places_SIMEC.csv")) %>% 
+i_efectividad_raw <- read_csv(file.path(lsp_google_sheets_dir, "simec_i_efectividad_anp_2025.csv")) %>% 
   janitor::clean_names()
 
 unique(i_efectividad_raw$nombre)
@@ -191,6 +218,8 @@ unique(ewg_archaeological_sites_protected_ANP$protected_area_name)
 ```
 
 #### Fuzzy matching the protected area names
+
+Same normalization recipe as scripts 3 & 5—critical because Ramsar labels seldom match SIMEC uppercase strings.
 
 ```{r}
 library(stringdist)
@@ -243,7 +272,8 @@ arch_sites_w_SIMEC <- arch_sites_matched %>%
          protected_area_condition = ifelse(is.na(protected_area_condition), 0, protected_area_condition)
   ) %>%
   group_by(lasting_special_place_lsp) %>% 
-  mutate(protected_area_condition = mean(protected_area_condition)) %>% 
+  # multiple MPAs / Ramsar overlaps: take best (highest) management score
+  mutate(protected_area_condition = max(protected_area_condition, na.rm = TRUE)) %>% 
   ungroup() %>% 
   dplyr::select(rgn_id, lasting_special_place_lsp, protected_area_condition) %>% 
   distinct()
@@ -253,7 +283,7 @@ arch_sites_w_SIMEC <- arch_sites_matched %>%
 
 ### Codified protection condition
 
-It is illegal to remove fossils from Mexico without explicit government authorization because they are considered national property under the Ley Federal sobre Monumentos y Zonas Arqueológicos, Artísticos e Históricos (1972). All fossils and paleontological items are considered state property, and their export is forbidden. https://www.diputados.gob.mx/LeyesBiblio/pdf/LFMZAAH.pdf 
+Literature quote below motivates why “not INAH + not inside ANP” still earns a **30** rather than zero—partial statutory scaffolding beats pretending no governance exists.
 
 From [Guerrero-Arenas et al. 2022:](https://paleontologiamexicana.geologia.unam.mx/index.php/paleontologia/article/view/165/299)
 
@@ -274,6 +304,8 @@ ewg_archaeological_sites_condition_protected <- ewg_archaeological_sites_conditi
 
 ## Condition per region
 
+Drop geometry columns that sneak in after joins, average `overall_condition` per `rgn_id`.
+
 ```{r}
 final_ewg_archaeological_sites_condition <- ewg_archaeological_sites_condition_protected %>% 
   st_drop_geometry() %>% 
@@ -289,9 +321,11 @@ rgn_final_ewg_archaeological_sites_condition <- final_ewg_archaeological_sites_c
 
 ### Write to Mazu
 
+Persist archaeological outputs beside fishing/diving tables for script 7’s residual accounting.
+
 ```{r}
-write_csv(final_ewg_archaeological_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/ewg_archaeological_sites_condition.csv"))
-write_csv(rgn_final_ewg_archaeological_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/rgn_ewg_archaeological_sites_condition.csv"))
+write_csv(final_ewg_archaeological_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_lsp_archaeological_sites.csv"))
+write_csv(rgn_final_ewg_archaeological_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_archaeological_sites.csv"))
 ```
 
 

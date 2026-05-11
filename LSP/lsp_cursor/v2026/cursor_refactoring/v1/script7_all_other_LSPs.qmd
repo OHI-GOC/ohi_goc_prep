@@ -1,0 +1,301 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# Sentido de Pertenencia: Lasting Special Places
+
+## All other LSPs that should lie within protected areas, or should have codified protections in the law
+
+```{r}
+lsp_google_sheets_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets"
+lsp_list_ewg <- read_csv(file.path(lsp_google_sheets_dir, "ewg_lsp_inventory_prepared.csv")) %>% 
+  janitor::clean_names()
+```
+
+
+### Join together the large categories of LSPs
+
+```{r}
+# fishing sites
+fishing_site_condition <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_lsp_fishing_sites.csv"))
+
+# archaeological sites
+archaeological_site_condition <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_lsp_archaeological_sites.csv"))
+
+# protected area sites
+protected_area_condition <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_lsp_protected_areas.csv"))
+
+# dive sites
+dive_sites_condition <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_lsp_dive_sites.csv"))
+```
+
+```{r}
+colnames(fishing_site_condition)
+colnames(archaeological_site_condition)
+colnames(protected_area_condition)
+colnames(dive_sites_condition)
+```
+
+
+```{r}
+fishing_site_condition_join <- fishing_site_condition %>% 
+  dplyr::select(rgn_id, lsp_name = lasting_special_place_lsp, condition = overall_condition)
+
+archaeological_site_condition_join <- archaeological_site_condition %>% 
+  dplyr::select(rgn_id, lsp_name = lasting_special_place_lsp, condition = overall_condition)
+
+protected_area_condition_join <- protected_area_condition %>% 
+  mutate(lsp_name = case_when(
+    !is.na(wdpa_orig_name) ~ wdpa_orig_name,
+    is.na(wdpa_orig_name) & !is.na(i_efectividad_name) ~ i_efectividad_name,
+    is.na(wdpa_orig_name) & is.na(i_efectividad_name) ~ lasting_special_place_description,
+    TRUE ~ NA
+  )) %>% 
+  mutate(lsp_name = normalize_name(lsp_name)) %>% 
+  mutate(lsp_name = str_replace_all(lsp_name, "LA TOVARA","La Tovara")) %>% 
+  dplyr::select(rgn_id, lsp_name, condition = overall_condition)
+
+dive_sites_condition_join <- dive_sites_condition %>% 
+  mutate(lsp_name = paste0("Dive Site:", sep = " ", nombre_sitio_de_buceo)) %>% 
+  dplyr::select(rgn_id, lsp_name, condition = overall_condition)
+```
+
+
+# Join them all together
+
+```{r}
+all_categorical_lsps <- bind_rows(fishing_site_condition_join, archaeological_site_condition_join, protected_area_condition_join, dive_sites_condition_join) 
+
+lsps_not_in_categories <- setdiff(lsp_list_ewg$lasting_special_place_lsp, all_categorical_lsps$lsp_name)
+```
+
+## LSPs from the EWG list that are not captured by the previous categories:
+
+```{r}
+lsps_missing_condition <- lsp_list_ewg %>% 
+  filter(lasting_special_place_lsp %in% lsps_not_in_categories) %>% 
+  filter(type_of_lsp %in% "Marine location of importance") %>% 
+  mutate(lat = as.numeric(lat),
+         lont = as.numeric(long)) %>% 
+  filter(!is.na(lat)) %>% 
+  st_as_sf(
+    coords = c("long", "lat"), # making sf object
+    crs = 4326, # WGS84
+    remove = FALSE
+  ) %>% 
+  filter(!lasting_special_place_lsp %in% c("Coquina Reefs in Libertad, Bahia Lobos, and Peñasco - AHW","Only coral reefs in Gulf (Cabo Pulmo/Los Frailes & Bahía San Gabriel on Is. Espíritu Santo). RCB, BW","Massive seagrass beds (Zostera marina), RCB, BW\n\nThe largest and most stable annual seagrass beds (Zostera marina) are in the eastern Pacific. The eelgrass in the Gulf of California is 100% annual, no perennial, and is considered a subspecies, JTC, BW","Only coral reefs in Gulf (Cabo Pulmo/Los Frailes & Bahía San Gabriel on Is. Espíritu Santo). RCB, BW", "Puerto Lobos N most mangrove (black mangrove) population, BW","Mangrove coastal lagoons, JTC.")) %>% 
+  dplyr::select(rgn_id, lsp_name = lasting_special_place_lsp)
+```
+
+## Determine if they overlap with protected areas
+
+```{r}
+lsps_missing_condition_clean <- lsps_missing_condition %>% 
+  mutate(rgn_id = str_replace_all(rgn_id, " ", "_"))
+```
+
+```{r}
+#mapview(lsps_missing_condition_clean) + #mapview(all_protected)
+```
+
+```{r}
+# buffer dive sites by 1000m
+lsps_missing_condition_clean_buffered <- st_buffer(
+  st_transform(lsps_missing_condition_clean, st_crs(all_protected)),
+  dist = 100
+)
+#mapview(lsps_missing_condition_clean_buffered) + #mapview(all_protected)
+
+# spatial join to the non-dissolved layer (all_protected) to keep protected area names
+lsps_missing_protected <- st_join(
+  lsps_missing_condition_clean_buffered,
+  all_protected %>% dplyr::select(name, geometry),
+  join = st_intersects,
+  left = TRUE  # keep all dive sites, even those outside of protected areas
+) %>%
+  mutate(in_protected_area = !is.na(name)) %>%
+  rename(protected_area_name = name) 
+
+# quick checks for sanity
+#mapview(lsps_missing_condition_clean) + #mapview(lsps_missing_protected, zcol = "in_protected_area") + #mapview(all_protected, col.regions = "pink")
+table(lsps_missing_protected$in_protected_area)
+table(lsps_missing_protected$protected_area_name)
+
+
+```
+
+The only problem is that if a buffered site overlaps multiple protected areas, `st_join()` will return one row per match, giving us duplicate sites. So that is something to keep in mind.
+
+### i-efectividad for each dive site in a protected area
+
+```{r}
+i_efectividad_raw <- read_csv(file.path(lsp_google_sheets_dir, "simec_i_efectividad_anp_2025.csv")) %>% 
+  janitor::clean_names()
+
+unique(i_efectividad_raw$nombre)
+unique(lsps_missing_protected$protected_area_name)
+```
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+library(stringdist)
+library(stringi)
+
+# normalize protected area names...title case, remove accents
+normalize_name <- function(x) {
+  x %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%  # remove accents
+    str_to_title() %>%
+    str_squish()  # remove extra whitespace left behind
+}
+```
+
+
+### Fuzzy matching the protected area names
+
+```{r}
+library(stringdist)
+library(stringi)
+
+# normalize protected area names...uppercase, remove accents, remove common filler words
+normalize_name <- function(x) {
+  x %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%  # remove accents
+    str_to_upper() %>%
+    str_remove_all("\\bPARQUE NACIONAL\\b|\\bPARQUE\\b|\\bNACIONAL\\b|\\bZONA MARINA\\b|\\bARCHIPIELAGO\\b") %>%
+    str_squish()  # remove extra whitespace left behind
+}
+
+# make normalized versions for matching
+i_efectividad_norm <- i_efectividad_raw %>%
+  mutate(nombre_norm = normalize_name(nombre))
+
+lsp_missing_sites_norm <- lsps_missing_protected %>%
+  mutate(protected_area_norm = normalize_name(protected_area_name))
+
+# fuzzy match: for each dive site protected area name, find the closest match in i_efectividad
+matches <- stringdist::amatch(
+  lsp_missing_sites_norm$protected_area_norm,
+  i_efectividad_norm$nombre_norm,
+  method = "jw", # Jaro-Winkler works well for place names
+  maxDist = 0.2 # adjust threshold as needed; lower = stricter
+)
+```
+
+
+```{r}
+# attach matched nombre from i_efectividad back to dive sites
+lsp_missing_matched <- lsp_missing_sites_norm %>%
+  mutate(
+    nombre_matched = i_efectividad_norm$nombre[matches],
+    nombre_norm_matched = i_efectividad_norm$nombre_norm[matches]
+  )
+```
+
+
+```{r}
+# inspect the matches before joining
+# join them!!!
+lsp_missing_w_SIMEC <- lsp_missing_matched %>%
+  left_join(
+    i_efectividad_raw,
+    by = c("nombre_matched" = "nombre")
+  ) %>% 
+  mutate(protected_area_condition = ifelse(!is.na(i_efectividad), i_efectividad, NA))
+
+ramsar_management_plans <- read_csv(file.path(lsp_google_sheets_dir, "ramsar_site_management_plan_presence.csv"))
+
+lsp_missing_RAMSAR <- lsp_missing_w_SIMEC %>% 
+  filter(!is.na(protected_area_name) & is.na(nombre_norm_matched)) %>% 
+  left_join(ramsar_management_plans, by = c("protected_area_name" = "wdpa_orig_name")) %>% 
+  mutate(protected_area_condition = case_when(
+    if_ramsar_has_management_plan == "y" ~ max(i_efectividad_raw$i_efectividad),
+    if_ramsar_has_management_plan == "in_progress" ~ 60,
+    if_ramsar_has_management_plan == "n" ~ min(i_efectividad_raw$i_efectividad),
+    TRUE ~ NA
+  )) %>% 
+  dplyr::select(rgn_id, lsp_name, protected_area_condition, if_ramsar_has_management_plan, protected_area_name, in_protected_area, protected_area_norm)
+
+lsp_missing_only_conanp_ANPs <- lsp_missing_w_SIMEC %>% 
+  filter(!protected_area_name %in% lsp_missing_RAMSAR$protected_area_name)
+```
+
+
+```{r}
+final_lsp_missing_condition <- bind_rows(lsp_missing_only_conanp_ANPs, lsp_missing_RAMSAR) %>% 
+  group_by(rgn_id, lsp_name) %>% 
+  summarize(protected_area_condition = mean(protected_area_condition, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  mutate(protected_area_condition = ifelse(protected_area_condition == "NaN", 0, protected_area_condition)) %>% 
+  mutate(lsp_name_join = stri_trim_both(lsp_name)) 
+
+length(unique(final_lsp_missing_condition$lsp_name)) # 37, only running the first line of the code chunk
+length(final_lsp_missing_condition$lsp_name) # 37, great!
+
+#mapview(final_lsp_missing_condition, zcol = "protected_area_condition") + #mapview(all_protected)
+```
+
+## Determine if those that are not within protected areas are still protected in some way
+
+```{r}
+lsps_other_protections <- final_lsp_missing_condition %>% 
+  filter(protected_area_condition == 0) %>%
+  mutate(lsp_name_join = stri_trim_both(lsp_name)) %>% 
+  dplyr::select(-lsp_name)
+
+#mapview(lsps_other_protections)
+
+# From: <https://docs.google.com/spreadsheets/d/1RwNTzRZdBIDtzi7d1ceFxhNmVghN47NxTgrhZV8O2SM/edit?gid=193789975#gid=193789975>
+other_protections_condition_score <- read_csv(file.path(lsp_google_sheets_dir, "lsps_codified_protections_estimated_condition.csv")) %>% 
+  mutate(lsp_name_join = stri_trim_both(lsp_name))  %>% 
+  dplyr::select(-lsp_name)
+
+lsps_other_protections_condition <- left_join(final_lsp_missing_condition, other_protections_condition_score)
+```
+
+
+# Condition per region
+
+```{r}
+final_other_protections_condition <- lsps_other_protections_condition %>% 
+  mutate(overall_condition = ifelse(protected_area_condition == 0, estimated_condition_of_protection, protected_area_condition),
+         overall_condition = as.numeric(overall_condition)) %>% 
+  st_drop_geometry()
+
+rgn_final_other_protections_condition <- final_other_protections_condition %>% 
+  group_by(rgn_id) %>% 
+  summarize(
+    condition = mean(overall_condition)
+  ) %>% 
+  ungroup()
+```
+
+## Write to Mazu
+
+```{r}
+write_csv(final_other_protections_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_lsp_other_marine_places.csv"))
+write_csv(rgn_final_other_protections_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_other_marine_places.csv"))
+```
+
+
