@@ -22,7 +22,17 @@ editor_options:
 
 # Sentido de Pertenencia: Lasting Special Places
 
+**Script 3 — Dive-site LSPs.** We borrow CBMC–GCMP layers, clip to GoC regions (marine + inland 10 km buffer), buffer priority sites slightly so polygon edges do not lie exactly between pixels, then marry overlaps to SIMEC via fuzzy names. Where no ANP intersects, we still carry NOM‑012’s tourism obligations into the score logic.
+
+**Contents**
+
+1. Load every dive site plus the conservation-priority subset with coordinates.
+2. Build `marine_and_inland10`, intersect both layers, stash intermediate geopackages.
+3. Merge WDPA + HEM into `all_protected`, spatial join buffered priority sites, fuzzy-match SIMEC, collapse duplicates, average per region, export CSVs.
+
 ## Dive Sites
+
+The qualitative sections below explain why dive tourism counts as sense of place; the executable chunks starting with **Read in dive sites** implement the quantitative pathway.
 
 *Overview*
 Dive sites are considered lasting special places because people make a concerted effort to travel to these locations, some of them rather remote, and view wildlife. It is a direct connection between humans and the ocean, and if these places are not protected, then it is possible there will not continue to be a visited dive spot because their unique features are not there anymore. If possible, we should separate out dive spots that are known for the rock formations versus the wildlife viewing.
@@ -56,6 +66,7 @@ library(mapview)
 
 ## Read in dive sites
 
+Bring `dive_sites.shp` + `tabla_prioridad.xlsx` straight from CBMC–GCMP so we inherit their QC’d geometries before limiting to OHI regions.
 
 <!-- ```{r} -->
 <!-- final_mpa_layer <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main/shp/final_mpa_layer.shp")) %>% -->
@@ -70,6 +81,8 @@ library(mapview)
 
 ### All dive sites
 
+Every polygon/point in the master shapefile—mostly for coverage maps before we prioritise.
+
 ```{r}
 dive_sites_raw <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main/shp/Diving_sites_v1.0_01032021/dive_sites.shp")) %>% 
   janitor::clean_names()
@@ -78,6 +91,8 @@ mapview(dive_sites_raw)
 ```
 
 ### Dive sites with conservation priority
+
+These rows carry popularity, threats, and socio-economic fields we later join back after SIMEC scoring.
 
 ```{r}
 dive_sites_w_priority <- readxl::read_xlsx(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main/data/tabla_prioridad.xlsx")) %>% 
@@ -93,6 +108,8 @@ mapview(dive_sites_w_priority)
 ### Limit to the GoC 
 
 First, group by region and unite the polygons for inland 10km with the marine polygons.
+
+We union marine region polygons with CONAP-style inland buffers so nearshore dive coordinates inherit the same `rgn_id` naming convention OHI reporting uses elsewhere.
 ```{r}
 ## intersect with inland_10:
 inland_10 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer","inland_10km_goc.shp"))
@@ -123,8 +140,8 @@ mapview(dive_sites_w_priority_goc_rgnid, zcol = "rgn_id")
 # compare them
 mapview(dive_sites_goc_rgnid, col.regions = "blue") + mapview(dive_sites_w_priority_goc_rgnid, col.regions = "red")
 
-st_write(dive_sites_goc_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/int","dive_sites_goc_rgnid.gpkg"))
-st_write(dive_sites_w_priority_goc_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/int","dive_sites_w_priority_goc_rgnid.gpkg"))
+st_write(dive_sites_goc_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/int","prep_dive_sites_with_region.gpkg"))
+st_write(dive_sites_w_priority_goc_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/int","prep_dive_sites_priority_with_region.gpkg"))
 ```
 
 
@@ -137,11 +154,15 @@ st_write(dive_sites_w_priority_goc_rgnid, here::here("/home/shares/ohi/OHI_GOC/g
 
 ## Determine if priority dive sites fall within protected areas
 
+Quick overlay plot plus rebuild of `all_protected` when we only have WDPA + HEM handy on this machine—matches script 1 outputs conceptually.
+
 ```{r}
 mapview(dive_sites_w_priority_goc_rgnid, col.regions = "red") + mapview(wdpa_poly_all, col.regions = "blue") + mapview(hem_protected_anps, col.regions = "black")
 ```
 
 ### Dissolve protected areas into one layer
+
+CRS housekeeping + `bind_rows` prior to buffering intersections—same caveats as earlier scripts about overlapping MPAs producing duplicate rows until grouped.
 
 ```{r}
 # check CRS
@@ -172,6 +193,8 @@ st_write(all_protected_dissolved, here::here("/home/shares/ohi/OHI_GOC/spatial/p
 
 ### Intersect diving priority areas w protected areas
 
+100 m buffers mimic GPS jitter; `st_join(..., left=TRUE)` keeps dives outside MPAs so we can fall back to NOM logic later.
+
 ```{r}
 # buffer dive sites by 100m
 dive_sites_buffered <- st_buffer(
@@ -201,8 +224,11 @@ The only problem is that if a buffered dive site overlaps multiple protected are
 
 ## i-efectividad for each dive site in a protected area
 
+SIMEC extract comes from `google_sheets/simec_i_efectividad_anp_2025.csv`; next chunks normalize strings + `amatch()` because WDPA labels rarely equal SIMEC `nombre`.
+
 ```{r}
-i_efectividad_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SIMEC/identifying_lasting_special_places_SIMEC.csv")) %>% 
+lsp_google_sheets_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets"
+i_efectividad_raw <- read_csv(file.path(lsp_google_sheets_dir, "simec_i_efectividad_anp_2025.csv")) %>% 
   janitor::clean_names()
 
 unique(i_efectividad_raw$nombre)
@@ -210,6 +236,8 @@ unique(dive_sites_protected$protected_area_name)
 ```
 
 ### Fuzzy matching the protected area names
+
+Helpers strip accents and institutional prefixes so `"PARQUE NACIONAL XYZ"` can marry `"XYZ"`.
 
 ```{r}
 library(stringdist)
@@ -275,6 +303,8 @@ dive_sites_w_SIMEC <- dive_sites_matched %>%
 
 ## Condition for each dive site
 
+Collapse duplicate overlaps per dive name, blend SIMEC hits with the NOM-derived floor, rebuild point `sf` for mapping.
+
 ```{r}
 # now, summarize by dive site, so we have one condition for each site
 dive_sites_condition <- dive_sites_w_SIMEC %>% 
@@ -300,6 +330,8 @@ mapview(dive_sites_condition_sf, zcol = "overall_condition") + mapview(all_prote
 
 # Condition per region
 
+Unweighted mean of `overall_condition` across dives inside each `rgn_id`.
+
 ```{r}
 rgn_dive_sites_condition <- dive_sites_condition %>% 
   group_by(rgn_id) %>% 
@@ -312,11 +344,11 @@ rgn_dive_sites_condition <- dive_sites_condition %>%
 
 ## Write to Mazu
 
-```{r}
-write_csv(dive_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/dive_sites_condition.csv"))
-write_csv(rgn_dive_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/rgn_dive_sites_condition.csv"))
+Drop per-site + regional summaries next to the other LSP pipelines.
 
-dive_sites_condition <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/dive_sites_condition.csv"))
+```{r}
+write_csv(dive_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_lsp_dive_sites.csv"))
+write_csv(rgn_dive_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_dive_sites.csv"))
 ```
 
 

@@ -22,7 +22,17 @@ editor_options:
 
 # Sentido de Pertenencia: Lasting Special Places
 
+**Script 5 — Fishing-ground LSPs.** Each coordinate the EWG tagged as an iconic fishing area gets tested against TNC’s ZRP polygons, a manually curated TURF flag (because cooperative shapefiles are awkward to batch download), then overlapping federal protected areas for SIMEC scoring. The idea is institutional stewardship—refugia y cooperativas—signals longevity beyond “open access.”
+
+**Contents**
+
+1. Filter `ewg_lsp_inventory_prepared.csv` for fishing-area rows, intersect regions.
+2. Spatial join ZRPs + assign TURF bonus where literature/Shiny maps prove cooperative tenure.
+3. Buffer into ANPs, fuzzy SIMEC merge, merge scores back, regional averages, CSV export.
+
 ## Fishing sites
+
+Context below explains subsistence vs cultural framing; code chunks pick up at **Read in fishing sites** once libraries load.
 
 *Overview*
 Fishing is an activity that can be done for subsistence, but it can also be done recreationally, or as part of traditional/cultural engagement. Ideally, fishing grounds are well managed so the locations to fish can be maintained.
@@ -42,14 +52,14 @@ library(mapview)
 
 ## Read in fishing sites
 
+Instantiate `lsp_google_sheets_dir`, isolate rows whose `type_of_lsp` quotes reference fishing refuges, drop missing coordinates.
+
 ```{r}
-lsp_list_ewg_v3 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/identifying_lasting_special_places_collapsed_lsp_protections_v3.csv")) %>% 
+lsp_google_sheets_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets"
+lsp_list_ewg <- read_csv(file.path(lsp_google_sheets_dir, "ewg_lsp_inventory_prepared.csv")) %>%
   janitor::clean_names()
 
-lsp_list_ewg_v4 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/identifying_lasting_special_places_collapsed_lsp_protections_v4.csv")) %>% 
-  janitor::clean_names()
-
-ewg_fishing_site_list <- lsp_list_ewg_v4 %>% 
+ewg_fishing_site_list <- lsp_list_ewg %>% 
   filter(type_of_lsp %in% c('"Important fishing areas, could have fishing refuges (zonas de refugio pesquero or ZRP)"')) %>%
   mutate(long = as.numeric(long),
          lat = as.numeric(lat)) %>% 
@@ -66,6 +76,8 @@ mapview(ewg_fishing_site_list)
 ### Assign regions
 
 First, read in the marine and land polygons.
+
+Same `ohi_rgns` intersection strategy as archaeology—keeps `rgn_id` spelling aligned for merges downstream.
 ```{r}
 ohi_rgns <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) 
 
@@ -83,7 +95,11 @@ mapview(ewg_fishing_site_list_goc_rgnid, zcol = "rgn_id")
 
 ## Determine if priority fishing sites fall within ZRPs or TURFs or codified regulation
 
+We stack institutional protections in priority order: fishing refuge polygons first, cooperative rights second, ANPs third.
+
 ### ZRPs
+
+GeoJSON from TNC portal + 1 km buffers so vertices grazing refuge borders still count as “inside.”
 
 ```{r}
 tnc_zrps_raw <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/TNC_geoportal_fishing_refuge_zones/d2026/Zonas_Refugios_Pesqueros_-8805549763229037385.geojson")) %>% 
@@ -120,6 +136,8 @@ ewg_fishing_site_condition_zrp <- st_join(
 
 ### TURFs
 
+Only one EWG label currently clears the bar after manually vetting the national Shiny atlas—note inline `ifelse` so future sites just extend the string match.
+
 This cooperative data is from authors Eréndira Aceves-Bueno ,Mateja Nenadovic,India Dove,Claire Atkins-Davis,Juan Salvador Aceves-Bueno,Abel Trejo-Ramirez,Cristina Rivas-Ochoa,Salvador Rodriguez-Van Dyck,Amy Hudson Weaver, from the paper *Sustaining small-scale fisheries through a nation-wide Territorial Use Rights in Fisheries system* published in 2023.
 
 <https://journals.plos.org/plosone/article/figure?id=10.1371/journal.pone.0286739.g003>
@@ -140,6 +158,8 @@ ewg_fishing_site_condition_turf <- ewg_fishing_site_condition_zrp %>%
 
 
 ## Intersect with protected areas
+
+Re-buffer against `all_protected` so fishers operating inside biosphere reserves inherit SIMEC effectiveness even without ZRP/TURF coverage.
 
 ```{r}
 # buffer fishing sites by 1000m
@@ -168,8 +188,10 @@ The only problem is that if a buffered site overlaps multiple protected areas, `
 
 ### i-efectividad for each dive site in a protected area
 
+(Historical heading—)`google_sheets/simec_i_efectividad_anp_2025.csv` supplies CONANP scores for overlapping ANPs.
+
 ```{r}
-i_efectividad_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SIMEC/identifying_lasting_special_places_SIMEC.csv")) %>% 
+i_efectividad_raw <- read_csv(file.path(lsp_google_sheets_dir, "simec_i_efectividad_anp_2025.csv")) %>% 
   janitor::clean_names()
 
 unique(i_efectividad_raw$nombre)
@@ -177,6 +199,8 @@ unique(ewg_fishing_site_condition_ANP$protected_area_name)
 ```
 
 ### Fuzzy matching the protected area names
+
+Normalize + `amatch()` identical to other pipelines; watch for duplicate rows until `group_by(lasting_special_place_lsp)` collapses means.
 
 ```{r}
 library(stringdist)
@@ -228,7 +252,8 @@ fishing_sites_w_SIMEC <- fishing_sites_matched %>%
         protected_area_condition = ifelse(nombre_matched == "CABO PULMO", 0, protected_area_condition) # CABO PULMO IS NO TAKE!!!!
          ) %>%
   group_by(lasting_special_place_lsp) %>% 
-  summarize(protected_area_condition = mean(protected_area_condition, na.rm = TRUE)) %>% 
+  # multiple MPAs / Ramsar overlaps: take best (highest) management score
+  summarize(protected_area_condition = max(protected_area_condition, na.rm = TRUE)) %>% 
   ungroup() %>% 
   st_drop_geometry()
 
@@ -238,6 +263,8 @@ fishing_sites_w_SIMEC <- fishing_sites_matched %>%
 
 
 ## Condition for each fishing site
+
+Bring SIMEC-derived `protected_area_condition` back onto ZRP/TURF skeleton—zeros become SIMEC whenever fisheries layers alone did not score.
 
 ```{r}
 final_ewg_fishing_site_condition <- ewg_fishing_site_condition_turf %>% 
@@ -250,7 +277,11 @@ final_ewg_fishing_site_condition <- ewg_fishing_site_condition_turf %>%
 
 None of the sites are not protected in some way by ZRPs, TURFs, or ANPs.  So we will not have to estimate a condition score based on codified protections, though some resources to do so in the future are here:
 
+Placeholder references if future EWG rows lack spatial overlaps—we keep links handy instead of hard-coding zeros today.
+
 #### Clams (almejas)
+
+NOM + fishery bulletins we might cite when expanding beyond current coordinates.
 
 [Official Mexican Standard NOM-014-SAG/PESC-2015, Specifications to regulate the use of geoduck clam ( panopea generosa and panopea globosa ) in waters of federal jurisdiction of the Pacific Ocean coast and Gulf of California.](https://dof.gob.mx/nota_detalle_popup.php?codigo=5398036)
 
@@ -262,10 +293,14 @@ None of the sites are not protected in some way by ZRPs, TURFs, or ANPs.  So we 
 
 #### Squid
 
+Third-party sustainability memo—useful anchor if squid-focused LSP rows appear later without MPAs.
+
 [Low management score from Seafood Watch.](https://www.seachoice.org/wp-content/uploads/2015/06/MBA_SeafoodWatch_JumboSquidMexicoReport.pdf)
 
 
 ## Condition per region
+
+Mean `overall_condition` per `rgn_id` after joins settle.
 
 ```{r}
 rgn_final_ewg_fishing_site_condition <- final_ewg_fishing_site_condition %>% 
@@ -279,9 +314,11 @@ rgn_final_ewg_fishing_site_condition <- final_ewg_fishing_site_condition %>%
 
 ## Write to Mazu
 
+Write fishing-site outputs alongside other condition CSV suites.
+
 ```{r}
-write_csv(final_ewg_fishing_site_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/fishing_sites_condition.csv"))
-write_csv(rgn_final_ewg_fishing_site_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/rgn_fishing_sites_condition.csv"))
+write_csv(final_ewg_fishing_site_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_lsp_fishing_sites.csv"))
+write_csv(rgn_final_ewg_fishing_site_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_fishing_sites.csv"))
 ```
 
 
