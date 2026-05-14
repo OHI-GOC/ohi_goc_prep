@@ -1298,6 +1298,49 @@ Mex.Pacific_MaricultureHarvest<- Mex.Pacific_Landings_sector %>%
 range(Mex.Pacific_MaricultureHarvest$year)
 ```
 
+```{r Open questions May 13}
+table(Mex.Pacific_Landings_sector$sector_estimate_draft)
+table(Mex.Pacific_Landings_sector$freshwater_flag)
+
+Mex.Pacific_Freshwater_Landings <- Mex.Pacific_Landings_sector %>%
+  anti_join(Mex.Pacific_Marine_Landings)
+
+dim(Mex.Pacific_Freshwater_Landings)
+# 1134279 obs. (Excellent! 6406303-5272024)
+
+sum1 <- Mex.Pacific_Landings_sector %>%
+  filter(state %in% States_of_Interest,
+         year == 2024) %>%
+  summarize(total_weight_mt = sum(weight_kg_corrected, na.rm = TRUE) / 1000) %>%
+  pull(total_weight_mt)
+# 1,740,378 total metric tonnes produced in this region across freshwater and marine systems.
+
+sum2 <- Mex.Pacific_MarineLandings_simple %>%
+  filter(state %in% States_of_Interest,
+         year == 2024) %>%
+  summarize(total_weight_mt = sum(weight_kg_corrected, na.rm = TRUE) / 1000) %>%
+  pull(total_weight_mt)
+# 1,636,859 total metric tonnes produced by marine wildcatch and mariculture in this region.
+
+sum3 <- Mex.Pacific_Freshwater_Landings %>%
+  filter(state %in% States_of_Interest,
+         year == 2024) %>%
+  summarize(total_weight_mt = sum(weight_kg_corrected, na.rm = TRUE) / 1000) %>%
+  pull(total_weight_mt)
+# 103,518 total metric tonnes from freshwater fisheries or aquaculture in this region.
+
+sum3/sum1
+
+sum4 <- Mex.Pacific_MaricultureHarvest %>%
+  filter(state %in% States_of_Interest,
+         year == 2024,
+         Major_Functional_Group == "Molluscs excl. Cephalopods") %>%
+  summarize(total_weight_mt = sum(weight_kg_corrected, na.rm = TRUE) / 1000) %>%
+  pull(total_weight_mt)
+# 9638 total metric tonnes of mariculture bivalves in this region... Woof.
+```
+
+
 # STEP 6: Generate a list of most common aquaculture species since 2018
 ```{r Generate a table / list of common n > 10 records aquaculture species since 2018}
 Mex.Pacific_MajorMariculture_summary <- Mex.Pacific_MaricultureHarvest %>%
@@ -1409,6 +1452,10 @@ MAR_byGroup <- MAR_byGroup %>%
     mean_production_2018.2024 = mean(
       total_est_production_mt[year >= 2018 & year <= 2024],
       na.rm = TRUE
+    ),
+    mean_production_2020.2024 = mean(
+      total_est_production_mt[year >= 2020 & year <= 2024],
+      na.rm = TRUE
     )
   ) %>%
   ungroup()
@@ -1416,18 +1463,6 @@ MAR_byGroup <- MAR_byGroup %>%
 # Limit number of decimal places, easier viewing:
 MAR_byGroup<- MAR_byGroup %>%
   mutate(across(where(is.numeric) & !all_of("year"), ~ round(.x, 2)))
-
-# Calculated WEIGHTED mean production from 2018-2024:
-MAR_byGroup <- MAR_byGroup %>%
-  group_by(Major_Functional_Group, state) %>%
-  mutate(
-    mean_production_2018.2024 = mean(
-      total_est_production_mt[year >= 2018 & year <= 2024],
-      na.rm = TRUE
-    )
-  ) %>%
-  ungroup() %>%
-  summarise(mean_prod = mean(total_est_production_mt, na.rm = TRUE))
 ```
 
 # Exploratory plots:
@@ -1439,6 +1474,7 @@ MAR_byGroup %>%
   
   ggplot(aes(x = year, y = total_est_production_mt, color = Major_Functional_Group)) +
   geom_line() +
+  geom_point(size= 1) +
   
   facet_wrap(~ state, scales = "free_y") +
   
@@ -1464,6 +1500,7 @@ MAR_byGroup %>%
   
   ggplot(aes(x = year, y = total_est_production_mt, color = Major_Functional_Group)) +
   geom_line() +
+  geom_point(size= 1) +
   
   geom_hline(
     aes(yintercept = mean_production_2018.2024),
@@ -1491,8 +1528,6 @@ ggsave(
 ```
 
 ```{r Other Plots}
-
-
 MAR_scores %>%
   filter(OHI_rgn_number == "BCS_Region_3_4_TBD") %>%
 ggplot(aes(x = year, y = weighted_MAR)) +
@@ -1573,45 +1608,291 @@ MAR_summary %>%
 head(MAR_byGroup)
 table(MAR_byGroup$Major_Functional_Group)
 
-# Scores dataframe:
+# SHRIMP scores dataframe:
 MAR_shrimp.scores <- MAR_byGroup %>%
   filter(Major_Functional_Group == "Shrimps, prawns") %>%
   mutate(
-    ratio = total_est_production_mt / mean_production_2018.2024,
-    score = case_when(
-      is.na(ratio) ~ NA_real_,
-      ratio >= 0.9 & ratio <= 1.1 ~ 1,
-      ratio < 0.9 ~ ratio,
-      ratio > 1.1 ~ 1/ratio
+    ratio = total_est_production_mt/mean_production_2018.2024,
+    inverse_ratio = 1 /(total_est_production_mt/mean_production_2018.2024),
+    shrimp_score = case_when(
+      is.na(inverse_ratio) ~ NA_real_,
+      inverse_ratio > 1 ~ 100,
+      inverse_ratio >= 0.95 ~ 100, # Within 95% of the baseline.
+      inverse_ratio < 0.95 ~ (inverse_ratio)*100
     )
-  )
+  ) %>%
+  select(Major_Functional_Group, state, year, mean_Sustainability_Score, 
+          weighted_est_production, total_est_production_mt,
+          mean_production_2018.2024, ratio, inverse_ratio, shrimp_score)
 
-# Plot the scores:
+# Plot the shrimp_scores:
 
 MAR_shrimp.scores %>%
   
-  ggplot(aes(x = year, y = score, color = Major_Functional_Group)) +
+  ggplot(aes(x = year, y = shrimp_score, color = Major_Functional_Group)) +
   geom_line() +
+  geom_point(size=1) +
   
   facet_wrap(~ state, scales = "free_y") +
   
   labs(
-    title = "Shrimp Scores",
+    title = "Shrimp Scores [prelim]",
+    x = "Year",
+    y = "Score (0-100)"
+  ) +
+  scale_color_manual(values= Group_colors[3])+
+  ylim(c(0, 100))+
+  theme_bw()
+
+ggsave(
+  "/home/ferrer/ohi_goc_prep/FP/Exploratory_Research/MAR_ExploratoryResearch/ShrimpScore_prelim_May122026.png",
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+```
+
+```{r NEWER Calculate finfish scores!}
+# May 12 2026
+head(MAR_byGroup)
+table(MAR_byGroup$Major_Functional_Group)
+
+# FINFISH scores dataframe:
+MAR_finfish.scores <- MAR_byGroup %>%
+  filter(Major_Functional_Group == "Demersal marine fishes") %>%
+  mutate(
+    ratio = total_est_production_mt/mean_production_2018.2024,
+    finfish_score = case_when(
+      is.na(ratio) ~ 0,
+      ratio > 0 ~ 100
+    )
+  ) %>%
+  select(Major_Functional_Group, state, year, mean_Sustainability_Score, 
+          weighted_est_production, total_est_production_mt,
+          mean_production_2018.2024, ratio, finfish_score)
+
+# Plot the finfish_scores:
+
+MAR_finfish.scores %>%
+  
+  ggplot(aes(x = year, y = finfish_score, color = Major_Functional_Group)) +
+  geom_line() +
+  geom_point(size=1) +
+  
+  facet_wrap(~ state, scales = "free_y") +
+  
+  labs(
+    title = "Finfish Scores [prelim]",
     x = "Year",
     y = "Score (0-100)"
   ) +
   scale_color_manual(values= Group_colors[1])+
-  ylim(c(0,1))+
+  ylim(c(0, 100))+
   theme_bw()
+
+ggsave(
+  "/home/ferrer/ohi_goc_prep/FP/Exploratory_Research/MAR_ExploratoryResearch/FinfishScores_prelim_May122026.png",
+  width = 10,
+  height = 6,
+  dpi = 300
+)
 ```
 
-```{r OUT OF DATE Calculate scores!}
-# Scores dataframe:
-MAR_scores <- MAR_summary %>%
-  group_by(state, year) %>%
-  summarise(
-    total_production_mt = sum(total_est_production_mt, na.rm = TRUE),
-    weighted_production_mt = (sum(total_est_production_mt * Est_Sustainability_Score, na.rm = TRUE) / total_production)*10,
-    .groups = "drop"
+```{r NEWER Calculate bivalve scores!}
+# May 12 2026
+head(MAR_byGroup)
+table(MAR_byGroup$Major_Functional_Group)
+
+# BIVALVE scores dataframe:
+MAR_bivalve.scores <- MAR_byGroup %>%
+  filter(Major_Functional_Group == "Molluscs excl. Cephalopods") %>%
+  
+  group_by(state) %>%
+  mutate(
+    mean_production_2018.2024 = mean(total_est_production_mt, na.rm = TRUE),
+    max_production_2018.2024  = max(total_est_production_mt, na.rm = TRUE)
+  ) %>%
+  
+  ungroup() %>%
+  
+  mutate(
+    ratio_mean = total_est_production_mt / mean_production_2018.2024,
+    ratio_max  = total_est_production_mt / max_production_2018.2024,
+    
+    bivalve_score = case_when(
+      is.na(ratio_max) ~ 0,
+      ratio_max >= 0.95 ~ 100,
+      ratio_max > 0 ~ ratio_max * 100,
+      TRUE ~ 0
+    )
+  ) %>%
+  
+  select(Major_Functional_Group, state, year, mean_Sustainability_Score, 
+         weighted_est_production, total_est_production_mt,
+         mean_production_2018.2024, max_production_2018.2024,
+         ratio_mean, ratio_max, bivalve_score)
+
+# Plot the bivalve_scores:
+
+MAR_bivalve.scores %>%
+  
+  ggplot(aes(x = year, y = bivalve_score, color = Major_Functional_Group)) +
+  geom_line() +
+  geom_point(size= 1) +
+  
+  facet_wrap(~ state, scales = "free_y") +
+  
+  labs(
+    title = "Bivalve Scores [prelim]",
+    x = "Year",
+    y = "Score (0-100)"
+  ) +
+  scale_color_manual(values= Group_colors[2])+
+  ylim(c(0, 100))+
+  theme_bw()
+
+ggsave(
+  "/home/ferrer/ohi_goc_prep/FP/Exploratory_Research/MAR_ExploratoryResearch/BivalveScores_prelim_May122026.png",
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+```
+
+```{r Merge shrimp finfish and bivalve scores}
+shrimp_df <- MAR_shrimp.scores %>%
+  select(
+    state,
+    year,
+    shrimp_score,
+    shrimp_production_mt = total_est_production_mt
+  )
+
+finfish_df <- MAR_finfish.scores %>%
+  select(
+    state,
+    year,
+    finfish_score,
+    finfish_production_mt = total_est_production_mt
+  )
+
+bivalves_df <- MAR_bivalve.scores %>%
+  select(
+    state,
+    year,
+    bivalve_score,
+    bivalve_production_mt = total_est_production_mt
+  )
+
+combined_df <- full_join(
+  shrimp_df,
+  finfish_df,
+  by = c("state", "year")
+)
+
+combined_df <- full_join(
+  combined_df,
+  bivalves_df,
+  by = c("state", "year")
+)
+
+colnames(combined_df)
+
+# Create total production column: 
+combined_df<- combined_df %>%
+  mutate(
+      total_production_mt = rowSums(
+      across(c(shrimp_production_mt, finfish_production_mt, bivalve_production_mt)),
+      na.rm = TRUE)
+  )
+
+combined_df<- combined_df %>%
+  mutate(
+    shrimp_catch_contribution = shrimp_production_mt / total_production_mt,
+    finfish_catch_contribution = finfish_production_mt / total_production_mt,
+    bivalve_catch_contribution = bivalve_production_mt / total_production_mt
+  )
+
+shrimp_sustainability_coeff = 0.260
+finfish_sustainability_coeff = 0.573
+bivalve_sustainability_coeff = 0.696
+
+colnames(combined_df)
+
+combined_df<- combined_df %>%
+  mutate(
+    shrimp_score_contribution = shrimp_score * shrimp_catch_contribution * shrimp_sustainability_coeff,
+    finfish_score_contribution = finfish_score * finfish_catch_contribution * finfish_sustainability_coeff,
+    bivalve_score_contribution = bivalve_score * bivalve_catch_contribution * bivalve_sustainability_coeff,
+    total_score = rowSums(across(c(shrimp_score_contribution, finfish_score_contribution, bivalve_score_contribution)), na.rm = TRUE)
   )
 ```
+
+```{r Plot of scores}
+combined_df %>%
+  
+  ggplot(aes(x = year, y = total_score)) +
+  geom_line(color= "tomato") +
+  geom_point(size= 1, color= "tomato") +
+  
+  facet_wrap(~ state, scales = "free_y") +
+  
+  labs(
+    title = "MAR Scores [prelim]",
+    x = "Year",
+    y = "Score (0-100)"
+  ) +
+
+  ylim(c(0, 100))+
+  theme_bw()
+```
+NEWEST Scores MAY 14 2026
+
+```{r NEWEST Scores}
+# May 14 2026
+# May 12 2026
+head(MAR_byGroup)
+table(MAR_byGroup$Major_Functional_Group)
+
+# SHRIMP scores dataframe:
+MAR_shrimp.scores <- MAR_byGroup %>%
+  filter(Major_Functional_Group == "Shrimps, prawns") %>%
+  mutate(
+    today_v_reference = total_est_production_mt/(1.2*mean_production_2020.2024),
+    shrimp_score = case_when(
+      is.na(today_v_reference) ~ NA_real_,
+      today_v_reference > 1 ~ 100,
+      today_v_reference < 1 ~ today_v_reference*100
+    )
+  ) %>%
+  select(Major_Functional_Group, state, year, mean_Sustainability_Score, 
+          weighted_est_production, total_est_production_mt,
+          mean_production_2018.2024, today_v_reference, shrimp_score)
+
+# Plot the shrimp_scores:
+
+MAR_shrimp.scores %>%
+  
+  ggplot(aes(x = year, y = shrimp_score, color = Major_Functional_Group)) +
+  geom_line() +
+  geom_point(size=1) +
+  
+  facet_wrap(~ state, scales = "free_y") +
+  
+  labs(
+    title = "Shrimp Scores [prelim]",
+    x = "Year",
+    y = "Score (0-100)"
+  ) +
+  scale_color_manual(values= Group_colors[3])+
+  ylim(c(0, 100))+
+  theme_bw()
+
+ggsave(
+  "/home/ferrer/ohi_goc_prep/FP/Exploratory_Research/MAR_ExploratoryResearch/ShrimpScore_prelim_May122026.png",
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+```
+
