@@ -1,0 +1,195 @@
+---
+title: 'OHI GoC 2025: Clean waters pesticides'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# CW: Pesticides
+
+## Estimated pesticide discharge
+
+```{r setup}
+library(sf)
+library(utils)
+library(tidyverse)
+library(here)
+library(raster)
+library(mapview)
+library(purrr)
+library(stringr) # fuzzy string matching
+library(stringi)
+library(janitor)
+library(tibble)
+```
+
+### Watersheds and pour points
+
+```{r}
+## lets use the full state for now and then summarize by the full watersheds.
+goc_ohi_rgns <- st_read(here::here("spatial/ohi_regions","goc_ohi_rgns.shp"))
+
+union_rgns <- goc_ohi_rgns %>% 
+  st_union() %>% 
+  st_make_valid()
+
+# plot(goc_ohi_rgns)
+# plot(union_rgns)
+
+watershed_all <- st_read(file.path("/home/shares/ohi/stressors_2021/_dataprep/nutrients/watersheds_pourpoints/watersheds_all_4326.shp"))
+st_crs(watershed_all)
+# mapview(watershed_all)
+
+watershed_goc <- st_intersection(st_transform(watershed_all, st_crs(union_rgns)), union_rgns)
+mapview(watershed_goc)
+
+# --- if we plan to change the buffer for some reason ---
+# inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
+# watershed_goc_50km <- st_intersection(st_transform(watershed_all, st_crs(inland_50)), inland_50)
+# mapview(watershed_goc_50km)
+```
+
+
+```{r}
+# here's the associated pourpoints that should match with the watersheds:
+pourpoints <- st_read("/home/shares/ohi/stressors_2021/_dataprep/nutrients/watersheds_pourpoints/pourpoints_mol.shp")
+
+pourpoints_goc <- st_intersection(st_transform(pourpoints, st_crs(union_rgns)), union_rgns)
+mapview(pourpoints_goc)
+
+mapview(pourpoints_goc) + mapview(watershed_goc)
+```
+
+### Calculate agricultural area per watershed
+
+```{r}
+# bring in the land use over time output:
+usv_all <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int/usv_agriculture_goc_allyears.gpkg"))
+```
+
+```{r}
+# reproj usv to match watersheds CRS
+usv_reproj <- st_transform(usv_all, st_crs(watershed_goc)) # so that it is in meters not degrees
+
+# Coordinate Reference System:
+#   User input: Mexico ITRF2008 / LCC 
+#   wkt:
+# PROJCRS["Mexico ITRF2008 / LCC",
+#     BASEGEOGCRS["Mexico ITRF2008",
+#         DATUM["Mexico ITRF2008",
+#             ELLIPSOID["GRS 1980",6378137,298.257222101,
+#                 LENGTHUNIT["metre",1]]],
+
+# intersect ag/aq polygons with watersheds
+usv_watershed <- st_intersection(usv_reproj, watershed_goc) %>%
+  mutate(area_ha = as.numeric(st_area(.)) / 10000)  # there are 0.0001 hectares in 1 square meter, to convert from square meters to hectares, multiply by 0.0001 or divide by 10000
+```
+
+Check out 2021:
+```{r}
+usv_watershed_2021 <- usv_watershed %>% 
+  filter(year %in% 2021)
+
+mapview(usv_watershed_2021, zcol = "area_ha") 
+
+mapview(usv_watershed_2021, zcol = "basin_id") + mapview(watershed_goc, zcol = "basin_id")
+```
+
+
+```{r}
+# summarize hectares per watershed per year
+# ag_area_by_watershed <- usv_watershed %>%
+#   st_drop_geometry() %>%
+#   group_by(basin_id, year) %>% 
+#   summarize(ag_area_ha = sum(area_ha, na.rm = TRUE)) %>% 
+#   ungroup()
+
+# summarize hectares per watershed per year
+ag_area_by_watershed <- usv_watershed %>%
+  st_drop_geometry() %>% # maybe take out...
+  group_by(basin_id, year) %>% 
+  summarize(ag_area_ha = sum(area_ha, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  mutate(year = as.numeric(year))
+
+```
+
+### Join FAOSTAT pesticide rates
+
+```{r}
+fao_raw <- read_csv("/home/shares/ohi/OHI_GOC/_raw_data/FAO_pesticide_per_area_cropland/d2026/FAOSTAT_data_en_5-15-2026.csv")
+colnames(fao_raw)
+
+# want to keep Year, Element (description), Value (kg/ha)
+
+# join w agriculture area
+pesticide_watershed <- ag_area_by_watershed %>%
+  left_join(fao_raw %>% dplyr::select(year = Year, element = Element, kg_ha = Value),
+            by = "year") %>% 
+  filter(year != "1985") %>% 
+  mutate(pesticide_kg = ag_area_ha * kg_ha)
+```
+
+
+### Aggregate to pour points/OHI regions
+
+```{r}
+# sum pesticide load to watershed, then join pour points
+pesticide_by_watershed <- pesticide_watershed %>%
+  group_by(basin_id, year, element) %>%
+  summarize(total_pesticide_kg = sum(pesticide_kg, na.rm = TRUE), .groups = "drop")
+```
+
+
+```{r}
+# join spatial pour points for mapping and assigning OHI regions
+pourpoints_pesticide <- pourpoints_goc %>%
+  dplyr::select(basin_id) %>% 
+  left_join(pesticide_by_watershed, by = "basin_id")  # match basin ID
+
+mapview(pourpoints_pesticide, zcol = "total_pesticide_kg") + mapview(watershed_goc, col.regions = "pink") + mapview(usv_all, col.regions = "magenta") # looks great!!!
+
+# only keep pourpoints with agriculture usage
+pourpoints_pesticide_final <- pourpoints_pesticide %>% 
+  filter(total_pesticide_kg != 0)
+
+# mapview(pourpoints_pesticide_final)
+```
+
+
+```{r}
+# now, aggregate to OHI regions by which region each pour point falls in
+st_crs(goc_ohi_rgns) == st_crs(pourpoints_pesticide_final) # TRUE
+
+pourpoints_pesticide_rgnid <- st_intersection(pourpoints_pesticide_final, goc_ohi_rgns) %>% 
+  group_by(rgn_id, year) %>% 
+  summarize(total_pesticide_kg = sum(total_pesticide_kg, na.rm = TRUE), .groups = "drop")
+
+# mapview(pourpoints_pesticide_rgnid, zcol = "rgn_id")
+```
+
+### Save to mazu
+
+```{r}
+st_write(
+  pourpoints_pesticide_rgnid,
+  here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int", "total_agriculture_pesticides_kg_pourpoints_rgnid_allyears.gpkg"),
+  delete_dsn = TRUE # overwrite if file already exists
+)
+```
+
