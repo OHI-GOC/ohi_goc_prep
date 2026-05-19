@@ -1,0 +1,177 @@
+---
+title: 'OHI GoC 2025: Clean waters pesticides'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# CW: pesticides
+
+## Land Use Prep: automating the reading in of each land use shapefile for each year and limiting to the GoC.
+
+Data: CONABIO Land Use & Vegetation Series <http://www.conabio.gob.mx/informacion/gis/?vns=gis_root/usv/inegi/usv250s7gw>
+
+This script filters the shapefiles to agriculture and aquaculture within GOC OHI Regions.  Note that each folder represents a different year of data.
+
+usv250kcs1agw = 1980-91
+usv250ks2gw = 2001
+usv250ks3gw = 2005
+usv250ks4gw = 2009
+usv250s5ugw = 2013
+usv250s6gw = 2016
+usv250s7gw = 2021
+
+```{r setup}
+library(sf)
+library(utils)
+library(tidyverse)
+library(here)
+library(raster)
+library(mapview)
+library(purrr)
+library(stringr) # fuzzy string matching
+library(stringi)
+library(janitor)
+library(tibble)
+```
+
+
+```{r step_1}
+#  ---------------- step 1: load in boundary ----------------
+# goc ohi regions shapefile, used to clip all data
+goc_ohi_rgns <- st_read(here("spatial/ohi_regions", "goc_ohi_rgns.shp"))
+```
+
+
+```{r step_2}
+# ---------------- step 2: save the folder names that are each associated with a year  ---------------- 
+# each folder corresponds to a different survey year
+usv_years <- tibble::tribble(
+  ~folder,           ~year,
+  "usv250kcs1agw",   "1985", # 1980-1991 survey, using midpoint year
+  "usv250ks2gw",     "2001",
+  "usv250ks3gw",     "2005",
+  "usv250ks4gw",     "2009",
+  "usv250s5ugw",     "2013",
+  "usv250s6gw",      "2016",
+  "usv250s7gw",      "2021"
+)
+
+# root directory for all raw USV shapefiles on mazu
+raw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg" # ask Austin to change the name to CONABIO
+```
+
+
+```{r step_3}
+#  ---------------- step 3: using fuzzy string matching to limit to ag and aquaculture ----------------
+
+# the fxn returns TRUE for any DESCRIPCIO value that contains "AGRICULT" (catches all agriculture observations) or "ACUICUL" (aquaculture)
+# `stri_trans_general` strips accents first (ex:. Ú = U, Í = I) so "ACUÍCOLA" matches "ACUICUL", avoids missed matches due to encoding differences
+
+is_agriculture <- function(x) {
+  str_detect(
+    str_to_upper( # convert to uppercase for matching
+      stri_trans_general(x, "Latin-ASCII") # remove accent characters before matching
+    ),
+    "AGRICULT|ACUICUL" # | = or; matches any agriculture type or aquaculture
+  )
+}
+```
+
+
+```{r step_4}
+# ---------------- step 4: make fxn to read it in, filter to ag/aq, and clip to GOC  ----------------
+
+# takes a folder name and year label, reads the shapefile, standardizes column names, filters to agriculture/aquaculture, reprojects and clips to the GOC boundary, and tags each row with its respective year
+
+read_usv <- function(folder, year) {
+  
+  # path to each folder
+  shp_path <- file.path(raw_dir, folder, paste0(folder, ".shp"))
+  
+  message("reading: ", folder, " (", year, ")")
+  
+  # read shapefile
+  shp <- st_read(shp_path) %>%
+    clean_names() # standardize all column names
+  
+  # keep only rows where descripcio matches agriculture or aquaculture patterns
+  agr <- shp %>%
+    filter(is_agriculture(descripcio))
+  
+  message("  = ", nrow(agr), " agriculture/aquaculture kept")
+  
+  # if it did not match with anything, skip that year...
+  if (nrow(agr) == 0) return(NULL)
+  
+  # reproject to match GOC regions CRS before clipping
+  agr_goc <- agr %>%
+    st_transform(st_crs(goc_ohi_rgns)) %>%    
+   
+  # intersect w goc (right now, not limited to a 50km buffer from the coast, includes the entire state.)                            
+    st_intersection(goc_ohi_rgns) %>%         
+    mutate(
+      year = year,                       
+      folder = folder 
+    )
+  
+  message("  = ", nrow(agr_goc), " clipped successfully")
+  
+  return(agr_goc)
+}
+```
+
+
+```{r}
+# ---------------- step 5: actually use the fxn  ----------------
+
+# map2() applies read_usv() to each folder and year pair (in parallel!).  It returns a list of sf objects (one per year), and NULLs where files were skipped
+
+usv_list <- map2(
+  usv_years$folder,
+  usv_years$year,
+  read_usv
+)
+```
+
+
+```{r}
+# ---------------- step 6: keep all years and make it into one sf object ----------------
+
+usv_all <- bind_rows(usv_list)
+
+# before saving, check it out!!
+message("Total features across all years: ", nrow(usv_all))
+message("Years present: ", paste(unique(usv_all$year), collapse = ", "))
+message("Land use types found:\n",
+        paste(sort(unique(usv_all$descripcio)), collapse = "\n"))
+```
+
+
+```{r}
+# ---------------- step 7: save the output to mazu ----------------
+
+# saving as .gpkg to handle long field names and special characters in case there are still some??
+
+st_write(
+  usv_all,
+  here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int", "usv_agriculture_goc_allyears.gpkg"),
+  delete_dsn = TRUE # overwrite if file already exists
+)
+```
+
