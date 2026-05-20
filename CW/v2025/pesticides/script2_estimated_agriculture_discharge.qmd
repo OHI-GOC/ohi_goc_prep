@@ -113,20 +113,12 @@ mapview(usv_watershed_2021, zcol = "basin_id") + mapview(watershed_goc, zcol = "
 
 ```{r}
 # summarize hectares per watershed per year
-# ag_area_by_watershed <- usv_watershed %>%
-#   st_drop_geometry() %>%
-#   group_by(basin_id, year) %>% 
-#   summarize(ag_area_ha = sum(area_ha, na.rm = TRUE)) %>% 
-#   ungroup()
-
-# summarize hectares per watershed per year
 ag_area_by_watershed <- usv_watershed %>%
   st_drop_geometry() %>% # maybe take out...
   group_by(basin_id, year) %>% 
   summarize(ag_area_ha = sum(area_ha, na.rm = TRUE)) %>% 
   ungroup() %>% 
   mutate(year = as.numeric(year))
-
 ```
 
 ### Join FAOSTAT pesticide rates
@@ -161,14 +153,55 @@ pesticide_by_watershed <- pesticide_watershed %>%
 pourpoints_pesticide <- pourpoints_goc %>%
   dplyr::select(basin_id) %>% 
   left_join(pesticide_by_watershed, by = "basin_id")  # match basin ID
+```
 
-mapview(pourpoints_pesticide, zcol = "total_pesticide_kg") + mapview(watershed_goc, col.regions = "pink") + mapview(usv_all, col.regions = "magenta") # looks great!!!
+First, group by region and unite the polygons for inland 50km with the marine polygons.
+```{r}
+## intersect with inland_50:
+inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
 
-# only keep pourpoints with agriculture usage
-pourpoints_pesticide_final <- pourpoints_pesticide %>% 
-  filter(total_pesticide_kg != 0)
+st_crs(inland_50) == st_crs(regions_marine) # TRUE
 
-# mapview(pourpoints_pesticide_final)
+marine_and_inland50 <- bind_rows(regions_marine, inland_50) %>% 
+  dplyr::select(rgn_id, geometry) %>% 
+  group_by(rgn_id) %>% 
+  summarize(
+    geometry = st_union(geometry)
+  )
+
+## intersect with inland_10:
+inland_10 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer","inland_10km_goc.shp"))
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+
+st_crs(inland_50) == st_crs(regions_marine) # TRUE
+
+marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>% 
+  dplyr::select(rgn_id, geometry) %>% 
+  group_by(rgn_id) %>% 
+  summarize(
+    geometry = st_union(geometry)
+  )
+```
+
+
+```{r}
+# only keep pourpoints with agriculture usage in the interior of the GoC.
+pourpoints_pesticide_keep <- pourpoints_pesticide %>% 
+  filter(total_pesticide_kg != 0) %>% 
+  st_intersection(., marine_and_inland50)
+
+## some pourpoints in region 4 are on the pacific-side, but I do not want to use a buffer less than 50km because then we lose the pour points in Region_5 at the Colorado River Delta.
+
+pourpoints_pesticide_final <- pourpoints_pesticide_keep %>% 
+  mutate(is_within_10km = lengths(st_within(., marine_and_inland10)) > 0) %>% 
+  filter(!(is_within_10km == FALSE & rgn_id == "Region_4"))
+
+mapview(pourpoints_pesticide_final, zcol = "total_pesticide_kg") + mapview(watershed_goc, col.regions = "pink") + mapview(usv_ag, col.regions = "magenta") # looks great!!!
+
+mapview(pourpoints_pesticide, zcol = "total_pesticide_kg") + mapview(inland_50)
 ```
 
 
