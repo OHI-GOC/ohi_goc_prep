@@ -1,0 +1,149 @@
+---
+title: 'OHI GoC 2025: Clean waters Untreated Wastewater'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# CW: Chemicals - Untreated Wastewater
+
+## Untreated Wastewater feeding into the ocean
+
+Data came from the National Census of Municipal Governments and Territorial Demarcations of Mexico City (CNGMD).
+
+> The National Census of Municipal Governments and Territorial Demarcations of Mexico City 2023, has the objective to generate statistical and geographic information on the integration and functioning of city councils and boroughs, as well as the management and performance of the institutions that make up the Public Administration of each municipality or territorial demarcation, specifically in the functions of government, public safety, civil protection, civic justice, potable water and sanitation, and urban solid residues. Its purpose is to link the data with the design, implementation, monitoring and evaluation of public policies of national scope in these functions.
+
+"Puntos de descarga de aguas residuales municipales vertidas sin tratamiento que existían en el municipio o demarcación territorial."
+
+The data also notes where the untreated wastewater emptied into:
+
+res_trec	descrip
+0	No aplica/Sin respuesta
+1	Río o arroyo
+2	Lago o laguna
+3	Presa
+4	Suelo o barranca
+5	Canal o dren
+6	Mar
+7	Playa
+8	Estero, marisma
+9	Gran colector
+10	Otro
+
+**We are interested in 6 Mar, 7 Playa, 8 Estero/marisma.**
+
+A continuación, se presenta la descripción de caracteres (siglas) para el manejo de valores que indican o representan algún estatus dentro de la información de los conjuntos de datos:
+
+-	NSS: No cuenta con elementos para responder
+
+	Se utiliza para identificar las variables en las que el informante, por falta de información, respondió no saber la respuesta; así como en aquellas variables que, por su carácter condicionado a otras respuestas, mantienen el mismo estatus.
+
+-	NA: No aplica
+
+	Se utiliza para identificar las variables que, por la naturaleza de la pregunta correspondiente, no aplica proporcionar información; así como en aquellas variables que, por su carácter condicionado a otras respuestas, no deben ser respondidas.
+
+-	ND: Información no disponible
+
+	Se utiliza para identificar las variables en las que, por diversas razones, el informante no respondió el cuestionario.
+
+-	NP: No publicable por el principio de confidencialidad o por reserva de información
+
+	Se utiliza para identificar las variables en las que el informante proporcionó información, pero que, por confidencialidad o reserva, no es susceptible de ser publicada.
+
+```{r setup}
+library(sf)
+library(utils)
+library(tidyverse)
+library(here)
+library(raster)
+library(mapview)
+library(purrr)
+library(stringr) # fuzzy string matching
+library(stringi)
+library(janitor)
+library(tibble)
+```
+
+## Read in the data dictionaries (explanations of variables)
+
+Data downloaded and placed at: `~/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento`.
+
+### 2023
+
+```{r}
+diccionario_de_datos_2023 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento/aguas_residuales_sin_tratamiento_cngmd2023_csv/diccionario_de_datos/diccionario_de_datos_aguaresd_cngmd2023.csv"))
+```
+
+```{r}
+municipio_codes_2023 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento/aguas_residuales_sin_tratamiento_cngmd2023_csv/catalogos/mnpio_cngmd2023.csv")) %>% 
+  mutate(descrip_mun = str_to_lower(descrip)) %>% 
+  mutate(descrip_mun = stri_trans_general(descrip_mun, "Latin-ASCII")) %>% 
+  dplyr::select(-descrip)
+
+entidad_codes_2023 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento/aguas_residuales_sin_tratamiento_cngmd2023_csv/catalogos/entidad_cngmd2023.csv")) %>% 
+  rename(descrip_ent = descrip)
+
+municipio_and_ent_codes_2023 <- left_join(municipio_codes_2023, entidad_codes_2023)
+
+goc_municipio_and_ent_codes_2023 <- municipio_and_ent_codes_2023 %>% 
+  filter(descrip_ent %in% c("Baja California","Baja California Sur","Jalisco","Nayarit","Sinaloa","Sonora"))
+```
+
+Combine with the lookup table of municipalities to region id.
+```{r}
+municipality_to_rgnid <- read_csv(here::here("/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid.csv")) %>% 
+  mutate(descrip_mun = str_trim(str_to_lower(municipio))) %>% 
+  mutate(descrip_mun = stri_trans_general(descrip_mun, "Latin-ASCII")) %>% 
+  dplyr::select(descrip_mun, rgn_id)
+
+setdiff(municipality_to_rgnid$descrip_mun, goc_municipio_and_ent_codes_2023$descrip_mun) ## character(0), beautiful!
+
+goc_codes_2023 <- left_join(goc_municipio_and_ent_codes_2023, municipality_to_rgnid) %>%  # note that for now, this does not include Comondu because it would include the pacific side.
+  filter(!is.na(rgn_id))
+```
+
+## Limit all WWTPs to GoC municipalities
+
+```{r}
+aguaresd_cngmd2023 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento/aguas_residuales_sin_tratamiento_cngmd2023_csv/conjunto_de_datos/aguaresd_cngmd2023.csv"))
+
+goc_aguaresd_cngmd2023 <- left_join(goc_codes_2023, aguaresd_cngmd2023)
+
+unique(goc_aguaresd_cngmd2023$res_trec)
+# [1]  5 NA  4  1  8  9  2
+# **We are interested in 6 Mar, 7 Playa, 8 Estero/marisma.**
+```
+
+
+# Explore all previous years
+
+```{r}
+aguaresd_cngmd2021 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento/aguas_residuales_sin_tratamiento_cngmd2021_csv/conjunto_de_datos/aguaresd_cngmd2021.csv"))
+
+### each after is SOOO different!!
+aguaresd_cngmd2019 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento/aguas_sintrat_cngmd2019_csv/conjunto_de_datos/secc_vii_td_m5_2018_agua_resd.csv"))
+
+aguaresd_cngmd2017 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento/aguas_sintrat_cngmd2017_csv/conjunto_de_datos/secc_vii_td_m5_2016_agua_resd.csv"))
+
+aguaresd_cngmd2015 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento/Aguas_sintrat_cngmd2015_csv/conjunto_de_datos/secc_vii_tr_cngmd15_m5_p9_1.csv"))
+
+aguaresd_cngmd2013 <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento/m5_vii_Aguas_residuales_cngmd2013_csv/conjunto_de_datos/tr_cengob13_5_vii_ar.csv"))
+
+```
+
+
