@@ -25,6 +25,7 @@ library(stringi)
 library(stringr)
 library(data.table)
 library(zoo) # used for gapfilling RAM data.
+library(sf) # shape files
 # Visualization
 library(ggplot2)
 library(ggforce)
@@ -2002,14 +2003,147 @@ saveRDS(NW.Mex_Landings_sector, file="/home/shares/ohi/OHI_GOC/goal_prep/fp/clea
 # 4713144 obs., 56 vars.
 ```
 
-# STEP 12: Filter down CONAPESCA data to sites in the GOC based on lat-long data & OHI region [UNDER CONSTRUCTION May 4 2026] ------------------------------
+# STEP 12: Filter down CONAPESCA data to sites in the GOC based on lat-long data & OHI region [UNDER CONSTRUCTION May 19 2026] ------------------------------
 
 Key Updates: included new lat-longs from Hem's key as of April 2 2026.
 
 ```{r Load NW.Mex_Landings_sector if needed}
-NW.Mex_Landings_sector<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/NW.Mex_Landings_SectorSorted_2000.present_May042026.rds"))
+NW.Mex_Landings_sector0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/NW.Mex_Landings_SectorSorted_2000.present_May042026.rds"))
 # 4713144 obs., 56 vars.
 ```
+
+## Add new lat-longs May 19 2026
+```{r Load lat-long keys}
+LatLong_SiteKey_finalized<- read_csv(here("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Spatial_Keys/Sites_LatLongKey_May192026.csv"))
+
+LatLong_OfficeKey_finalized<- read_csv(here("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Spatial_Keys/Offices_LatLongKey_May192026.csv"))
+```
+
+```{r Trim down the NW.Mex_Landings_sector0 df to prepare for merge}
+colnames(NW.Mex_Landings_sector0)
+
+NW.Mex_Landings_sector<- NW.Mex_Landings_sector0 %>% 
+  select(-c(inside_GOC, lat_final, lon_final))
+# 4713144 obs., 53 vars.
+
+# Merge LatLong_SiteKey:
+NW.Mex_Landings_georeferenced<- NW.Mex_Landings_sector %>%
+  left_join(
+    LatLong_SiteKey_finalized,
+    by = c("state", "landing_site")
+  )
+# 4713144 obs., 64 vars.
+
+# For the records that didn't have a state-landing_site match, match by office name:
+unmatched<- NW.Mex_Landings_georeferenced %>%
+  filter(is.na(lat_est))
+# 1213865 obs., 64 vars.
+
+unmatched<- unmatched %>%
+  left_join(
+    LatLong_OfficeKey_finalized,
+    by = c("state", "office_name")
+  )
+# 1213865 obs., 67 vars.
+
+nomatch<- unmatched %>%
+  filter(is.na(lon_mean))
+# 271041 records (~6% of landings) have no match at all.
+
+table(nomatch$state)
+    # BAJA CALIFORNIA BAJA CALIFORNIA SUR             NAYARIT             SINALOA              SONORA 
+    #            2869               55930               49684               80245               82313
+```
+
+
+```{r Loading in OHI regions and buffer shape files}
+# OHI regions:
+OHI_regions_shape <- sf::st_read(
+  "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/marine/ohi_goc_final_071025.shp",
+  options = "ENCODING=LATIN1"
+)
+
+OHI_regions_shape <- st_make_valid(OHI_regions_shape)
+
+# Quick plot:
+ggplot(OHI_regions_shape) +
+  geom_sf(aes(fill = rgn_id)) +
+  theme_minimal()
+
+# 50km buffer:
+OHI_buffer_shape <- sf::st_read(
+  "/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer/",
+  options = "ENCODING=LATIN1"
+)
+
+OHI_buffer_shape <- st_make_valid(OHI_buffer_shape)
+
+# Quick plot:
+ggplot(OHI_buffer_shape) +
+  geom_sf(aes(fill = rgn_id)) +
+  theme_minimal()
+```
+
+```{r Join the regions shape file and buffer}
+OHI_combined_shape <- st_transform(OHI_regions_shape, st_crs(OHI_buffer_shape))
+
+OHI_combined_shape <- st_make_valid(OHI_combined_shape)
+
+# choose a target CRS and force it for region and buffer:
+target_crs <- st_crs(OHI_buffer_shape)
+
+regions <- st_transform(OHI_regions_shape, target_crs)
+buffers <- OHI_buffer_shape
+
+# Bind:
+OHI_combined_shape <- bind_rows(
+  regions %>% select(rgn_id, geometry),
+  buffers %>% select(rgn_id, geometry)
+)
+
+# Quick plot:
+ggplot(OHI_combined_shape) +
+  geom_sf(aes(fill = rgn_id)) +
+  theme_minimal()
+
+# Make sure this key is clean by creating a union:
+OHI_combined_shape <- OHI_combined_shape %>%
+  group_by(rgn_id) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop")
+```
+
+
+```{r Convert landings data into spatial points for merge}
+# Convert landings data into spatial points:
+# keep all rows (but convert only valid ones)
+landings_sf <- NW.Mex_Landings_georeferenced
+
+# Filter missing coordinates (at least for now):
+valid <- !is.na(landings_sf$lon_est) & !is.na(landings_sf$lat_est)
+
+# Convert to sf points:
+landings_sf_valid <- st_as_sf(
+  landings_sf[valid, ],
+  coords = c("lon_est", "lat_est"),
+  crs = 4326
+)
+
+landings_sf_valid <- st_transform(
+  landings_sf_valid,
+  st_crs(OHI_combined_shape)
+)
+
+# Spatial join:
+result <- st_join(landings_sf_valid, 
+                  OHI_combined_shape,
+                  join = st_within)
+
+# SANITY CHECK: How many points are missing an OHI region?
+TEST<- result %>%
+  filter(is.na(rgn_id))
+# obs.
+```
+
 
 ## STEP 12a: Exclude all sites that definitely AREN'T in the Gulf, leave the others for now...
 NOTE TO SELF: Additional research will be required for some landing sites. Details pending additional lat-long key work. See notes here (as of Mar 11 2026): https://docs.google.com/document/d/1ANHEdRi8aWC0qLNaM1_c_nLtn5GihTFgHDcU96bry5Y/edit?tab=t.0
