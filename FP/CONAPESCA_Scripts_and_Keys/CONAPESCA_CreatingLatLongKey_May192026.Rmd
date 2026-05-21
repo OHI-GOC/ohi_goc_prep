@@ -36,6 +36,7 @@ library(stringr)
 library(data.table)
 library(zoo) # used for gapfilling RAM data.
 library(fuzzyjoin)
+library(sf)
 # Visualization
 library(ggplot2)
 library(ggforce)
@@ -47,18 +48,12 @@ library(htmltools)
 setwd("/home/ferrer/ohi_goc_prep/FP/")
 ```
 
-# STEP 1: Attach lat-long data to NW Mexico dataframe. (co-authors: Melanie Frazier, Hem Nalini Morzaria) ----------------------
-
-# Flag these in the lat-long key as not in the Gulf [UNDER CONSTRUCTION May 19 2026]
-office_name== c("EL ROSARIO", "ENSENADA", "TIJUANA")
-
-# STEP 2: Attach lat-long and OHI_region info based on official landing site:
-NOTE TO SELF: Come back to this! The lat long keys are imperfect. We'll want to fix this as much as possible.
+# STEP 1: Load in Mel's lat-long keys from Baja & Sonora, and Sinaloa ------------------------------
 
 ```{r Append lat-long data to sites in Baja BCS Sonora and Sinaloa}
 # Filter OUT sites from Baja that are on the Pacific side using lat-Long file from Mel's repository:
 
-# Integrated Hem georefcatchlocs (STEP 3b) and georeflocskm permit/INEGI georef (STEP 3b2) May 19 2026
+# Integrated Hem georefcatchlocs (STEP 3) and georeflocskm permit/INEGI georef (STEP 3) - May 19 2026
 BajaSonora_LatLongKey<- read_csv("/home/frazier/ohi_goc_prep/FP/Exploratory_Research/FIS_TeamResearch/data/Baja_Sonora_states_key.csv")
 colnames(BajaSonora_LatLongKey) <- c("state", "landing_site", "OHI_rgn", "lat", "long", "GoC")
 
@@ -66,7 +61,6 @@ Jalisco_LatLongKey<- read_csv(here("/home/frazier/ohi_goc_prep/FP/Exploratory_Re
 colnames(Jalisco_LatLongKey) <- c("landing_site", "CONAPESCA_landing_key", "est_habitat", "lat", "long", "site_notes", "OHI_rgn", "state")
 
 
-#### CLEAN LAT-LONG KEYS: ####
 # Clean the Baja-Sonora key...
 BajaSonora_LatLongKey_clean <- BajaSonora_LatLongKey %>%
   
@@ -125,10 +119,10 @@ Jalisco_LatLongKey_clean <- Jalisco_LatLongKey_clean %>%
 # Add the "GoC" helpful column here based on a latitude cut off for the Nayarit/Jalisco OHI region, region 9 starting at 20.40895:
 Jalisco_LatLongKey_clean <- Jalisco_LatLongKey_clean %>%
   mutate(GoC = if_else(lat < 20.40895, "no", NA_character_))
+```
 
-
-#### MERGE LAT-LONG KEYS TO CREATE MASTER LAT-LONG KEYS: ####
-Mels_LatLongKey_pending <- bind_rows(BajaSonora_LatLongKey_clean, Jalisco_LatLongKey_clean) %>%
+```{r Merge Mel's Jalisco Baja and Sonora key into one master key}
+Mels_LatLongKey <- bind_rows(BajaSonora_LatLongKey_clean, Jalisco_LatLongKey_clean) %>%
   filter(!is.na(landing_site)) %>%  # remove the NA from this data frame as this will create a many-to-many matching issue later on
   mutate(long = as.numeric(long))
 # 1176 obs., 9 vars.
@@ -137,25 +131,25 @@ Mels_LatLongKey_pending <- bind_rows(BajaSonora_LatLongKey_clean, Jalisco_LatLon
 rm(BajaSonora_LatLongKey, Jalisco_LatLongKey, removed_rows)
 
 # Take a look
-unique(Mels_LatLongKey_pending$state)
-unique(Mels_LatLongKey_pending$OHI_rgn)
+unique(Mels_LatLongKey$state)
+unique(Mels_LatLongKey$OHI_rgn)
 ```
 
-# STEP 3: Integrate Hem's catch-location lat-long key (georeflocskm) ------------------------------
+# STEP 2: Integrate Hem's catch-location lat-long key (georeflocskm) ------------------------------
 ```{r Load and prepare georeflocskm}
 load("/home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByHemMorzaria/permit_data/georeflocskm.rda")
-Hems_PermitLatLongKey0 <- georeflocskm
+Hems_LatLongKey0 <- georeflocskm
 #rm(georeflocskm)
 ```
 
 ```{r Flag potential duplicate entries in Hem's key}
-# Columns: NOM_ENT, NOM_LOC, deci_lat, deci_lon, fishery_office, fishery_office_ent, distance_km
-colnames(Hems_PermitLatLongKey0) <- c(
+
+colnames(Hems_LatLongKey0) <- c(
   "state", "landing_site", "geometry", "lon_deci", "lat_deci",
   "fishery_office", "fishery_office_ent", "distance", "distance_km"
 )
 
-Hems_LatLongKey_simple <- Hems_PermitLatLongKey0 %>%
+Hems_LatLongKey <- Hems_LatLongKey0 %>%
   mutate(
     state = toupper(stringr::str_squish(state)),
     landing_site = toupper(
@@ -166,70 +160,80 @@ Hems_LatLongKey_simple <- Hems_PermitLatLongKey0 %>%
   select(state, landing_site, fishery_office, lat_deci, lon_deci, distance_km) %>%
   distinct()
 
-# Thresholds:
+
+# Annotate Hem's key with alerts about disagreement; and compress the key
+# Annotation thresholds:
 threshold_alert  <- 2
 threshold_low    <- 1
 threshold_medium <- 0.5
 
-Hems_LatLong_flags <- Hems_LatLongKey_simple %>%
+
+Hems_LatLongKey_compressed <- Hems_LatLongKey %>%
+  select(state, landing_site, fishery_office, lat_deci, lon_deci, distance_km) %>%
+  
   group_by(state, landing_site) %>%
+  
   summarise(
-    lat_range = max(lat_deci, na.rm = TRUE) - min(lat_deci, na.rm = TRUE),
-    lon_range = max(lon_deci, na.rm = TRUE) - min(lon_deci, na.rm = TRUE),
-    lat_long_confidence = case_when(
-      lat_range > threshold_alert | lon_range > threshold_alert ~
-        "alert 3: multiple lat-long values in Hem's permit/INEGI key that are more than 2 degrees apart",
-      lat_range > threshold_low | lon_range > threshold_low ~
-        "alert 2: multiple lat-long values in Hem's permit/INEGI key that are more than 1 degree apart",
-      lat_range > threshold_medium | lon_range > threshold_medium ~
-        "alert 1: multiple lat-long values in Hem's permit/INEGI key that are more than 0.5 degree apart",
-      TRUE ~ "high confidence"
+    
+    Hems_lat_range = max(lat_deci, na.rm = TRUE) - min(lat_deci, na.rm = TRUE),
+    Hems_lon_range = max(lon_deci, na.rm = TRUE) - min(lon_deci, na.rm = TRUE),
+    
+    Hems_est_lat = median(lat_deci, na.rm = TRUE),
+    Hems_est_lon = median(lon_deci, na.rm = TRUE),
+    
+    notes_re_HemsKey = case_when(
+      is.na(Hems_lat_range) | is.na(Hems_lon_range) ~
+        "coordinate data not found in Hem's key",
+
+      Hems_lat_range > threshold_alert | Hems_lon_range > threshold_alert ~
+        "alert level 3: multiple state-landing_site matches in Hem's key with lat-long values >2 degrees apart",
+
+      Hems_lat_range > threshold_low | Hems_lon_range > threshold_low ~
+        "alert level 2: multiple state-landing_site matches in Hem's key with lat-long values ~1 degree apart",
+
+      Hems_lat_range > threshold_medium | Hems_lon_range > threshold_medium ~
+        "alert level 1: multiple state-landing_site matches in Hem's key with lat-long values ~0.5 degree apart",
+
+      TRUE ~ "high coherence in Hem's key regarding state-landing_site location"
     ),
+
     .groups = "drop"
   )
 
-Hems_LatLongKey_collated <- Hems_LatLongKey_simple %>%
-  group_by(state, landing_site) %>%
-  slice(1) %>%
-  ungroup() %>%
-  left_join(
-    Hems_LatLong_flags %>% select(state, landing_site, lat_long_confidence),
-    by = c("state", "landing_site")
-  )
+# rm(Hems_LatLongKey_compressed)
 
-rm(Hems_LatLongKey_simple, Hems_LatLong_flags)
+table(Hems_LatLongKey_compressed$notes_re_HemsKey)
 
-table(Hems_LatLongKey_collated$lat_long_confidence)
+# alert level 1: multiple state-landing_site matches in Hem's key with lat-long values ~0.5 degree apart 
+#                                                                                                    589 
+#   alert level 2: multiple state-landing_site matches in Hem's key with lat-long values ~1 degree apart 
+#                                                                                                   1072 
+#  alert level 3: multiple state-landing_site matches in Hem's key with lat-long values >2 degrees apart 
+#                                                                                                   1107 
+#                                      high coherence in Hem's key regarding state-landing_site location 
+#                                                                                                  24128  
 
-# alert 1: multiple lat-long values in Hem's permit/INEGI key that are more than 0.5 degree apart 
-#                                                                                             589 
-#   alert 2: multiple lat-long values in Hem's permit/INEGI key that are more than 1 degree apart 
-#                                                                                            1072 
-#  alert 3: multiple lat-long values in Hem's permit/INEGI key that are more than 2 degrees apart 
-#                                                                                            1107 
-#                                                                                 high confidence 
-#                                                                                           24128 
-
-# SANITY CHECK:
-TEST<- Hems_LatLongKey_collated %>%
-  filter(lat_long_confidence== "alert 3: multiple lat-long values in Hem's permit/INEGI key that are more than 2 degrees apart")
+# SANITY CHECK: which values really don't agree?
+TEST<- Hems_LatLongKey_compressed %>%
+  filter(notes_re_HemsKey== "alert level 3: multiple state-landing_site matches in Hem's key with lat-long values >2 degrees apart")
+# n=1107 - Basically, values that have different offices. I feel good enough about this to proceed though.
 
 # SANITY CHECK: Number of unique state + landing_site combinations
-n_unique_sites <- Hems_LatLongKey_collated %>%
+n_unique_sites <- Hems_LatLongKey_compressed %>%
   distinct(state, landing_site) %>%
   nrow()
 # 26896 unique state-landing_site combinations.
 ```
 
 
-# STEP 4: Create a backbone of a key to merge to... ------------------------------
+# STEP 4: Create a backbone for a key... ------------------------------
 
 ```{r Prepare to merge keys}
-dim(Hems_LatLongKey_collated) # 26896 obs., 7 variables
-dim(Mels_LatLongKey_pending) # 1176 obs., 9 variables
+dim(Hems_LatLongKey_compressed) # 26896 obs., 7 variables
+dim(Mels_LatLongKey) # 1176 obs., 9 variables
 
 # Shave down Mel's key:
-Mels_LatLongKey_simple<- Mels_LatLongKey_pending %>%
+Mels_LatLongKey_simple<- Mels_LatLongKey %>%
   select(state, landing_site, lat, long, OHI_rgn, GoC, est_habitat, site_notes)
 
 colnames(Mels_LatLongKey_simple)<- c("state", "landing_site", "lat_Mel", "lon_Mel", "OHI_region_draft", "GoC", "est_habitat", "site_notes_Mel")
@@ -264,49 +268,163 @@ LatLong_merge.skeleton<- Mex.Pacific_Landings %>%
 # 3060 distinct state-landingsite combos in the Mexican Pacific that I am going to try to fill using information from Hem's key or Mel's key. Privilege information from Hem's key.
 ```
 
+# Cleaning
+```{r  CLEAN NAMES FUNCTION}
+clean_name <- function(x) {
+
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+
+  x %>%
+    toupper() %>%
+    trimws() %>%
+    gsub("\\bDE\\b", "", .) %>%
+    gsub("\\s+", " ", .) %>%
+    trimws()
+}
+```
+
+```{r Clean names for landing_site across LatLong_merge.skeleton}
+# Clean the landing_site names:
+LatLong_merge.skeleton<- LatLong_merge.skeleton %>%
+  mutate(landing_site_clean= clean_name(landing_site)) %>%
+  relocate(landing_site_clean, .after= landing_site)
+
+Hems_LatLongKey<- Hems_LatLongKey %>%
+  mutate(landing_site_clean= clean_name(landing_site),
+         office_name_clean= clean_name(fishery_office)) %>%
+  relocate(landing_site_clean, .after= landing_site) %>%
+  relocate(office_name_clean, .after= fishery_office)
+
+Hems_LatLongKey_compressed<- Hems_LatLongKey_compressed %>%
+  mutate(landing_site_clean= clean_name(landing_site)) %>%
+  relocate(landing_site_clean, .after= landing_site)
+
+Mels_LatLongKey_simple<- Mels_LatLongKey_simple %>%
+  mutate(landing_site_clean= clean_name(landing_site)) %>%
+  relocate(landing_site_clean, .after= landing_site)
+```
+
+```{r Make sure to compress all keys after cleaning}
+# Compress: LatLong_merge.skeleton
+colnames(LatLong_merge.skeleton)
+
+LatLong_merge.skeleton_compr<- LatLong_merge.skeleton %>%
+  select(state, landing_site_clean) %>%
+  group_by(state, landing_site_clean) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup()
+# From 3060 obs down to 3038
+
+# Compress: Hems_LatLongKey_compressed
+colnames(Hems_LatLongKey_compressed)
+
+Hems_LatLongKey_compr<- Hems_LatLongKey_compressed %>%
+  select(state, landing_site_clean, Hems_lat_range, Hems_lon_range, Hems_est_lat, Hems_est_lon, notes_re_HemsKey) %>%
+  group_by(state, landing_site_clean) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup()
+# From 26896 obs down to 26866
+
+# Compress: Mels_LatLongKey_simple
+colnames(Mels_LatLongKey_simple)
+
+Mels_LatLongKey_compr<- Mels_LatLongKey_simple %>%
+  select(state, landing_site_clean, lat_Mel, lon_Mel, GoC, est_habitat, site_notes_Mel) %>%
+  group_by(state, landing_site_clean) %>%
+  slice(1) %>%  # keeps the first occurrence per key
+  ungroup()
+# From 1176 obs to 1168
+```
+
+
+# STEP 5: Create LatLong_SiteKey ------------------------------
+
 ```{r Merge to the backbone}
 # LOGIC (May 19 2026):
-# Mel's key -> Hem catchlocs (georefcatchlocs) when within 2 degrees of Mel 
-# -> Hem permit/INEGI georef (georeflocskm) to fill remaining NAs.
-
-colnames(Hems_LatLongKey_collated)
-
 # Start with the skeleton
-LatLong_SiteKey <- LatLong_merge.skeleton %>%
-  # Join Mel's key first (preferential population)
-  left_join(Mels_LatLongKey_simple, by = c("state", "landing_site")) %>%
-  # Join Hem's key
-  left_join(Hems_LatLongKey_collated %>%
-              select(state, landing_site, lat_deci, lon_deci, lat_long_confidence),
-            by = c("state", "landing_site")) %>%
+# Privilege Hem’s key over Mel’s, unless Hem's key is empty or has high disagreement:
+
+LatLong_SiteKey <- LatLong_merge.skeleton_compr %>%
+  
+  left_join(Mels_LatLongKey_compr, by = c("state", "landing_site_clean")) %>%
+  
+  left_join(
+    Hems_LatLongKey_compr %>%
+      select(state, landing_site_clean, Hems_lon_range, Hems_lat_range, Hems_est_lat, Hems_est_lon, notes_re_HemsKey),
+    by = c("state", "landing_site_clean")
+  ) %>%
+  
   mutate(
-    # Determine if Hem should override Mel
-    use_HemsKey = !is.na(lat_deci) & !is.na(lon_deci),
     
-    # Compute difference between Hem and Mel
-    lat_diff = ifelse(!is.na(lat_deci) & !is.na(lat_Mel), abs(lat_deci - lat_Mel), 0),
-    lon_diff = ifelse(!is.na(lon_deci) & !is.na(lon_Mel), abs(lon_deci - lon_Mel), 0),
+    # Availability of Hem's key, yes or no?
+    has_Hem = !is.na(Hems_est_lat) & !is.na(Hems_est_lon),
     
-    # Decide final lat/lon
+    # Disagreement in Hem's key?
+    high_disagreement = (Hems_lon_range > 2 | Hems_lat_range > 2),
+
+    # lat-lon difference between Hem and Mel's keys (flag high disagreement):
+    keys_lat_diff = if_else(has_Hem & !is.na(lat_Mel),
+                       abs(Hems_est_lat - lat_Mel), NA_real_),
+
+    keys_lon_diff = if_else(has_Hem & !is.na(lon_Mel),
+                       abs(Hems_est_lon - lon_Mel), NA_real_),
+    
+    # Assign lat-long values:
+    # final coordinates: Hem's estimates unless high disagreement, fallback to Mel's estimates
+    
     lat_est = case_when(
-      use_HemsKey & lat_diff <= 2 & lon_diff <= 2 ~ lat_deci,  # Hem overrides when reasonable
-      TRUE ~ lat_Mel  # Otherwise, keep Mel
-    ),
-    lon_est = case_when(
-      use_HemsKey & lat_diff <= 2 & lon_diff <= 2 ~ lon_deci,
-      TRUE ~ lon_Mel
-    ),
+      has_Hem & is.na(lat_Mel) ~ Hems_est_lat,
+      has_Hem & (!is.na(lat_Mel)) & high_disagreement ~ lat_Mel,
+      has_Hem & (!is.na(lat_Mel)) ~ Hems_est_lat,
+      !has_Hem & !is.na(lat_Mel) ~ lat_Mel,
+      TRUE ~ NA_real_
+      ),
     
-    # Decide final confidence
+    lon_est = case_when(
+      has_Hem & is.na(lon_Mel) ~ Hems_est_lon,
+      has_Hem & (!is.na(lon_Mel)) & high_disagreement ~ lon_Mel,
+      has_Hem & (!is.na(lon_Mel)) ~ Hems_est_lon,
+      !has_Hem & !is.na(lon_Mel) ~ lon_Mel,
+      TRUE ~ NA_real_
+      ),
+    
+    # Assign confidence values:
     lat_long_confidence = case_when(
-      use_HemsKey & (lat_diff > 2 | lon_diff > 2) ~
-        "alert 4: the lat-long values in Hem's key do not match the lat-long values in Mel's key by more than 2 degrees",
-      use_HemsKey & (lat_diff <= 2 & lon_diff <= 2) ~ lat_long_confidence,  # keep Hem's original
-      TRUE ~ NA_character_  # default when using Mel or no Hem info
+      
+      has_Hem & (!is.na(lat_Mel)) & high_disagreement ~
+        "medium confidence; Mel's estimate; found in both keys but high disagreement in Hem's",
+
+      has_Hem & (!is.na(lat_Mel)) ~
+        "high confidence; Hem's estimate; Hem and Mel's keys agree",
+      
+      has_Hem & is.na(lat_Mel) ~
+        "high confidence; Hem's estimate; found in Hem's key",
+
+      has_Hem & (!is.na(lat_Mel)) &
+        (keys_lat_diff > 2 | keys_lon_diff > 2) ~
+        "check required; Hem's estimate; Hem and Mel's keys disagree by >2º",
+
+      !has_Hem & !is.na(lat_Mel) ~
+        "medium confidence; Mel's estimate; found only in Mel's key",
+
+      TRUE ~ NA_character_
     )
-  )
+  ) %>%
+  relocate(lat_est, lon_est, .after = last_col())
+
+# 3038 obs.
 
 table(LatLong_SiteKey$lat_long_confidence)
+#                                  high confidence; Hem's estimate; found in Hem's key 
+#                                                                                  351 
+#                            high confidence; Hem's estimate; Hem and Mel's keys agree 
+#                                                                                  501 
+# medium confidence; Mel's estimate; found in both keys but high disagreement in Hem's 
+#                                                                                   78 
+#                           medium confidence; Mel's estimate; found only in Mel's key 
+#                                                                                  571 
+
 table(LatLong_SiteKey$GoC)
 
 # SANITY CHECK: how many lat-long values are missing from the states of interest?
@@ -314,7 +432,7 @@ TEST<- LatLong_SiteKey %>%
   filter(state %in% States_of_Interest) %>%
   filter(is.na(lat_est))
 
-# 538 sites in the States_of_Interest are missing lat-long values
+# 530 sites in the States_of_Interest are missing lat-long values (down from 538 thanks to name cleaning!)
 ```
 
 ```{r Check to see how many entries are covered by this key alone}
@@ -324,114 +442,156 @@ NW.Mex_Landings<- Mex.Pacific_Landings %>%
 dim(NW.Mex_Landings)
 # 4713144 obs.
 
+# Clean the landing_site names in NW.Mex_Landings:
+NW.Mex_Landings<- NW.Mex_Landings %>%
+  mutate(landing_site_clean= clean_name(landing_site),
+         office_name_clean= clean_name(office_name)) %>%
+  relocate(landing_site_clean, .after= landing_site) %>%
+  relocate(office_name_clean, .after= office_name)
+
+# Merge key based on landing_site_clean names:
 NW.Mex_Landings <- NW.Mex_Landings %>%
-  left_join(LatLong_SiteKey, by = c("state", "landing_site"))
+  left_join(LatLong_SiteKey, by = c("state", "landing_site_clean"))
 # 4713144 obs.
 
 # SANITY CHECK: how many records are missing lat-long values?
 Landings_missingLatLong<- NW.Mex_Landings %>%
   filter(is.na(lat_est))
 # 1/4 of records (n= 1,213,865) are not assigned... 
+# May 20: Down from 1213865 to 1205911 (-7954) thanks to name cleaning!
 # This doesn't really work for me.
 # Can we make this key better?
 
 # table(Landings_missingLatLong$landing_site)
 
-# Let's take a look at a site we KNOW should be assigned like "BAHIA DE KINO" but isnt:
+# Let's take a look at a site we KNOW should be assigned like "BAHIA DE KINO" but isn't:
 TEST2<- Landings_missingLatLong %>%
   filter(landing_site=="BAHIA DE KINO")
 ```
 
-```{r In situations where we can't merge by state-landing_site let's merge by state-office}
-LatLong_OfficeKey0<- Hems_LatLongKey_collated %>%
-  select(state, fishery_office, lat_deci, lon_deci) %>%
-  group_by(state, fishery_office) %>%
+
+# STEP 6: Create LatLong_OfficeKey ------------------------------
+
+In situations where we can't merge by state-landing_site let's merge by state-office
+
+```{r Key skeleton}
+colnames(Hems_LatLongKey)
+
+LatLong_OfficeKey0<- Hems_LatLongKey %>%
+  select(state, office_name_clean, Hems_est_lat= lat_deci, Hems_est_lon= lon_deci) %>%
+  group_by(state, office_name_clean) %>%
   mutate(
-    lat_mean = mean(lat_deci , na.rm= TRUE),
-    lon_mean = mean(lon_deci , na.rm= TRUE)
+    lat_mean = mean(Hems_est_lat , na.rm= TRUE),
+    lon_mean = mean(Hems_est_lon , na.rm= TRUE)
   )
+# 36486 obs., 6 vars.
 
 # Reorganize this key:
 colnames(LatLong_OfficeKey0)
 
 LatLong_OfficeKey<- LatLong_OfficeKey0 %>%
-  select(state, office_name= fishery_office, lat_mean, lon_mean) %>%
+  select(state, office_name_clean, est_lat_mean= lat_mean, est_lon_mean= lon_mean) %>%
   distinct()
-
+# Down to 73 obs., 4 vars.
 ```
 
-```{r}
+```{r Create LatLong_OfficeKey}
+# NOTE: CLEAN NAMES function found above
 
-#--------------------------
-# 1. CLEAN NAMES
-#--------------------------
+# Match based on state-office_name_clean:
 
-clean_name <- function(x) {
-
-  # fix encoding
-  x <- iconv(x, from = "", to = "UTF-8", sub = "")
-
-  x %>%
-    toupper() %>%
-    trimws() %>%
-    gsub("\\bDE\\b", "", .) %>%
-    gsub("\\s+", " ", .)
-}
-
-LatLong_OfficeKey <- LatLong_OfficeKey %>%
-  mutate(office_clean = clean_name(office_name)) %>%
-  select(-c(office_name))
-
-Landings_missingLatLong <- Landings_missingLatLong %>%
-  mutate(office_clean = clean_name(office_name)) %>%
-  select(-c(office_name))
-
-#--------------------------
-# 2. EXACT MATCH FIRST
-#--------------------------
-
-matched_exact <- Landings_missingLatLong %>%
+Landing_missing.matched <- Landings_missingLatLong %>%
   left_join(
     LatLong_OfficeKey,
-    by = c("state", "office_clean")
+    by = c("state", "office_name_clean")
   )
 
-table(matched_exact$state)
-
-#--------------------------
-# 3. FIND UNMATCHED
-#--------------------------
-
-unmatched <- matched_exact %>%
-  filter(is.na(lat_mean))
+# Then find any values that are unmatched to a lat-long. Is this a small enough number I can live with?
+unmatched <- Landing_missing.matched %>%
+  filter(is.na(est_lat_mean))
+# Only 241371 out of 4713144 un-matched (= 5%). I can live with this!
 
 table(unmatched$state)
-
-#--------------------------
-# 4. FUZZY MATCH ONLY UNMATCHED
-#--------------------------
-
-fuzzy_matches <- unmatched %>%
-  rowwise() %>%
-  mutate(
-    best_match = {
-      candidates <- LatLong_OfficeKey %>%
-        filter(state == cur_data()$state)
-
-      if(nrow(candidates) == 0) NA_character_
-      else {
-        d <- stringdist::stringdist(
-          office_clean,
-          candidates$office_clean,
-          method = "jw"
-        )
-
-        candidates$office_name[which.min(d)]
-      }
-    }
-  )
 ```
 
+```{r PURG? May 20 2026}
+LatLong_OfficeKey$lat_long_confidence<- c("medium; Hem's estimate; estimate derived as a mean at the office level across sites")
+```
+
+
+# STEP 8: Add OHI region to the key ------------------------------
+
+```{r Loading in OHI regions and buffer shape files}
+# OHI regions:
+OHI_regions_shape <- sf::st_read(
+  "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/marine/ohi_goc_final_071025.shp",
+  options = "ENCODING=LATIN1"
+)
+
+OHI_regions_shape <- st_make_valid(OHI_regions_shape)
+
+# Quick plot:
+ggplot(OHI_regions_shape) +
+  geom_sf(aes(fill = rgn_id)) +
+  theme_minimal()
+
+# 50km buffer:
+OHI_buffer_shape <- sf::st_read(
+  "/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer/",
+  options = "ENCODING=LATIN1"
+)
+
+OHI_buffer_shape <- st_make_valid(OHI_buffer_shape)
+
+# Quick plot:
+ggplot(OHI_buffer_shape) +
+  geom_sf(aes(fill = rgn_id)) +
+  theme_minimal()
+```
+
+```{r Spatial join: assign OHI region to LatLong_SiteKey and LatLong_OfficeKey based on these shapes}
+LatLong_SiteKey_final<- LatLong_SiteKey %>%
+  filter(!is.na(lat_est))
+
+LatLong_OfficeKey_sf <- st_as_sf(
+  LatLong_OfficeKey,
+  coords = c("est_lon_mean", "est_lat_mean"),
+  crs = st_crs(OHI_regions_shape)
+)
+```
+
+
+
+```{r Join the regions shape file and buffer}
+OHI_combined_shape <- st_transform(OHI_regions_shape, st_crs(OHI_buffer_shape))
+
+OHI_combined_shape <- st_make_valid(OHI_combined_shape)
+
+# choose a target CRS and force it for region and buffer:
+target_crs <- st_crs(OHI_buffer_shape)
+
+regions <- st_transform(OHI_regions_shape, target_crs)
+buffers <- OHI_buffer_shape
+
+# Bind:
+OHI_combined_shape <- bind_rows(
+  regions %>% select(rgn_id, geometry),
+  buffers %>% select(rgn_id, geometry)
+)
+
+# Quick plot:
+ggplot(OHI_combined_shape) +
+  geom_sf(aes(fill = rgn_id)) +
+  theme_minimal()
+
+# Make sure this key is clean by creating a union:
+OHI_combined_shape <- OHI_combined_shape %>%
+  group_by(rgn_id) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop")
+```
+
+
+# STEP 7: Export key(s) ------------------------------
 ```{r Clean up key before export}
 # Final sites key:
 LatLong_SiteKey_finalized<- LatLong_SiteKey
@@ -442,7 +602,7 @@ LatLong_SiteKey_finalized<- LatLong_SiteKey_finalized %>%
   select(
     state, landing_site, GoC, est_habitat,
     lat_est, lon_est, lat_long_confidence,
-    lat_deci, lon_deci, lat_deci, lon_deci,
+    Hems_est_lat, Hems_est_lon, Hems_est_lat, Hems_est_lon,
     lat_Mel, lon_Mel,
     OHI_region_draft, site_notes_Mel
   )
@@ -466,41 +626,36 @@ LatLong_SiteKey_finalized <- LatLong_SiteKey_finalized %>%
 
 sum(is.na(LatLong_SiteKey_finalized$lat_est))
 
+# How many / which values are missing?
 subset<- LatLong_SiteKey_finalized %>% 
   filter(is.na(lat_est))
+
+LatLong_SiteKey_finalized<- LatLong_SiteKey_finalized %>%
+  filter(is.na(lat_est))
+# 1508 sites with lat-long details
 
 # Final offices key:
 LatLong_OfficeKey_finalized<- LatLong_OfficeKey
 ```
 
-```{r Export these new lat-long keys}
-write.csv(
-  LatLong_SiteKey_finalized,
-  "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Spatial_Keys/Sites_LatLongKey_May192026.csv",
-  row.names = FALSE
-)
 
-write.csv(
-  LatLong_OfficeKey_finalized,
-  "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Spatial_Keys/Offices_LatLongKey_May192026.csv",
-  row.names = FALSE
-)
-```
-
-```{r remove unused dataframes}
+```{r PURG? remove unused dataframes}
 rm(
   subset,
-  Hems_LatLongKey0, Hems_LatLongKey_collated,
-  Hems_LatLongKey_collated,
   BajaSonora_LatLongKey_clean, Jalisco_LatLongKey_clean,
   LatLong_merge.skeleton, LatLong_SiteKey,
-  Mels_LatLongKey_pending, Mels_LatLongKey_simple
+  Mels_LatLongKey, Mels_LatLongKey_simple
 )
 
 rm(n_unique_sites, threshold_alert, threshold_low, threshold_medium)
 ```
 
-# STEP 3c: Add lat-long and OHI_region info to landings data ------------------------------
+
+
+
+
+# UNDER CONSTRUCTION / PURG - May 20 2026
+# STEP 9: Add lat-long and OHI_region info to landings data ------------------------------
 ```{r OHI LatLong_SiteKey_finalized and RegionKey_pending}
 LatLong_SiteKey_finalized<- read_csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/Sites_LatLongKey_May192026.csv")
 
@@ -541,10 +696,116 @@ Mex.Pacific_Landings<- temp_df
 rm(temp_df, test)
 ```
 
-## STEP 3d: Save the NW Mexico landings appended with lat-long info in a separate .rds file:
+## STEP 9b: Save the NW Mexico landings appended with lat-long info in a separate .rds file:
 ```{r Save the Northwest Mexico dataframe: May 19 2026}
 Mex.Pacific_Landings<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/Mex.Pacific_Landings_2000.present_May042026.rds"))
 ```
 
 # NEXT STEPS: Use of the lat-long key can be found in "CONAPESCA_CleaningWorkflow_May2026.Rmd"
 found here: /home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys
+
+# STEP: Attach lat-long data to NW Mexico dataframe. (co-authors: Melanie Frazier, Hem Nalini Morzaria) ----------------------
+
+# Flag these in the lat-long key as not in the Gulf [UNDER CONSTRUCTION May 19 2026]
+office_name== c("EL ROSARIO", "ENSENADA", "TIJUANA")
+
+# STEP: Attach lat-long and OHI_region info based on official landing site:
+NOTE TO SELF: Come back to this! The lat long keys are imperfect. We'll want to fix this as much as possible.
+
+# PURG
+```{r Try cleaning the landing_site names}
+# STEP 2: Trim down Landings_missingLatLong so we can do another merge
+colnames(Landings_missingLatLong)
+
+Landings_missingLatLong<- Landings_missingLatLong %>%
+  select(-c(lat_Mel:lon_est))
+
+# STEP 3: Clean the landing_site and office_name columns and place them next to their uncleaned counter-part:
+Landings_missingLatLong <- Landings_missingLatLong %>%
+  mutate(landing_site_clean = clean_name(landing_site),
+         office_name_clean = clean_name(office_name)) %>%
+  relocate(office_name, .before = office_name_clean) %>%
+  relocate(landing_site, .before = landing_site_clean)
+
+# SANITY CHECK: check entries where landing_site_clean is different than landing_site
+TEST <- Landings_missingLatLong %>%
+  filter(landing_site != landing_site_clean) %>%
+  select(landing_site, landing_site_clean) %>%
+  mutate(
+    landing_site = iconv(landing_site,
+                         from = "",
+                         to = "UTF-8",
+                         sub = ""),
+    landing_site_clean = iconv(landing_site_clean,
+                               from = "",
+                               to = "UTF-8",
+                               sub = ""),
+    nchar_original = nchar(landing_site),
+    nchar_clean = nchar(landing_site_clean)
+  )
+
+# These make sense. Many of them had "DE" removed.
+
+
+# STEP 4: Create a modified key:
+LatLong_SiteKey_modified<- LatLong_SiteKey %>%
+  filter(!is.na(lat_est)) %>%
+  mutate(landing_site_clean = clean_name(landing_site)) %>%
+  relocate(landing_site, .before = landing_site_clean)
+
+colnames(LatLong_SiteKey_modified)
+
+# Start with the skeleton
+LatLong_SiteKey_modified <- LatLong_SiteKey_modified %>%
+  select(state, landing_site_clean, GoC, est_habitat, site_notes_Mel, lat_long_confidence, lat_est, lon_est) %>%
+  distinct()
+
+  mutate(
+    # Determine if Hem should override Mel
+    use_HemsKey = !is.na(Hems_est_lat) & !is.na(Hems_est_lon),
+    
+    # Compute difference between Hem and Mel
+    keys_lat_diff = ifelse(!is.na(Hems_est_lat) & !is.na(lat_Mel), abs(Hems_est_lat - lat_Mel), 0),
+    keys_lon_diff = ifelse(!is.na(Hems_est_lon) & !is.na(lon_Mel), abs(Hems_est_lon - lon_Mel), 0),
+    
+    # Decide final lat/lon
+    lat_est = case_when(
+      use_HemsKey & keys_lat_diff <= 2 & keys_lon_diff <= 2 ~ Hems_est_lat,  # Hem overrides when reasonable
+      TRUE ~ lat_Mel  # Otherwise, keep Mel
+    ),
+    lon_est = case_when(
+      use_HemsKey & keys_lat_diff <= 2 & keys_lon_diff <= 2 ~ Hems_est_lon,
+      TRUE ~ lon_Mel
+    ),
+    
+    # Decide final confidence
+    lat_long_confidence = case_when(
+      use_HemsKey & (keys_lat_diff > 2 | keys_lon_diff > 2) ~
+        "alert 4: the lat-long values in Hem's key do not match the lat-long values in Mel's key by more than 2 degrees",
+      use_HemsKey & (keys_lat_diff <= 2 & keys_lon_diff <= 2) ~ lat_long_confidence,  # keep Hem's original
+      TRUE ~ NA_character_  # default when using Mel or no Hem info
+    )
+  )
+```
+
+```{r Match exact names}
+# 2. EXACT MATCH FIRST
+# I want to merge two dataframes in R together with slightly different column names. I want to merge Landings_missingLatLong to LatLong_SiteKey based on a match between Landings_missingLatLong$landing_site_clean and LatLong_SiteKey$landing_site
+
+Landing_missing.matched <- Landings_missingLatLong %>%
+  left_join(
+    LatLong_SiteKey,
+    by = c("state", "landing_site_clean" = "landing_site")
+  )
+
+# 1213865 (Good! As expected, no many-to-many matching)
+
+table(Landing_missing.matched$state)
+
+# 3. FIND UNMATCHED
+
+unmatched <- Landing_missing.matched %>%
+  filter(is.na(lat_mean))
+
+table(unmatched$state)
+```
