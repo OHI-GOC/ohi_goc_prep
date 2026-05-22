@@ -1,0 +1,669 @@
+---
+title: 'OHI GoC 2025: Clean waters Untreated Wastewater, Script 1'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# CW: Chemicals - Untreated Wastewater feeding into the ocean
+
+Data came from the National Census of Municipal Governments and Territorial Demarcations of Mexico City (CNGMD).
+
+> The National Census of Municipal Governments and Territorial Demarcations of Mexico City 2023, has the objective to generate statistical and geographic information on the integration and functioning of city councils and boroughs, as well as the management and performance of the institutions that make up the Public Administration of each municipality or territorial demarcation, specifically in the functions of government, public safety, civil protection, civic justice, potable water and sanitation, and urban solid residues. Its purpose is to link the data with the design, implementation, monitoring and evaluation of public policies of national scope in these functions.
+
+"Puntos de descarga de aguas residuales municipales vertidas sin tratamiento que existían en el municipio o demarcación territorial."
+
+The data also notes where the untreated wastewater emptied into:
+
+res_trec	descrip
+0	No aplica/Sin respuesta
+1	Río o arroyo
+2	Lago o laguna
+3	Presa
+4	Suelo o barranca
+5	Canal o dren
+6	Mar
+7	Playa
+8	Estero, marisma
+9	Gran colector
+10	Otro
+
+**We are interested in 6 Mar, 7 Playa, 8 Estero/marisma** (2021/2023 coding).
+
+Earlier census years use different receptor code schemes; each year is mapped to this 2023 standard before filtering. See `cursor_generated/README.md` for a full year-by-year comparison.
+
+A continuación, se presenta la descripción de caracteres (siglas) para el manejo de valores que indican o representan algún estatus dentro de la información de los conjuntos de datos:
+
+-	NSS: No cuenta con elementos para responder
+
+	Se utiliza para identificar las variables en las que el informante, por falta de información, respondió no saber la respuesta; así como en aquellas variables que, por su carácter condicionado a otras respuestas, mantienen el mismo estatus.
+
+-	NA: No aplica
+
+	Se utiliza para identificar las variables que, por la naturaleza de la pregunta correspondiente, no aplica proporcionar información; así como en aquellas variables que, por su carácter condicionado a otras respuestas, no deben ser respondidas.
+
+-	ND: Información no disponible
+
+	Se utiliza para identificar las variables en las que, por diversas razones, el informante no respondió el cuestionario.
+
+-	NP: No publicable por el principio de confidencialidad o por reserva de información
+
+	Se utiliza para identificar las variables en las que el informante proporcionó información, pero que, por confidencialidad o reserva, no es susceptible de ser publicada.
+
+```{r setup}
+# load packages for spatial and tabular work
+# we need sf/mapview for future mapping, tidyverse for cleaning, and stringi for accent-insensitive municipality name matching across catalogs
+library(sf)
+library(utils)
+library(tidyverse)
+library(here)
+library(raster)
+library(mapview)
+library(purrr)
+library(stringr)
+library(stringi)
+library(janitor)
+library(tibble)
+```
+
+## Explore each year and determine if we can automate cleaning...
+
+Data downloaded and placed at: `~/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento`.
+
+When running locally, raw data lives in the project root (one level above this file in `cursor_generated/`):
+
+```{r paths}
+# set data directory in mazu
+data_dir <- here::here(
+  "/home/shares/ohi/OHI_GOC/_raw_data/CNGMD_censacional_gobiernos_municipales_demarcaciones_territoriales/agua_sin_tratamiento"
+)
+
+# set municipality to region lookup path
+# this file maps normalized municipality names to OHI Gulf of California region ids
+municipality_to_rgnid_path <- here::here(
+  "/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid.csv"
+)
+
+# define gulf of california states
+# we only retain discharge points in these six coastal states
+GOC_STATES <- c(
+  "Baja California", "Baja California Sur", "Jalisco",
+  "Nayarit", "Sinaloa", "Sonora"
+)
+
+# define ocean receptor codes in 2023 standard
+# after harmonization, codes 6/7/8 correspond to Mar/Playa/Estero-marisma
+OCEAN_RES_TREC_STD <- c(6L, 7L, 8L)
+
+# define lookup for mapping 2013-2019 receptor codes to the 2023 standard
+# codes 1-4 are unchanged; 5-8 and 9 (2013 only) are remapped (see README)
+RES_TREC_OLD_TO_STD <- c(
+  `0` = 0L, `1` = 1L, `2` = 2L, `3` = 3L, `4` = 4L,
+  `5` = 6L,  # Mar
+  `6` = 5L,  # Canal o dren
+  `7` = 9L,  # Gran colector
+  `8` = 10L, # Otro
+  `9` = 0L   # 2013: No especificado -> No aplica/Sin respuesta
+)
+
+# build reference catalog for harmonized receptor codes
+# all years are mapped onto this 2023 coding scheme before filtering
+res_trec_catalog_std <- tibble::tribble(
+  ~res_trec_std, ~descrip_std,
+  0L,  "No aplica/Sin respuesta",
+  1L,  "Río o arroyo",
+  2L,  "Lago o laguna",
+  3L,  "Presa",
+  4L,  "Suelo o barranca",
+  5L,  "Canal o dren",
+  6L,  "Mar",
+  7L,  "Playa",
+  8L,  "Estero, marisma",
+  9L,  "Gran colector",
+  10L, "Otro"
+)
+```
+
+Data dictionary for 2023:
+```{r}
+# load 2023 data dictionary for reference
+diccionario_de_datos_2023 <- read_csv(
+  file.path(
+    data_dir,
+    "aguas_residuales_sin_tratamiento_cngmd2023_csv/diccionario_de_datos",
+    "diccionario_de_datos_aguaresd_cngmd2023.csv"
+  )
+)
+```
+
+### Helper functions
+
+Each census year uses different column names and receptor-code schemes. The functions below harmonize municipality identifiers and map receptor codes to the 2023 standard before filtering to GoC municipalities and ocean discharge points.
+
+```{r helpers}
+# normalize mun name
+# lower-case, trim, and strip accents so municipality names match across years and between census catalogs and the municipality_to_rgnid lookup table
+# stri enc toutf8 handles older catalog files saved in latin1 rather than utf8
+normalize_mun_name <- function(x) {
+  x %>%
+    stri_enc_toutf8(validate = TRUE) %>%
+    str_trim() %>%
+    str_to_lower() %>%
+    stri_trans_general("Latin-ASCII")
+}
+
+# read cngmd csv
+# wrapper around read csv that lets us specify file encoding for older INEGI exports
+read_cngmd_csv <- function(path, file_encoding = "UTF-8") {
+  read_csv(
+    path,
+    show_col_types = FALSE,
+    locale = locale(encoding = file_encoding)
+  )
+}
+
+# normalize mnpio
+# coerce municipality/folio ids to a 5-digit integer (e.g. "01001" and 1001 -> 1001)
+# this is required because some years store folio as character with leading zeros, while others store it as a bare integer
+normalize_mnpio <- function(x) {
+  as.integer(str_pad(as.character(as.integer(x)), 5, pad = "0"))
+}
+
+# read goc municipality codes
+# read a year's municipality catalog, attach entity names, and filter to GoC states
+# mun_id_col / mun_name_col / ent_id_col differ across census years (see `~/wastewater_discharge_without_treatment/README.md`)
+read_goc_municipality_codes <- function(municipio_codes, entidad_codes,
+                                        mun_id_col, mun_name_col, ent_id_col) {
+  municipio_codes %>%
+    rename(
+      mnpio = !!sym(mun_id_col),
+      descrip_mun_raw = !!sym(mun_name_col),
+      entidad = !!sym(ent_id_col)
+    ) %>%
+    mutate(
+      mnpio = normalize_mnpio(mnpio),
+      descrip_mun = normalize_mun_name(descrip_mun_raw),
+      entidad = as.integer(entidad)
+    ) %>%
+    dplyr::select(mnpio, descrip_mun, entidad, descrip_mun_raw) %>%
+    left_join(
+      entidad_codes %>%
+        rename(descrip_ent = descrip),
+      by = "entidad"
+    ) %>%
+    filter(descrip_ent %in% GOC_STATES)
+}
+
+# load municipality to rgnid
+# prepare the OHI spatial lookup so it can join on normalized municipality names
+load_municipality_to_rgnid <- function(path) {
+  read_csv(path) %>%
+    mutate(
+      descrip_mun = normalize_mun_name(municipio)
+    ) %>%
+    dplyr::select(descrip_mun, rgn_id)
+}
+
+# attach rgn id
+# join region ids and drop municipalities with no OHI region assignment
+# (e.g. Comondu is intentionally excluded when it would span both coasts)
+attach_rgn_id <- function(goc_codes, municipality_to_rgnid) {
+  goc_codes %>%
+    left_join(municipality_to_rgnid, by = "descrip_mun") %>%
+    filter(!is.na(rgn_id))
+}
+
+# map res trec to std
+# translate year-specific receptor codes to the 2023 standard (res_trec_std)
+# 2021/2023 pass through unchanged; 2013-2019 use RES_TREC_OLD_TO_STD (see README)
+# pre-2021 years have no separate Playa or Estero categories
+map_res_trec_to_std <- function(res_trec, census_year) {
+  code <- suppressWarnings(as.integer(res_trec))
+  dplyr::case_when(
+    is.na(code) ~ NA_integer_,
+    census_year %in% c(2021L, 2023L) ~ code,
+    census_year %in% c(2013L, 2015L, 2017L, 2019L) ~
+      as.integer(RES_TREC_OLD_TO_STD[as.character(code)]),
+    TRUE ~ NA_integer_
+  )
+}
+
+# is ocean discharge
+# flag rows whose harmonized receptor code indicates direct ocean discharge
+is_ocean_discharge <- function(res_trec_std) {
+  res_trec_std %in% OCEAN_RES_TREC_STD
+}
+
+# clean special values
+# replace census missing-value codes (NSS, NA, ND, NP, NULL) with proper NA
+clean_special_values <- function(x) {
+  x <- str_trim(as.character(x))
+  special <- c("NSS", "NA", "ND", "NP", "NULL", "")
+  ifelse(toupper(x) %in% special, NA_character_, x)
+}
+```
+
+### Municipality lookup for GoC
+
+```{r municipality-lookup}
+# load 2023 municipality and entity catalogs
+# we use the 2023 catalogs as the master municipality list because they are the most recent and already include demarcaciones territoriales de CDMX
+municipio_codes_2023 <- read_csv(
+  file.path(data_dir, "aguas_residuales_sin_tratamiento_cngmd2023_csv/catalogos/mnpio_cngmd2023.csv")
+)
+
+entidad_codes_2023 <- read_csv(
+  file.path(data_dir, "aguas_residuales_sin_tratamiento_cngmd2023_csv/catalogos/entidad_cngmd2023.csv")
+)
+
+# build goc municipality code table
+goc_municipio_and_ent_codes <- read_goc_municipality_codes(
+  municipio_codes = municipio_codes_2023,
+  entidad_codes = entidad_codes_2023,
+  mun_id_col = "mnpio",
+  mun_name_col = "descrip",
+  ent_id_col = "entidad"
+)
+
+# load and attach region ids
+municipality_to_rgnid <- load_municipality_to_rgnid(municipality_to_rgnid_path)
+
+# check municipality name mismatches between census and rgnid lookup
+# character(0) means all GoC municipalities matched successfully
+setdiff(
+  municipality_to_rgnid$descrip_mun,
+  goc_municipio_and_ent_codes$descrip_mun
+)
+
+# finalize goc codes with region ids
+goc_codes <- attach_rgn_id(goc_municipio_and_ent_codes, municipality_to_rgnid)
+```
+
+### Are municipality codes stable across years?
+
+```{r compare-municipality-codes-across-years}
+# load municipality catalog for each census year
+# each year names the columns differently but folio/mnpio is the same 5-digit code
+mun_catalogs_by_year <- list(
+  `2013` = read_cngmd_csv(
+    file.path(data_dir, "m5_vii_Aguas_residuales_cngmd2013_csv/catalogos/ttc_municipio.csv"),
+    file_encoding = "Latin1"
+  ) %>%
+    transmute(mnpio = normalize_mnpio(FOLIO), descrip_mun = normalize_mun_name(DES_MUNICIPIO)),
+
+  `2015` = read_cngmd_csv(
+    file.path(data_dir, "Aguas_sintrat_cngmd2015_csv/catalogos/secc_vii_ttc_municipio.csv"),
+    file_encoding = "Latin1"
+  ) %>%
+    transmute(mnpio = normalize_mnpio(folio), descrip_mun = normalize_mun_name(des_municipio)),
+
+  `2017` = read_cngmd_csv(
+    file.path(data_dir, "aguas_sintrat_cngmd2017_csv/catalogos/ttc_municipios_2016.csv")
+  ) %>%
+    transmute(mnpio = normalize_mnpio(mun_folio), descrip_mun = normalize_mun_name(mun_des_municipio)),
+
+  `2019` = read_cngmd_csv(
+    file.path(data_dir, "aguas_sintrat_cngmd2019_csv/catalogos/tc_municipio_2018.csv")
+  ) %>%
+    transmute(mnpio = normalize_mnpio(folio), descrip_mun = normalize_mun_name(des_municp)),
+
+  `2021` = read_cngmd_csv(
+    file.path(data_dir, "aguas_residuales_sin_tratamiento_cngmd2021_csv/catalogos/mnpio_cngmd2021.csv")
+  ) %>%
+    transmute(mnpio = normalize_mnpio(folio), descrip_mun = normalize_mun_name(descrip)),
+
+  `2023` = read_cngmd_csv(
+    file.path(data_dir, "aguas_residuales_sin_tratamiento_cngmd2023_csv/catalogos/mnpio_cngmd2023.csv")
+  ) %>%
+    transmute(mnpio = normalize_mnpio(mnpio), descrip_mun = normalize_mun_name(descrip))
+)
+
+# count municipalities per year
+map_int(mun_catalogs_by_year, nrow)
+
+# compare code sets using 2023 as reference
+mnpio_reference <- mun_catalogs_by_year[["2023"]]$mnpio
+
+mun_code_comparison <- imap_dfr(mun_catalogs_by_year, function(catalog, census_year) {
+  tibble(
+    census_year = as.integer(census_year),
+    n_municipalities = nrow(catalog),
+    n_codes_in_common_with_2023 = length(intersect(catalog$mnpio, mnpio_reference)),
+    n_codes_only_in_this_year = length(setdiff(catalog$mnpio, mnpio_reference)),
+    n_codes_missing_vs_2023 = length(setdiff(mnpio_reference, catalog$mnpio)),
+    identical_code_set_to_2023 = setequal(catalog$mnpio, mnpio_reference)
+  )
+})
+
+mun_code_comparison
+
+# list any codes that differ from 2023 (administrative boundary changes, new demarcaciones, etc.)
+mun_codes_not_in_2023 <- imap(mun_catalogs_by_year, function(catalog, census_year) {
+  codes <- setdiff(catalog$mnpio, mnpio_reference)
+  if (length(codes) == 0) return(NULL)
+  catalog %>% filter(mnpio %in% codes) %>% mutate(census_year = as.integer(census_year))
+}) %>% compact() %>% bind_rows()
+
+mun_codes_missing_from_year <- imap(mun_catalogs_by_year, function(catalog, census_year) {
+  codes <- setdiff(mnpio_reference, catalog$mnpio)
+  if (length(codes) == 0) return(NULL)
+  mun_catalogs_by_year[["2023"]] %>%
+    filter(mnpio %in% codes) %>%
+    mutate(census_year = as.integer(census_year), status = "present in 2023 but missing in this year")
+}) %>% compact() %>% bind_rows()
+
+# check whether shared codes keep the same municipality name
+mun_name_mismatches_vs_2023 <- imap_dfr(mun_catalogs_by_year, function(catalog, census_year) {
+  if (census_year == "2023") return(tibble())
+
+  comparison <- catalog %>%
+    inner_join(
+      mun_catalogs_by_year[["2023"]] %>% rename(descrip_mun_2023 = descrip_mun),
+      by = "mnpio"
+    ) %>%
+    filter(descrip_mun != descrip_mun_2023)
+
+  if (nrow(comparison) == 0) return(tibble())
+
+  comparison %>%
+    transmute(
+      census_year = as.integer(census_year),
+      mnpio,
+      descrip_mun_this_year = descrip_mun,
+      descrip_mun_2023
+    )
+})
+
+mun_codes_not_in_2023
+mun_codes_missing_from_year
+mun_name_mismatches_vs_2023 # none in GoC.
+
+## UNDERSTANDABLY, san felipe and san quintin did not exist before 2021, and so they are not present in data years previous to 2021.
+```
+
+All good to move forward!!
+
+Okay, now we will combine with the lookup table of municipalities to region id.
+
+All years previous to 2023...
+
+```{r read-raw-years}
+# read raw discharge tables one per year
+# each file has a different name, path, and column structure (see README.md)
+aguaresd_cngmd2023 <- read_csv(
+  file.path(data_dir, "aguas_residuales_sin_tratamiento_cngmd2023_csv/conjunto_de_datos/aguaresd_cngmd2023.csv"),
+  show_col_types = FALSE
+)
+
+aguaresd_cngmd2021 <- read_csv(
+  file.path(data_dir, "aguas_residuales_sin_tratamiento_cngmd2021_csv/conjunto_de_datos/aguaresd_cngmd2021.csv"),
+  show_col_types = FALSE
+)
+
+### each year after is SOOO different!!
+aguaresd_cngmd2019 <- read_csv(
+  file.path(data_dir, "aguas_sintrat_cngmd2019_csv/conjunto_de_datos/secc_vii_td_m5_2018_agua_resd.csv"),
+  show_col_types = FALSE
+)
+
+aguaresd_cngmd2017 <- read_csv(
+  file.path(data_dir, "aguas_sintrat_cngmd2017_csv/conjunto_de_datos/secc_vii_td_m5_2016_agua_resd.csv"),
+  show_col_types = FALSE
+)
+
+# aguaresd_cngmd2017_mun <- read_csv(
+#   file.path(data_dir, "aguas_sintrat_cngmd2017_csv/catalogos/ttc_municipios_2016.csv"),
+#   show_col_types = FALSE
+# )
+
+aguaresd_cngmd2015 <- read_csv(
+  file.path(data_dir, "Aguas_sintrat_cngmd2015_csv/conjunto_de_datos/secc_vii_tr_cngmd15_m5_p9_1.csv"),
+  show_col_types = FALSE
+)
+
+aguaresd_cngmd2013 <- read_csv(
+  file.path(data_dir, "m5_vii_Aguas_residuales_cngmd2013_csv/conjunto_de_datos/tr_cengob13_5_vii_ar.csv"),
+  show_col_types = FALSE
+)
+```
+
+Limit all 2023 WW Point Sources (in theory, treatment plants) to GoC municipalities
+
+```{r explore-2023}
+# exploratory join for 2023 only
+# quick check of receptor codes present in GoC before running the full pipeline
+goc_aguaresd_cngmd2023 <- left_join(goc_codes, aguaresd_cngmd2023, by = "mnpio") 
+      # mutate(
+      #   res_trec_raw = suppressWarnings(as.integer(res_trec)),
+      #   res_caud = clean_special_values(res_caud)
+      # )
+
+unique(goc_aguaresd_cngmd2023$res_trec)
+# **we are interested in 6 Mar, 7 Playa, 8 Estero/marisma... none in 2023!!  perhaps we should change it to include rivers and streams?**
+```
+
+## Bring in and clean each year.
+
+Year-specific receptor-code schemes. All raw codes are mapped to the 2023 standard in `res_trec_std` (full changes, or "crosswalk", in README):
+
+| Census year | Receptor variable | Raw codes | Harmonization (mapped to 2023 standard) |
+|-------------|-------------------|------------|---------------|
+| 2023        | `res_trec`        | 2023 standard | unchanged |
+| 2021        | `cuerprec`        | 2023 standard | unchanged |
+| 2019        | `res_trec`        | 2015-2019 standard | full crosswalk |
+| 2017        | `agua_resd_tip_crp_recp` | 2015-2019 standard | full crosswalk |
+| 2015        | `P9_1_2`          | 2015-2019 standard | full crosswalk |
+| 2013        | `P11_CPO_RP`      | 2013 standard | full crosswalk |
+
+```{r clean-each-year}
+# clean cngmd year
+# read one census year, rename columns to a common schema, harmonize codes,
+# join GoC municipality metadata, and return a standardized tibble
+clean_cngmd_year <- function(census_year, goc_codes) {
+
+  if (census_year == 2023L) {
+    # clean 2023
+    # most recent schema: mnpio, res_trec, res_caud (flow in L/s)
+    raw <- read_csv(
+      file.path(data_dir, "aguas_residuales_sin_tratamiento_cngmd2023_csv/conjunto_de_datos/aguaresd_cngmd2023.csv")
+    ) %>%
+      mutate(
+        census_year = census_year,
+        mnpio = normalize_mnpio(mnpio),
+        res_trec_raw = suppressWarnings(as.integer(res_trec)),
+        res_caud = clean_special_values(res_caud)
+      )
+  }
+
+  if (census_year == 2021L) {
+    # clean 2021
+    # same structure as 2023 but municipality id is called folio and receptor
+    # code is called cuerprec instead of res_trec
+    raw <- read_csv(
+      file.path(data_dir, "aguas_residuales_sin_tratamiento_cngmd2021_csv/conjunto_de_datos/aguaresd_cngmd2021.csv")
+    ) %>%
+      mutate(
+        census_year = census_year,
+        mnpio = normalize_mnpio(folio),
+        res_trec_raw = suppressWarnings(as.integer(cuerprec)),
+        res_caud = clean_special_values(res_caud)
+      )
+  }
+
+  if (census_year == 2019L) {
+    # clean 2019
+    # flow reported as volume (res_v_m3 / res_v_es) rather than res_caud;
+    # no cve_geo; folio stored as zero-padded character
+    raw <- read_csv(
+      file.path(data_dir, "aguas_sintrat_cngmd2019_csv/conjunto_de_datos/secc_vii_td_m5_2018_agua_resd.csv")
+    ) %>%
+      mutate(
+        census_year = census_year,
+        mnpio = normalize_mnpio(folio),
+        res_nom = str_squish(res_nom),
+        res_trec_raw = as.integer(res_trec),
+        res_caud = NA_character_,
+        res_v_m3 = clean_special_values(res_v_m3),
+        res_v_es = clean_special_values(res_v_es),
+        cve_geo = NA_character_
+      )
+  }
+
+  if (census_year == 2017L) {
+    # clean 2017
+    # minimal table: only id, folio, and receptor type; no name or flow columns
+    raw <- read_csv(
+      file.path(data_dir, "aguas_sintrat_cngmd2017_csv/conjunto_de_datos/secc_vii_td_m5_2016_agua_resd.csv")
+    ) %>%
+      rename(id_resd = agua_resd_id_serial) %>%
+      mutate(
+        census_year = census_year,
+        mnpio = normalize_mnpio(agua_resd_folio),
+        res_nom = NA_character_,
+        res_trec_raw = suppressWarnings(as.integer(agua_resd_tip_crp_recp)),
+        res_caud = NA_character_,
+        cve_geo = NA_character_
+      )
+  }
+
+  if (census_year == 2015L) {
+    # clean 2015
+    # P9_1_1 = discharge point name, P9_1_2 = receptor type code
+    # P9_1_2_1 holds free-text when "other" is selected (not used for ocean filter)
+    raw <- read_csv(
+      file.path(data_dir, "Aguas_sintrat_cngmd2015_csv/conjunto_de_datos/secc_vii_tr_cngmd15_m5_p9_1.csv")
+    ) %>%
+      rename(id_resd = ID_GR111224807) %>%
+      mutate(
+        census_year = census_year,
+        mnpio = normalize_mnpio(FOLIO),
+        res_nom = str_squish(P9_1_1),
+        res_trec_raw = suppressWarnings(as.integer(P9_1_2)),
+        res_caud = NA_character_,
+        cve_geo = NA_character_
+      )
+  }
+
+  if (census_year == 2013L) {
+    # clean 2013
+    # sparsest table: only folio and receptor code (P11_CPO_RP); no id, name, or flow
+    raw <- read_csv(
+      file.path(data_dir, "m5_vii_Aguas_residuales_cngmd2013_csv/conjunto_de_datos/tr_cengob13_5_vii_ar.csv")
+    ) %>%
+      mutate(
+        census_year = census_year,
+        id_resd = NA_integer_,
+        mnpio = normalize_mnpio(FOLIO),
+        res_nom = NA_character_,
+        res_trec_raw = suppressWarnings(as.integer(P11_CPO_RP)),
+        res_caud = NA_character_,
+        cve_geo = NA_character_
+      )
+  }
+
+  # harmonize receptor codes and join goc metadata
+  raw %>%
+    mutate(
+      res_trec_std = map_res_trec_to_std(res_trec_raw, census_year),
+      ocean_discharge = is_ocean_discharge(res_trec_std)
+    ) %>%
+    left_join(
+      goc_codes %>% dplyr::select(mnpio, entidad, descrip_ent, descrip_mun, rgn_id),
+      by = "mnpio"
+    ) %>%
+    left_join(res_trec_catalog_std, by = c("res_trec_std" = "res_trec_std")) %>%
+    filter(!is.na(rgn_id)) %>%
+    dplyr::select(
+      census_year,
+      any_of(c("id_resd", "mnpio", "cve_geo", "res_nom", "res_caud", "res_v_m3", "res_v_es")),
+      res_trec_raw,
+      res_trec_std,
+      descrip_std,
+      ocean_discharge,
+      entidad,
+      descrip_ent,
+      descrip_mun,
+      rgn_id
+    )
+}
+
+# run cleaning pipeline for all census years
+cngmd_years <- c(2013L, 2015L, 2017L, 2019L, 2021L, 2023L)
+
+goc_aguaresd_all_years <- map_dfr(cngmd_years, clean_cngmd_year, goc_codes = goc_codes)
+
+# subset to ocean discharge points only
+# these are the rows used for the clean waters untreated wastewater indicator
+goc_aguaresd_ocean <- goc_aguaresd_all_years %>%
+  filter(ocean_discharge)
+```
+
+### Save to Mazu
+
+```{r}
+# all years merged and harmonized (yay!)
+write_csv(goc_aguaresd_all_years, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/agua_sin_tratamiento/int","goc_aguaresd_all_years.csv"))
+
+# all points that discharge into the GoC specifically.
+write_csv(goc_aguaresd_ocean, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/agua_sin_tratamiento/int","goc_aguaresd_ocean.csv"))
+```
+
+
+## Summary by year
+
+```{r summary-by-year}
+# count all goc discharge points by year
+discharge_pts_annual <- goc_aguaresd_all_years %>%
+  count(census_year, name = "n_goc_discharge_points") %>%
+  arrange(census_year)
+discharge_pts_annual
+
+# count ocean discharge points by year and receptor type
+discharge_pts_ocean_annual <- goc_aguaresd_ocean %>%
+  count(census_year, res_trec_std, descrip_std, name = "n_ocean_discharge_points") %>%
+  arrange(census_year, res_trec_std)
+discharge_pts_ocean_annual
+```
+
+### Inspect ocean discharge points
+
+```{r inspect-ocean}
+# review ocean discharge records
+goc_aguaresd_ocean %>%
+  arrange(census_year, descrip_ent, descrip_mun, res_nom) %>%
+  dplyr::select(
+    census_year, mnpio, descrip_ent, descrip_mun, rgn_id,
+    res_nom, res_caud, res_trec_raw, res_trec_std, descrip_std
+  )
+```
+
+Unique receptor codes observed in GoC municipalities (all discharge points, not just ocean):
+
+```{r unique-codes-by-year}
+# audit raw and harmonized receptor codes by year
+raw_and_harmonized <- goc_aguaresd_all_years %>%
+  group_by(census_year) %>%
+  summarise(
+    res_trec_raw = list(sort(unique(res_trec_raw))),
+    res_trec_std = list(sort(unique(res_trec_std))),
+    .groups = "drop"
+  )
+raw_and_harmonized
+
+## just double checking what was changed....
+```
