@@ -1,0 +1,438 @@
+# CMSY Stock Assesments
+# NOTE: Must run CMSY on personal machine. Can generate the main files here though. 
+
+################################################################################ 
+
+For questions contact: Erica Ferrer, Ph.D. at emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################ 
+
+# STEP 0: PRE-WORK ------------------------------
+
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+## Review Instructional Files:
+```{r Review the CMSY protocol developed by Ferrer et al. (2021)}
+# Absolute path to your PDF
+pdf_path <- normalizePath(
+  "~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_InstructionalFiles/Copy of Ferrer et al. (2021) CMSY Protocol.pdf",
+  winslash = "/", mustWork = TRUE
+)
+
+# Convert to file URL
+file_url <- paste0("file:///", URLencode(pdf_path, reserved = TRUE))
+
+# Open in default browser
+browseURL(file_url)
+```
+
+# STEP 1: CREATE FILE 1 - Landings Timeseries  ------------------------------
+- ABOUT FILE 1: File with annual landings in kg (and n_count observations) grouped by year per "stock". 
+- Here, stock is defined as the total population of GENUS X fished within the Gulf of California from Baja to northern Jalisco, not including landings from the Pacific.
+- I’m going to run CMSY at the genus level. I actually think it’s a safer more reliable bet than species-level info and because – in many cases – fishermen seem to target taxa of the same genus interchangeably.
+- This file was created in /home/ferrer/ohi_goc_prep/FP/CONAPESCA_CleanUp/CONAPESCA_CleaningWorkflow_Mar2026.Rmd
+
+## Re-generate time series (from 2004-2024) per genus to use in CMSY [FIRST DRAFT COMPLETE]
+
+```{r Load GOC_Landings_marine dataframe as needed}
+GOC_Landings_marine<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Landings_MARINE_2000.present_EMF.Apr032026.rds"))
+# 3312602 obs., 62 vars.
+```
+
+```{r FILTER OUT MARINE SECTORS OF INTEREST:}
+# FILTER OUT MARINE FISHERY SECTORS OF INTEREST: ----
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified" , "marine: small-scale capture", "marine: large-scale capture")
+
+GOC_Landings_mar.fisheries<- GOC_Landings_marine %>% 
+  filter(sector_estimate_draft %in% MarineFishery_Sectors)
+# 3107603 obs., 62 vars.
+
+range(GOC_Landings_mar.fisheries$year)
+```
+
+```{r Sort by genera}
+table(GOC_Landings_mar.fisheries$estimated_genus_name)
+# Some of these genera don't appear very often. I want to filter genera for which we have more than 10 years worth of data and > 10 records per year.
+
+# Summarize per genus and year
+GOC_Genera_summary <- GOC_Landings_mar.fisheries %>%
+  filter(!is.na(estimated_genus_name)) %>%
+  select(estimated_genus_name, Major_Functional_Group, year) %>%
+  group_by(estimated_genus_name, Major_Functional_Group, year) %>%
+  summarise(
+    n_records = n(),
+    .groups = "drop"
+  )
+
+table(GOC_Genera_summary$Major_Functional_Group)
+table(GOC_Genera_summary$estimated_genus_name)
+# Great! No freshwater taxa here.
+
+# - Restrict to years ≥ 2010
+# - For each genus × functional group × year and check if that year meets the threshold (>10 records)
+# - Count how many qualifying years each genus has
+# - Keep genera with ≥10 such years
+
+
+#### DETERMINE "STOCKS OF INTEREST" ####
+GOC_Genera_filtered <- GOC_Genera_summary %>%
+  filter(year >= 2010) %>%
+  filter(!estimated_genus_name %in% c("unknown", "NEI")) %>%
+  
+  # count qualifying years per genus
+  group_by(estimated_genus_name, Major_Functional_Group) %>%
+  filter(n_records > 10) %>%   # only keep years that meet threshold
+  summarise(n_qualifying_years = n_distinct(year), .groups = "drop") %>%
+  
+  # keep genera with >=10 qualifying years
+  filter(n_qualifying_years >= 10)
+# 95 obs. / genera and 3 vars.
+
+Stocks_of_Interest<- GOC_Genera_filtered$estimated_genus_name
+```
+
+
+## Filter records for Stocks_of_Interest from GOC_Landings_marine dataframe:
+
+```{r Filter dataset to generate time series for Stocks_of_Interest}
+# Keep only genera that meet the criteria in the main dataset
+GOC_Landings_cmsy <- GOC_Landings_marine %>%
+  filter(year < 2025) %>%
+  filter(estimated_genus_name %in% Stocks_of_Interest)
+# 2310529 obs., 62 vars.
+```
+
+## Generate time series for Stocks_of_Interest:
+
+```{r Generate time series}
+colnames(GOC_Landings_cmsy)
+
+CMSY_Landings_file1 <- GOC_Landings_cmsy %>%
+  filter(!is.na(estimated_genus_name)) %>%
+  # Summarize by year + genus
+  group_by(year, estimated_genus_name) %>%
+  summarise(
+    total_biomass_kg       = sum(weight_kg_corrected, na.rm = TRUE),
+    total_revenue          = sum(value, na.rm = TRUE)
+
+  ) %>%
+  arrange(estimated_genus_name, year)
+
+# 2252 obs., 4 obs.
+
+table(CMSY_Landings_file1$estimated_genus_name)
+# This looks great! 95 genera or "stocks" that are faily well sampled from 2000-2024.
+```
+
+## Add family and major group info to Stocks_of_Interest:
+```{r Load in helpful new FAOFamilyKey}
+FAOFamily_key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/FAOFamilyKey_COMPLETE_Apr042026.csv")
+
+# Trim key:
+colnames(FAOFamily_key)
+FAOFamily_key<- FAOFamily_key %>%
+  select(estimated_genus_name, Major_Functional_Group, estimated_taxa_group, new_estimated_family_name)
+```
+
+```{r Merge key to CMSY_Landings_file1 and rename columns as needed}
+CMSY_Landings_file1 <- left_join(CMSY_Landings_file1, FAOFamily_key, 
+                           by = "estimated_genus_name")
+# 2252 obs., 7 obs. (as expected)
+
+# Rename estimated_genus_name to "Stock"
+colnames(CMSY_Landings_file1)
+CMSY_Landings_file1 <- CMSY_Landings_file1 %>%
+  rename(Stock = estimated_genus_name)
+```
+
+
+# SAVE FILE 1:
+
+```{r Save these time series CMSY_Landings_file1}
+write.csv(CMSY_Landings_file1, row.names= FALSE, file= "/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Model_Input_Files/File1_CMSY_LandingsPerStock_Apr042026.csv")
+# 2252 obs., 7 obs. (as expected)
+```
+Okay! Timeseries are ready for CMSY.
+
+
+# STEP 2A: CREATE FILE 2 - Fill in metadata from priors  ------------------------------
+FILE 2: Create a meta-data file that includes all the information about stock. This file can probably be trimmed down but for now I recommend formatting it exactly as it appears from before.
+
+```{r Create File 2 based on File 1}
+# STEP 1: CREATE CMSY_Metadata_file2
+# Which taxa (stocks) do we want to account for in our File 2?
+Stock_names<- CMSY_Landings_file1 %>%
+  select(Stock, Major_Functional_Group, estimated_taxa_group, new_estimated_family_name) %>%
+  distinct()
+# 95 unique genera / stocks.
+
+## Read in the column names from blueprint of File 2.
+File2_blueprint <- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_InstructionalFiles/CMSY_File2_BluePrint_Apr032026.csv")
+File2_headers <- names(File2_blueprint)
+
+## Create an empty dataframe with the same File2_headers
+CMSY_Metadata_file2 <- data.frame(matrix(ncol = length(File2_headers), nrow = length(Stock_names$Stock)))
+colnames(CMSY_Metadata_file2) <- File2_headers
+
+# STEP 2: FILL CMSY_Metadata_file2
+## Populate CMSY_Metadata_file2 with info from Stock_names and File2_blueprint
+CMSY_Metadata_file2$Stock <- Stock_names$Stock
+CMSY_Metadata_file2$Major_Functional_Group <- Stock_names$Major_Functional_Group
+CMSY_Metadata_file2$estimated_taxa_group <- Stock_names$estimated_taxa_group
+CMSY_Metadata_file2$estimated_family_name <- Stock_names$new_estimated_family_name
+
+# Fill in some of the other columns:
+CMSY_Metadata_file2$Region <- unique(File2_blueprint$Region)
+CMSY_Metadata_file2$Source <- unique(File2_blueprint$Source)
+CMSY_Metadata_file2$Comment <- unique(File2_blueprint$Comment)
+
+CMSY_Metadata_file2$Sufficient_No_Years <- TRUE
+CMSY_Metadata_file2$Yes_Run <- c("Yes")
+CMSY_Metadata_file2$btype <- c("None")
+CMSY_Metadata_file2$force.cmsy <- c("TRUE")
+```
+
+```{r Save this file as UNDER CONSTRUCTION so I can work with it offline and use it to generate priors}
+write.csv(CMSY_Metadata_file2, row.names= FALSE,
+          "/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Model_Input_Files/File2_CMSY_StockMetadata_UNDERCONSTRUCTION_Apr032026.csv")
+```
+
+# STEP 2B: Generate Model Priors using other .R files ------------------------------
+1_StartingBiomass_EstimatePriors_Apr032026.R
+2_IntermediateYear_EstimatePriors_Apr032026.R
+3_CurrentRelativeBiomass_EstimatePriors_Apr032026.R
+
+
+# STEP 2C: COMPLETE FILE 2 with infro from new generated priors.   ------------------------------
+
+```{r lowercase_function}
+# Turns all entries lower-case
+lowercase_function<- function(x){
+  if(is.character(x)){
+    tolower(x)
+  } else if (is.factor(x)){
+    tolower(as.character(x))
+  } else {
+    x
+  }
+}
+```
+
+```{r Read in additional files to complete file 2}
+# Load File 2: CMSY_StockMetadata_file2
+Stock_Metadata = read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Model_Input_Files/File2_CMSY_StockMetadata_UNDERCONSTRUCTION_Apr032026.csv")
+Stock_Metadata<- as.data.frame(lapply(Stock_Metadata, lowercase_function))
+# 95 obs., 39 vars.
+
+# Load in generated priors:
+
+Priors_StartingBiomass <- read.csv("~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Generating_Model_Priors/Generated_Priors/1_StartingBiomassPriors_fromFAO_Apr042026.csv")
+Priors_StartingBiomass<- as.data.frame(lapply(Priors_StartingBiomass, lowercase_function))
+colnames(Priors_StartingBiomass)[1]<- "Stock_family"
+colnames(Priors_StartingBiomass)[4]<- "FisheryStatus_Circa2000"
+# 106 obs., 4 vars.
+
+Priors_IntermediateYear <- read.csv("~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Generating_Model_Priors/Generated_Priors/2_IntermediateYearsPriors_fromLandings_Apr042026.csv")
+Priors_IntermediateYear<- as.data.frame(lapply(Priors_IntermediateYear, lowercase_function))
+# 95 obs., 5 vars.
+
+Priors_IntEnd.Conditions <- read.csv("~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Generating_Model_Priors/Generated_Priors/3_IntermediateEndConditionsPriors_Apr042026.csv")
+Priors_IntEnd.Conditions<- as.data.frame(lapply(Priors_IntEnd.Conditions, lowercase_function))
+# 95 obs., 5 vars.
+
+
+# UNDER CONSTRUCITON: RETURN TO THIS LATER - ERICA Apr 4 2026
+Priors_Resilience <- read.csv("~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Generating_Model_Priors/Priors_Data/ResilienceEstimates_fromEMF_Dec2025.csv")
+Priors_Resilience<- as.data.frame(lapply(Priors_Resilience, lowercase_function))
+# 98 obs., 3 vars.
+```
+
+```{r Stitch in newly generated priors}
+# Add Starting Biomass Priors
+colnames(Priors_StartingBiomass)
+
+Stock_Metadata <- Stock_Metadata %>%
+  left_join(Priors_StartingBiomass,
+            by = c("estimated_family_name" = "Stock_family"),
+            suffix = c("", ".new")) %>%
+  mutate(
+    st_b.low = coalesce(st_b.low.new, st_b.low),
+    st_b.hi  = coalesce(st_b.hi.new, st_b.hi)
+  ) %>%
+  select(-st_b.low.new, -st_b.hi.new)
+# 95 obs., 40 vars.
+
+
+# Add Intermediate Year Priors
+colnames(Priors_IntermediateYear)
+
+Stock_Metadata <- Stock_Metadata %>%
+  left_join(Priors_IntermediateYear, by = "Stock", suffix = c("", "_overwrite")) %>%
+  mutate(
+    int_yr = int_yr_overwrite,
+    StartYear = StartYear_overwrite,
+    EndYear = EndYear_overwrite,
+    Sufficient_No_Years = Sufficient_No_Years_overwrite
+  ) %>%
+  select(-ends_with("_overwrite"))
+
+
+# Add Intermediate & End Conditions Priors
+colnames(Priors_IntEnd.Conditions)
+
+Stock_Metadata <- Stock_Metadata %>%
+  left_join(Priors_IntEnd.Conditions, by = "Stock", suffix = c("", "_overwrite")) %>%
+  mutate(
+    int_b.low = int_b.low_overwrite,
+    int_b.hi = int_b.hi_overwrite,
+    end_b.low = end_b.low_overwrite,
+    end_b.hi = end_b.hi_overwrite
+  ) %>%
+  select(-ends_with("_overwrite"))
+
+
+# Add Resilience Priors - UNDER CONSTRUCTION, Apr 4 2026
+colnames(Priors_Resilience)
+
+Stock_Metadata <- Stock_Metadata %>%
+  left_join(Priors_Resilience, by = "Stock", suffix = c("", "_overwrite")) %>%
+  mutate(
+    Resilience = Resilience_overwrite,
+  ) %>%
+  select(-ends_with("_overwrite"))
+```
+
+```{r Finally lets clean up File 2 before saving}
+colnames(Stock_Metadata)
+
+CMSY_StockMetadata_file2<- Stock_Metadata %>% 
+  select(Region, Stock, estimated_family_name, Major_Functional_Group, estimated_taxa_group,
+         Landings_Datasource= Source, 
+         Sufficient_No_Years,
+         StartYear, EndYear, int_yr,
+         btype,
+         Flim, Fpa, Blim, Bpa, Bmsy, B40,
+         FMSY, MSY, MSYBtrigger, M,
+         Fofl, last_F,
+         q.start, q.end,
+         FisheryStatus_Circa2000, st_b.low, st_b.hi, 
+         int_b.low, int_b.hi, end_b.low, end_b.hi,
+         r.low, r.hi, 
+         Resilience, Resilience_Source,
+         Yes_Run, Comment)
+# 95 obs., 38 vars.
+```
+
+# SAVE FILE 2:
+```{r Save these time series CMSY_Landings_file1}
+write.csv(CMSY_StockMetadata_file2, row.names= FALSE, file= "/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Model_Input_Files/File2_CMSY_StockMetadata_Apr042026.csv")
+# 95 obs., 38 vars.
+```
+
+# Stopped here April 4 2026.
+
+
+
+
+# OTHER: Misc. work.
+
+```{r How much of FP will these CMSY stocks account for?}
+Landings_CMSY_TEST <- Landings_GoC_NoFresh.NoMariculture %>%
+  mutate(estimated_genus_name = tolower(estimated_genus_name))
+
+CMSY_Stocks <- CMSY_Metadata_file2_merged %>%
+  filter(Yes_Run == 1) %>%
+  pull(Stock) %>%
+  unique()
+
+CMSY_Stocks_hypothetical <- c(
+  CMSY_Stocks, 
+  "sardinops", 
+  "opisthonema", 
+  "sarda",
+  "scomber"
+)
+
+# Calculate total from genera landings identified in the CMSY exercise:
+# NOTE TO SELF: Come back to this. Find priors for these four taxa! They represent a huge component of total landings.
+Landings_CMSY_summary <- Landings_CMSY_TEST %>%
+  filter(year %in% 2015:2024) %>%           # only last 10 years
+  mutate(is_CMSY = estimated_genus_name %in% CMSY_Stocks_hypothetical) %>%  # flag CMSY genera
+  summarise(
+    total_landings = sum(weight_kg_corrected, na.rm = TRUE),                # total landings
+    CMSY_landings  = sum(weight_kg_corrected[is_CMSY], na.rm = TRUE)       # landings from CMSY genera
+  ) %>%
+  mutate(percent_CMSY = 100 * CMSY_landings / total_landings)    # percentage
+  
+Landings_CMSY_summary
+# If I can sort out priors for these four extra txa, CMSY could account for ~50% of all GoC landings in the last five years.
+```
+
+```{r How much of FP will these CMSY stocks account for?}
+Landings_CMSY_TEST <- Landings_GoC_NoFresh.NoMariculture %>%
+  mutate(estimated_genus_name = tolower(estimated_genus_name))
+
+CMSY_Stocks <- CMSY_Metadata_file2_merged %>%
+  filter(Yes_Run == 1) %>%
+  pull(Stock) %>%
+  unique()
+
+CMSY_Stocks_hypothetical <- c(
+  CMSY_Stocks, 
+  "sardinops", 
+  "opisthonema", 
+  "sarda",
+  "scomber"
+)
+
+# Calculate total from genera landings identified in the CMSY exercise:
+# NOTE TO SELF: Come back to this. Find priors for these four taxa! They represent a huge component of total landings.
+Landings_CMSY_summary <- Landings_CMSY_TEST %>%
+  filter(year %in% 2015:2024) %>%           # only last 10 years
+  mutate(is_CMSY = estimated_genus_name %in% CMSY_Stocks_hypothetical) %>%  # flag CMSY genera
+  summarise(
+    total_landings = sum(weight_kg_corrected, na.rm = TRUE),                # total landings
+    CMSY_landings  = sum(weight_kg_corrected[is_CMSY], na.rm = TRUE)       # landings from CMSY genera
+  ) %>%
+  mutate(percent_CMSY = 100 * CMSY_landings / total_landings)    # percentage
+  
+Landings_CMSY_summary
+# If I can sort out priors for these four extra txa, CMSY could account for ~50% of all GoC landings in the last five years.
+```
+
+
+# RUN CMSY: Ran on personal machine. Here are the outputs from that analysis:
+
+```{r Load in CMSY asessment results}
+# Actual B/Bmsy output from CMSY:
+CMSY_Timeseries_original<- read.csv("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_StockStatus_Scores/CMSY_Scores/Output_Files/CMSY_Assessment_Timeseries_Dec102025.csv")
+# 775 obs., 13 vars.
+```
