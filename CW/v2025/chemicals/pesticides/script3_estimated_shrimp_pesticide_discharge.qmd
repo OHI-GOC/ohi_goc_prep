@@ -38,10 +38,321 @@ library(janitor)
 library(tibble)
 ```
 
+### Watersheds and pour points
+
+```{r}
+## lets use the full state for now and then summarize by the full watersheds.
+goc_ohi_rgns <- st_read(here::here("spatial/ohi_regions","goc_ohi_rgns.shp"))
+
+union_rgns <- goc_ohi_rgns %>% 
+  st_union() %>% 
+  st_make_valid()
+
+# plot(goc_ohi_rgns)
+# plot(union_rgns)
+
+watershed_all <- st_read(file.path("/home/shares/ohi/stressors_2021/_dataprep/nutrients/watersheds_pourpoints/watersheds_all_4326.shp"))
+st_crs(watershed_all)
+# mapview(watershed_all)
+
+watershed_goc <- st_intersection(st_transform(watershed_all, st_crs(union_rgns)), union_rgns)
+mapview(watershed_goc)
+
+# --- if we plan to change the buffer for some reason ---
+# inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
+# watershed_goc_50km <- st_intersection(st_transform(watershed_all, st_crs(inland_50)), inland_50)
+# mapview(watershed_goc_50km)
+```
+
+
+```{r}
+# here's the associated pourpoints that should match with the watersheds:
+pourpoints <- st_read("/home/shares/ohi/stressors_2021/_dataprep/nutrients/watersheds_pourpoints/pourpoints_mol.shp")
+
+pourpoints_goc <- st_intersection(st_transform(pourpoints, st_crs(union_rgns)), union_rgns)
+mapview(pourpoints_goc)
+
+mapview(pourpoints_goc) + mapview(watershed_goc)
+```
+
+### Calculate aquacultural area per watershed
+
 ```{r}
 # bring in the aquaculture land use over time output:
 usv_aq <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int/usv_aquaculture_goc_allyears.gpkg"))
-
 mapview(usv_aq)
+
+unique(usv_aq$year)
+
+usv_aq_2005 <- usv_aq %>% 
+  filter(year %in% "2005")
+usv_aq_2009 <- usv_aq %>% 
+  filter(year %in% "2009")
+usv_aq_2013 <- usv_aq %>% 
+  filter(year %in% "2013")
+usv_aq_2016 <- usv_aq %>% 
+  filter(year %in% "2016")
+usv_aq_2021 <- usv_aq %>% 
+  filter(year %in% "2021")
+
+mapview(usv_aq_2005, col.regions = "red") + mapview(usv_aq_2009, col.regions = "darkorange") + mapview(usv_aq_2013, col.regions = "orange") + mapview(usv_aq_2016, col.regions = "yellow") + mapview(usv_aq_2021, col.regions = "green")
+
+mapview(usv_aq_2021, col.regions = "green") + mapview(watershed_goc) + mapview(pourpoints_goc)
+
+```
+
+```{r}
+# reproj usv to match watersheds CRS
+usv_aq_reproj <- st_transform(usv_aq, st_crs(watershed_goc)) # so that it is in meters not degrees
+
+# Coordinate Reference System:
+#   User input: Mexico ITRF2008 / LCC 
+#   wkt:
+# PROJCRS["Mexico ITRF2008 / LCC",
+#     BASEGEOGCRS["Mexico ITRF2008",
+#         DATUM["Mexico ITRF2008",
+#             ELLIPSOID["GRS 1980",6378137,298.257222101,
+#                 LENGTHUNIT["metre",1]]],
+
+# intersect aq polygons with watersheds
+usv_aq_watershed <- st_intersection(usv_aq_reproj, watershed_goc) %>%
+  mutate(area_ha = as.numeric(st_area(.)) / 10000)  # there are 0.0001 hectares in 1 square meter, to convert from square meters to hectares, multiply by 0.0001 or divide by 10000
+```
+
+Check out 2021:
+```{r}
+usv_aq_watershed_2021 <- usv_aq_watershed %>% 
+  filter(year %in% 2021)
+
+mapview(usv_aq_watershed_2021, zcol = "area_ha") 
+
+mapview(usv_aq_watershed_2021, zcol = "basin_id") + mapview(watershed_goc, zcol = "basin_id")
+```
+
+
+```{r}
+# summarize hectares per watershed per year
+aq_area_by_watershed <- usv_aq_watershed %>%
+  st_drop_geometry() %>% # maybe take out...
+  group_by(basin_id, year) %>% 
+  summarize(aq_area_ha = sum(area_ha, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  mutate(year = as.numeric(year))
+```
+
+### Join with literature rates of liming chemicals 
+
+Lyle-Fritch et al. 2006, *"A survey on use of the chemical and biological products for shrimp farming in Sinaloa (NW Mexico)"*, is the most comprehensive manuscript detailing intensity and rates of application of pesticides and other disinfectant chemicals for shrimp farming in the Gulf of California. 
+
+<https://www.sciencedirect.com/science/article/pii/S0144860905001299>
+
+See Table 4: List of liming materials with application rates in shrimp ponds from Sinaloa, Mexico during the 2002 survey.
+
+The types of liming materials used are hydrated lime, agricultural limestone, agricultural and hydrated lime, unidentified liming compound, and burnt lime.  
+
+>"3.3.3. Soil and water treatment compounds"
+>"Since 2000, when the presence of white spot syndrome virus (WSSV) in Sinaloa coast was detected, a common procedure for preparing pond soils before stocking was generated among farms. This procedure consists of drying the soils, then dragging and finally, liming. It was found that 91.3% of farms dry naturally the soils for 30 or until 210 days (average 86 days), followed by dragging until a depth of 20 cm. Finally, most of farms (82.6%) apply lime to adjust pH when are low (pH < 6) and as preventing disinfectant. The application rate of liming in soils varied from 3 to 1500 kg ha−1 (average 571 kg ha−1), being the hydrated lime the most frequently used (47.8%) and the burnt lime the least frequently used (8.7%) (Table 4). The application rate is variable among the different culture systems, semi-intensive farms apply the higher amounts (average, 660 kg ha−1), following intensive farms (500 kg ha−1) and extensive farms (151 kg ha−1)."
+>
+>"Additionally, liming application is made on the water ponds every 1 or 2 weeks through doses range from 25 to 200 kg ha−1, most of the farms use 50-100 kg ha−1 (average 73 kg ha−1), product application may vary either pre-dissolved (41.2% of farms) or by blowing (52.9%); only in one farm the product was added in combination with food (2 kg lime per 25 kg of food). In addition to liming, in one farm the addition of 2 L ha−1 of iodine solution as disinfectant was registered."
+
+See Table 5: List of diseases registered during the study, considering the different types: bacterial (●) virus (■); parasitic (♦) and red tides (command icon)
+
+>"3.3.5. Antibiotics and diseases"
+>"During 2001 diseases occurred in 95.7% of the interviewed farms. Two or more different diseases were detected in 81.8% of farms, while in the remaining 18.2% only one disease was evidenced (Table 5). The most frequent diseases were associated to gregarines, vibriosis and WSSV. It is important to indicate that in most (56.5%) of the interviewed farms, two or more diseases were reported for the 2001 culture cycles, being gregarines and/or vibriosis always present, which indicates that these last diseases are propitiable for the virus infection."
+>
+>"During the presence of diseases, the first action performed by most of the farms (60.5%) was to increase the water exchange rate. Other measures include liming, use of probiotics and antibiotics. Most (56.5%) of the farmers consider that autumn and winter were the seasons that mainly enhance the spreading of diseases. When diseases occur, most of the farms (78.3%) treat the pond soils as indicated in Section 3.3.3."
+>
+>"When diseases occur, 19 of the farmers (82.6%) use antibiotics combined with food, while the rest (17.4%) do not use any treatment. Table 6 shows the dose and frequency of antibiotics and disinfectants in Sinaloa during this survey. Most commonly used antibiotics were oxytetracycline (47.8%), enrofloxacin (21.7%) and monensin-sodium (17.4%). Additionally, six antibiotics were used; a few farms used a mix of garlic, onion and lemon as therapeutant. In only three of the farms, where occurred WSSV, liming was used as control measure (Table 6). Farmers considered that antibiotics were effective in 83.3% of cases; however, the average survival after treatment was 48.2%. From available information in 78.3% of the interviewed farms, mortality by diseases fluctuated between 8 and 100%, being the average 54.8%."
+
+See Table 6: Dose and frequency of application rates of antibiotics and disinfectants in shrimp farms during 2002 in Sinaloa (Mexico)
+
+>"Comparatively, semi-intensive farms used a major number of antibiotics (average 2.0 antibiotics per farm) than intensive (0.5 antibiotics per farm) and extensive (1.0 antibiotics per farm) farms (Table 7). One of two intensive shrimp farms and two of the three extensive farms used antibiotics mixed with food. Eleven of 18 semi-intensive farms also applied antibiotics combined with food."
+
+See Table 7: Number of chemical and biological products used per farm considering the management system in Sinaloa, Mexico during 2002
+
+>"In this survey, it was found that most (87%) of the farm effluents are discharged in creeks, characterized by eutrophic or hypertrophic waters with poor circulation; this way receiving waters are more vulnerable to water quality deterioration and eutrophication. Among the effects related to the water quality deterioration are (Páez-Osuna, 2001): oxygen depletion, light reduction, increases in chlorophyll a and changes in benthic macrofauna."
+>
+>"Residues of antibiotics in the environment may affect coastal or marine ecosystems and human health. It is one of the main problems of shrimp pond management (Le and Munekage, 2004). In addition to target organisms, the final destination of antibiotics applied in aquaculture can be non-target organisms, water, suspended solids and sediments (Páez-Osuna et al., 2003). The main effect that antibiotics have on the suspended solids in the water column of both shrimp ponds and receiving waters is that they reduce the number of bacteria adhered to those solids, reducing the food availability to the meio and macrofauna which feed on them (Weston, 1996). Concerning the presence of antibiotics in sediments, they may affect microbial capacity of sediments to the sulfate-reduction. However, the main concern is related to the repeated and prolonged use of antibiotics that leads to the development of resistance among pathogens (Páez-Osuna, 2001). Antibiotic resistance to pathogens poses several risks. The transference of resistance genes directly to bacteria that infect humans can also happen, with a consequent increment in the incidence of infections caused by resistant pathogens, leading to an increment in therapeutic failure in both animals and humans (Páez-Osuna et al., 2003).
+Environmental studies on antibiotics in shrimp farms and surroundings are really limited. Recently, it has been reported the presence of residues of antibiotics in water and mud from shrimp ponds in Vietnam (Le and Munekage, 2004); they found residues of trimethoprim, sulfamethoxazole, norfloxacin and oxolinic acid in samples from both shrimp ponds and adjacent canals, clearly evidencing that surrounding environment has also been polluted by antibiotic residues."
+>
+> "In general, antibiotics have not been well investigated from an ecotoxicological perspective (Graslund et al., 2003), but recent studies have shown that many antibiotics are from moderately to highly toxic to algae (Holten-Lutzhoft et al., 1999, Halling-Sorensen, 2000) and Daphnia magna (Wollenberger et al., 2000). Halling-Sorensen et al. (2003) investigated the stability of various antibiotics, including oxytetracycline under experimental conditions (aerobic and anaerobic) in soil interstitial water and sewage sludge water. With the exception of streptomycin and ciprofloxacin, the antimicrobial agents generally lost a considerable amount of their anti-microbial potency under aerobic conditions. In the anaerobic experiments, only oxytetracycline retained potency. These results have several implications, considering that oxytetracycline is the most frequently utilized antibiotic in Sinaloa and that mangrove sediments are characterized by an anaerobic environment, therefore, it is predictable that such antibiotic remain active for various days or weeks in mangrove sediments that receive discharges from shrimp farms containing oxytetracycline.
+During 2002, in Mexico, were established several rules that include requirements and measures to control disease outbreaks and for the use and application of antibiotics in shrimp aquaculture. For instance Section 4.1B in Norma Official Mexicana NOM-EM-05-PESC-2002, prohibits the use of chloramphenicol and furazolidone (nitrofurans) in shrimp farming. Section 4.14 prohibits treatment with antibiotics 30 days before the harvest. However, in most of the cases there is an insufficient capacity to guarantee the enforcement of such rules."
+>
+> "Finally, it is important to indicate that figures shown here should be considered as an estimation, given the fact that could document fewer or more products than were actually in use. A special effort was made to document amounts, volumes and frequencies of usage of the products; however, such information was limited or unavailable. Another relevant aspect (Graslund et al., 2003) that might be the situation in Sinaloa is that farmers using many products may have used them rarely and carefully, while other farmers using few products may have used them indiscriminately, and vice versa and thereby created larger hazards to himself and the environment."
+
+---
+
+Note that "NOM-EM-05-PESC-2002 establishes the requirements and measures to prevent and control the dispersion of high impact diseases and the requirements for the use of antibiotics in shrimp cultivation (National Fisheries Chart, 2004)." 
+
+> "With regard to aquatic health, the System of Information on Diagnosis Results of the Laboratory Network (SIRED) has been established with the objective of providing information to CONAPESCA and SENASICA on the confirmation of high-risk diseases in aquaculture. Also, the Aquaculture Health Committees have been founded, as auxiliary entities for the prevention, diagnosis and control of aquaculture diseases; the Committees also promote sanitation campaigns (SAGARPA, 2004). At present, there are 17 Aquaculture Health Committees belonging to the states of Aguascalientes, Baja California, Baja California Sur, Chihuahua, Mexico, Hidalgo, Jalisco, Michoacán, Morelos, Nayarit, Sinaloa, Sonora, Tabasco, Tamaulipas, Tlaxcala, Puebla and Veracruz."
+
+^ © FAO. 2026. National Aquaculture Sector Overview - Mexico. Mexico. Text by Montero Rodríguez, M.. In: Fisheries and Aquaculture [online]. [Cited Thursday, May 28th 2026].
+http://www.fao.org/fishery/countrysector/MX/en?status=published
+
+
+---
+
+
+#### Source
+
+Lyle-Fritch, L. P., Romero-Beltrán, E., & Páez-Osuna, F. (2006). A survey on use of the chemical and biological products for shrimp farming in Sinaloa (NW Mexico). *Aquacultural Engineering*, 35(2), 135-146. [doi:10.1016/j.aquaeng.2005.09.006](https://doi.org/10.1016/j.aquaeng.2005.09.006)
+
+**Survey:** 23 farms in Sinaloa, June to July 2002 (diseases were from the 2001 cycle).
+**Systems:** 18 were semi-intensive, 2 intensive, 3 extensive. See `2. Materials and Methods`.
+
+#### Table 4: Liming materials
+
+| Compound | Number of farms | % | Average (range) kg/ha |
+|----------|-----------------|---|-------------------------|
+| Hydrated lime | 11 | 47.8 | 628 (3-1500) |
+| Agricultural limestone | 3 | 13.0 | 363 (100-625) |
+| Agricultural and hydrated lime | 2 | 8.7 | 350 (300-400) |
+| Unidentified liming compound | 1 | 4.4 | 373 |
+| Burnt lime | 2 | 8.7 | 750 (500-1000) |
+| Without application | 4 | 17.4 | - |
+| **Total** | **23** | **100** | **571 (3-1500)** |
+
+**Also from Section 3.3.3 (not in Table 4):** water liming **73 kg/ha** per application, every 1-2 weeks; semi-intensive soil liming **660 kg/ha** per cycle (of which, semi-intensive farms are the most common).
+
+| File | Content from Lyle-Fritch et al. 2006 |
+|------|--------------------------------------|
+| `lyle_fritch_table4_liming_materials.csv` | Table 4: soil liming by compound |
+| `lyle_fritch_table4_liming_by_system.csv` | Soil liming by culture system |
+| `lyle_fritch_table4_water_liming_parameters.csv` | §3.3.3 water liming |
+| `lyle_fritch_cycle_parameters.csv` | Cycle length and cycles per year |
+
+**Note:** Disease treatment lime in Table 6 (`include_in_lime_estimate = yes` but excluded here) overlaps routine liming; see `aquaculture_antibiotics_estimation.qmd`.
+
+```{r load-rates}
+data_dir <- here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int/lyle_fritch_et_al_2006_digitized_data")
+
+table4 <- read_csv(file.path(data_dir, "lyle_fritch_table4_liming_materials.csv"))
+table4_system <- read_csv(file.path(data_dir, "lyle_fritch_table4_liming_by_system.csv"))
+water_params <- read_csv(file.path(data_dir, "lyle_fritch_table4_water_liming_parameters.csv"))
+cycle_params <- read_csv(file.path(data_dir, "lyle_fritch_cycle_parameters.csv"))
+```
+
+
+```{r load-rates}
+# first, let's isolate the average kg per ha of liming materials added to the dried out soil, for semi-intensive aquaculture (considering that this is the most common type):
+lime_soil_semi <- table4_system %>%
+  filter(culture_system == "Semi-intensive") %>%
+  pull(soil_lime_avg_kg_ha_cycle)
+
+# let's make a function so we do not have to copy paste the same code over and over...
+get_param <- function(df, name) df %>% 
+  filter(parameter == name) %>% 
+  pull(value)
+
+# now, isolate all the other parameters from the paper that are useful.
+water_per_app <- get_param(water_params, "water_lime_per_application") # "Additionally, liming application is made on the water ponds every 1 or 2 weeks through doses range from 25 to 200 kg ha 1, most of the farms use 50100 kg ha 1 (average 73 kg ha 1), product application may vary either pre-dissolved (41.2% of farms) or by blowing (52.9%); only in one farm the product was added in combination with food (2 kg lime per 25 kg of food). In addition to liming, in one farm the addition of 2 L ha 1"
+interval_mid <- get_param(water_params, "water_lime_interval_days_mid") # midpoint between 1-2 weeks (aka between 7 and 14 days)
+cycle_days <- get_param(cycle_params, "culture_cycle_days_first") # "On an average, the duration of the first cycle of the year is 139 days and the second cycle 127 days. Considering the 23 farms, a total of 566 employees were registered; 28% is laboring in feeding, 20% in pumping stations,..."
+cycles_yr <- get_param(cycle_params, "cycles_per_year_weighted") # use the formula μw = (w₁x₁ + w₂x₂ + ... + wₙxₙ) ÷ (w₁ + w₂ + ... + wₙ) Where: μw = weighted mean x₁, x₂ = values w₁, w₂ = weights...... so to get the weighted average across all farms, of which "Over half (60.9%) of the farms operate two culture cycles per year, 34.8% one cycle, and in 4.3% of the farms the culture is continuous, operating 2.5–3 culture cycles per year.", then we do (2 * 60.9) + (1 * 34.8) + (2.5 * 4.3) = 167.35, where 60.9% + 34.8% + 4.3% = 100%, so 167.35 / 100 = 1.67. 
+```
+
+
+```{r load-rates}
+# OKAY! so let's calculate how many times the liming solution was applied on average...
+n_water_apps <- floor(cycle_days / interval_mid) # was 13.2381, but you can't have 0.2381 applications, so we can round down to 13.
+
+# now let us see how much will be applied per cycle for water liming...
+lime_water_per_cycle <- water_per_app * n_water_apps # 73 kg/ha * 13 applications/year
+
+# and this is for semi-intensive soil liming....
+lime_kg_ha_cycle <- lime_soil_semi + lime_water_per_cycle # soil (660 kg/ha) + water (949 kg/ha per year)
+lime_kg_ha_year <- lime_kg_ha_cycle * cycles_yr # this is 2687.03 kg/ha per total cycle, multiplied by the number of cycles per year to get the full yearly application amount: 1609 * 1.67
+
+# tibble(
+#   soil_lime_kg_ha_cycle = lime_soil_semi,
+#   water_lime_kg_ha_cycle = lime_water_per_cycle,
+#   water_applications_per_cycle = n_water_apps,
+#   lime_kg_ha_cycle = lime_kg_ha_cycle,
+#   cycles_per_year = cycles_yr,
+#   lime_kg_ha_year = lime_kg_ha_year
+# )
+# 
+# table4
+```
+
+## Estimated lime mass (kg)
+
+What we want here is to estimate the total kg applied per year to each region.
+
+```{r estimate-lime}
+lime_watershed <- aq_area_by_watershed %>%
+  mutate(
+    lime_kg = aq_area_ha * lime_kg_ha_year, # ha * (kg/ha) = kg / year
+    rate_source = "Lyle-Fritch 2006 Table 4 + §3.3.3", # to keep track of this.
+    survey_year = 2002L # as integer!!
+  )
+```
+
+## Pour points and OHI regions
+
+```{r pourpoints}
+lime_by_watershed <- lime_watershed %>%
+  group_by(basin_id, year) %>% # group by the basin, and summarize the total kg of lime applied.
+  summarize(
+    aq_area_ha = sum(aq_area_ha, na.rm = TRUE),
+    lime_kg = sum(lime_kg, na.rm = TRUE),
+    .groups = "drop"
+  )
+summary(lime_by_watershed)
+
+pourpoints_lime <- pourpoints_goc %>%
+  dplyr::select(basin_id) %>%
+  left_join(lime_by_watershed, by = "basin_id")
+```
+
+
+```{r ohi_marine_and_inland}
+inland_50 <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer", "inland_50km_goc.shp"))
+inland_10 <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer", "inland_10km_goc.shp"))
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+
+marine_and_inland50 <- bind_rows(regions_marine, inland_50) %>%
+  dplyr::select(rgn_id, geometry) %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
+
+marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>%
+  dplyr::select(rgn_id, geometry) %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
+```
+
+
+```{r pourpoints}
+pourpoints_lime_final <- pourpoints_lime %>%
+  filter(!is.na(lime_kg), lime_kg > 0) %>% # note that the watershed with the id 73730 wraps around, and that the pour point is only on the left side...not sure that is correct.
+  st_intersection(marine_and_inland50) %>% # keep those within 50 km...
+  mutate(is_within_10km = lengths(st_within(., marine_and_inland10)) > 0) %>% # but make sure not to keep the ones on the pacific side of the peninsula.
+  filter(!(is_within_10km == FALSE & rgn_id == "Region_4"))
+
+mapview(pourpoints_lime_final, zcol = "lime_kg") + mapview(usv_aq_2021, col.regions = "red") + mapview(watershed_goc, col.regions = "pink")
+
+pourpoints_lime_rgnid <- st_intersection(pourpoints_lime_final, goc_ohi_rgns) %>%
+  st_drop_geometry() %>%
+  group_by(rgn_id, year) %>%
+  summarize(
+    aq_area_ha = sum(aq_area_ha, na.rm = TRUE),
+    lime_kg = sum(lime_kg, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+pourpoints_lime_rgnid
+```
+
+# Save to mazu
+
+```{r save}
+write_csv(lime_watershed, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int/shrimp_lime_kg_by_watershed_lyle_fritch.csv"))
+
+write_csv(pourpoints_lime_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int/shrimp_lime_kg_by_rgnid_lyle_fritch.csv"))
+
+st_write(pourpoints_lime_final, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int/shrimp_lime_kg_pourpoints_lyle_fritch.gpkg"), delete_dsn = TRUE # so it can overwrite if changes are made.
+)
 ```
 
