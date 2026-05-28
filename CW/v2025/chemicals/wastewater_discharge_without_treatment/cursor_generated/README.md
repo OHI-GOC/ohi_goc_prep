@@ -39,8 +39,8 @@ After cleaning, every year is returned with these columns (where available):
 | `cve_geo` | Geographic key (2021/2023 only) |
 | `res_nom` | Discharge point name |
 | `res_caud` | Flow rate in L/s (2021/2023 only) |
-| `res_v_m3` | Measured volume in m³ (2019 only) |
-| `res_v_es` | Estimated volume in m³ (2019 only) |
+| `res_v_m3` | Measured volume in mÂ³ (2019 only) |
+| `res_v_es` | Estimated volume in mÂ³ (2019 only) |
 | `res_trec_raw` | Receptor code as reported in that year's raw data |
 | `res_trec_std` | Receptor code mapped to the 2023 standard |
 | `descrip_std` | Label for the harmonized receptor code |
@@ -61,7 +61,7 @@ Used in `res_trec` (2023) and `cuerprec` (2021):
 | Code | Description |
 |------|-------------|
 | 0 | No aplica / Sin respuesta |
-| 1 | Río o arroyo |
+| 1 | RÃ­o o arroyo |
 | 2 | Lago o laguna |
 | 3 | Presa |
 | 4 | Suelo o barranca |
@@ -81,7 +81,7 @@ Used in `res_trec` (2019), `agua_resd_tip_crp_recp` (2017), and `P9_1_2` (2015):
 | Code | Description |
 |------|-------------|
 | 0 | No aplica / Sin respuesta (2019, 2017 only) |
-| 1 | Río o arroyo |
+| 1 | RÃ­o o arroyo |
 | 2 | Lago o laguna |
 | 3 | Presa |
 | 4 | Suelo o barranca |
@@ -100,7 +100,7 @@ Used in `P11_CPO_RP`:
 
 | Code | Description |
 |------|-------------|
-| 1 | Río o arroyo |
+| 1 | RÃ­o o arroyo |
 | 2 | Lago o laguna |
 | 3 | Presa |
 | 4 | Suelo o barranca |
@@ -114,7 +114,7 @@ Used in `P11_CPO_RP`:
 
 **Mapping to 2023 standard:** `5 ? 6` (Mar)
 
-Note: 2013 uses the same numeric values as 2015–2019 for Mar, but the catalog file (`TD_CUERPO_RECEPTOR.csv`) lists categories in a different order.
+Note: 2013 uses the same numeric values as 2015Â–2019 for Mar, but the catalog file (`TD_CUERPO_RECEPTOR.csv`) lists categories in a different order.
 
 ---
 
@@ -143,7 +143,7 @@ Note: 2013 uses the same numeric values as 2015–2019 for Mar, but the catalog fi
 - **Receptor catalog:** `catalogos/ttc_tipo_cuerpo_recp_2018.csv`
 - **Notes:**
   - Data reflects 2018 reporting year inside the 2019 census release.
-  - Flow is reported as volume (m³), not L/s.
+  - Flow is reported as volume (mÂ³), not L/s.
   - `folio` is stored as a zero-padded 5-character string (e.g. `"01001"`).
   - `res_espe` holds free text when receptor code is 8 (Otro).
   - No `cve_geo` column.
@@ -209,7 +209,7 @@ Across years, numeric and character fields may contain:
 |------|---------|
 | NSS | No sabe / no cuenta con elementos para responder |
 | NA | No aplica |
-| ND | Información no disponible |
+| ND | InformaciÃ³n no disponible |
 | NP | No publicable (confidentiality) |
 | NULL | Missing |
 
@@ -234,5 +234,5 @@ The cleaning script converts these to proper `NA` values before analysis.
 
 **Key outputs:**
 
-- `goc_aguaresd_all_years` — all GoC discharge points, all years, harmonized schema
-- `goc_aguaresd_ocean` — subset discharging to Mar, Playa, or Estero/marisma
+- `goc_aguaresd_all_years` Â— all GoC discharge points, all years, harmonized schema
+- `goc_aguaresd_ocean` Â— subset discharging to Mar, Playa, or Estero/marisma
