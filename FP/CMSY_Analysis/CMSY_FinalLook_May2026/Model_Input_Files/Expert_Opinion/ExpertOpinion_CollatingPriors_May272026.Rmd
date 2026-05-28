@@ -1,0 +1,429 @@
+# Collating Expert Opinion for CMSY Run
+
+################################################################################ 
+
+For questions contact: Erica Ferrer, Ph.D. at emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################ 
+
+# STEP 0: PRE-WORK ------------------------------
+
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+## Add family and major group info to Stocks_of_Interest:
+```{r Load in helpful new FAOFamilyKey}
+FAO_Family.Key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/FAO_FamilyGenusKey_COMPLETE_Apr042026.csv")
+
+# Trim key:
+colnames(FAO_Family.Key)
+
+FAO_Family.Key<- FAO_Family.Key %>%
+  select(estimated_genus_name, Major_Functional_Group, estimated_taxa_group, new_estimated_family_name)
+```
+
+```{r Load in my priors for numeric reference}
+ReferencePriors_Erica<- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/Expert_Opinion/CMSY.Priors_ParticipantActivity_April2026_Erica.csv")
+
+colnames(ReferencePriors_Erica)
+
+# Current / ending biomass, numeric conversion:
+Ref_End.B.Priors_numeric<- ReferencePriors_Erica %>%
+  select(FisheryStatus_Circa2024, end_b.low, end_b.hi) %>%
+  group_by(FisheryStatus_Circa2024) %>%
+  summarize(mean_end_b.low= mean(end_b.low, na.rm= TRUE),
+            mean_end_b.hi= mean(end_b.hi, na.rm= TRUE),
+    ) %>%
+  distinct()
+
+# Starting biomass, numeric conversion:
+Ref_Start.B.Priors_numeric<- ReferencePriors_Erica %>%
+  select(FisheryStatus_Circa2000, st_b.low, st_b.hi) %>%
+  group_by(FisheryStatus_Circa2000) %>%
+  summarize(mean_st_b.low= mean(st_b.low, na.rm= TRUE),
+            mean_st_b.hi= mean(st_b.hi, na.rm= TRUE),
+    ) %>%
+  distinct()
+```
+
+```{r Clean up reference priors}
+table(Ref_Start.B.Priors_numeric$FisheryStatus_Circa2000)
+     # depleted       healthy new / healthy   sustainable       UNKNOWN 
+     #        1             1             1             1             1
+
+table(Ref_End.B.Priors_numeric$FisheryStatus_Circa2024)
+         # depleted           healthy     new / healthy severely depleted       sustainable           UNKNOWN 
+         #        1                 1                 1                 1                 1                 1 
+```
+
+# Collate Expert Opinion
+```{r Collate Expert Opinion}
+Priors_Adrian<- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/Expert_Opinion/CMSY.Priors_ParticipantActivity_April2026_Adrian.csv")
+
+Priors_Amy<- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/Expert_Opinion/CMSY.Priors_ParticipantActivity_April2026_Amy.csv")
+
+Priors_Andres<- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/Expert_Opinion/CMSY.Priors_ParticipantActivity_April2026_Andres.csv")
+
+Priors_Hem<- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/Expert_Opinion/CMSY.Priors_ParticipantActivity_April2026_Hem.csv")
+
+Priors_Jorge<- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/Expert_Opinion/CMSY.Priors_ParticipantActivity_April2026_Jorge.csv")
+```
+
+```{r Join priors together}
+ExpertPriors_combined <- bind_rows(Priors_Adrian, Priors_Amy, Priors_Andres, Priors_Hem, Priors_Jorge)
+```
+
+```{r Clean priors column}
+colnames(ExpertPriors_combined)
+
+table(ExpertPriors_combined$Status_of_Major_Functional_Group)
+table(ExpertPriors_combined$Fishery_Status_in_2000_v_Historic)
+table(ExpertPriors_combined$Fishery_Status_in_2024_v_Historic)
+# NA       
+# 361 
+# depleted | agotadas 
+# 6 
+# healthy | saludable 
+# 1 
+# severely depleted | Las existencias están gravemente agotadas 
+# 2 
+# sustainable | sostenible 
+# 2 
+
+# Clean column (english only) for eventualy matching:
+ExpertPriors_combined <- ExpertPriors_combined %>%
+  mutate(
+    Status_of_Major_Functional_Group = case_when(
+      Status_of_Major_Functional_Group == "severely depleted | Las existencias están gravemente agotadas" ~ "severely depleted",
+      Status_of_Major_Functional_Group == "depleted | agotadas" ~ "depleted",
+      Status_of_Major_Functional_Group == "sustainable | sostenible" ~ "sustainable",
+      Status_of_Major_Functional_Group == "healthy | saludable" ~ "healthy",
+      TRUE ~ NA_character_
+    ),
+    Fishery_Status_in_2024_v_Historic = case_when(
+      Fishery_Status_in_2024_v_Historic == "severely depleted | Las existencias están gravemente agotadas" ~ "severely depleted",
+      Fishery_Status_in_2024_v_Historic == "depleted | agotadas" ~ "depleted",
+      Fishery_Status_in_2024_v_Historic == "sustainable | sostenible" ~ "sustainable",
+      Fishery_Status_in_2024_v_Historic == "healthy | saludable" ~ "healthy",
+      TRUE ~ NA_character_
+    ),
+    Fishery_Status_in_2000_v_Historic = case_when(
+      Fishery_Status_in_2000_v_Historic == "severely depleted | Las existencias están gravemente agotadas" ~ "severely depleted",
+      Fishery_Status_in_2000_v_Historic == "depleted | agotadas" ~ "depleted",
+      Fishery_Status_in_2000_v_Historic == "sustainable | sostenible" ~ "sustainable",
+      Fishery_Status_in_2000_v_Historic == "healthy | saludable" ~ "healthy",
+      TRUE ~ NA_character_
+    )
+  )
+```
+
+```{r Clean work space}
+rm(Priors_Adrian, Priors_Amy, Priors_Andres, Priors_Hem, Priors_Jorge)
+```
+
+
+# Convert experts' qualitative inputs into quantitative scores
+```{r Define thresholds for fishery status}
+table(ExpertPriors_combined$Fishery_Status_in_2000_v_Historic)
+         # depleted           healthy severely depleted       sustainable 
+         #       25                 7                 1                10 
+table(ExpertPriors_combined$Fishery_Status_in_2024_v_Historic)
+         # depleted           healthy severely depleted       sustainable 
+         #       25                 7                 1                10
+
+# Picked these thresholds based on an approximate interpretation of the data (above):
+severely.depleted_lower_threshold= 0.01
+severely.depleted_higher_threshold= 0.15
+
+depleted_lower_threshold= 0.1
+depleted_higher_threshold= 0.3
+
+sustainable_lower_threshold= 0.3
+sustainable_higher_threshold= 0.5
+
+healthy_lower_threshold= 0.5
+healthy_higher_threshold= 0.8
+
+new_lower_threshold= 0.6
+new_higher_threshold= 0.95
+```
+
+```{r Convert qualitative inputs into quantitative scores}
+# Convert qualitative inputs into quantitative scores
+ExpertPriors_combined <- ExpertPriors_combined %>%
+  mutate(
+    est_st_b.low = case_when(
+      Fishery_Status_in_2000_v_Historic == "severely depleted" ~ severely.depleted_lower_threshold,
+      Fishery_Status_in_2000_v_Historic == "depleted" ~ depleted_lower_threshold,
+      Fishery_Status_in_2000_v_Historic == "sustainable" ~ sustainable_lower_threshold,
+      Fishery_Status_in_2000_v_Historic == "healthy" ~ healthy_lower_threshold,
+      Fishery_Status_in_2000_v_Historic == "new" ~ new_lower_threshold,
+      TRUE ~ NA_real_
+    ),
+    est_st_b.hi = case_when(
+      Fishery_Status_in_2000_v_Historic == "severely depleted" ~ severely.depleted_higher_threshold,
+      Fishery_Status_in_2000_v_Historic == "depleted" ~ depleted_higher_threshold,
+      Fishery_Status_in_2000_v_Historic == "sustainable" ~ sustainable_higher_threshold,
+      Fishery_Status_in_2000_v_Historic == "healthy" ~ healthy_higher_threshold,
+      Fishery_Status_in_2000_v_Historic == "new" ~ new_higher_threshold,
+      TRUE ~ NA_real_
+    ),
+    est_end_b.low = case_when(
+      Fishery_Status_in_2024_v_Historic == "severely depleted" ~ severely.depleted_lower_threshold,
+      Fishery_Status_in_2024_v_Historic == "depleted" ~ depleted_lower_threshold,
+      Fishery_Status_in_2024_v_Historic == "sustainable" ~ sustainable_lower_threshold,
+      Fishery_Status_in_2024_v_Historic == "healthy" ~ healthy_lower_threshold,
+      Fishery_Status_in_2024_v_Historic == "new" ~ new_lower_threshold,
+      TRUE ~ NA_real_
+    ),
+    est_end_b.hi = case_when(
+      Fishery_Status_in_2024_v_Historic == "severely depleted" ~ severely.depleted_higher_threshold,
+      Fishery_Status_in_2024_v_Historic == "depleted" ~ depleted_higher_threshold,
+      Fishery_Status_in_2024_v_Historic == "sustainable" ~ sustainable_higher_threshold,
+      Fishery_Status_in_2024_v_Historic == "healthy" ~ healthy_higher_threshold,
+      Fishery_Status_in_2024_v_Historic == "new" ~ new_higher_threshold,
+      TRUE ~ NA_real_
+    )
+  )
+```
+
+```{r Take the mean across experts' opinions}
+colnames(ExpertPriors_combined)
+
+ExpertPriors_summary0 <- ExpertPriors_combined %>%
+  group_by(Common_Name, Stock, estimated_family_name) %>%
+  summarize(
+    
+    Notes_1 = paste(unique(na.omit(Notes_1)), collapse = "; "),
+    Notes_2 = paste(unique(na.omit(Notes_2)), collapse = "; "),
+    Notes_3 = paste(unique(na.omit(Notes_3)), collapse = "; "),
+    Notes_4 = paste(unique(na.omit(Notes_4)), collapse = "; "),
+    
+    Population_Resilience = paste(unique(na.omit(Population_Resilience)),
+                                  collapse = "; "),
+    
+    IUU_Estimate = paste(unique(na.omit(IUU_Estimate)),
+                         collapse = "; "),
+    
+    mean_st_b.low  = mean(est_st_b.low, na.rm = TRUE),
+    mean_st_b.hi = mean(est_st_b.hi, na.rm = TRUE),
+    mean_end_b.low = mean(est_end_b.low, na.rm = TRUE),
+    mean_end_b.hi = mean(est_end_b.hi, na.rm = TRUE),
+    
+    Fishery_Status_in_2000_ExpertOpinion = paste(unique(na.omit(Fishery_Status_in_2000_v_Historic)),
+                        collapse = "; "),
+    Fishery_Status_in_2024_ExpertOpinion = paste(unique(na.omit(Fishery_Status_in_2024_v_Historic)),
+                        collapse = "; "),
+    .groups = "drop"
+  )
+
+
+# Create qualitative scores too:
+ExpertPriors_summary0<- ExpertPriors_summary0 %>%
+  mutate(
+   st_b.low_qual = case_when(
+      mean_st_b.low >= new_lower_threshold ~ "new",
+      mean_st_b.low >= healthy_lower_threshold ~ "healthy",
+      mean_st_b.low >= sustainable_lower_threshold ~ "sustainable",
+      mean_st_b.low >= depleted_lower_threshold ~ "depleted",
+      mean_st_b.low >= severely.depleted_lower_threshold ~ "severely depleted"
+    ),
+    st_b.hi_qual = case_when(
+      mean_st_b.hi >= new_higher_threshold ~ "new",
+      mean_st_b.hi >= healthy_higher_threshold ~ "healthy",
+      mean_st_b.hi >= sustainable_higher_threshold ~ "sustainable",
+      mean_st_b.hi >= depleted_higher_threshold ~ "depleted",
+      mean_st_b.hi >= severely.depleted_higher_threshold ~ "severely depleted"
+    ),
+    end_b.low_qual = case_when(
+      mean_end_b.low >= new_lower_threshold ~ "new",
+      mean_end_b.low >= healthy_lower_threshold ~ "healthy",
+      mean_end_b.low >= sustainable_lower_threshold ~ "sustainable",
+      mean_end_b.low >= depleted_lower_threshold ~ "depleted",
+      mean_end_b.low >= severely.depleted_lower_threshold ~ "severely depleted"
+    ),
+    end_b.hi_qual = case_when(
+      mean_end_b.hi >= new_higher_threshold ~ "new",
+      mean_end_b.hi >= healthy_higher_threshold ~ "healthy",
+      mean_end_b.hi >= sustainable_higher_threshold ~ "sustainable",
+      mean_end_b.hi >= depleted_higher_threshold ~ "depleted",
+      mean_end_b.hi >= severely.depleted_higher_threshold ~ "severely depleted"
+    )
+  )
+```
+
+# Merge expert opinion to my priors (Erica's reference priors)
+```{r Cleaning up ExpertPriors_summary0 for merging and export}
+colnames(ExpertPriors_summary0)
+
+ExpertPriors_summary <- ExpertPriors_summary0 %>%
+  transmute(
+    Common_Name,
+    Stock,
+    estimated_family_name,
+    
+    Population_Resilience_ExpOp = Population_Resilience,
+    IUU_Estimate_ExpOp = IUU_Estimate,
+    
+    st_b.low_ExpOp  = mean_st_b.low,
+    st_b.hi_ExpOp = mean_st_b.hi,
+    end_b.low_ExpOp = mean_end_b.low,
+    end_b.hi_ExpOp = mean_end_b.hi,
+    
+    Status_in_2000_ExpOp = st_b.low_qual,
+    Status_in_2024_ExpOp = end_b.low_qual,
+    
+    Notes_ExpOp = paste(
+      unique(na.omit(c(Notes_1, Notes_2, Notes_3, Notes_4))),
+      collapse = "; "
+    )
+  )
+```
+
+```{r Add in reference priors}
+colnames(ReferencePriors_Erica)
+
+ReferencePriors_Erica<- ReferencePriors_Erica %>%
+  select(Region, Landings_Datasource, StartYear, EndYear,
+         Major_Functional_Group, estimated_taxa_group, Common_Name, Stock, estimated_family_name,
+         Status_in_2000_Ref= FisheryStatus_Circa2000,
+         st_b.low_Ref= st_b.low, st_b.hi_Ref= st_b.hi,
+         Status_in_2024_Ref= FisheryStatus_Circa2024,
+         end_b.low_Ref= end_b.low, end_b.hi_Ref= end_b.hi,
+         Population_Resilience_Ref= Population_Resilience,
+         Resilience_Source_Ref= Resilience_Source)
+```
+
+```{r Merge}
+colnames(ReferencePriors_Erica)
+colnames(ExpertPriors_summary)
+
+AllPriors_combined <- ReferencePriors_Erica %>%
+  left_join(
+    ExpertPriors_summary,
+    by = c("Common_Name", "Stock", "estimated_family_name")
+  )
+```
+
+```{r Coalesce and flag results that are different}
+colnames(AllPriors_combined)
+
+# Coalesce and flag results that are different
+AllPriors_combined <- AllPriors_combined %>%
+  mutate(
+    
+    # Final estimates
+    st_b.low_new  = coalesce(st_b.low_ExpOp,  st_b.low_Ref),
+    st_b.hi_new   = coalesce(st_b.hi_ExpOp, st_b.hi_Ref),
+    end_b.low_new = coalesce(end_b.low_ExpOp, end_b.low_Ref),
+    end_b.hi_new  = coalesce(end_b.hi_ExpOp, end_b.hi_Ref),
+    
+    # Source flags
+    st_b_source = case_when(
+      !is.na(st_b.low_ExpOp) ~ "Expert Opinion",
+      !is.na(st_b.low_Ref) ~ "Reference",
+      TRUE ~ NA_character_
+    ),
+    
+    end_b_source = case_when(
+      !is.na(end_b.low_ExpOp) ~ "Expert Opinion",
+      !is.na(end_b.low_Ref) ~ "Reference",
+      TRUE ~ NA_character_
+    ),
+    
+    # Difference flags
+    Status_in_2000_disagreement = case_when(
+      !is.na(Status_in_2000_ExpOp) &
+      !is.na(Status_in_2000_Ref) &
+      Status_in_2000_ExpOp != Status_in_2000_Ref ~ "Different",
+      
+      !is.na(Status_in_2000_ExpOp) &
+      !is.na(Status_in_2000_Ref) &
+      Status_in_2000_ExpOp == Status_in_2000_Ref ~ "Same",
+      
+      TRUE ~ NA_character_
+    ),
+    
+    Status_in_2024_disagreement = case_when(
+      !is.na(Status_in_2024_ExpOp) &
+      !is.na(Status_in_2024_Ref) &
+      Status_in_2024_ExpOp != Status_in_2024_Ref ~ "Different",
+      
+      !is.na(Status_in_2024_ExpOp) &
+      !is.na(Status_in_2024_Ref) &
+      Status_in_2024_ExpOp == Status_in_2024_Ref ~ "Same",
+      
+      TRUE ~ NA_character_
+    )
+  )
+```
+
+```{r Reorganize columns}
+colnames(AllPriors_combined)
+
+AllPriors_combined<- AllPriors_combined %>%
+  select(Region, Landings_Datasource, StartYear, EndYear,
+         Major_Functional_Group, estimated_taxa_group, Common_Name, Stock, estimated_family_name,
+         Status_in_2000_Ref, Status_in_2000_ExpOp, Status_in_2000_disagreement,
+         st_b.low_Ref, st_b.low_ExpOp, st_b.hi_Ref, st_b.hi_ExpOp,
+         Status_in_2024_Ref, Status_in_2024_ExpOp, Status_in_2024_disagreement,
+         end_b.low_Ref, end_b.low_ExpOp, end_b.hi_Ref, end_b.hi_ExpOp,
+         st_b_source, end_b_source,
+         st_b.low_new, st_b.hi_new, end_b.low_new, end_b.hi_new,
+         Population_Resilience_Ref, Resilience_Source_Ref, IUU_Estimate_ExpOp)
+```
+
+```{r Special exception for shrimp litopenaeus / penaus}
+# Name change circa 2010s where litopenaeus = penaus but logged separately. 
+
+# Extract the row to duplicate
+split_rows <- AllPriors_combined %>%
+  filter(Stock == "litopenaeus / penaus")
+
+# Create two versions
+row_litopenaeus <- split_rows %>%
+  mutate(Stock = "litopenaeus")
+
+row_penaeus <- split_rows %>%
+  mutate(Stock = "penaeus")
+
+# Remove original combined row and add the two new rows
+AllPriors_combined <- AllPriors_combined %>%
+  filter(Stock != "litopenaeus / penaus") %>%
+  bind_rows(row_litopenaeus, row_penaeus)
+```
+
+```{r Export Expert Opinion Summary}
+write.csv(AllPriors_combined,
+          file="/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/Expert_Opinion/ExpertOpinion_CMSY.PriorsCollated_May282026.csv",
+          row.names = FALSE)
+# 94 obs., 32 vars.
+```
+

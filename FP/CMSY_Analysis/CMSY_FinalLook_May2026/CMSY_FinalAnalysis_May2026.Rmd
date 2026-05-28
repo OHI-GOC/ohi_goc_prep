@@ -39,6 +39,19 @@ library(htmltools)
 setwd("/home/ferrer/ohi_goc_prep/FP/")
 ```
 
+```{r lowercase_function}
+# Turns all entries lower-case
+lowercase_function<- function(x){
+  if(is.character(x)){
+    tolower(x)
+  } else if (is.factor(x)){
+    tolower(as.character(x))
+  } else {
+    x
+  }
+}
+```
+
 ## Review Instructional Files:
 ```{r Review the CMSY protocol developed by Ferrer et al. (2021)}
 # Absolute path to your PDF
@@ -60,7 +73,7 @@ browseURL(file_url)
 - I’m going to run CMSY at the genus level. I actually think it’s a safer more reliable bet than species-level info and because – in many cases – fishermen seem to target taxa of the same genus interchangeably.
 - This file was created in /home/ferrer/ohi_goc_prep/FP/CONAPESCA_CleanUp/CONAPESCA_CleaningWorkflow_May2026.Rmd
 
-## Re-generate time series (from 2004-2024) per genus to use in CMSY [FINAL DRAFT: May 26 2026]
+## Re-generate time series (from 2004-2024) per genus to use in CMSY [May 26 2026]
 
 ```{r Load GOC_MarineLandings dataframe as needed}
 GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_2000.present_May262026.rds"))
@@ -74,7 +87,7 @@ MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
                           "marine: small-scale capture",
                           "marine: large-scale capture")
 
-GOC_Landings_mar.fisheries<- GOC_MarineLandings %>% 
+GOC_Landings_mar.fisheries<- GOC_MarineLandings0 %>% 
   filter(sector_estimate_draft %in% MarineFishery_Sectors)
 # 3107603 obs., 62 vars.
 
@@ -130,7 +143,7 @@ Stocks_of_Interest<- GOC_Genera_filtered$estimated_genus_name
 
 ```{r Filter dataset to generate time series for Stocks_of_Interest}
 # Keep only genera that meet the criteria in the main dataset
-CMSY_Landings <- GOC_MarineLandings %>%
+CMSY_Landings <- GOC_MarineLandings0 %>%
   filter(year < 2025) %>%
   filter(estimated_genus_name %in% Stocks_of_Interest)
 # 2256949 obs., 57 vars.
@@ -161,17 +174,17 @@ table(CMSY_Landings_file1$estimated_genus_name)
 
 ## Add family and major group info to Stocks_of_Interest:
 ```{r Load in helpful new FAOFamilyKey}
-FAOFamily_key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/FAO_FamilyGenusKey_COMPLETE_Apr042026.csv")
+FAO_Family.Key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/FAO_FamilyGenusKey_COMPLETE_Apr042026.csv")
 
 # Trim key:
-colnames(FAOFamily_key)
+colnames(FAO_Family.Key)
 
-FAOFamily_key<- FAOFamily_key %>%
+FAO_Family.Key<- FAO_Family.Key %>%
   select(estimated_genus_name, Major_Functional_Group, estimated_taxa_group, new_estimated_family_name)
 ```
 
 ```{r Merge key to CMSY_Landings_file1 and rename columns as needed}
-CMSY_Landings_file1 <- left_join(CMSY_Landings_file1, FAOFamily_key, 
+CMSY_Landings_file1 <- left_join(CMSY_Landings_file1, FAO_Family.Key, 
                            by = "estimated_genus_name")
 # 2169 obs., 7 obs. (as expected)
 
@@ -182,12 +195,34 @@ CMSY_Landings_file1 <- CMSY_Landings_file1 %>%
   rename(Stock = estimated_genus_name)
 ```
 
+```{r Special coalesce for shrimp litopanaeus versus panaeus}
+# I want to merge landings of litopanaeus to panaeus under one Stock name "Penaeus"
+CMSY_Landings_file1
+
+CMSY_Landings_file1 <- CMSY_Landings_file1 %>%
+  mutate(Stock = case_when(
+    Stock %in% c("Litopenaeus", "Penaeus") ~ "Penaeus",
+    TRUE ~ Stock
+  ))
+# 2169 obs.
+
+CMSY_Landings_file1 <- CMSY_Landings_file1 %>%
+  group_by(year, Stock, Major_Functional_Group,
+           estimated_taxa_group, new_estimated_family_name) %>%
+  summarise(
+    total_biomass_kg = sum(total_biomass_kg, na.rm = TRUE),
+    total_revenue = sum(total_revenue, na.rm = TRUE),
+    .groups = "drop"
+  )
+# 2146 obs.
+```
+
 
 # SAVE FILE 1:
 
 ```{r Save these time series CMSY_Landings_file1}
-write.csv(CMSY_Landings_file1, row.names= FALSE, file= "/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Final_May2026/Model_Input_Files/File1_CMSY_LandingsPerStock_May262026.csv")
-# 2169 obs., 7 obs.
+write.csv(CMSY_Landings_file1, row.names= FALSE, file= "/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/File1_CMSY_LandingsPerStock_May262026.csv")
+# 2146 obs., 7 obs.
 ```
 
 # Okay, timeseries are ready for CMSY tomorrow (May 27 2026)!
@@ -196,13 +231,17 @@ write.csv(CMSY_Landings_file1, row.names= FALSE, file= "/home/ferrer/ohi_goc_pre
 # STEP 2A: CREATE FILE 2 - Fill in metadata from priors  ------------------------------
 FILE 2: Create a meta-data file that includes all the information about stock. This file can probably be trimmed down but for now I recommend formatting it exactly as it appears from before.
 
+```{r Load in CMSY_Landings_file1 as necessary}
+CMSY_Landings_file1<- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/File1_CMSY_LandingsPerStock_May262026.csv")
+```
+
 ```{r Create File 2 based on File 1}
 # STEP 1: CREATE CMSY_Metadata_file2
 # Which taxa (stocks) do we want to account for in our File 2?
 Stock_names<- CMSY_Landings_file1 %>%
   select(Stock, Major_Functional_Group, estimated_taxa_group, new_estimated_family_name) %>%
   distinct()
-# 95 unique genera / stocks.
+# 93 unique genera / stocks.
 
 ## Read in the column names from blueprint of File 2.
 File2_blueprint <- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_InstructionalFiles/CMSY_File2_BluePrint_Apr032026.csv")
@@ -232,29 +271,20 @@ CMSY_Metadata_file2$force.cmsy <- c("TRUE")
 
 ```{r Save this file as UNDER CONSTRUCTION so I can work with it offline and use it to generate priors}
 write.csv(CMSY_Metadata_file2, row.names= FALSE,
-          "/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Model_Input_Files/File2_CMSY_StockMetadata_UNDERCONSTRUCTION_Apr032026.csv")
+          "/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/File2_CMSY_StockMetadata_UNDERCONSTRUCTION_May262026.csv")
 ```
 
+
 # STEP 2B: Generate Model Priors using other .R files ------------------------------
+ExpertOpinion_CollatingPriors_May272026.Rmd
+ExpertOpinion_CMSY.PriorsCollated_May282026.csv
+
 1_StartingBiomass_EstimatePriors_Apr032026.R
 2_IntermediateYear_EstimatePriors_Apr032026.R
 3_CurrentRelativeBiomass_EstimatePriors_Apr032026.R
 
 
-# STEP 2C: COMPLETE FILE 2 with infro from new generated priors.   ------------------------------
-
-```{r lowercase_function}
-# Turns all entries lower-case
-lowercase_function<- function(x){
-  if(is.character(x)){
-    tolower(x)
-  } else if (is.factor(x)){
-    tolower(as.character(x))
-  } else {
-    x
-  }
-}
-```
+# SKIP THIS STEP - STEP 2C: COMPLETE FILE 2 with infro from new generated priors.   ------------------------------
 
 ```{r Read in additional files to complete file 2}
 # Load File 2: CMSY_StockMetadata_file2
@@ -264,13 +294,13 @@ Stock_Metadata<- as.data.frame(lapply(Stock_Metadata, lowercase_function))
 
 # Load in generated priors:
 
-Priors_StartingBiomass <- read.csv("~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Generating_Model_Priors/Generated_Priors/1_StartingBiomassPriors_fromFAO_Apr042026.csv")
+Priors_StartingBiomass <- read.csv("~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_RevisedLook_April2026/Generating_Model_Priors/Generated_Priors/1_StartingBiomassPriors_fromFAO_Apr042026.csv")
 Priors_StartingBiomass<- as.data.frame(lapply(Priors_StartingBiomass, lowercase_function))
 colnames(Priors_StartingBiomass)[1]<- "Stock_family"
 colnames(Priors_StartingBiomass)[4]<- "FisheryStatus_Circa2000"
 # 106 obs., 4 vars.
 
-Priors_IntermediateYear <- read.csv("~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Generating_Model_Priors/Generated_Priors/2_IntermediateYearsPriors_fromLandings_Apr042026.csv")
+Priors_IntermediateYear <- read.csv("~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_RevisedLook_April2026/Generating_Model_Priors/Generated_Priors/2_IntermediateYearsPriors_fromLandings_Apr042026.csv")
 Priors_IntermediateYear<- as.data.frame(lapply(Priors_IntermediateYear, lowercase_function))
 # 95 obs., 5 vars.
 
@@ -340,12 +370,124 @@ Stock_Metadata <- Stock_Metadata %>%
   select(-ends_with("_overwrite"))
 ```
 
-```{r Finally lets clean up File 2 before saving}
-colnames(Stock_Metadata)
 
-CMSY_StockMetadata_file2<- Stock_Metadata %>% 
+# SKIP TO HERE - STEP 2B: COMPLETE FILE 2 based on priors from experts. ------------------------------
+ExpertOpinion_CollatingPriors_May272026.Rmd
+ExpertOpinion_CMSY.PriorsCollated_May282026.csv
+
+```{r Load in expert opinion priors on starting and ending biomass}
+AllPriors_combined0<- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/Expert_Opinion/ExpertOpinion_CMSY.PriorsCollated_May282026.csv")
+
+AllPriors_combined<- AllPriors_combined0
+```
+
+```{r Load in FILE 2 blueprint}
+CMSY_Metadata_file2<- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/File2_CMSY_StockMetadata_UNDERCONSTRUCTION_May262026.csv")
+```
+
+```{r Coerce values from to fit the FILE 2 blueprint}
+# Specifically, I want to make AllPriors_combined conform the blueprint of CMSY_Metadata_file2.
+
+# Check names
+colnames(CMSY_Metadata_file2)
+colnames(AllPriors_combined)
+
+# Blueprint column order
+blueprint_cols <- colnames(CMSY_Metadata_file2)
+
+# Add missing blueprint columns as NA
+missing_cols <- setdiff(blueprint_cols, colnames(AllPriors_combined))
+
+for(col in missing_cols) {
+  AllPriors_combined[[col]] <- NA
+}
+
+# Identify extra columns not in blueprint
+extra_cols <- setdiff(colnames(AllPriors_combined), blueprint_cols)
+
+# Reorder: blueprint columns first, extras afterward
+AllPriors_combined <- AllPriors_combined[, c(blueprint_cols, extra_cols)]
+
+# Check result
+colnames(AllPriors_combined)
+
+# Assign the values from st_b.hi_new to st_b.hi, etc.
+AllPriors_combined$st_b.hi <- AllPriors_combined$st_b.hi_new
+AllPriors_combined$st_b.low  <- AllPriors_combined$st_b.low_new
+AllPriors_combined$end_b.low <- AllPriors_combined$end_b.low_new
+AllPriors_combined$end_b.hi  <- AllPriors_combined$end_b.hi_new
+AllPriors_combined$Resilience  <- AllPriors_combined$Population_Resilience_Ref
+
+# Assign metadata from CMSY_Metadata_file2
+AllPriors_combined$Source <- c("CONAPESCA")
+AllPriors_combined$Sufficient_No_Years <- c(TRUE)
+AllPriors_combined$Yes_Run <- c("Yes")
+AllPriors_combined$Comment <- c("Timeseries (TS) generated by Erica Ferrer using CONAPESCA data. TS used to generate priors made on April 3 2026; TS used to generate CMSY made on May 26 2026; Stock is estimated at the genus level")
+AllPriors_combined$btype <- c("None")
+AllPriors_combined$force.cmsy <- c(TRUE)
+AllPriors_combined$Yes_Run <- c("Yes")
+```
+
+```{r Clean up column names}
+colnames(AllPriors_combined)
+
+CMSY_file2_filled<- AllPriors_combined %>%
+  select(-c(MinOfYear, MaxOfYear,
+            Landings_Datasource, 
+            st_b.low_Ref, st_b.low_ExpOp, st_b.hi_Ref, st_b.hi_ExpOp,
+            end_b.low_Ref, end_b.low_ExpOp, end_b.hi_Ref, end_b.hi_ExpOp,
+            st_b.low_new, st_b.hi_new, end_b.low_new, end_b.hi_new,
+            Population_Resilience_Ref, IUU_Estimate_ExpOp)
+         )
+
+colnames(CMSY_file2_filled)
+
+CMSY_file2_filled<- CMSY_file2_filled %>%
+  relocate(st_b_source, end_b_source, .before= Common_Name)
+```
+
+```{r Add in int year priors from April}
+Priors_IntermediateYear <- read.csv("~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_RevisedLook_April2026/Generating_Model_Priors/Generated_Priors/2_IntermediateYearsPriors_fromLandings_Apr042026.csv")
+Priors_IntermediateYear<- as.data.frame(lapply(Priors_IntermediateYear, lowercase_function))
+# 95 obs., 5 vars.
+
+colnames(Priors_IntermediateYear)
+
+CMSY_file2_filled <- CMSY_file2_filled %>%
+  select(-int_yr, -StartYear, -EndYear, -Sufficient_No_Years) %>%
+  left_join(
+    Priors_IntermediateYear %>%
+      select(Stock, int_yr, StartYear, EndYear, Sufficient_No_Years),
+    by = "Stock"
+  )
+```
+
+```{r Add in int year condition priors from April}
+Priors_IntEnd.Conditions <- read.csv("~/ohi_goc_prep/FP/CMSY_Analysis/CMSY_RevisedLook_April2026/Generating_Model_Priors/Generated_Priors/3_IntermediateEndConditionsPriors_Apr042026.csv")
+Priors_IntEnd.Conditions<- as.data.frame(lapply(Priors_IntEnd.Conditions, lowercase_function))
+# 95 obs., 5 vars.
+
+colnames(Priors_IntEnd.Conditions)
+
+# Remove the old end_b.low and end_b.hi priors (so that we can replace them)
+Priors_IntEnd.Conditions<- Priors_IntEnd.Conditions %>%
+  select(-c(end_b.low, end_b.hi))
+
+CMSY_file2_filled <- CMSY_file2_filled %>%
+  select(-int_b.low, -int_b.hi) %>%
+  left_join(
+    Priors_IntEnd.Conditions %>%
+      select(Stock, int_b.low, int_b.hi),
+    by = "Stock"
+  )
+```
+
+```{r Finally lets clean up File 2 before saving}
+colnames(CMSY_file2_filled)
+
+CMSY_StockMetadata_file2<- CMSY_file2_filled %>% 
   select(Region, Stock, estimated_family_name, Major_Functional_Group, estimated_taxa_group,
-         Landings_Datasource= Source, 
+         Source, 
          Sufficient_No_Years,
          StartYear, EndYear, int_yr,
          btype,
@@ -353,23 +495,44 @@ CMSY_StockMetadata_file2<- Stock_Metadata %>%
          FMSY, MSY, MSYBtrigger, M,
          Fofl, last_F,
          q.start, q.end,
-         FisheryStatus_Circa2000, st_b.low, st_b.hi, 
-         int_b.low, int_b.hi, end_b.low, end_b.hi,
+         st_b.low, st_b.hi, 
+         int_b.low, int_b.hi, 
+         end_b.low, end_b.hi,
          r.low, r.hi, 
-         Resilience, Resilience_Source,
-         Yes_Run, Comment)
-# 95 obs., 38 vars.
+         Resilience, Resilience_Source= Resilience_Source_Ref,
+         Yes_Run, Comment,
+         st_b_source, end_b_source)
+# 94 obs., 39 vars.
+
+# If biomass priors are missing, do not run:
+CMSY_StockMetadata_file2 <- CMSY_StockMetadata_file2 %>%
+  mutate(
+    Yes_Run = case_when(
+      is.na(st_b.low) | is.na(int_b.low) | is.na(end_b.low) ~ "No, missing biomass priors",
+      TRUE ~ Yes_Run
+    )
+  )
+```
+
+```{r Finally I only want to include priors for stocks actually listed in CMSY_Landings_file1}
+CMSY_Landings_file1<- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/File1_CMSY_LandingsPerStock_May262026.csv")
+
+Stocks_of_Interest<- unique(CMSY_Landings_file1$Stock)
+Stocks_of_Interest<- lowercase_function(Stocks_of_Interest)
+
+# And finally, I only want to include priors for stocks actually listed in CMSY_file 1:
+CMSY_StockMetadata_file2<- CMSY_StockMetadata_file2 %>%
+  filter(Stock %in% Stocks_of_Interest)
+# 89 obs., 39 vars.
 ```
 
 # SAVE FILE 2:
 ```{r Save these time series CMSY_Landings_file1}
-write.csv(CMSY_StockMetadata_file2, row.names= FALSE, file= "/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_Revised_April2026/Model_Input_Files/File2_CMSY_StockMetadata_Apr042026.csv")
-# 95 obs., 38 vars.
+write.csv(CMSY_StockMetadata_file2, row.names= FALSE, file= "/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Input_Files/File2_CMSY_StockMetadata_May282026.csv")
+# 89 obs., 39 vars.
 ```
 
-# Stopped here April 4 2026.
-
-
+# Must run CMSY on personal machine (May 29 2026).
 
 
 # OTHER: Misc. work.
