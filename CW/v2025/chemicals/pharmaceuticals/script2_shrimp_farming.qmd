@@ -1,0 +1,257 @@
+---
+title: "OHI GoC 2025: Shrimp aquaculture antibiotic discharge"
+subtitle: "Lyle-Fritch et al. (2006): Table 6 and Table 1 feed demand"
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# CW: Pharmaceuticals - Shrimp Farming
+
+**Methods**
+
+Aquaculture antibiotic pressure = pond area × **antibiotic_kg_ha_year** from Lyle-Fritch et al. 2006's Table 6 (kg/tonne of feed, treatment days, % farms) and semi-intensive feed demand from Table 1 (1680 kg feed/ha per crop), scaled by 1.67 cycles/year (see `~ohi_goc_prep/CW/v2025/chemcials/pesticides/script3_estimated_shrimp_pesticide_discharge.qmd`. Formalin and disease-treatment lime is excluded because that fits within the pesticide subcomponent. See `lyle_fritch_table6_antibiotics_disinfectants.csv` for more information.
+
+## Estimated pharmaceutical discharge
+
+```{r setup}
+library(sf)
+library(utils)
+library(tidyverse)
+library(here)
+library(raster)
+library(mapview)
+library(purrr)
+library(stringr)
+library(stringi)
+library(janitor)
+library(tibble)
+```
+
+### Watersheds and pour points
+
+```{r}
+## lets use the full state for now and then summarize by the full watersheds.
+goc_ohi_rgns <- st_read(here::here("spatial/ohi_regions","goc_ohi_rgns.shp"))
+
+union_rgns <- goc_ohi_rgns %>% 
+  st_union() %>% 
+  st_make_valid()
+
+# plot(goc_ohi_rgns)
+# plot(union_rgns)
+
+watershed_all <- st_read(file.path("/home/shares/ohi/stressors_2021/_dataprep/nutrients/watersheds_pourpoints/watersheds_all_4326.shp"))
+st_crs(watershed_all)
+# mapview(watershed_all)
+
+watershed_goc <- st_intersection(st_transform(watershed_all, st_crs(union_rgns)), union_rgns)
+mapview(watershed_goc)
+
+# --- if we plan to change the buffer for some reason ---
+# inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
+# watershed_goc_50km <- st_intersection(st_transform(watershed_all, st_crs(inland_50)), inland_50)
+# mapview(watershed_goc_50km)
+
+# here's the associated pourpoints that should match with the watersheds:
+pourpoints <- st_read("/home/shares/ohi/stressors_2021/_dataprep/nutrients/watersheds_pourpoints/pourpoints_mol.shp")
+
+pourpoints_goc <- st_intersection(st_transform(pourpoints, st_crs(union_rgns)), union_rgns)
+mapview(pourpoints_goc)
+
+mapview(pourpoints_goc) + mapview(watershed_goc)
+```
+
+
+### Join with literature rates of antibiotics given in the GoC to shrimp ponds
+
+#### Source
+
+Lyle-Fritch, L. P., Romero-Beltrán, E., & Páez-Osuna, F. (2006). *Aquacultural Engineering*, 35(2), 135-146. [doi:10.1016/j.aquaeng.2005.09.006](https://doi.org/10.1016/j.aquaeng.2005.09.006)
+
+**Data files from digitized paper:**
+
+| File | Content from Lyle-Fritch et al. 2006 |
+|------|--------------------------------------|
+| `lyle_fritch_table6_antibiotics_disinfectants.csv` | Table 6: doses and frequency |
+| `lyle_fritch_table1_feed_production.csv` | Table 1: FCR and production (feed demand) |
+| `lyle_fritch_cycle_parameters.csv` | Cycle length and cycles per year |
+| `lyle_fritch_table5_disease_totals.csv` | Table 5: disease context |
+
+![Tables 6 and 7](lyle_table_3.png)
+
+#### Load Table 6 and Table 1
+
+```{r load-rates}
+data_dir <- here::here("/home/shares/ohi/OHI_GOC/_raw_data/lyle_fritch_et_al_2006_digitized_data")
+
+table6 <- read_csv(file.path(data_dir, "lyle_fritch_table6_antibiotics_disinfectants.csv"))
+table1 <- read_csv(file.path(data_dir, "lyle_fritch_table1_feed_production.csv"))
+cycle_params <- read_csv(file.path(data_dir, "lyle_fritch_cycle_parameters.csv"))
+```
+
+
+```{r load-rates}
+# isolate the parameters relevant to estimating pharmaceutical application rates to shrimp farms.
+get_param <- function(df, name) df %>% 
+  filter(parameter == name) %>% 
+  pull(value)
+
+feed_kg_ha <- table1 %>%
+  filter(culture_system == "Semi-intensive") %>%
+  pull(feed_kg_ha_crop_derived)
+
+cycle_days <- get_param(cycle_params, "culture_cycle_days_first")
+cycles_yr <- get_param(cycle_params, "cycles_per_year_weighted")
+
+calc_ab_kg_ha_cycle <- function(frac_farms, dose_kg_per_tonne, treat_days) {
+  frac_farms * dose_kg_per_tonne * (treat_days / cycle_days) * (feed_kg_ha / 1000)
+}
+
+# Feed-based antibiotics (Table 6)
+t6_feed <- table6 %>%
+  filter(include_in_antibiotic_estimate == "yes", dose_unit == "kg/tonne feed") %>%
+  mutate(
+    frac_farms = pct_farms / 100,
+    kg_ha_cycle = calc_ab_kg_ha_cycle(frac_farms, dose_mid, treatment_days_mid)
+  )
+
+# Unidentified antibiotic: 4 mg/kg feed for 8 days
+ab_unidentified <- table6 %>%
+  filter(product == "Unidentified antibiotic") %>%
+  mutate(frac_farms = pct_farms / 100) %>%
+  { calc_ab_kg_ha_cycle(.$frac_farms, 4, .$treatment_days_mid) }
+
+antibiotic_kg_ha_cycle <- sum(t6_feed$kg_ha_cycle) + ab_unidentified
+antibiotic_kg_ha_year <- antibiotic_kg_ha_cycle * cycles_yr
+
+tibble(
+  feed_kg_ha_crop = feed_kg_ha,
+  cycle_days = cycle_days,
+  cycles_per_year = cycles_yr,
+  antibiotic_kg_ha_cycle = antibiotic_kg_ha_cycle,
+  antibiotic_kg_ha_year = antibiotic_kg_ha_year
+)
+
+t6_feed %>%
+  select(disease, product, pct_farms, dose_mid, treatment_days_mid, kg_ha_cycle = kg_ha_cycle) %>%
+  mutate(kg_ha_cycle = round(kg_ha_cycle, 4))
+
+table6 %>% filter(include_in_antibiotic_estimate == "yes")
+```
+
+### Aquaculture area per watershed
+
+```{r aquaculture-area}
+usv_aq <- st_read(
+  here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int/usv_aquaculture_goc_allyears.gpkg")
+)
+
+usv_aq_reproj <- st_transform(usv_aq, st_crs(watershed_goc))
+
+usv_aq_watershed <- st_intersection(usv_aq_reproj, watershed_goc) %>%
+  mutate(area_ha = as.numeric(st_area(.)) / 10000)
+
+aq_area_by_watershed <- usv_aq_watershed %>%
+  st_drop_geometry() %>%
+  group_by(basin_id, year) %>%
+  summarize(aq_area_ha = sum(area_ha, na.rm = TRUE), .groups = "drop") %>%
+  mutate(year = as.numeric(year))
+```
+
+### Estimated antibiotic mass in kg per year
+
+```{r estimate-antibiotics}
+antibiotic_watershed <- aq_area_by_watershed %>%
+  mutate(
+    antibiotic_kg = aq_area_ha * antibiotic_kg_ha_year,
+    rate_source = "Lyle-Fritch 2006 Table 6 + Table 1",
+    survey_year = 2002L
+  )
+```
+
+### Pour points and OHI regions
+
+```{r pourpoints}
+ab_by_watershed <- antibiotic_watershed %>%
+  group_by(basin_id, year) %>%
+  summarize(
+    aq_area_ha = sum(aq_area_ha, na.rm = TRUE),
+    antibiotic_kg = sum(antibiotic_kg, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+pourpoints_ab <- pourpoints_goc %>%
+  dplyr::select(basin_id) %>%
+  left_join(ab_by_watershed, by = "basin_id")
+
+inland_50 <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer", "inland_50km_goc.shp"))
+inland_10 <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer", "inland_10km_goc.shp"))
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+
+marine_and_inland50 <- bind_rows(regions_marine, inland_50) %>%
+  dplyr::select(rgn_id, geometry) %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
+
+marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>%
+  dplyr::select(rgn_id, geometry) %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
+
+pourpoints_ab_final <- pourpoints_ab %>%
+  filter(!is.na(antibiotic_kg), antibiotic_kg > 0) %>%
+  st_intersection(marine_and_inland50) %>%
+  mutate(is_within_10km = lengths(st_within(., marine_and_inland10)) > 0) %>%
+  filter(!(is_within_10km == FALSE & rgn_id == "Region_4"))
+
+pourpoints_ab_rgnid <- st_intersection(pourpoints_ab_final, goc_ohi_rgns) %>%
+  st_drop_geometry() %>%
+  group_by(rgn_id, year) %>%
+  summarize(
+    aq_area_ha = sum(aq_area_ha, na.rm = TRUE),
+    antibiotic_kg = sum(antibiotic_kg, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+pourpoints_ab_rgnid
+```
+
+## Save to Mazu
+
+```{r save}
+# out_dir <- here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int")
+# write_csv(antibiotic_watershed, file.path(out_dir, "shrimp_antibiotic_kg_by_watershed_lyle_fritch.csv"))
+# write_csv(pourpoints_ab_rgnid, file.path(out_dir, "shrimp_antibiotic_kg_by_rgnid_lyle_fritch.csv"))
+# write_csv(t6_feed, file.path(out_dir, "shrimp_antibiotic_kg_ha_by_product_lyle_fritch.csv"))
+# st_write(
+#   pourpoints_ab_final,
+#   file.path(out_dir, "shrimp_antibiotic_kg_pourpoints_lyle_fritch.gpkg"),
+#   delete_dsn = TRUE
+# )
+```
+
+
+
+
+
+
+
+
+
