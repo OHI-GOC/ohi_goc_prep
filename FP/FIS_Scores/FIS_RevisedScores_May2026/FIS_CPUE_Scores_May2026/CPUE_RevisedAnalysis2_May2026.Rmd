@@ -1,0 +1,512 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+# PENDING - Must merge with new techniques (May 28 2026)
+# SCORE A: CPUE Estimates (per major marine group) ------------------------------
+```{r Load data as necessary}
+# Load file, only if needed:
+GoC_Landings_for_CPUE_original<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
+GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE_original
+# GoC_Landings_for_CPUE<- Landings_GoC_NoFresh.NoMariculture
+# 3163120 obs., 50 vars.
+```
+
+```{r TEMPORARY - Graph of Top Fisheries Per Region}
+GoC_FIS.Landings_CLEAN<- GoC_Landings_for_CPUE_original
+
+colnames(GoC_FIS.Landings_CLEAN)
+
+top_fisheries <- GoC_FIS.Landings_CLEAN %>%
+  group_by(OHI_Region_No, estimated_genus_name) %>%
+  summarise(
+    total_weight = sum(weight_kg_corrected, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(OHI_Region_No) %>%
+  slice_max(total_weight, n = 10, with_ties = FALSE)
+
+
+library(dplyr)
+library(ggplot2)
+library(tidytext)
+
+regions_to_drop <- c(
+  "Region_4_5_6_Sonora_TBD",
+  "Region_3_4_BCS_TBD",
+  "Region_1_2_Baja_TBD"
+)
+
+TOPFisheries_Jan202026<- ggplot(
+  top_fisheries %>%
+    filter(!OHI_Region_No %in% regions_to_drop),
+  aes(
+    x = reorder_within(estimated_genus_name, total_weight, OHI_Region_No),
+    y = total_weight,
+    fill = OHI_Region_No
+  )
+) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~ OHI_Region_No, scales = "free_y") +
+  scale_x_reordered() +
+  scale_y_log10(
+    labels = scales::comma,
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    x = "Fishery",
+    y = "Total landed weight (kg, log scale)",
+    title = "Top 10 fisheries by landed weight (per region)"
+  ) +
+  theme_minimal()
+
+
+  # Save as PNG
+  ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/TOPFisheries_Jan202026.png"),
+    plot = TOPFisheries_Jan202026,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+  
+top_Artisanal_fisheries <- GoC_FIS.Landings_CLEAN %>%
+  filter(year >= 2005) %>%
+  filter(fleet=="small_scale") %>%
+  group_by(OHI_Region_No, estimated_genus_name) %>%
+  summarise(
+    total_weight = sum(weight_kg_corrected, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(OHI_Region_No) %>%
+  slice_max(total_weight, n = 10, with_ties = FALSE)
+  
+TOP_SSF_Plot_Genus <- ggplot(
+  top_Artisanal_fisheries %>%
+    filter(!OHI_Region_No %in% regions_to_drop),
+  aes(
+    x = reorder_within(estimated_genus_name, total_weight, OHI_Region_No),
+    y = log10(total_weight),
+    fill = OHI_Region_No
+  )
+) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~ OHI_Region_No, scales = "free_y") +
+  scale_x_reordered() +
+  scale_fill_viridis_d(option = "C", end = 0.9) +
+  labs(
+    x = "Fishery",
+    y = "Total landed weight (kg, log scale)",
+    title = "Top 10 fisheries by landed weight (per region) BY GENUS"
+  ) +
+  theme_bw() +
+  theme(
+    axis.title.x = element_text(size = 18, face = "bold"),
+    axis.title.y = element_text(size = 18, face = "bold"),
+    axis.text.x  = element_text(size = 14),
+    axis.text.y  = element_text(size = 14),
+    plot.title   = element_text(size = 22, face = "bold", hjust = 0.5)
+  )
+
+TOP_SSF_Plot_Genus
+  
+# Save as PNG
+  ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/TOPSSF_Genus_Jan212026.png"),
+    plot = TOP_SSF_Plot_Genus,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+
+```
+
+```{r}
+subset<- GoC_FIS.Landings_CLEAN"PESQUERA PUNTA PEÑASCO SA DE CV"
+```
+
+
+```{r CPUE calculations}
+# Calculate the difference in days between period start and end:
+GoC_Landings_for_CPUE$days_fishing <- as.numeric(GoC_Landings_for_CPUE$period_end_fixed - GoC_Landings_for_CPUE$period_start_fixed) + 1
+# 3163120 obs., 51 vars.
+
+# Estimate CPUE per trip:
+GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE %>%
+  mutate(CPUE_kg.day = weight_kg_corrected / days_fishing)
+# 3163120 obs., 52 vars.
+
+# General filtering:
+# In general, the receipts from early trips are a bit funky. Let's filter out trips before 2003 (n= 267072 records).
+GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE %>%
+  filter(year >= 2003)
+# 2896048 obs., 52 vars.
+
+# Let's also filter out any records that did not have a receipt start and end date, and records where live weight was < or = 0 (n= 126955 records).
+GoC_Landings_for_CPUE<- GoC_Landings_for_CPUE %>%
+  filter(!is.na(days_fishing) & days_fishing > 0 & weight_kg_corrected > 0)
+# 2769093 obs., 52 vars.
+
+max(GoC_Landings_for_CPUE$CPUE_kg.day) # 1400000 (Oysters in Baja, no landing site), followed by tuna in Sinaloa
+min(GoC_Landings_for_CPUE$CPUE_kg.day) #0.00125
+
+subset<- GoC_Landings_for_CPUE %>% filter(CPUE_kg.day >= 288000)
+unique(subset$estimated_genus_name)
+
+##### NOTE TO SELF:
+# - There is some funky stuff going on with SOME of the end and start dates. Come back to this in the new year.
+# - I am not sure what to do about the days with no record of live weight. Exclude these for now.
+```
+
+```{r Exploratory: Plot CPUE per trip}
+# PLOT CPUE PER TRIP:
+
+CPUE_PerTrip_Distribution<- GoC_Landings_for_CPUE %>% 
+  filter(year >= 2003, year <= 2013) %>%
+ 
+  ggplot(aes(x = seq_along(CPUE_kg.day), y = CPUE_kg.day)) +
+  geom_point(color = "steelblue", alpha = 0.6, size = 2) +
+  geom_hline(yintercept = mean(GoC_Landings_for_CPUE$CPUE_kg.day, na.rm = TRUE),
+             color = "red", linetype = "dashed", linewidth = 1) +
+  labs(
+    x = "# of observations",
+    y = "CPUE (kg/day)",
+    title = "CPUE Distribution"
+  ) +
+  
+  theme_minimal(base_size = 14)
+
+CPUE_PerTrip_Distribution
+
+  # Save as PNG
+  ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/Distribution_of_CPUEperTrip_2003.2013_Dec112025.png"),
+    plot = CPUE_PerTrip_Distribution,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+```
+
+```{r Let's explore the landings for which IHH_major_group equals NA}
+# TEST<- GoC_Landings_for_CPUE %>% filter(is.na(IHH_functional_major_groups_sm))
+# # 180324 out of 2787363 total records contain no IHH_functional_major_groups_sm (this equate to about ~6-7% of records).
+# 
+# TEST2<- TEST %>% 
+#   select(recorded_taxa_group, recorded_taxa_name_clean, common_name_clean, keywords_1:keywords_5) %>% 
+#   distinct()
+# 
+# # write.csv(TEST2, "/home/ferrer/ohi_goc_prep/general/Species_Keys/NoIHHClass_SpKey_UNDERCONSTRUCTION_Dec022025.csv", row.names = FALSE)
+# 
+# rm(TEST, TEST2)
+```
+NOTE TO SELF: Interesting. Most things could probably be grouped to the IHH group level with a little bit of extra leg work... COME BACK TO THIS IN THE NEW YEAR.
+
+```{r Re-assigning CPUE major groups based on new key}
+Genus_MajorGroup_Key<- read.csv("~/ohi_goc_prep/general/CONAPESCA_Keys/Genus_to_MajorGroup_Key_Dec112025.csv")
+# 326 obs., 4 vars.
+
+GoC_Landings_for_CPUE <- GoC_Landings_for_CPUE %>%
+  left_join(Genus_MajorGroup_Key,
+            by = c("recorded_taxa_group", "estimated_genus_name"))
+# 2769093 obs., 54 vars. as expected!
+```
+
+```{r Estimate CPUE for each Major Functional Group per region per year versus "historic" baseline}
+# Turn off scientific notation:
+options(scipen = 999)
+
+# STEP 1: ESTABLISH CPUE BASELINE VALUES, 2003-2013 -----
+# Where "baseline" equals the average Group-level CPUE from 2003-2013
+CPUE_baseline <- GoC_Landings_for_CPUE %>%
+  filter(year >= 2003, year <= 2013) %>%
+  filter(!is.na(OHI_Region_No)) %>%
+  group_by(OHI_Region_No, Major_Functional_Group) %>%
+  summarise(
+    OLD_CPUE_2003.2013 = mean(CPUE_kg.day, na.rm = TRUE),
+    NEW_CPUE_2003.2013 = sum(weight_kg_corrected) / sum(days_fishing),
+    .groups = "drop"
+  )
+
+# CPUE_baseline <- CPUE_baseline %>%
+#   mutate(
+#     Percent_Diff = (NEW_CPUE_2003.2013 - OLD_CPUE_2003.2013) / OLD_CPUE_2003.2013
+#   )
+# 
+# # NOTE TO SELF: Save this table to show to Mel, can delete later -
+# write.csv(CPUE_baseline, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_MethodsIllustration_PURG_Dec112025.csv", row.names = FALSE)
+
+
+# STEP 2: CALCULATE CPUE VALUES FOR RECENT YEARS, 2014-2024 -----
+CPUE_recent <- GoC_Landings_for_CPUE %>%
+  filter(year >= 2014, year <= 2024) %>%
+  filter(!is.na(OHI_Region_No)) %>%
+  group_by(year, OHI_Region_No, Major_Functional_Group) %>%
+  summarise(
+    Total_Biomass_kg = sum(weight_kg_corrected),
+    Total_Days = sum(days_fishing),
+    OLD_mean_CPUE.recent = mean(CPUE_kg.day, na.rm = TRUE),
+    NEW_mean_CPUE.recent = ifelse(Total_Days > 0, Total_Biomass_kg / Total_Days, NA_real_),
+    Total_Value_mxn = sum(value, na.rm = TRUE),  # keep na.rm just in case value has NAs
+    n_records = n(),
+    .groups = "drop"
+  )
+
+# # NOTE TO SELF: Save this table to show to Mel, can delete later -
+# write.csv(CPUE_recent, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_MethodsIllustration2_PURG_Dec112025.csv", row.names = FALSE)
+
+
+# STEP 3: COMPUTE PERCENT BIOMASS FOR RECENT YEARS -----
+CPUE_recent <- CPUE_recent %>%
+  group_by(year, OHI_Region_No) %>%
+  mutate(
+    total_biomass_state_year = sum(Total_Biomass_kg, na.rm = TRUE),
+    pct_of_total_biomass = (Total_Biomass_kg / total_biomass_state_year) * 100
+  ) %>%
+  ungroup()
+
+
+# Quick aside: how much of percent catch do the NAs account for?
+subset<- CPUE_recent %>% filter(is.na(Major_Functional_Group))
+# In only a handful of cases do NAs account for the *majority* of annual catch - primarily in Region 5.
+# And again, a lot of these NAs can be accounted for with further species key work.
+
+
+# STEP 4: MERGE BASELINE TO PRESENT DATA -----
+CPUE_Table <- CPUE_recent %>%
+  left_join(CPUE_baseline,
+            by = c("OHI_Region_No", "Major_Functional_Group")) %>%
+  mutate(
+    RatioCPUE_Recent.Baseline = NEW_mean_CPUE.recent / NEW_CPUE_2003.2013  # Score = CPUEpresent / CPUE_2003.2013
+  )
+
+# STEP 5: DESIRED TABLE -----
+CPUE_Table <- CPUE_Table %>%
+  transmute(
+    OHI_Region = OHI_Region_No,
+    Year = year,
+    Major_Functional_Group = Major_Functional_Group,
+    RatioCPUE_Recent.Baseline = round(RatioCPUE_Recent.Baseline, 3),
+    Total_Landings_kg = round(Total_Biomass_kg, 1),
+    Taxa_per_Total_Catch = round(pct_of_total_biomass, 2)
+  ) %>%
+  arrange(OHI_Region, Year, Major_Functional_Group)
+
+
+# STEP 6: CAP CPUE AT A MAX OF 1 per GROUP
+CPUE_Table <- CPUE_Table %>%
+  mutate(
+    RatioCPUE_Recent.Baseline_CAPPED = if_else(
+      RatioCPUE_Recent.Baseline > 1,
+      1,
+      RatioCPUE_Recent.Baseline
+    )
+  )
+
+# STEP 7: OHI CPUE SCORES PER REGION PER YEAR -----
+CPUE_Scores <- CPUE_Table %>%
+  mutate(TaxaProp = Taxa_per_Total_Catch/100) %>%     # IF % values are 0–100; if 0–1 then skip this line
+  group_by(Year, OHI_Region) %>%
+  summarise(
+    weighted_CPUE_acrossAllGroups = sum(RatioCPUE_Recent.Baseline_CAPPED * TaxaProp, na.rm = TRUE)
+  ) %>%
+  ungroup()
+```
+
+# SAVE: OHI CPUE SCORES PER REGION PER YEAR
+```{r Save this CPUE data table}
+# write.csv(CPUE_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/FIS_CPUEScores_WeightedMean_Dec12025.csv", row.names = FALSE)
+```
+
+## Take a closer look at CPUE per Region and per Major_Functional_Group:
+```{r Plot CPUE over all years 2003-2024}
+CPUE_AllYears <- GoC_Landings_for_CPUE %>%
+  filter(year >= 2003, year <= 2024) %>%
+  filter(!is.na(OHI_Region_No)) %>%
+  group_by(OHI_Region_No, year, Major_Functional_Group) %>%
+  summarise(
+    Total_Biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    Total_Value_mxn = sum(value, na.rm = TRUE),
+    Total_Days = sum(days_fishing, na.rm = TRUE),
+    Avg_CPUE = mean(CPUE_kg.day, na.rm = TRUE),
+    n_records = n(),
+    .groups = "drop"
+  )
+
+Taxa_colors <- c("darkblue", "royalblue", "skyblue", "orange", "sienna1", "plum", "purple4", "aquamarine3", "gold2", "tomato", "grey")
+
+Region_colors <- c("royalblue", "skyblue", "orange", "sienna1", "plum", "purple4", "aquamarine3", "gold2", "tomato")
+
+Regions_of_Interest <- c(
+  "Region_1", "Region_2", "Region_3",
+  "Region_4", "Region_5", "Region_6",
+  "Region_7", "Region_8", "Region_9"
+)
+
+
+# PLOT 1: CPUE overTime per Region, facet by Major_Functional_Group
+CPUE_overTime_byRegion_perTaxa<- CPUE_AllYears %>%
+  filter(OHI_Region_No %in% Regions_of_Interest) %>%
+  ggplot(
+       aes(x = year, 
+           y = Avg_CPUE, 
+           group = OHI_Region_No, 
+           color = OHI_Region_No)) +
+  geom_line(size = 1) +                # lines connecting the points
+  facet_wrap(~ Major_Functional_Group, scales = "free_y") +  # facet by region
+  labs(
+    title = "Average CPUE Over Time by Functional Group",
+    x = "Year",
+    y = "Avg CPUE (kg/day)",
+    color = "Functional Group"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_color_manual(values = Taxa_colors) +  # nice palette
+  geom_vline(xintercept = 2013, linetype= "solid", color = "grey5")
+
+CPUE_overTime_byRegion_perTaxa
+
+  # # Save as PNG
+  # ggsave(
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_PlotOverTime_byRegion_perTaxa_Dec092025.png"),
+  #   plot = CPUE_overTime_byRegion_perTaxa,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+
+
+# PLOT 2: CPUE overTime per Major_Functional_Group, facet by Region
+CPUE_overTime_byRegion_perTaxa<- CPUE_AllYears %>%
+  filter(OHI_Region_No %in% Regions_of_Interest) %>%
+  ggplot(
+       aes(x = year, 
+           y = Avg_CPUE, 
+           group = Major_Functional_Group, 
+           color = Major_Functional_Group)) +
+  geom_line(size = 1) +                # lines connecting the points
+  facet_wrap(~ OHI_Region_No, scales = "free_y") +  # facet by region
+  labs(
+    title = "Average CPUE Over Time by Functional Group",
+    x = "Year",
+    y = "Avg CPUE (kg/day)",
+    color = "Functional Group"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_color_manual(values = Taxa_colors) +  # nice palette
+  geom_vline(xintercept = 2013, linetype= "solid", color = "grey5")
+
+CPUE_overTime_byRegion_perTaxa
+
+  # # Save as PNG
+  # ggsave(
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_PlotOverTime_byTaxa_perRegion_Dec092025.png"),
+  #   plot = CPUE_overTime_byTaxa,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+
+
+# PLOT 3: CPUE overTime per Major_Functional_Group, facet by Region - normalized 0 to 1
+CPUE_overTime_byRegion_perTaxa_normalized<- CPUE_AllYears %>%
+  filter(OHI_Region_No %in% Regions_of_Interest) %>%
+  # Normalize Avg_CPUE per functional group across all years
+  group_by(Major_Functional_Group) %>%
+  mutate(Avg_CPUE_norm = (Avg_CPUE - min(Avg_CPUE, na.rm = TRUE)) /
+                            (max(Avg_CPUE, na.rm = TRUE) - min(Avg_CPUE, na.rm = TRUE))) %>%
+  ungroup() %>%
+  ggplot(aes(
+    x = year, 
+    y = Avg_CPUE_norm, 
+    group = Major_Functional_Group, 
+    color = Major_Functional_Group
+  )) +
+  geom_line(size = 1) +
+  facet_wrap(~ OHI_Region_No, scales = "free_y") +
+  labs(
+    title = "Normalized CPUE Over Time by Functional Group",
+    x = "Year",
+    y = "Normalized CPUE (0-1)",
+    color = "Functional Group"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_color_manual(values = Taxa_colors) +
+  geom_vline(xintercept = 2013, linetype = "solid", color = "grey5")
+
+CPUE_overTime_byRegion_perTaxa_normalized
+
+  # Save as PNG
+  # ggsave(
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_PlotOverTime_byTaxa_perRegion_normalized_Dec092025.png"),
+  #   plot = CPUE_overTime_byTaxa_normalized,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+```
+
+```{r Take a closer look at CPUE per Region and per Taxa}
+# Region 5
+subset<- GoC_Landings_for_CPUE %>% 
+  filter(OHI_Region_No == "Region_5" & is.na(IHH_functional_major_groups_sm))
+
+table(subset$recorded_taxa_name)
+table(subset$recorded_taxa_group)
+# Again, a lot of these NAs can be accounted for with further species key work.
+
+# Region 7
+subset<- GoC_Landings_for_CPUE %>% 
+  filter(OHI_Region_No == "Region_7" & is.na(IHH_functional_major_groups_sm))
+
+table(subset$recorded_taxa_name)
+table(subset$recorded_taxa_group)
+```
