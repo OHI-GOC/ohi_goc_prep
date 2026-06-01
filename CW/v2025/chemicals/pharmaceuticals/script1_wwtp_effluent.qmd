@@ -81,51 +81,207 @@ sina <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SINA_3_CONAGUA/d2
 colnames(sina)
 ```
 
+### Reading in all WWTP capacities and usages from 2017-2023
 
-## Water treatment plant exploration
+Data was downloaded from <https://sinav30.conagua.gob.mx:8080/SINA/?opcion=salud#infrah>: 
 
-```{r}
-sina3.0_wtp <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SINA_3_CONAGUA/d2025/m30_vwplantaspotm/m30_vwplantaspotm.shp"))
+(1) click on "Infraestructura Hidráulica", 
 
-colnames(sina3.0_wtp)
-head(sina3.0_wtp)
+(2) Click on "Plantas de Tratamiento de Aguas Residuales", 
 
-unique(sina3.0_wtp$estado)
-```
+(3) For each year, go through this process: select the year, click PTAR (the acronym in Spanish, it would be WWTPs in English), and then select the next year and do the same thing, which ensures that the data is shown on the interactive map,
 
-```{r}
-# only in GoC states
-sina3.0_wtp_goc <- sina3.0_wtp %>% 
-  filter(estado %in% c("Baja California Sur","Baja California","Jalisco","Sinaloa","Sonora")) # no nayarit
-```
-
-
-## WASTEwater treatment plant exploration
+(4) Once all layers from all years are showing, go to the bottom left-hand corner and click the button that is meant to represent "see all layers currently on the map".  It has an eye and multiple squares, looking like layered papers.  It is located just above the question mark button.  Here, you will go one by one, and download each of the years by clicking on the button representing ".SHP".  Because the .zip files are all named the same, regardless of the year, you will need to rename each folder as you go before adding it to `~/home/shares/ohi/OHI_GOC/_raw_data/SINA_3_CONAGUA/d2025/wastewater_treatment_plants`.  Once you unzip each folder, add the appropriate year in the end of the folder name, for example: "_2020".
 
 ```{r}
-sina3.0_wwtp <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SINA_3_CONAGUA/d2025/m29_vwplantastarm/m29_vwplantastarmPoint.shp"))
-
-colnames(sina3.0_wwtp)
-head(sina3.0_wwtp)
-
-unique(sina3.0_wwtp$estado)
-```
-
-```{r}
-# only in GoC states
-sina3.0_wwtp_goc <- sina3.0_wwtp %>% 
-  filter(estado %in% c("Baja California Sur","Baja California","Jalisco","Sinaloa","Sonora","Nayarit")) 
-```
-
-```{r}
-over_processing <- sina3.0_wwtp_goc %>% 
-  mutate(over_proc = case_when(
-    caudal > capacidad ~ TRUE,
-    TRUE ~ FALSE
-  ))
+## write function to read in all of the shapefiles and limit them to GoC states, as well as determine whether they were over capacity for that year and WWTP
+read_in_wwtp <- function (year) {
+  
+  df <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/SINA_3_CONAGUA/d2025/wastewater_treatment_plants", paste0("m29_vwplantastarm_", year))) %>% 
+    mutate(across(where(is.character), ~iconv(., from = "WINDOWS-1252", to = "UTF-8"))) %>%  # to address encoding issues
+    filter(estado %in% c("Baja California Sur","Baja California","Jalisco","Sinaloa","Sonora","Nayarit")) %>% 
+    mutate(over_proc = case_when(
+      caudal > capacidad ~ TRUE,
+      TRUE ~ FALSE
+    ))
+  
+  return(df)
+  
+}
 ```
 
 
+```{r}
+# specify the years we want to iterate through.  Change this in the future if necessary.
+years_to_read_in <- 2017:2023
 
+# use `lapply` and bind rows to obtain data over time.
+list_of_all_dfs <- lapply(years_to_read_in, read_in_wwtp)
+  
+# bind them across all years
+bind_all_years_wwtp <- bind_rows(list_of_all_dfs)
+
+summary(bind_all_years_wwtp)
+unique(bind_all_years_wwtp$estado)
+unique(bind_all_years_wwtp$proceso)
+```
+
+```{r}
+mapview(bind_all_years_wwtp, zcol = "over_proc")
+```
+
+
+#### Understanding WWTPs over time
+
+```{r}
+pct_over_processing <- bind_all_years_wwtp %>% 
+  st_drop_geometry() %>% 
+  group_by(anio, estado) %>% 
+  summarize(
+    total_wwtp = n(),
+    num_over_proc = sum(over_proc, na.rm = TRUE),
+    pct_over_proc = round(num_over_proc / total_wwtp * 100, 1),
+    mean_caudal = mean(caudal, na.rm = TRUE),
+    mean_capacidad = mean(capacidad, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+number_of_wwtp <- bind_all_years_wwtp %>% 
+  st_drop_geometry() %>% 
+  group_by(anio, estado) %>% 
+  summarize(
+    num_wwtp = n()
+  ) %>% 
+  ungroup()
+```
+
+### Assign to watersheds
+
+```{r}
+# reproj usv to match watersheds CRS
+bind_all_years_wwtp_reproj <- st_transform(bind_all_years_wwtp, st_crs(watershed_goc))
+
+# Coordinate Reference System:
+#   User input: Mexico ITRF2008 / LCC 
+#   wkt:
+# PROJCRS["Mexico ITRF2008 / LCC",
+#     BASEGEOGCRS["Mexico ITRF2008",
+#         DATUM["Mexico ITRF2008",
+#             ELLIPSOID["GRS 1980",6378137,298.257222101,
+#                 LENGTHUNIT["metre",1]]],
+
+# intersect wwtps with watersheds
+wwtps_watershed <- st_intersection(bind_all_years_wwtp_reproj, watershed_goc)
+colnames(wwtps_watershed)
+```
+
+Check out 2021:
+```{r}
+wwtps_watershed_2021 <- wwtps_watershed %>% 
+  filter(anio %in% 2021)
+
+mapview(wwtps_watershed_2021, zcol = "capacidad") 
+
+mapview(wwtps_watershed_2021, zcol = "basin_id") + mapview(watershed_goc, zcol = "basin_id")
+```
+
+
+#### Exploring liters of effluent caluclation
+
+```{r}
+summary(bind_all_years_wwtp$caudal) # no zeros or NAs:      Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+                                                 #  0.010     1.377     3.100    53.311    15.100 28743.230 
+
+effluent_liters_wwtp_yearly <- bind_all_years_wwtp %>%
+  mutate(
+    ef_l_yr = caudal * 31536000 # assumes that the WWTP is running constantly... but it is likely not running 24/7/365.  This is basically an upper bound for the year.
+  )
+```
+
+#### Summarize liters per watershed per year
+
+```{r}
+# summarize liters per watershed per year
+wwtp_liters_effluent_by_watershed <- wwtps_watershed %>%
+  st_drop_geometry() %>% # maybe take out...
+  group_by(basin_id, anio) %>% 
+  mutate(
+    ef_l_yr = caudal * 31536000 # assumes that the WWTP is running constantly... but it is likely not running 24/7/365.  This is basically an upper bound for the year
+  ) %>% 
+  summarize(
+    total_wwtp = n(),
+    num_over_proc = sum(over_proc, na.rm = TRUE),
+    pct_over_proc = num_over_proc / total_wwtp * 100,
+    total_ef_l_yr = sum(ef_l_yr),
+    total_ef_m3_yr = total_ef_l_yr / 1000 # more readable
+  ) %>% 
+  ungroup() %>% 
+  mutate(year = as.numeric(anio))
+```
+
+### Pour points and OHI regions
+
+```{r pourpoints}
+pourpoints_wwtp_liters <- pourpoints_goc %>%
+  dplyr::select(basin_id) %>%
+  left_join(wwtp_liters_effluent_by_watershed, by = "basin_id")
+
+mapview(pourpoints_wwtp_liters)
+```
+
+
+```{r ohi_marine_and_inland}
+inland_50 <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer", "inland_50km_goc.shp"))
+inland_10 <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer", "inland_10km_goc.shp"))
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+
+marine_and_inland50 <- bind_rows(regions_marine, inland_50) %>%
+  dplyr::select(rgn_id, geometry) %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
+
+marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>%
+  dplyr::select(rgn_id, geometry) %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
+```
+
+
+```{r pourpoints}
+pourpoints_wwtp_liters_final <- pourpoints_wwtp_liters %>%
+  filter(!is.na(total_ef_l_yr), total_ef_l_yr > 0) %>% # note that the watershed with the id 73730 wraps around, and that the pour point is only on the left side...not sure that is correct.
+  st_intersection(marine_and_inland50) %>% # keep those within 50 km...
+  mutate(is_within_10km = lengths(st_within(., marine_and_inland10)) > 0) %>% # but make sure not to keep the ones on the pacific side of the peninsula.
+  filter(!(is_within_10km == "false" & rgn_id %in% c("Region_4","Region_9")))
+```
+
+# COME BACK HERE!!!! fix pourpoint in Jalisco. 
+
+```{r pourpoints}
+mapview(pourpoints_wwtp_liters_final, zcol = "total_ef_l_yr") + mapview(wwtps_watershed, col.regions = "red") + mapview(watershed_goc, col.regions = "pink")
+
+pourpoints_lime_rgnid <- st_intersection(pourpoints_lime_final, goc_ohi_rgns) %>%
+  st_drop_geometry() %>%
+  group_by(rgn_id, year) %>%
+  summarize(
+    aq_area_ha = sum(aq_area_ha, na.rm = TRUE),
+    lime_kg = sum(lime_kg, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+pourpoints_lime_rgnid
+```
+
+# Save to mazu
+
+```{r save}
+write_csv(lime_watershed, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int/shrimp_lime_kg_by_watershed_lyle_fritch.csv"))
+
+write_csv(pourpoints_lime_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int/shrimp_lime_kg_by_rgnid_lyle_fritch.csv"))
+
+st_write(pourpoints_lime_final, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int/shrimp_lime_kg_pourpoints_lyle_fritch.gpkg"), delete_dsn = TRUE # so it can overwrite if changes are made.
+)
+```
 
 
