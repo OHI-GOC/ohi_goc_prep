@@ -1,0 +1,396 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+
+# STEP 1: Load and merge the various FIS scores  ------------------------------
+
+```{r Load the indicator dataframes as necessary}
+# Read in datafiles as necessary:
+CPUE_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_CPUE_Scores/FIS_CPUE_Scores_Jun012026.csv")
+# 43 obs., 10 vars.
+
+RAM_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_StockStatus_Scores/FIS_RAM_Scores_Jun012026.csv")
+# 216 obs., 14 vars.
+
+Carta_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_StockStatus_Scores/FIS_CartaScores_Jun012026.csv")
+# 1873 obs., 17 vars.
+
+CMSY_Scores<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_StockStatus_Scores/FIS_CMSY_Scores_Jun012026.csv")
+# 1569 obs., 11 vars.
+```
+
+```{r Load in GOC_MarineLandings0 as necessary}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_2000.present_May262026.rds"))
+# 3246583 obs., 57 var.
+```
+
+
+```{r Augment the RAM dataframe by collapsing all stock info into one score per genus per year}
+RAM_Scores_compressed <- RAM_Scores %>%
+  group_by(Year, Genus) %>%   # or Year + ScientificName if you want species-specific
+  summarize(
+    RAM_BBmsy = mean(Formal_BBmsy_numeric, na.rm = TRUE),
+    n_Formal_Assessments = sum(!is.na(Formal_BBmsy_numeric)), # optional: count how many assessments contributed
+    .groups = "drop"
+  )
+
+RAM_Scores_compressed<- RAM_Scores_compressed %>%
+    mutate(
+    Stock_Status_RAM= RAM_BBmsy
+  )
+  
+```
+
+```{r Rename Carta_Scores}
+Carta_Scores<- Carta_Scores %>%
+  mutate(
+    Stock_Status_Carta= Stock_Status
+  )
+```
+
+```{r Rename Stock_Status_CMSY}
+CMSY_Scores<- CMSY_Scores %>%
+  mutate(
+    Stock_Status_CMSY= B.Bmsy
+  )
+```
+
+```{r Create Stock Status Dataframe}
+# lowercase to make sure matching works
+RAM_Scores_compressed <- RAM_Scores_compressed %>%
+  mutate(Genus = tolower(Genus))
+
+# Merge CMSY_Scores and Carta_Scores by genus, year, and region:
+StockStatus_Scores <- full_join(
+  CMSY_Scores,
+  Carta_Scores,
+  by = c("yr" = "year",
+         "estimated_genus_name")
+)
+# 3265 obs., 29 vars.
+
+StockStatus_Scores <- full_join(
+  StockStatus_Scores,
+  RAM_Scores_compressed,
+  by = c("yr" = "Year",
+         "estimated_genus_name" = "Genus")
+)
+# 3329 obs., 32 vars.
+```
+
+```{r Clean up this dataframe}
+colnames(StockStatus_Scores)
+
+StockStatus_Scores_clean<- StockStatus_Scores %>%
+  select(Year=yr, OHI_region_est, stock, 
+         Annual_Catch_kg= total_catch_kg, Avg_Catch_Ref2018.2022= Avg_Catch_Ref2018.22,
+         n_Years_Ref2018.2022= n_years_Ref2018.22,
+         Carta_est.Status= status,
+         CMSY_est.B= B,
+         RAM_n_Assessments= n_Formal_Assessments,
+         Carta_StockStatus= Stock_Status,
+         CMSY_StockStatus= B.Bmsy,
+         RAM_StockStatus= RAM_BBmsy
+         )
+```
+
+```{r Assign Stock Status 'Pick' column}
+# A hierarchy of which score to pick!
+StockStatus_Scores_clean <- StockStatus_Scores %>%
+  mutate(
+    StockStatus_Pick = case_when(
+      !is.na(Stock_Status_RAM) ~ Stock_Status_RAM,
+      !is.na(Stock_Status_Carta)     ~ Stock_Status_Carta,
+      !is.na(Stock_Status_CMSY)    ~ Stock_Status_CMSY,
+      TRUE              ~ NA_real_
+    ),
+    StockStatus_capped = pmin(StockStatus_Pick, 1)  # caps values at 1
+  )
+
+StockStatus_Scores_clean<- StockStatus_Scores_clean %>% 
+  filter(Year >= 2018 & Year <=2024)
+# 3329 obs., 34 vars.
+```
+
+# STEP 2: Calculate GEOMETRIC MEAN of stock landings * Stock_Status ------------------------------
+
+```{r Weights and geometric mean}
+# Calculate the proportion of catch each "Stock" (i.e. genus) contributed to its regional total during that 5-year reference period.
+colnames(StockStatus_Scores_clean)
+
+Weights_data <- StockStatus_Scores_clean %>%
+  filter(yr >= 2018 & yr <= 2022) %>%
+  group_by(estimated_genus_name, OHI_region_est) %>%
+  mutate(StockCatch_2018.22 = sum(annual_Catch_kg)) %>% # total tonnes across all years for each stock and region during this reference period, 2018-2022
+  ungroup() %>%
+  group_by(OHI_region_est) %>%
+  mutate(TotalCatch_2018.22 = sum(annual_Catch_kg, na.rm = TRUE)) %>% # total tonnes catch across all years and stocks for each region
+  ungroup() %>%
+  mutate(wprop_2018.22 = StockCatch_2018.22 / TotalCatch_2018.22) %>% # proportion of catch each stock contributed to the total catch
+  distinct(estimated_genus_name, OHI_region_est, wprop_2018.22)
+
+
+# Sanity check: Yup, looks good!
+subset<- Weights_data %>%
+  group_by(OHI_region_est) %>%
+  summarize(sum_w = sum(wprop_2018.22, na.rm= TRUE))
+
+
+# Add weights data to Stock Status df:
+StockStatus_Scores_clean <- left_join(StockStatus_Scores_clean, 
+                                      Weights_data, 
+                                      by = c("OHI_region_est", "estimated_genus_name"))
+
+
+# This is the geometric mean part:
+StockStatus_GeoMean <- StockStatus_Scores_clean %>%
+  group_by(OHI_region_est, yr) %>%
+  summarize(
+    GeoMean_StockStatus = prod(StockStatus_capped ^ wprop_2018.22, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r Save this dataframe}
+write.csv(StockStatus_GeoMean, "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_StockStatusScores_GeoMean_Jun012026.csv", row.names = FALSE)
+```
+
+```{r Plot Stock Status Geo Mean over time}
+#### PLOT: Stock_Status (Geometric Mean) OVER TIME ####
+
+#### Region Colors ####
+Region_colors <- c(
+  "royalblue",
+  "skyblue",
+  "orange",
+  "sienna1",
+  "plum",
+  "purple4",
+  "aquamarine3",
+  "gold2",
+  "tomato"
+)
+
+Regions_of_Interest <- c(
+  "Region_1", "Region_2", "Region_3",
+  "Region_4", "Region_5", "Region_6",
+  "Region_7", "Region_8", "Region_9"
+)
+
+Regions_of_Interest<- tolower(Regions_of_Interest)
+
+StockStatus_GeoMean_overTime <- StockStatus_GeoMean %>%
+  filter(OHI_region_est %in% Regions_of_Interest) %>%
+  ggplot(aes(
+    x = yr,
+    y = GeoMean_StockStatus,
+    color = OHI_region_est
+  )) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ OHI_region_est, scales = "fixed") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  scale_color_manual(values = Region_colors) +
+  labs(
+    title = expression(bold("FIS: Regional " * bolditalic("Stock_Status") * " Scores (Geometric Mean)")),
+    y = "Stock_Status Score (from 0 to 1)",
+    x = "Year"
+  ) +
+  ylim(0, 1.1) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold")
+    # plot.title = element_text(size = 18, face = "bold")
+  )
+
+StockStatus_GeoMean_overTime
+  
+  # Save as PNG
+  # ggsave(
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_StockStatus_Scores/StockStatus_GeoMeanScores_PlotOverTime_Dec162025.png"),
+  #   plot = StockStatus_GeoMean_overTime,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+
+```
+
+```{r Plot CPUE Scores over time}
+#### PLOT: CPUE (weighted average) OVER TIME ####
+
+Region_colors <- c(
+  "royalblue",
+  "skyblue",
+  "orange",
+  "sienna1",
+  "plum",
+  "purple4",
+  "aquamarine3",
+  "gold2",
+  "tomato"
+)
+
+Regions_of_Interest <- c(
+  "Region_1", "Region_2", "Region_3",
+  "Region_4", "Region_5", "Region_6",
+  "Region_7", "Region_8", "Region_9"
+)
+
+CPUE_WeightedMean_overTime <- CPUE_Scores %>%
+  filter(OHI_region_est %in% Regions_of_Interest) %>%
+  ggplot(aes(
+    x = yr,
+    y = weighted_CPUE_acrossAllGroups,
+    color = OHI_region_est
+  )) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ OHI_region_est, scales = "fixed") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  labs(
+    title = expression(bold("FIS: Regional " * bolditalic("CPUE") * " Scores relative to Baseline (2003–2013) (Weighted Average)")),
+    y = "CPUE Scores (CPUE_present : CPUE_baseline capped at 1)",
+    x = "Year"
+  ) +
+  ylim(0, 1.1) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold")
+    # plot.title = element_text(size = 18, face = "bold")
+  )
+
+CPUE_WeightedMean_overTime
+```
+
+```{r Save as PNG}
+  # ggsave(
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/FIS_CPUEScores_WeightedMean_PlotOverTime_Dec162025.png"),
+  #   plot = CPUE_WeightedMean_overTime,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+
+```
+
+```{r Merge ALL dataframes for final OHI Score}
+# Merge:
+# lowercase to make sure matching works
+CPUE_Scores <- CPUE_Scores %>%
+  mutate(OHI_Region = tolower(OHI_Region))
+
+OHI_Scores_df <- CPUE_Scores %>%
+  full_join(
+    StockStatus_GeoMean,
+    by = c("Year", "OHI_Region")
+  )
+
+OHI_Scores_df <- OHI_Scores_df %>%
+  mutate(FIS_Score = rowMeans(cbind(weighted_CPUE_acrossAllGroups, GeoMean_StockStatus), na.rm = TRUE))
+
+# Multiply by 100 and round to second decimal place:
+OHI_Scores_df$FIS_Score_Scale100 <- round(
+  OHI_Scores_df$FIS_Score * 100,
+  digits = 1
+)
+```
+
+```{r Filter out the OHI_Scores_df and save it}
+# SAVE THIS DATAFRAME
+# write.csv(OHI_Scores_df, "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Scores_Jun012026.csv", row.names = FALSE)
+```
+
+```{r Graph FIS scores per region over time}
+#### PLOT: FIS SCORES OVER TIME ####
+Region_colors <- c(
+  "royalblue",
+  "skyblue",
+  "orange",
+  "sienna1",
+  "plum",
+  "purple4",
+  "aquamarine3",
+  "gold2",
+  "tomato"
+)
+
+FIS_Scores_overTime<- OHI_Scores_df %>%
+  filter(OHI_Region %in% Regions_of_Interest) %>%
+  
+  ggplot(aes(x = Year, y = FIS_Score_Scale100, color = OHI_Region)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ OHI_Region, scales = "fixed") +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  labs(
+    title = "FIS Scores per Region Over Time",
+    x = "Year",
+    y = "FIS Score (0–100)"
+  ) +
+  
+  ylim(50, 110) +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+FIS_Scores_overTime
+```
+
+```{r Save as PNG}
+  # ggsave(
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_FIS_Scores/FIS_Scores_PlotOverTime_Dec172025.png"),
+  #   plot = FIS_Scores_overTime,
+  #   width = 12,
+  #   height = 12,
+  #   dpi = 300
+  # )
+```

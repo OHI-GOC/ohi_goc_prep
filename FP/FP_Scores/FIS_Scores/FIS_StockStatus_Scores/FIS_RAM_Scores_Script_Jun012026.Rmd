@@ -66,6 +66,156 @@ lowercase_function<- function(x){
 ```
 
 
+# PICK 1: RAM Stock Assessment - species level ------------------------------
+
+# >> SKIP: I have already downloaded and gapfilled the RAM data through 2024.
+```{r Load in RAM and formal assessment data}
+RAM_data0<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS/v2025/data/formal_assessments.csv")
+table(RAM_data0$year)
+# 195 obs., 17 vars.
+```
+
+```{r Separate Genus from scientific_name}
+RAM_data<- RAM_data0
+
+RAM_data <- RAM_data %>%
+  separate(scientificname, into = c("Genus", "Species"), sep = " ", remove = FALSE)
+# Okay, looks good!
+# 195 obs., 19 vars.
+```
+
+```{r Basic filtering & correcting}
+# Keep Stock (genus-species in this case) only if it has post-2019 data
+RAM_data <- RAM_data %>%
+  group_by(Genus, Species) %>%
+  filter(any(year >= 2019)) %>%
+  select(year, assessyear, areaname, 
+         commonname, scientificname, Genus, Species, 
+         ram_bmsy, source) %>%
+  ungroup()
+# 181 obs., 9 vars.
+
+# Correct the non_numeric values:
+RAM_data$RAM_BBmsy_numeric <- as.numeric(gsub("[^0-9.]", "", RAM_data$ram_bmsy))
+```
+
+```{r Gapfill RAM data using the zoo package}
+RAM_gapfilled <- RAM_data %>%
+  group_by(Genus, Species, areaname) %>%
+  complete(year = 2019:2024) %>%
+  ungroup()
+# 256 obs., 10 vars.
+
+# Gapfilling - INTERPOLATION between years with data (using the zoo package):
+RAM_gapfilled <- RAM_gapfilled %>%
+  # --- identify each stock correctly ---
+  group_by(Genus, Species, areaname) %>%
+  
+  # --- add missing years WITHOUT removing any original rows ---
+  complete(year = full_seq(c(year, 2019:2024), 1)) %>%
+  # ^ This safely adds 2019–2024 and any intermediate years, 
+  #   never removes rows
+  
+  # --- fill descriptors (stock metadata) ---
+  fill(commonname, scientificname, source, assessyear, .direction = "downup") %>%
+  
+  arrange(year, .by_group = TRUE) %>%
+  
+  # --- interpolate only RAM_BBmsy_numeric ---
+  mutate(
+    RAM_gapfilled = zoo::na.approx(RAM_BBmsy_numeric, x = year, na.rm = FALSE)
+  ) %>%
+  
+  ungroup()
+# 347 obs., 11 vars.
+
+# Gapfilling - EXTRAPOLATION beyond years with data (using the zoo package):
+RAM_gapfilled <- RAM_gapfilled %>%
+  group_by(Genus, Species, areaname) %>%
+  arrange(year, .by_group = TRUE) %>%
+  mutate(
+    RAM_gapfilled = zoo::na.approx(
+      RAM_BBmsy_numeric,
+      x = year,
+      na.rm = FALSE,
+      rule = 2   # allow linear extrapolation outside observed years
+    )
+  ) %>%
+  ungroup()
+# 347 obs., 11 vars.
+
+# Sanity check: do gapfilled values always match numeric values when they exist?
+# Example vectors
+numeric_BBmsy_values<- RAM_gapfilled$RAM_BBmsy_numeric
+gapfilled_BBmsy_values <- RAM_gapfilled$RAM_gapfilled
+
+# Logical check: TRUE wherever BBmsy_numeric is NA or matches RAM_gapfilled
+check <- ifelse(!is.na(numeric_BBmsy_values), gapfilled_BBmsy_values == numeric_BBmsy_values, TRUE)
+
+# Are all original values preserved?
+all(check)
+# Yes!
+```
+
+```{r Annotate RAM_gapfilled dataframe}
+# Finally, a "RAM_BBmsy_Pick" column and "Pick_Source" column that tell which BBmsy value to work with and where that data point came from, a formal assessment value or a gapfilled value:
+RAM_gapfilled <- RAM_gapfilled %>%
+  mutate(
+    RAM_BBmsy_Pick = ifelse(!is.na(RAM_BBmsy_numeric), RAM_BBmsy_numeric, RAM_gapfilled),
+    Pick_Source    = ifelse(!is.na(RAM_BBmsy_numeric), "Direct from formal assessment (RAM or other)", "gapfilled from formal assessment")
+  )
+# 347 obs., 13 vars.
+```
+
+```{r Save the RAM_gapfilled file}
+# PENDING... cannot recreate as of June 1. Must find missing formal_assessments file.
+```
+
+```{r BBmsy cap at 1}
+colnames(RAM_gapfilled)
+
+# Caps values for RAM_BBmsy_Pick at 1 & filters out 2025 data:
+RAM_FIS_scores<- RAM_gapfilled %>%
+  filter(Year <= 2024) %>%
+  mutate(Formal_BBmsy_capped = pmin(Formal_BBmsy_Pick, 1)) %>%
+  select(Year, Area, CommonName,
+         ScientificName= scientificname, Genus, Species,
+         FormalAssessment_Source = source, FormalAssessment_Years= assessyear,
+         Formal_BBmsy= ram_bmsy, Formal_BBmsy_numeric= RAM_BBmsy_numeric,
+         Formal_BBmsy_gapfilled = RAM_gapfilled,
+         Formal_BBmsy_Pick = RAM_BBmsy_Pick, Formal_BBmsy_capped,
+         Formal_BBmsy_Pick_Source = Pick_Source)
+# 346 obs., 14 vars.
+```
+
+# >> SKIP TO HERE: Convert RAM data into a usable BBMSY score.
+```{r Load in RAM_gapfilled0 as needed}
+RAM_gapfilled0<- read.csv("/home/frazier/ohi_goc_prep/FP/FIS_Scores/FIS_Scores_Dec2026/FIS_StockStatus_Scores_Dec2025/RAM_Scores/Gapfilled_RAMdata_Dec122025.csv")
+# 346 obs., 14 vars.
+```
+
+```{r Convert RAM_gapfilled0 to RAM_FIS_scores}
+RAM_FIS_scores<- RAM_gapfilled0
+# 346 obs., 14 vars.
+
+table(RAM_gapfilled0$FormalAssessment_Source)
+
+RAM_FIS_scores <- RAM_gapfilled0 %>%
+  filter(!FormalAssessment_Source %in% c(
+    "carta",
+    "carta: robalos are regulated as one group",
+    "carta: rough estimate from plot",
+    "carta: snappers are regulated as one taxa"
+  ))
+# 216 obs., 14 vars.
+```
+
+# >> FINAL STEP: SAVE the RAM_FIS_scores dataframe:
+```{r Save this dataframe}
+write.csv(RAM_FIS_scores,"~/ohi_goc_prep/FP/FIS_Scores/FIS_RevisedScores_May2026/FIS_StockStatus_Scores_May2026/FIS_RAMScores_June012026.csv", row.names = FALSE)
+```
+
+
 # PICK 2: Catch vs CNP Baseline - species level ------------------------------
 
 ## STEP A: Load in recommendations for the Carta Nacional Pesquera
@@ -520,5 +670,113 @@ median(Carta_FIS_scores$Stock_Status, na.rm=TRUE)
 ```{r Write this as a CSV}
 write.csv(Carta_FIS_scores,
           file= "/home/ferrer/ohi_goc_prep/FP/FIS_Scores/FIS_RevisedScores_May2026/FIS_StockStatus_Scores_May2026/FIS_CartaScores_May282026.csv", 
+          row.names = FALSE)
+```
+
+
+# PICK 3: CMSY Stock Assesments - genus level ------------------------------
+- This task represents a considerable amount of work that was not completed in this file.
+- To learn how the CMSY scores were generated, review this file:
+CMSY_FinalAnalysis_May2026.Rmd.
+- I used this file to generate the model priors.
+- However, the actual CMSY script (RunCMSY_May282026.R) was run on my personal machine.
+
+Important Notes: 
+- I ran CMSY at genus level, since I actually think it’s a safer more reliable bet than species-level info and because – in many cases – fishermen seem to target taxa of the same genus interchangeably.
+
+# >> SKIP: I have already run the CMSY through 2024.
+
+FILE 1: Create a file with annual landings in kg (and n_count observations) grouped by year per "stock". Here, stock is defined as the total population of GENUS X fished within the Gulf of California from Baja to northern Jalisco, not including landings from the Pacific.
+
+FILE 2: Create a file with OHI_Region, Stock, Group = Name, English Name, Scientific Name, Source, and a whole bunch of year columns that you populate using the various R files shared by Alfredo. This file can probably be trimmed down but for now I recommend formatting it exactly as it appears from before.
+
+
+```{r Load in CMSY asessment results}
+# Actual B/Bmsy output from CMSY:
+CMSY_Timeseries0<- read.csv("/home/ferrer/ohi_goc_prep/FP/CMSY_Analysis/CMSY_FinalLook_May2026/Model_Output_Files/CMSY_Assessment_Timeseries_May282026.csv")
+# 1569 obs., 14 vars.
+
+colnames(CMSY_Timeseries0)
+
+CMSY_Timeseries0<- CMSY_Timeseries0 %>%
+  select(-c(X, cinfo.stock.i.))
+
+table(CMSY_Timeseries0$stock)
+```
+
+```{r Load other useful dataframes: CMSY timeseries and key data}
+# Useful genus key:
+CMSY_GenusKey<- read.csv("~/ohi_goc_prep/FP/FIS/v2025/OHI_StockStatus_Scores/RAM_FIS_scores/Instructional_Files/CMSY_GenusKey_Dec102025.csv")
+# 98 obs., 3 vars.
+```
+
+```{r Append info about Major_Functional_Group}
+CMSY_Timeseries<- CMSY_Timeseries0 %>% 
+  select(stock, yr,
+         B, B.Bmsy, lcl.B.Bmsy, ucl.B.Bmsy,
+         F.Fmsy, lcl.F.Fmsy, ucl.F.Fmsy)
+
+# Convert the relevant columns to lower case
+CMSY_Timeseries <- CMSY_Timeseries %>%
+  mutate(stock = tolower(stock))
+
+CMSY_GenusKey <- CMSY_GenusKey %>%
+  mutate(Stock = tolower(Stock))
+
+# Merge in Major_Functional_Group data:
+CMSY_Timeseries <- CMSY_Timeseries %>%
+  left_join(
+    CMSY_GenusKey,
+    by = c("stock" = "Stock")
+  )
+# 775 obs., 11 vars.
+```
+
+```{r Summarize landings by genus / stock}
+Genera_in_CMSY<- unique(CMSY_Timeseries$stock)
+# 31 assessed genera
+
+CMSY_LandingsData <- CMSY_LandingsData_original %>%
+  mutate(estimated_genus_name = tolower(estimated_genus_name))
+
+CMSY_LandingsData <- CMSY_LandingsData %>% filter(estimated_genus_name %in% Genera_in_CMSY)
+# 1126147 obs., 53 vars
+unique(CMSY_LandingsData$estimated_genus_name)
+# Yup! Looks good!
+
+# Summarize by year and OHI region:
+CMSYstocks_RegionalLandings_Summary <- CMSY_LandingsData %>% 
+  filter(year >= 2014, year <= 2024) %>%
+  select(year, OHI_Region_No, estimated_genus_name, weight_kg_corrected, value) %>%
+  group_by(stock = estimated_genus_name, OHI_Region_No, yr = year) %>%
+  summarize(
+    total_catch_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    total_value_pesos = sum(value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(stock, OHI_Region_No, yr)
+# 2171 obs., 5 vars.
+
+CMSYstocks_RegionalLandings_Summary <- CMSYstocks_RegionalLandings_Summary %>%
+  left_join(
+    CMSY_Timeseries,
+    by = c("yr", "stock")
+  )
+# 2171 obs., 14 obs.
+```
+
+```{r Now filter to create the final dataframe}
+colnames(CMSYstocks_RegionalLandings_Summary)
+
+RAM_FIS_scores<- CMSYstocks_RegionalLandings_Summary %>% select(yr, OHI_Region_No, stock,
+                                                             total_catch_kg, B, B.Bmsy, lcl.B.Bmsy,
+                                                             ucl.B.Bmsy,
+                                                             F.Fmsy, lcl.F.Fmsy, ucl.F.Fmsy)
+```
+
+# FINAL STEP: SAVE the RAM_FIS_scores dataframe:
+```{r Save this dataframe}
+write.csv(RAM_FIS_scores,
+          file= "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_StockStatus_Scores/RAM_FIS_scores/FIS_CMSY.BBmsyScores_Dec162025.csv",
           row.names = FALSE)
 ```

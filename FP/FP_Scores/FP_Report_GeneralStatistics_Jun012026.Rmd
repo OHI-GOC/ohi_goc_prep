@@ -1,0 +1,207 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+# >> Report Statistics <<  ------------------------------
+```{r How much seafood is produced in this region in 2024?}
+AllMex_Landings<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/juan_carlos/AllMex_landings_2000_present_EMF_edited.rds"))
+# 12153879 obs., 20 vars.
+
+# Subset records from 2024:
+AllMex_Landings_2024<- AllMex_Landings %>% filter(year==2024)
+# 483775 obs., 20 vars.
+
+# Landed weight correction (kind of looks like sometimes 'landed weight' is 'live weight' and vice versa. Fix this):
+AllMex_Landings_2024$weight_kg_corrected <- ifelse(
+  AllMex_Landings_2024$live_weight >= AllMex_Landings_2024$landed_weight,
+  AllMex_Landings_2024$live_weight,
+  AllMex_Landings_2024$landed_weight
+)
+# 483775 obs., 21 vars.
+
+# Let's filter out any records where weight_kg_corrected is < or = 0.
+AllMex_Landings_2024<- AllMex_Landings_2024 %>%
+  filter(weight_kg_corrected > 0)
+# 483775 obs., 21 vars.
+
+sum(is.na(AllMex_Landings_2024$weight_kg_corrected))
+# 0. Good!
+
+# Finally, let's apply a coarse filter to filter out landings from aquaculture. This won't get everything.
+table(AllMex_Landings_2024$acuaculture_production) #  NO: 421421 and the rest are NAs.
+
+
+## VERSUS - [MARINE] LANDINGS IN ONLY THE GoC
+# This is an imperfect calculation because we can't be certain that all of these sites are inside the GoC.
+
+
+GoC_Landings_cleaned<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
+# GoC_Landings<- Landings_GoC_NoFresh.NoMariculture
+# 3163120 obs., 50 vars.
+
+# Subset records from 2024:
+GoC_Landings_2024<- GoC_Landings_cleaned %>% filter(year== 2024)
+# 143479 obs., 50 vars.
+
+# Let's filter out any records where weight_kg_corrected is < or = 0.
+GoC_Landings_2024<- GoC_Landings_2024 %>%
+  filter(weight_kg_corrected > 0)
+# 143479 obs., 50 vars.
+
+sum(is.na(GoC_Landings_2024$weight_kg_corrected))
+# 0. Good!
+
+table(GoC_Landings_2024$OHI_Region_No)
+unique(GoC_Landings_2024$OHI_Region_No)
+
+Definitely_GoC_Regions<- c("Region_1", "Region_2", "Region_3",
+                           "Region_4", "Region_5", "Region_6",
+                           "Region_7", "Region_8", "Region_9",
+                           "Region_4_5_6_Sonora_TBD")
+# We cannot be certain about the landings from "Region_1_2_Baja_TBD" or "Region_3_4_BCS_TBD"
+
+GoC_Landings_2024<- GoC_Landings_2024 %>% filter(OHI_Region_No %in% Definitely_GoC_Regions)
+# 142533 obs., 50 vars.
+
+#### CALCULATION: How much seafood produced in the region? ####
+# ANSWER: ~50% in 2024
+
+sum(AllMex_Landings_2024$weight_kg_corrected)
+# 1993632680 kg
+
+sum(GoC_Landings_2024$weight_kg_corrected)
+# 995487742 kg
+
+
+#### CALCULATION: How much seafood VALUE is produced in the region? ####
+# ANSWER: ~23% in 2024
+
+sum(AllMex_Landings_2024$value)
+# 44196283211 pesos
+
+sum(GoC_Landings_2024$value)
+# 9978483456 pesos
+
+
+#### CALCULATION: How much seafood in the region is produced by SSF? ####
+# ANSWER: 20% total in 2024; anywhere from 25-48% when exclude large-scale anchovy and sardine
+
+table(GoC_Landings_2024$fleet)
+# large_scale small_scale NA
+#       14546      127261 
+
+GoC_Landings_2024_All<- GoC_Landings_2024 %>% filter(!is.na(fleet))
+# 141807 obs.
+
+GoC_Landings_2024_SSF<- GoC_Landings_2024 %>% filter(fleet=="small_scale")
+# 127261 obs.
+
+sum(GoC_Landings_2024_All$weight_kg_corrected) # 992204985 kg
+sum(GoC_Landings_2024_SSF$weight_kg_corrected) # 199330559 kg
+
+# What about for direct consumption?
+GoC_Landings_2024_Large<- GoC_Landings_2024 %>% filter(fleet=="large_scale")
+# 14546 obs.
+
+table(GoC_Landings_2024_Large$recorded_taxa_group)
+
+GoC_Landings_2024_withoutLargeAnchovy <- GoC_Landings_2024 %>% 
+  filter(
+    !(fleet == "large_scale" &
+      recorded_taxa_group %in% c("ANCHOVETA", "SARDINA"))
+  )
+# 137815 obs.
+
+sum(GoC_Landings_2024_withoutLargeAnchovy$weight_kg_corrected) # 417828233 kg
+sum(GoC_Landings_2024_SSF$weight_kg_corrected) # 199330559 kg
+```
+
+
+```{r How much of the seafood can we account for in our analysis?}
+# Load file, only if needed:
+GoC_Landings_TEST<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/fis/v2025/int/GOC_FIS.landings_CLEAN_as.of.Dec092025.rds"))
+# 3163120 obs., 50 vars.
+
+# General filtering:
+# In general, the receipts from early trips are a bit funky. Let's filter out trips before 2003.
+GoC_Landings_TEST<- GoC_Landings_TEST %>%
+  filter(year >= 2003)
+# 2896048 obs., 50 vars.
+
+# Let's also filter out any records where weight was < or = 0 (n= 126955 records).
+GoC_Landings_TEST<- GoC_Landings_TEST %>%
+  filter(weight_kg_corrected > 0 & !is.na(weight_kg_corrected))
+# 2895892 obs., 50 vars.
+
+# Re-assigning CPUE major groups based on new key:
+Genus_MajorGroup_Key<- read.csv("~/ohi_goc_prep/general/CONAPESCA_Keys/Genus_to_MajorGroup_Key_Dec112025.csv")
+# 326 obs., 4 vars.
+
+GoC_Landings_TEST <- GoC_Landings_TEST %>%
+  left_join(Genus_MajorGroup_Key,
+            by = c("recorded_taxa_group", "estimated_genus_name"))
+# 2895892 obs., 52 vars. as expected!
+
+
+#### CALCULATION: How much of the seafood can we account for in our analysis? ####
+# ANSWER: Anywhere from 92-99% in any given year.
+
+table(GoC_Landings_TEST$Major_Functional_Group)
+# We can account for 2778209 out of 2895892 records (96%).
+
+# How much of the landings can we account for?
+Yearly_weight_summary <- GoC_Landings_TEST %>%
+  group_by(year) %>%
+  summarise(
+    # Total weight across ALL records
+    total_weight_all = sum(weight_kg_corrected, na.rm = TRUE),
+
+    # Weight where Major_Functional_Group is present and not NEI
+    total_weight_tax_grouped = sum(
+      weight_kg_corrected[
+        !is.na(Major_Functional_Group) &
+        Major_Functional_Group != "NEI"
+      ],
+      na.rm = TRUE
+    ),
+
+    # Optional: proportion of total that is taxonomically grouped
+    prop_tax_grouped = total_weight_tax_grouped / total_weight_all
+  ) %>%
+  ungroup()
+```
+
