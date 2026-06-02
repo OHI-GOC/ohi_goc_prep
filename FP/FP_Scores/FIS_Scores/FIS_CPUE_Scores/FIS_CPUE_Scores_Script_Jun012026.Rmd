@@ -291,6 +291,9 @@ GOC_CPUE_Landings <- GOC_CPUE_Landings %>%
   filter(year >= 2018 & year <= 2025) %>%
   filter(eu_rnpa %in% ConsistentEconomicUnits)
 # 860336 obs., 57 vars. (down -263170 obs.)
+
+# SANITY CHECK: Do all landings have a Major_Functional_Group assigned? Yes!
+sum(is.na(GOC_CPUE_Landings$Major_Functional_Group))
 ```
 
 ```{r Summarize catch per EU by Major_Functional_Group per year}
@@ -317,7 +320,8 @@ CPUE_summary <- GOC_CPUE_Landings %>%
 CPUE_mean_df <- CPUE_summary %>%
   filter(year > 2017 & year < 2025) %>%
   group_by(Major_Functional_Group) %>%
-  summarise(mean_cpue = mean(catch.mt_per_eu), .groups = "drop")
+  summarise(mean_cpue = mean(catch.mt_per_eu), 
+            .groups = "drop")
 
 CPUE_perEU_plot <- 
   
@@ -365,10 +369,12 @@ ggsave(
 )
 ```
 
-# STEP: Estimate CPUE over some "historic" baseline
+# STEP 2: Estimate CPUE now and over a "historic" baseline
 ```{r Establish what is the "historic" baseline?}
 HistoricBaseline_low= 2018
 HistoricBaseline_high= 2022
+CurrentPeriod_low= HistoricBaseline_high
+CurrentPeriod_high= 2025
 
 # It was previously 2003 to 2013 (December 2025), but now I will make it 2018-2022 to be consistent with the Carta baseline.
 ```
@@ -379,98 +385,79 @@ options(scipen = 999)
 
 colnames(CPUE_summary)
 
-# Establish CPUE values (at the group-level) over the "historic" baseline period defined above:
+# Calculate CPUE values (at the group-level) over the "historic" baseline period defined above:
 CPUE_baseline <- CPUE_summary %>%
   filter(year >= HistoricBaseline_low, year <= HistoricBaseline_high) %>%
   group_by(Major_Functional_Group, ) %>%
   summarise(
     CPUE_baseline = mean(catch.mt_per_eu, na.rm = TRUE),
+    n_eu_baseline = sum(n_eu, na.rm = TRUE),
+    n_years_baseline = n_distinct(year),
     .groups = "drop"
   )
 
 
-# STEP 2: CALCULATE CPUE VALUES FOR RECENT YEARS, 2014-2024 -----
-CPUE_recent <- GOC_CPUE_Landings %>%
-  filter(year >= 2014, year <= 2024) %>%
-  filter(!is.na(OHI_region_est)) %>%
-  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+# Calculate CPUE values (at the group-level) over recent years, 2023-2024
+CPUE_recent <- CPUE_summary %>%
+  filter(year > CurrentPeriod_low & year <= CurrentPeriod_high) %>%
+  group_by(year, Major_Functional_Group) %>%
   summarise(
-    Total_Biomass_kg = sum(weight_kg_corrected),
-    Total_Days = sum(days_fishing),
-    OLD_mean_CPUE.recent = mean(CPUE_kg.day, na.rm = TRUE),
-    NEW_mean_CPUE.recent = ifelse(Total_Days > 0, Total_Biomass_kg / Total_Days, NA_real_),
-    Total_Value_mxn = sum(value, na.rm = TRUE),  # keep na.rm just in case value has NAs
-    n_records = n(),
+    CPUE_current = mean(catch.mt_per_eu, na.rm = TRUE),
+    n_eu = sum(n_eu, na.rm = TRUE),
     .groups = "drop"
   )
+```
 
-# # NOTE TO SELF: Save this table to show to Mel, can delete later -
-# write.csv(CPUE_recent, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_MethodsIllustration2_PURG_Dec112025.csv", row.names = FALSE)
+```{r Merge baseline to present}
+# Merge CPUE_baseline to CPUE_recent:
+CPUE_FIS_scores <- CPUE_recent %>%
+  left_join(CPUE_baseline,
+            by = c("Major_Functional_Group")) %>%
+  mutate(
+    CPUE_score = CPUE_current / CPUE_baseline
+  )
+
+# Cap CPUE_score at a max of 1:
+CPUE_FIS_scores <- CPUE_FIS_scores %>%
+  mutate(
+    CPUE_score_capped = if_else(
+      CPUE_score > 1,
+      1,
+      CPUE_score
+    )
+  )
+```
+
+```{r Add a GOC region column}
+CPUE_FIS_scores$region<- c("GOC")
+
+CPUE_FIS_scores<- CPUE_FIS_scores %>%
+  relocate(region, .before= year)
+```
 
 
-# STEP 3: COMPUTE PERCENT BIOMASS FOR RECENT YEARS -----
+# FINAL STEP: SAVE the CPUE_FIS_scores dataframe:
+```{r Save this CPUE data table}
+write.csv(CPUE_FIS_scores, 
+"/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_CPUE_Scores/FIS_CPUE_Scores_Jun012026.csv", 
+row.names = FALSE)
+```
+
+
+# UNDER CONSTRUCTION / PURG: Other Inquiries - June 1 2026
+
+Estimate how much biomass per group?
+```{r COMPUTE PERCENT BIOMASS FOR RECENT YEARS}
 CPUE_recent <- CPUE_recent %>%
-  group_by(year, OHI_region_est) %>%
+  group_by(year) %>%
   mutate(
     total_biomass_state_year = sum(Total_Biomass_kg, na.rm = TRUE),
     pct_of_total_biomass = (Total_Biomass_kg / total_biomass_state_year) * 100
   ) %>%
   ungroup()
-
-
-# Quick aside: how much of percent catch do the NAs account for?
-subset<- CPUE_recent %>% filter(is.na(Major_Functional_Group))
-# In only a handful of cases do NAs account for the *majority* of annual catch - primarily in Region 5.
-# And again, a lot of these NAs can be accounted for with further species key work.
-
-
-# STEP 4: MERGE BASELINE TO PRESENT DATA -----
-CPUE_Table <- CPUE_recent %>%
-  left_join(CPUE_baseline,
-            by = c("OHI_region_est", "Major_Functional_Group")) %>%
-  mutate(
-    RatioCPUE_Recent.Baseline = NEW_mean_CPUE.recent / NEW_CPUE_2003.2013  # Score = CPUEpresent / CPUE_2003.2013
-  )
-
-# STEP 5: DESIRED TABLE -----
-CPUE_Table <- CPUE_Table %>%
-  transmute(
-    OHI_Region = OHI_region_est,
-    Year = year,
-    Major_Functional_Group = Major_Functional_Group,
-    RatioCPUE_Recent.Baseline = round(RatioCPUE_Recent.Baseline, 3),
-    Total_Landings_kg = round(Total_Biomass_kg, 1),
-    Taxa_per_Total_Catch = round(pct_of_total_biomass, 2)
-  ) %>%
-  arrange(OHI_Region, Year, Major_Functional_Group)
-
-
-# STEP 6: CAP CPUE AT A MAX OF 1 per GROUP
-CPUE_Table <- CPUE_Table %>%
-  mutate(
-    RatioCPUE_Recent.Baseline_CAPPED = if_else(
-      RatioCPUE_Recent.Baseline > 1,
-      1,
-      RatioCPUE_Recent.Baseline
-    )
-  )
-
-# STEP 7: OHI CPUE SCORES PER REGION PER YEAR -----
-CPUE_Scores <- CPUE_Table %>%
-  mutate(TaxaProp = Taxa_per_Total_Catch/100) %>%     # IF % values are 0–100; if 0–1 then skip this line
-  group_by(Year, OHI_Region) %>%
-  summarise(
-    weighted_CPUE_acrossAllGroups = sum(RatioCPUE_Recent.Baseline_CAPPED * TaxaProp, na.rm = TRUE)
-  ) %>%
-  ungroup()
 ```
 
-# SAVE: OHI CPUE SCORES PER REGION PER YEAR
-```{r Save this CPUE data table}
-# write.csv(CPUE_Scores, "/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/FIS_CPUEScores_WeightedMean_Dec12025.csv", row.names = FALSE)
-```
-
-## Take a closer look at CPUE per Region and per Major_Functional_Group:
+Take a closer look at CPUE per Region and per Major_Functional_Group:
 ```{r Plot CPUE over all years HistoricBaseline_low-2024}
 CPUE_AllYears <- GOC_CPUE_Landings %>%
   filter(year >= HistoricBaseline_low, year <= 2024) %>%
@@ -524,7 +511,7 @@ CPUE_overTime_byRegion_perTaxa
 
   # # Save as PNG
   # ggsave(
-  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_PlotOverTime_byRegion_perTaxa_Dec092025.png"),
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_FIS_scores/CPUE_PlotOverTime_byRegion_perTaxa_Dec092025.png"),
   #   plot = CPUE_overTime_byRegion_perTaxa,
   #   width = 12,
   #   height = 12,
@@ -560,7 +547,7 @@ CPUE_overTime_byRegion_perTaxa
 
   # # Save as PNG
   # ggsave(
-  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_PlotOverTime_byTaxa_perRegion_Dec092025.png"),
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_FIS_scores/CPUE_PlotOverTime_byTaxa_perRegion_Dec092025.png"),
   #   plot = CPUE_overTime_byTaxa,
   #   width = 12,
   #   height = 12,
@@ -602,7 +589,7 @@ CPUE_overTime_byRegion_perTaxa_normalized
 
   # Save as PNG
   # ggsave(
-  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_Scores/CPUE_PlotOverTime_byTaxa_perRegion_normalized_Dec092025.png"),
+  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_FIS_scores/CPUE_PlotOverTime_byTaxa_perRegion_normalized_Dec092025.png"),
   #   plot = CPUE_overTime_byTaxa_normalized,
   #   width = 12,
   #   height = 12,
