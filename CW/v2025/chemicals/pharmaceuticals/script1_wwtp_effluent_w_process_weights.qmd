@@ -30,9 +30,14 @@ editor_options:
 
 We will be doing this by estimating the total liters per year of effluent from each WWTP across the Gulf, determining which watershed the WWTP falls into, and aggregate the liters per year at the associated pourpoints.  
 
-From there, we can classify which OHI Region each pourpoint falls into, and aggregate the total liters per year of WWTP effluent for each year and region. This will then represent pharmaceutical discharge risk for each year and region.
+From there, we can classify which OHI Region each pourpoint falls into, and aggregate the total liters per year of WWTP effluent for each year and region.
 
-The regions will then be compared across time, using the global historical maximum (global meaning across-Gulf) as the highest risk.  That specific year and region will receive a risk factor of 100, and a current status of 0. Everything else will be scaled accordingly, assuming that the ideal is that zero liters per year of wastewater effluent is released into the GoC. 
+We calculate **two** pressure metrics:
+
+1. **Volume pressure** (`total_ef_l_yr`) — effluent volume only (original approach).
+2. **Pharmaceutical-weighted pressure** (`total_ef_pharma_l_yr`) — effluent volume × literature-based expected micropollutant **retention** in effluent (by SINA `proceso`) × optional overload multiplier when `caudal > capacidad`.
+
+The regions are compared across time using the global historical maximum (across-Gulf) for each metric. The year–region at each maximum receives a risk factor of 100 and a current status of 0. Everything else is scaled accordingly, with ideal = zero effluent (volume or weighted volume). 
 
 ```{r setup}
 library(sf)
@@ -68,7 +73,7 @@ st_crs(watershed_all)
 # mapview(watershed_all)
 
 watershed_goc <- st_intersection(st_transform(watershed_all, st_crs(union_rgns)), union_rgns)
-mapview(watershed_goc)
+# mapview(watershed_goc)
 
 # --- if we plan to change the buffer for some reason ---
 # inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
@@ -83,7 +88,7 @@ pourpoints <- st_read("/home/shares/ohi/stressors_2021/_dataprep/nutrients/water
 pourpoints_goc <- st_intersection(st_transform(pourpoints, st_crs(union_rgns)), union_rgns)
 mapview(pourpoints_goc)
 
-mapview(pourpoints_goc) + mapview(watershed_goc)
+# mapview(pourpoints_goc) + mapview(watershed_goc)
 ```
 
 ### Reading in all WWTP capacities and usages from 2017-2023
@@ -132,10 +137,90 @@ unique(bind_all_years_wwtp$estado)
 procesos <- unique(bind_all_years_wwtp$proceso)
 ```
 
+### Literature-based retention factors (by `proceso`)
+
+SINA reports each plant's dominant treatment process in `proceso`. We join `proceso_retention_lookup.csv` (derived from `wwtp_pharmaceutical_removal_by_process.csv`) to assign a conservative **retention** fraction — the share of influent pharmaceutical load expected to remain in effluent after treatment (not measured removal).
+
+Retention by overall literature rating: Good = 0.30, Moderate = 0.45, Limited = 0.75, Variable/Unknown = 0.50 (with low/high bounds for sensitivity). Plants operating over capacity (`over_proc`) use `overproc_multiplier` (default 1.25).
+
+```{r retention-lookup}
+seconds_per_year <- 31536000
+
+proceso_retention_candidates <- c(
+  here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/treatment_process_differences/proceso_retention_lookup.csv")
+)
+
+proceso_retention_lookup <- read_csv(proceso_retention_candidates)
+
+retention_defaults <- proceso_retention_lookup %>%
+  filter(treatment_process == "Other") %>%
+  slice(1)
+
+# helper: join retention + compute volume and pharma-weighted effluent (L/yr)
+add_pharma_effluent <- function(df) {
+  df %>%
+    left_join(
+      proceso_retention_lookup %>%
+        dplyr::select(
+          proceso,
+          treatment_process_mapped = treatment_process,
+          pharmaceutical_removal_rating,
+          retention_pharma,
+          retention_pharma_low,
+          retention_pharma_high,
+          overproc_multiplier
+        ),
+      by = "proceso"
+    ) %>%
+    mutate(
+      proceso_mapped = !is.na(retention_pharma),
+      pharmaceutical_removal_rating = coalesce(
+        pharmaceutical_removal_rating,
+        retention_defaults$pharmaceutical_removal_rating
+      ),
+      treatment_process_mapped = coalesce(
+        treatment_process_mapped,
+        retention_defaults$treatment_process
+      ),
+      retention_pharma = coalesce(retention_pharma, retention_defaults$retention_pharma),
+      retention_pharma_low = coalesce(
+        retention_pharma_low,
+        retention_defaults$retention_pharma_low
+      ),
+      retention_pharma_high = coalesce(
+        retention_pharma_high,
+        retention_defaults$retention_pharma_high
+      ),
+      overproc_multiplier = coalesce(
+        overproc_multiplier,
+        retention_defaults$overproc_multiplier
+      ),
+      overproc_mult = if_else(over_proc %in% TRUE, overproc_multiplier, 1),
+      ef_l_yr = caudal * seconds_per_year,
+      ef_pharma_l_yr = ef_l_yr * retention_pharma * overproc_mult,
+      ef_pharma_l_yr_low = ef_l_yr * retention_pharma_low * overproc_mult,
+      ef_pharma_l_yr_high = ef_l_yr * retention_pharma_high * overproc_mult
+    )
+}
+
+# audit: SINA proceso values not in lookup (before defaulting to Other)
+proceso_not_in_lookup <- bind_all_years_wwtp %>%
+  st_drop_geometry() %>%
+  distinct(proceso) %>%
+  anti_join(proceso_retention_lookup, by = "proceso")
+
+if (nrow(proceso_not_in_lookup) > 0) {
+  message(
+    "SINA proceso values not in lookup (assigned Other retention): ",
+    paste(proceso_not_in_lookup$proceso, collapse = "; ")
+  )
+}
+```
+
 Take a look...
 
 ```{r}
-mapview(bind_all_years_wwtp, zcol = "over_proc")
+# mapview(bind_all_years_wwtp, zcol = "over_proc")
 ```
 
 
@@ -184,6 +269,10 @@ bind_all_years_wwtp_reproj <- st_transform(bind_all_years_wwtp, st_crs(watershed
 
 # intersect wwtps with watersheds
 wwtps_watershed <- st_intersection(bind_all_years_wwtp_reproj, watershed_goc)
+
+wwtps_watershed <- wwtps_watershed %>%
+  add_pharma_effluent()
+
 colnames(wwtps_watershed)
 ```
 
@@ -192,46 +281,52 @@ Check out 2021:
 wwtps_watershed_2021 <- wwtps_watershed %>% 
   filter(anio %in% 2021)
 
-mapview(wwtps_watershed_2021, zcol = "capacidad") 
+# mapview(wwtps_watershed_2021, zcol = "capacidad") 
 
-mapview(wwtps_watershed_2021, zcol = "basin_id") + mapview(watershed_goc, zcol = "basin_id")
+# mapview(wwtps_watershed_2021, zcol = "basin_id") + mapview(watershed_goc, zcol = "basin_id")
 ```
 
 
-#### Exploring liters of effluent caluclation
+#### Exploring liters of effluent calculation
 
-To go from L/s to L/year, we need to multiply by 31536000.  Note that this is a rough assumption... it assumes that the WWTP is running constantly, but it is likely not running 24/7/365.  This is basically an upper bound for the year.
+To go from L/s to L/year, multiply by `seconds_per_year` (31,536,000). This assumes the WWTP runs continuously — an upper bound for the year. Pharmaceutical-weighted effluent applies literature retention and an overload multiplier when `over_proc` is TRUE.
 
 ```{r}
 summary(bind_all_years_wwtp$caudal) # no zeros or NAs:      Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
-                                                 #  0.010     1.377     3.100    53.311    15.100 28743.230 
+                                                        #  0.010     1.377     3.100    53.311    15.100     28743.230 
 
-effluent_liters_wwtp_yearly <- bind_all_years_wwtp %>%
-  mutate(
-    ef_l_yr = caudal * 31536000 # assumes that the WWTP is running constantly... but it is likely not running 24/7/365.  This is basically an upper bound for the year.
+effluent_liters_wwtp_yearly <- wwtps_watershed %>%
+  st_drop_geometry() %>%
+  dplyr::select(
+    clvplanta, anio, estado, proceso, treatment_process_mapped,
+    pharmaceutical_removal_rating, retention_pharma, over_proc, overproc_mult,
+    caudal, capacidad, ef_l_yr, ef_pharma_l_yr,
+    ef_pharma_l_yr_low, ef_pharma_l_yr_high, proceso_mapped
   )
 ```
 
 #### Summarize liters per watershed per year
 
-We can now aggregate the total L/year for each watershed.
+Aggregate total effluent volume and pharmaceutical-weighted effluent per watershed.
 
 ```{r}
 # summarize liters per watershed per year
 wwtp_liters_effluent_by_watershed <- wwtps_watershed %>%
-  st_drop_geometry() %>% # maybe take out...
-  group_by(basin_id, anio) %>% 
-  mutate(
-    ef_l_yr = caudal * 31536000 # assumes that the WWTP is running constantly... but it is likely not running 24/7/365.  This is basically an upper bound for the year
-  ) %>% 
+  st_drop_geometry() %>%
+  group_by(basin_id, anio) %>%
   summarize(
     total_wwtp = n(),
     num_over_proc = sum(over_proc, na.rm = TRUE),
     pct_over_proc = num_over_proc / total_wwtp * 100,
-    total_ef_l_yr = sum(ef_l_yr),
-    total_ef_m3_yr = total_ef_l_yr / 1000 # more readable
-  ) %>% 
-  ungroup() %>% 
+    num_proceso_unmapped = sum(!proceso_mapped, na.rm = TRUE),
+    total_ef_l_yr = sum(ef_l_yr, na.rm = TRUE),
+    total_ef_pharma_l_yr = sum(ef_pharma_l_yr, na.rm = TRUE),
+    total_ef_pharma_l_yr_low = sum(ef_pharma_l_yr_low, na.rm = TRUE),
+    total_ef_pharma_l_yr_high = sum(ef_pharma_l_yr_high, na.rm = TRUE),
+    total_ef_m3_yr = total_ef_l_yr / 1000,
+    total_ef_pharma_m3_yr = total_ef_pharma_l_yr / 1000,
+    .groups = "drop"
+  ) %>%
   mutate(year = as.numeric(anio))
 ```
 
@@ -244,7 +339,7 @@ pourpoints_wwtp_liters <- pourpoints_goc %>%
   dplyr::select(basin_id) %>%
   left_join(wwtp_liters_effluent_by_watershed, by = "basin_id")
 
-mapview(pourpoints_wwtp_liters)
+# mapview(pourpoints_wwtp_liters)
 ```
 
 *This is just so that we are not losing any WWTPs that may be on the coastal border:*
@@ -276,7 +371,7 @@ pourpoints_wwtp_liters_final <- pourpoints_wwtp_liters %>%
   filter(!(is_within_10km == "FALSE" & rgn_id %in% c("Region_4","Region_5","Region_9")))
 
 # ensure that all of the pourpoints outside of the Gulf are not included.
-mapview(pourpoints_wwtp_liters_final, zcol = "total_ef_l_yr") + mapview(wwtps_watershed, col.regions = "red") + mapview(watershed_goc, col.regions = "pink")
+# mapview(pourpoints_wwtp_liters_final, zcol = "total_ef_l_yr") + mapview(wwtps_watershed, col.regions = "red") + mapview(watershed_goc, col.regions = "pink")
 ```
 
 And now we can aggregate by region to determine the total L/year and region.
@@ -286,10 +381,14 @@ pourpoints_wwtp_liters_rgnid <- st_intersection(pourpoints_wwtp_liters_final, go
   st_drop_geometry() %>%
   group_by(rgn_id, year) %>%
   summarize(
-    total_ef_l_yr = sum(total_ef_l_yr),
-    total_ef_m3_yr = sum(total_ef_m3_yr),
-    total_wwtp = sum(total_wwtp),
-    num_over_proc = sum(num_over_proc),
+    total_ef_l_yr = sum(total_ef_l_yr, na.rm = TRUE),
+    total_ef_pharma_l_yr = sum(total_ef_pharma_l_yr, na.rm = TRUE),
+    total_ef_pharma_l_yr_low = sum(total_ef_pharma_l_yr_low, na.rm = TRUE),
+    total_ef_pharma_l_yr_high = sum(total_ef_pharma_l_yr_high, na.rm = TRUE),
+    total_ef_m3_yr = sum(total_ef_m3_yr, na.rm = TRUE),
+    total_ef_pharma_m3_yr = sum(total_ef_pharma_m3_yr, na.rm = TRUE),
+    total_wwtp = sum(total_wwtp, na.rm = TRUE),
+    num_over_proc = sum(num_over_proc, na.rm = TRUE),
     pct_over_proc = num_over_proc / total_wwtp * 100,
     .groups = "drop"
   )
@@ -299,20 +398,49 @@ pourpoints_wwtp_liters_rgnid
 
 ### Calculate risk factor
 
-Note that the risk factor is essentially the pressure on the system.  The current status is the inverse of that (1 - risk_factor).
+The risk factor is pressure on the system; current status is its inverse (higher status = lower pressure).
 
-$$current\ status\ _{human\_wastewater\_pharmaceutical\_risk} = 1 - \frac{wastewater\_in\_liters\ _{current} - wastewater\_in\_liters\ _{ideal}}{wastewater\_in\_liters\ _{maximum} - wastewater\_in\_liters\ _{ideal}}$$
+**Volume metric** (primary, SINA-native):
 
-Where the ideal is zero, and the maximum is the global maximum of liters estimated across all years and regions.
+$$current\ status\ _{effluent\_volume} = 1 - \frac{total\_ef\_l\_yr - 0}{max(total\_ef\_l\_yr) - 0}$$
+
+**Pharmaceutical-weighted metric** (secondary, literature retention by `proceso`):
+
+$$current\ status\ _{effluent\_pharma} = 1 - \frac{total\_ef\_pharma\_l\_yr - 0}{max(total\_ef\_pharma\_l\_yr) - 0}$$
 
 ```{r}
-current_status_wwtp_effluent <- pourpoints_wwtp_liters_rgnid %>% 
-  mutate(
-    ideal = 0,
-    maximum = max(total_ef_l_yr),
-    current_status = 1 - ((total_ef_l_yr - ideal)/(maximum - ideal)),
-    current_status_final = current_status * 100
+calc_current_status <- function(df, pressure_col, prefix) {
+  ideal <- 0
+  maximum <- max(df[[pressure_col]], na.rm = TRUE)
+  risk_col <- paste0("risk_factor_", prefix)
+  status_col <- paste0("current_status_", prefix)
+  status_final_col <- paste0("current_status_final_", prefix)
+  maximum_col <- paste0("maximum_", prefix)
+
+  df %>%
+    mutate(
+      ideal = ideal,
+      !!maximum_col := maximum,
+      !!risk_col := (.data[[pressure_col]] - ideal) / (maximum - ideal),
+      !!status_col := 1 - .data[[risk_col]],
+      !!status_final_col := .data[[status_col]] * 100
+    )
+}
+
+current_status_wwtp_effluent <- pourpoints_wwtp_liters_rgnid %>%
+  calc_current_status("total_ef_l_yr", "volume") %>%
+  calc_current_status("total_ef_pharma_l_yr", "pharma")
+
+# backward-compatible column names (volume = original single metric)
+current_status_wwtp_effluent <- current_status_wwtp_effluent %>%
+  rename(
+    maximum = maximum_volume,
+    current_status = current_status_volume,
+    current_status_final = current_status_final_volume,
+    risk_factor = risk_factor_volume
   )
+
+risk_factor_wwtp_effluent <- current_status_wwtp_effluent
 ```
 
 #### plotly
@@ -334,29 +462,52 @@ rgn_colors <- c(
   Region_9 = "#8d61a9"
 )
 
-## plot the wwtp effluent rf over time
-wwtp_plotly <- plotly::plot_ly(
-  current_status_wwtp_effluent, 
-  x = ~year, 
-  y = ~current_status_final, 
-  color = ~rgn_id, 
+## plot the wwtp effluent current status over time (volume and pharma-weighted)
+wwtp_plotly_volume <- plotly::plot_ly(
+  current_status_wwtp_effluent,
+  x = ~year,
+  y = ~current_status_final_volume,
+  color = ~rgn_id,
   colors = rgn_colors,
-  type = "scatter", 
+  type = "scatter",
   mode = "lines+markers"
-) %>% 
+) %>%
   layout(
-    title = "Clean Waters: current status of WWTP effluent, estimation of pharmaceutical risk from human wastewater",
+    title = "Clean Waters: current status — WWTP effluent volume (primary)",
     xaxis = list(title = "ano // Year"),
     yaxis = list(title = "Puntaje // Percent (out of 100)")
   ) %>%
-  add_lines( 
-    x = range(current_status_wwtp_effluent$year), 
+  add_lines(
+    x = range(current_status_wwtp_effluent$year),
     y = c(100, 100),
     line = list(color = "black", width = 2, dash = "dash"),
     name = "Meta // Goal (100/100)",
     inherit = FALSE
   )
-wwtp_plotly
+wwtp_plotly_volume
+
+wwtp_plotly_pharma <- plotly::plot_ly(
+  current_status_wwtp_effluent,
+  x = ~year,
+  y = ~current_status_final_pharma,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Clean Waters: current status — pharma-weighted effluent (literature retention by proceso)",
+    xaxis = list(title = "ano // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(current_status_wwtp_effluent$year),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+wwtp_plotly_pharma
 
 # ---
 
@@ -388,8 +539,8 @@ wwtps_watershed_na_80866_2019 <- wwtps_watershed %>%
   filter(basin_id %in% "na_80866") %>% 
   filter(anio %in% 2019)
 
-mapview(wwtps_watershed_na_80866_2020, zcol = "total_ef_l_yr") # look at it over time, see if 2020 has any outlier or inconsistent internal results over time.  Determine what is going on there!! Is it a mistake???
-mapview(wwtps_watershed_na_80866_2019, zcol = "total_ef_l_yr")
+# mapview(wwtps_watershed_na_80866_2020, zcol = "total_ef_l_yr") # look at it over time, see if 2020 has any outlier or inconsistent internal results over time.  Determine what is going on there!! Is it a mistake???
+# mapview(wwtps_watershed_na_80866_2019, zcol = "total_ef_l_yr")
 ```
 
 ```{r}
@@ -428,11 +579,8 @@ wwtps_watershed_only_basins_76895_80866 <- wwtps_watershed %>%
   st_drop_geometry() %>% 
   group_by(clvplanta, anio, caudal) %>% 
   distinct() %>% 
-  filter(basin_id %in% c("na_76895","na_80866")) %>% 
-  mutate(
-    ef_l_yr = caudal * 31536000, # assumes that the WWTP is running constantly... but it is likely not running 24/7/365.  This is basically an upper bound for the year
-    year = as.numeric(anio)
-  ) %>% 
+  filter(basin_id %in% c("na_76895","na_80866")) %>%
+  mutate(year = as.numeric(anio)) %>%
   ungroup()
 
 ## plot the liters per year of effluent for these basins
@@ -534,8 +682,7 @@ cat("how many basins:", n_distinct(anomalies_2020$basin_id), "\n") # 76
 flagged_plants <- unique(anomalies_2020$clvplanta)
 
 wwtps_flagged_timeseries <- wwtps_2020_anomaly_check %>%
-  filter(clvplanta %in% flagged_plants) %>%
-  mutate(ef_l_yr = caudal * 31536000)
+  filter(clvplanta %in% flagged_plants)
 
 wwtps_flagged_timeseries_plotly <- plotly::plot_ly(
   wwtps_flagged_timeseries,
@@ -565,15 +712,50 @@ wwtps_flagged_timeseries_plotly
 # Save to mazu
 
 ```{r save}
-write_csv(risk_factor_wwtp_effluent, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/output/risk_factor_wwtp_effluent_pharma_risk.csv"))
+out_dir <- here::here("goal_prep/cw/v2025/pharmaceuticals")
+int_dir <- file.path(out_dir, "int")
+output_dir <- file.path(out_dir, "output")
 
-write_csv(wwtp_liters_effluent_by_watershed, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/int/wwtp_liters_effluent_by_watershed.csv"))
+dir.create(int_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
-write_csv(pourpoints_wwtp_liters_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/int/effluent_wwtp_liters_rgnid.csv"))
+write_csv(
+  risk_factor_wwtp_effluent,
+  file.path(output_dir, "risk_factor_wwtp_effluent_pharma_risk.csv")
+)
 
-st_write(pourpoints_wwtp_liters_final,here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/int/pourpoints_effluent_wwtp_liters_final.gpkg"), delete_dsn = TRUE) # so it can overwrite if changes are made.
+write_csv(
+  effluent_liters_wwtp_yearly,
+  file.path(int_dir, "wwtp_effluent_by_plant_yearly.csv")
+)
 
-write_csv(current_status_wwtp_effluent, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/output/current_status_wwtp_effluent_pharma_risk.csv"))
+write_csv(
+  wwtp_liters_effluent_by_watershed,
+  file.path(int_dir, "wwtp_liters_effluent_by_watershed.csv")
+)
+
+write_csv(
+  pourpoints_wwtp_liters_rgnid,
+  file.path(int_dir, "effluent_wwtp_liters_rgnid.csv")
+)
+
+write_csv(
+  proceso_retention_lookup,
+  file.path(int_dir, "proceso_retention_lookup.csv")
+)
+
+if (nrow(proceso_not_in_lookup) > 0) {
+  write_csv(
+    proceso_not_in_lookup,
+    file.path(int_dir, "proceso_not_in_retention_lookup.csv")
+  )
+}
+
+st_write(
+  pourpoints_wwtp_liters_final,
+  file.path(int_dir, "pourpoints_effluent_wwtp_liters_final.gpkg"),
+  delete_dsn = TRUE
+)
 ```
 
 

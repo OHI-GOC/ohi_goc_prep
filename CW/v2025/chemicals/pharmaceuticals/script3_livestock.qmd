@@ -76,5 +76,108 @@ mapview(pourpoints_goc) + mapview(watershed_goc)
 ```
 
 
+## Estimating risk of pharmaceutical discharge based on the intensity of livestock farming in each OHI Region
+
+Here I will plan to aggregate the total number of "cabezas", aka "heads", of all livestock and then rasterize the polygon of each municipio. I will then assume that the production is homogeneously distributed across the municipio, so that every cell has the same value within the municipality. 
+
+I will then summarize the total cabezas in each watershed, and use the associated pourpoints to assign values to OHI regions. I will then aggregate the total livestock produced in each OHI Region, where the more livestock produced means that there is a higher risk of pharmaceutical discharge in that region and year.
+
+### Reading in all livestock reared from 2006-2024 (missing 2023 right now)
+
+Data was downloaded from <https://nube.agricultura.gob.mx/datosAbiertos/Pecuario.php>: 
+
+For each year, click on the associated link for the year, then bring it into Mazu at `~/home/shares/ohi/OHI_GOC/_raw_data/DGSIAP/d2026`.
+
+```{r}
+## write function to read in all of the files and limit them to GoC states
+
+read_in_livestock <- function (year) {
+  
+  df <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/DGSIAP/d2026", paste0("cierre_", year, ".csv"))) %>% 
+    
+    janitor::clean_names() %>% 
+    
+    mutate(across(where(is.character), ~iconv(., from = "WINDOWS-1252", to = "UTF-8"))) %>%  # to address encoding issues
+    
+    filter(nomestado %in% c("Baja California Sur","Baja California","Jalisco","Sinaloa","Sonora","Nayarit")) 
+  
+  return(df)
+  
+}
+```
+
+Now, we can use the function to read in each year's WWTP data and limit to GoC states.
+
+```{r}
+# specify the years we want to iterate through. ideally, we would have 2023 in the future...
+years_to_read_in <- c(2006:2022, 2024)
+
+# use `lapply` and bind rows to obtain data over time.
+list_of_all_dfs <- lapply(years_to_read_in, read_in_livestock)
+  
+# bind them across all years
+bind_all_years_livestock <- bind_rows(list_of_all_dfs) %>% 
+  mutate(cvempio = as.numeric(cvempio),
+         cveestado = as.numeric(cveestado))
+
+summary(bind_all_years_livestock)
+unique(bind_all_years_livestock$nomestado)
+unique(bind_all_years_livestock$cvempio)
+colnames(bind_all_years_livestock)
+
+unique(bind_all_years_livestock$nomproducto)
+# [1] "Miel"          "Carne"         "Huevo-plato"   "Ganado en pie" "Leche"        
+# [6] "Cera"          "Huevo plato"   "Ganado en Pie"
+
+unique(bind_all_years_livestock$cveestado)
+
+```
+
+### Aggregate all livestock cabezas for each municipality and year
+
+Later, come back and determine how to weigh the different types of livestock appropriately.
+
+```{r}
+## check that carne is always less than "ganado en pie" (live cattle), so that we know that carne is a subset of ganado en pie?
+
+# for now, just use ganado en pie only
+sum_livestock_municipal <- bind_all_years_livestock %>% 
+  filter(nomproducto %in% c("Ganado en pie","Ganado en Pie")) %>% 
+  group_by(anio, cveestado, nomestado, cvempio, nommunicipio) %>% 
+  summarize(toneladas_volumen = sum(volumen, na.rm = TRUE)) %>% 
+  ungroup()
+```
+
+
+#### Join with municipality polygons
+
+```{r}
+# read them in
+municipio_codigo_sf <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/land_admin_boundaries", "mex_admin2_joined_w_municipio_codigos.shp")) %>% 
+  mutate(cvempio = as.numeric(clv_mnc),
+         cveestado = as.numeric(clv_std))
+
+unique(municipio_codigo_sf$clv_mnc)
+unique(municipio_codigo_sf$cveestado)
+
+mapview(municipio_codigo_sf)
+```
+
+```{r}
+siap_municipal <- inner_join(sum_livestock_municipal, municipio_codigo_sf) %>% 
+  st_as_sf()
+
+siap_municipal_2022 <- siap_municipal %>% 
+  filter(anio %in% 2022)
+
+mapview(siap_municipal_2022, zcol = "toneladas_volumen")
+```
+
+
+
+
+
+
+
 
 
