@@ -331,13 +331,13 @@ table(Carta_Recommendations_clean0$control_adjusted)
 ## STEP 4: SAVE the Carta_Recommendations_clean
 ```{r SAVE the Carta_Recommendations_clean as necessary}
 write.csv(Carta_Recommendations_clean0,
-          file="/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_Recommendations_Cleaned_Jun012026.csv",
+          file="/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_RawRecommendations_Cleaned_Jun032026.csv",
           row.names = FALSE)
 # 1010 obs., 8 vars.
 ```
 
 
-# STEP 5: Create Carta_SpeciesRec_Lookup and Carta_GenusRec_Lookup and from Carta_Recommendations_clean
+# STEP 5: Create Carta_SpeciesRec_Lookup
 ```{r Load in Carta_Recommendations_clean as needed}
 Carta_Recommendations_clean0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores//Carta_Recommendations_Cleaned_Jun012026.csv")
 # 1010 obs., 8 vars.
@@ -527,6 +527,7 @@ Carta_SpeciesRec_Lookup %>%
 # All species should have n_regions == 9.
 ```
 
+# STEP 5B: Create Carta_GenusRec_Lookup
 ```{r Build genus-level input from original Carta estimates only}
 colnames(Carta_SpeciesRec_Lookup)
 
@@ -741,33 +742,221 @@ summary(Carta_GenusRec_Lookup$n_species)
 dim(Carta_GenusRec_Lookup)
 ```
 
-## STEP 6: SAVE the Carta_Recommendations_clean
+
+# STEP 5C: Create Carta_FamilyRec_Lookup
+
+```{r Build group-level input from original Carta estimates only}
+colnames(Carta_SpeciesRec_Lookup)
+
+# Genus key (Carta_SpeciesRec_for_Genus) uses only species-level original estimates (won't use estimates that are gapfilled).
+Carta_SpeciesRec_for_Group <- Carta_SpeciesRec_Lookup %>%
+  filter(carta_source == "original estimate; Carta recommendation available for this species in this region") %>%
+  mutate(
+    estimated_genus_name = if_else(
+      is.na(estimated_genus_name),
+      "unparsed",
+      estimated_genus_name
+    )
+  )
+# 1010 obs., 9 vars.
+
+table(Carta_SpeciesRec_for_Genus$estimated_genus_name)
+```
+
+```{r Create Carta_GenusRec_Lookup - Part 1 genus x region modes}
+colnames(Carta_SpeciesRec_for_Genus)
+table(Carta_SpeciesRec_for_Genus$status)
+
+status_priority <- c(
+  "decreasing",
+  "maximally harvested",
+  "development potential"
+)
+
+Carta_GenusRec_Lookup0 <- Carta_SpeciesRec_for_Genus %>%
+  group_by(estimated_genus_name, OHI_region) %>%
+  summarise(
+    Year_of_Recommendation = Year_of_Recommendation[
+      !is.na(Year_of_Recommendation)
+    ][1],
+
+    n_species = n(),
+
+    status = {
+      valid_status <- status[!is.na(status) & status != ""]
+      if (length(valid_status) == 0) {
+        NA_character_
+      } else {
+        tab <- table(valid_status)
+        tied <- names(tab)[tab == max(tab)]
+        matched <- status_priority[status_priority %in% tied]
+        if (length(matched) > 0) {
+          matched[1]
+        } else {
+          sort(tied)[1]
+        }
+      }
+    },
+
+    control = {
+      valid_control <- control[!is.na(control) & control != ""]
+      if (length(valid_control) == 0) {
+        NA_character_
+      } else {
+        tab <- table(valid_control)
+        tied <- names(tab)[tab == max(tab)]
+        sort(tied)[1]
+      }
+    },
+
+    .groups = "drop"
+  )
+# 477 obs., 6 vars.
+
+# One row per genus × region with at least one original species estimate.
+```
+
+```{r Create Carta_GenusRec_Lookup - Part 2 gapfill full genus x region grid}
+colnames(Carta_GenusRec_Lookup0)
+
+OHI_regions_all <- paste0("region_", 1:9)
+
+Carta_GenusRec_Lookup_grid <- expand.grid(
+  estimated_genus_name = unique(
+    Carta_SpeciesRec_for_Genus$estimated_genus_name
+  ),
+  OHI_region = OHI_regions_all,
+  stringsAsFactors = FALSE
+)
+# 612 obs.
+
+genus_modes <- Carta_GenusRec_Lookup0 %>%
+  group_by(estimated_genus_name) %>%
+  summarise(
+    Year_of_Recommendation = Year_of_Recommendation[
+      !is.na(Year_of_Recommendation)
+    ][1],
+
+    status_mode = {
+      valid_status <- status[!is.na(status) & status != ""]
+      if (length(valid_status) == 0) {
+        NA_character_
+      } else {
+        tab <- table(valid_status)
+        tied <- names(tab)[tab == max(tab)]
+        matched <- status_priority[status_priority %in% tied]
+        if (length(matched) > 0) {
+          matched[1]
+        } else {
+          sort(tied)[1]
+        }
+      }
+    },
+
+    control_mode = {
+      valid_control <- control[!is.na(control) & control != ""]
+      if (length(valid_control) == 0) {
+        NA_character_
+      } else {
+        tab <- table(valid_control)
+        tied <- names(tab)[tab == max(tab)]
+        sort(tied)[1]
+      }
+    },
+
+    .groups = "drop"
+  )
+
+Carta_GenusRec_Lookup <- Carta_GenusRec_Lookup_grid %>%
+  left_join(
+    Carta_GenusRec_Lookup0,
+    by = c("estimated_genus_name", "OHI_region")
+  ) %>%
+  left_join(
+    genus_modes %>%
+      select(
+        estimated_genus_name,
+        Year_genus = Year_of_Recommendation,
+        status_mode,
+        control_mode
+      ),
+    by = "estimated_genus_name"
+  ) %>%
+  mutate(
+    n_species_original = n_species,
+    genus_region_present = !is.na(Year_of_Recommendation),
+
+    carta_provenance = case_when(
+      genus_region_present ~
+        "genus aggregation; took the mode across all Carta recommendations supplied for this genus in this region (in the case of ties, I chose the most conservative status and control estimate)",
+      TRUE ~
+        "genus gapfill; data missing for this genus in this region, took the mode across all Carta recommendations supplied for this genus elsewhere"
+    ),
+
+    n_species = if_else(
+      is.na(n_species),
+      0,
+      n_species
+    ),
+
+    Year_of_Recommendation = coalesce(
+      Year_of_Recommendation,
+      Year_genus
+    ),
+
+    status = if_else(
+      is.na(status) | status == "",
+      status_mode,
+      status
+    ),
+
+    control = if_else(
+      is.na(control) | control == "",
+      control_mode,
+      control
+    )
+  ) %>%
+  select(
+    estimated_genus_name,
+    Year_of_Recommendation,
+    OHI_region,
+    status,
+    control,
+    n_species,
+    n_species_original,
+    carta_provenance
+  )
+# Now 612 obs.
+```
+
+
+## STEP 6: SAVE Carta_SpeciesRec_Lookup and Carta_GenusRec_Lookup
 ```{r Save these dataframes!}
 write.csv(Carta_SpeciesRec_Lookup,
-          file="/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_Recommendations_SpeciesLookup_Jun012026.csv",
+          file="/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_SpeciesRec_Lookup_Jun032026.csv",
           row.names = FALSE)
 # 1359 obs., 9 vars.
 
 write.csv(Carta_GenusRec_Lookup,
-          file="/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_Recommendations_GenusLookup_Jun012026.csv",
+          file="/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_GenusRec_Lookup_Jun032026.csv",
           row.names = FALSE)
 # 612 obs., 8 vars.
 ```
 
 
-# STEP 7: Scoring based on the Carta: compare landings over time (GOC_MarineLandings) to recommendations in the Carta_Recommendations
+# STEP 7: Scoring based on the Carta: compare landings over time (GOC_MarineLandings) to recommendations in the Carta_Recommendations Lookups
 
 ```{r Load in Carta_SpeciesRec_Lookup and Carta_GenusRec_Lookup as needed}
-Carta_SpeciesRec_Lookup<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_StockStatus_Scores/Carta_Recommendations_SpeciesLookup_Jun012026.csv")
+Carta_SpeciesRec_Lookup<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_SpeciesRec_Lookup_Jun032026.csv")
 # 1359 obs., 9 vars.
 
-Carta_GenusRec_Lookup<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_StockStatus_Scores/Carta_Recommendations_GenusLookup_Jun012026.csv")
+Carta_GenusRec_Lookup<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_GenusRec_Lookup_Jun032026.csv")
 # 612 obs., 8 vars.
 ```
 
 ```{r Load in GOC_MarineLandings_carta as needed}
-GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_2000.present_May262026.rds"))
-# 3246583 obs., 57 vars.
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 vars.
 ```
 
 ```{r STEP 7b - Summarize landings by taxon, year, and region}
@@ -798,7 +987,8 @@ GOC_MarineLandings_summary <- GOC_MarineLandings %>%
     OHI_region_est,
     taxon_key,
     taxon_level,
-    estimated_genus_name
+    estimated_genus_name, 
+    estimated_taxa_group
   ) %>%
   summarize(
     annual_Catch_kg = sum(weight_kg_corrected, na.rm = TRUE),
@@ -819,16 +1009,11 @@ GOC_MarineLandings_summary <- GOC_MarineLandings %>%
 ```
 
 ```{r STEP 7c - Merge species lookup, then genus lookup fallback}
+# Merge species lookup:
 Carta_SpeciesRec_Lookup <- Carta_SpeciesRec_Lookup %>%
   mutate(
     OHI_region_est = clean_names_lowercase(OHI_region),
     estimated_species_name = clean_names_lowercase(estimated_species_name),
-    estimated_genus_name = clean_names_lowercase(estimated_genus_name)
-  )
-
-Carta_GenusRec_Lookup <- Carta_GenusRec_Lookup %>%
-  mutate(
-    OHI_region_est = clean_names_lowercase(OHI_region),
     estimated_genus_name = clean_names_lowercase(estimated_genus_name)
   )
 
@@ -848,7 +1033,17 @@ Carta_Scores0 <- GOC_MarineLandings_summary %>%
       "taxon_key" = "estimated_species_name",
       "OHI_region_est"
     )
-  ) %>%
+  )
+# 16858 obs., 14 vars.
+
+# Then merge genus lookup as a fallback:
+Carta_GenusRec_Lookup <- Carta_GenusRec_Lookup %>%
+  mutate(
+    OHI_region_est = clean_names_lowercase(OHI_region),
+    estimated_genus_name = clean_names_lowercase(estimated_genus_name)
+  )
+
+Carta_Scores0 <- Carta_Scores0 %>%
   left_join(
     Carta_GenusRec_Lookup %>%
       select(
@@ -859,7 +1054,9 @@ Carta_Scores0 <- GOC_MarineLandings_summary %>%
         carta_provenance
       ),
     by = c("estimated_genus_name", "OHI_region_est")
-  ) %>%
+  )
+
+
   mutate(
     carta_recommendation_source = case_when(
       taxon_level == "species" & !is.na(status) ~
@@ -884,6 +1081,18 @@ Carta_Scores0 <- GOC_MarineLandings_summary %>%
   select(-status_genus, -control_genus, -carta_provenance)
 # 16858 obs., 16 vars.
 ```
+
+```{r How common is it that something is landed only once?}
+Carta_Scores0 %>%
+  count(n_landings_records) %>%
+  filter(n > 1) %>%
+  ggplot(aes(x = n_landings_records, y = n)) +
+  geom_col() +
+  theme_bw() +
+  coord_cartesian(xlim = c(1, 1000),
+                  ylim = c(1, 400))
+```
+
 
 ```{r STEP 7d - Check status and control combinations before scoring}
 Carta_Scores0 %>%

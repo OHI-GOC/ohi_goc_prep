@@ -1327,7 +1327,7 @@ GenusFamilyGroup.Key_clean <- GenusFamilyGroup.Key_clean %>%
 # Great! Export this key (integrate later): call it FAO Family Key
 write.csv(GenusFamilyGroup.Key_clean, row.names = FALSE, file= "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/GenusFamilyGroupKey_INCOMPLETE_Apr042026.csv")
 ```
-# Key work ends here. Filled in last 8 missing families mannually offline.
+# Key work ends here. Filled in last 8 missing families manually offline.
 See: /home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/FAOFamilyKey_COMPLETE_Apr042026.csv
 
 # AQUACULTURE KEY UNDER CONSTRUCTION [Apr 4 2026]
@@ -1424,4 +1424,533 @@ GenusFamilyGroup.Key_clean <- GenusFamily.Key %>%
 
 # Great! Export this key (integrate later): call it FAO Family Key
 # write.csv(GenusFamilyGroup.Key_clean, row.names = FALSE, file= "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Scripts_and_Keys/CONAPESCA_Keys/AquacultureFamilyKey_INCOMPLETE_Apr042026.csv")
+```
+
+
+# Create most-likley family if 
+
+```{r Load data}
+NW.Mex_Landings<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/NW.Mex_Landings_SectorSorted.Georef_2000.present_May262026.rds"))
+
+dim(NW.Mex_Landings)
+# 4713144 obs., 57 vars.
+```
+
+```{r Create backbone for key}
+colnames(NW.Mex_Landings)
+
+LikelyFamily.Key_backbone0<- NW.Mex_Landings %>%
+  select(estimated_genus_name, estimated_family_name, estimated_taxa_group) %>%
+  distinct()
+```
+
+```{r Cleaning}
+LikelyFamily.Key_backbone <- LikelyFamily.Key_backbone0 %>%
+  mutate(
+    most_likely_family = case_when(
+      estimated_family_name == "family missing but genus available" ~ NA_character_,
+      TRUE ~ estimated_family_name
+    )
+  ) %>%
+  select(estimated_taxa_group, estimated_genus_name, estimated_family_name, most_likely_family)
+```
+
+```{r How was family estimated if species and genus is NEI?}
+TEST<- NW.Mex_Landings %>%
+  filter(estimated_taxa_group== "BANDERA")
+# Must have been estimated like this in Hem or Mars key
+```
+
+```{r Estimate most_likely_family based on the other families available in that group}
+write.csv(LikelyFamily.Key_backbone, 
+          file="/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/CONAPESCA_Keys/Taxonomic_Keys/LikelyFamilyKey_INCOMPLETE_Jun032026.csv", 
+          row.names = FALSE)
+```
+
+# Sent this to Cursor - June 3 2026. I checked it but not closely. Needs to be closely scruntinized at some point.
+## STEP A: Load the incomplete Likely Family Key
+
+```{r Load LikelyFamilyKey_INCOMPLETE}
+KEY_DIR <- "/Users/ferrer/Desktop/Cursor Projects/OHI/Taxonomic Keys"
+
+LikelyFamilyKey0 <- read.csv(
+  file.path(KEY_DIR, "LikelyFamilyKey_INCOMPLETE_Jun032026.csv"),
+  stringsAsFactors = FALSE
+)
+
+colnames(LikelyFamilyKey0)
+# 381 obs., 4 vars.
+```
+
+```{r Clean taxonomic text fields}
+invalid_genus_tokens <- c(
+  "nei", "unknown", "especies", "na", ""
+)
+invalid_family_tokens <- c(
+  "nei",
+  "family missing but genus available",
+  "na",
+  ""
+)
+excluded_taxa_groups <- c("otras")
+
+LikelyFamilyKey0 <- LikelyFamilyKey0 %>%
+  mutate(
+    estimated_taxa_group = str_squish(as.character(estimated_taxa_group)),
+    estimated_genus_name = str_squish(as.character(estimated_genus_name)),
+    estimated_family_name = str_squish(as.character(estimated_family_name)),
+    most_likely_family = str_squish(as.character(most_likely_family)),
+
+    taxa_group_clean = tolower(estimated_taxa_group),
+    genus_clean = tolower(estimated_genus_name),
+    family_clean = tolower(estimated_family_name),
+
+    genus_valid = !is.na(genus_clean) &
+      !genus_clean %in% invalid_genus_tokens,
+
+    family_valid = !is.na(family_clean) &
+      !family_clean %in% invalid_family_tokens,
+
+    taxa_group_eligible_for_gapfill = !is.na(taxa_group_clean) &
+      !taxa_group_clean %in% excluded_taxa_groups
+  )
+# 381 obs., 12 vars.
+```
+
+## STEP B: Assign most_likely_family when family information is already available
+
+```{r Create LikelyFamilyKey - Part 1 known family}
+colnames(LikelyFamilyKey0)
+
+original_most_likely_family <- LikelyFamilyKey0$most_likely_family
+
+LikelyFamilyKey <- LikelyFamilyKey0 %>%
+  mutate(
+    most_likely_family = case_when(
+      # Multi-family lists (e.g. "FamilyA;;FamilyB") are kept as-is.
+      family_valid ~ estimated_family_name,
+      family_clean == "nei" & !genus_valid ~ "NEI",
+      !is.na(most_likely_family) &
+        most_likely_family != "" &
+        most_likely_family != "NEI" ~
+        most_likely_family,
+      TRUE ~ NA_character_
+    ),
+
+    family_source = case_when(
+      !is.na(original_most_likely_family) &
+        original_most_likely_family != "" &
+        !(original_most_likely_family == "NEI" &
+          genus_valid &
+          family_clean == "nei") ~
+        "original estimate",
+      family_valid ~ "direct family assignment",
+      family_clean == "nei" & !genus_valid ~ "family reported as NEI",
+      TRUE ~ NA_character_
+    )
+  )
+
+sum(is.na(LikelyFamilyKey$most_likely_family) |
+  LikelyFamilyKey$most_likely_family == "")
+# Rows still needing genus lookup or taxa-group gapfill.
+# NEI rows with a valid genus are held for taxize lookup in STEP C.
+```
+
+## STEP C: Use taxize to estimate family from genus when family is missing
+
+```{r Identify genera needing taxize lookup}
+genera_for_taxize <- LikelyFamilyKey %>%
+  filter(
+    genus_valid,
+    is.na(most_likely_family) | most_likely_family == ""
+  ) %>%
+  distinct(estimated_genus_name) %>%
+  pull(estimated_genus_name)
+
+length(genera_for_taxize)
+# Unique genera to query with taxize.
+```
+
+```{r Helper - extract family rank from taxize classification}
+extract_family_from_classification <- function(classification_df) {
+  if (is.null(classification_df) || !is.data.frame(classification_df)) {
+    return(NA_character_)
+  }
+
+  rank_col <- intersect(
+    c("rank", "Rank"),
+    names(classification_df)
+  )[1]
+  name_col <- intersect(
+    c("name", "Name"),
+    names(classification_df)
+  )[1]
+
+  if (is.na(rank_col) || is.na(name_col)) {
+    return(NA_character_)
+  }
+
+  family_match <- classification_df[[name_col]][
+    tolower(classification_df[[rank_col]]) == "family"
+  ]
+
+  if (length(family_match) == 0) {
+    return(NA_character_)
+  }
+
+  family_match[1]
+}
+```
+
+```{r Query taxize for genus-level family estimates}
+GENUS_LOOKUP_FILE <- file.path(
+  KEY_DIR,
+  "LikelyFamilyKey_GenusFamilyLookup_Jun032026.csv"
+)
+
+# WoRMS is preferred for marine taxa; ITIS is used as a fallback.
+lookup_genus_family <- function(genus_name) {
+  worms_family <- tryCatch(
+    {
+      worms_cls <- classification(genus_name, db = "worms")
+      extract_family_from_classification(worms_cls[[1]])
+    },
+    error = function(e) NA_character_
+  )
+
+  if (!is.na(worms_family) && worms_family != "") {
+    return(worms_family)
+  }
+
+  tryCatch(
+    {
+      itis_cls <- classification(genus_name, db = "itis")
+      extract_family_from_classification(itis_cls[[1]])
+    },
+    error = function(e) NA_character_
+  )
+}
+
+if (file.exists(GENUS_LOOKUP_FILE)) {
+  GenusFamilyLookup <- read.csv(
+    GENUS_LOOKUP_FILE,
+    stringsAsFactors = FALSE
+  )
+
+  missing_genera <- setdiff(genera_for_taxize, GenusFamilyLookup$estimated_genus_name)
+
+  if (length(missing_genera) > 0) {
+    missing_lookup <- data.frame(
+      estimated_genus_name = missing_genera,
+      taxize_family = vapply(
+        missing_genera,
+        lookup_genus_family,
+        character(1)
+      ),
+      stringsAsFactors = FALSE
+    )
+
+    GenusFamilyLookup <- bind_rows(GenusFamilyLookup, missing_lookup)
+    write.csv(
+      GenusFamilyLookup,
+      GENUS_LOOKUP_FILE,
+      row.names = FALSE
+    )
+  }
+} else {
+  GenusFamilyLookup <- data.frame(
+    estimated_genus_name = genera_for_taxize,
+    taxize_family = vapply(
+      genera_for_taxize,
+      lookup_genus_family,
+      character(1)
+    ),
+    stringsAsFactors = FALSE
+  )
+
+  write.csv(
+    GenusFamilyLookup,
+    GENUS_LOOKUP_FILE,
+    row.names = FALSE
+  )
+}
+# One row per genus queried with taxize.
+
+table(is.na(GenusFamilyLookup$taxize_family))
+```
+
+```{r Merge taxize family estimates onto the key}
+colnames(LikelyFamilyKey)
+
+LikelyFamilyKey <- LikelyFamilyKey %>%
+  left_join(GenusFamilyLookup, by = "estimated_genus_name") %>%
+  mutate(
+    most_likely_family = case_when(
+      !is.na(most_likely_family) & most_likely_family != "" ~ most_likely_family,
+      !is.na(taxize_family) & taxize_family != "" ~ taxize_family,
+      family_clean == "nei" & genus_valid ~ "NEI",
+      TRUE ~ most_likely_family
+    ),
+
+    family_source = case_when(
+      !is.na(family_source) ~ family_source,
+      !is.na(taxize_family) & taxize_family != "" ~ "taxize genus lookup",
+      family_clean == "nei" & genus_valid ~ "family reported as NEI",
+      genus_valid &
+        (is.na(most_likely_family) | most_likely_family == "") ~
+        "taxize lookup failed",
+      TRUE ~ family_source
+    )
+  ) %>%
+  select(-taxize_family)
+# 381 obs.
+# taxize may override NEI when a valid genus is available; otherwise NEI is kept.
+```
+
+## STEP D: Gapfill remaining rows using the most likely family within each taxonomic group
+
+```{r Create genus-level family assignments within each taxa group}
+GenusGroupFamily <- LikelyFamilyKey %>%
+  filter(
+    genus_valid,
+    !is.na(most_likely_family),
+    most_likely_family != "",
+    most_likely_family != "NEI",
+    !is.na(estimated_taxa_group),
+    estimated_taxa_group != "",
+    taxa_group_eligible_for_gapfill
+  ) %>%
+  group_by(estimated_taxa_group, estimated_genus_name) %>%
+  summarise(
+    genus_family = names(sort(table(most_likely_family), decreasing = TRUE))[1],
+    .groups = "drop"
+  )
+# One family per valid genus within each eligible taxonomic group.
+```
+
+```{r Create taxa-group family lookup}
+TaxaGroupFamilyLookup <- GenusGroupFamily %>%
+  group_by(estimated_taxa_group) %>%
+  summarise(
+    most_likely_family_by_group = names(
+      sort(table(genus_family), decreasing = TRUE)
+    )[1],
+
+    n_genera_assigned_to_modal_family = sum(
+      genus_family == names(sort(table(genus_family), decreasing = TRUE))[1]
+    ),
+
+    n_genera_assigned_to_other_family = sum(
+      genus_family != names(sort(table(genus_family), decreasing = TRUE))[1]
+    ),
+
+    n_genera_in_group = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    modal_family_genus_percent = round(
+      100 * n_genera_assigned_to_modal_family / n_genera_in_group,
+      1
+    ),
+
+    family_estimate_likelihood = case_when(
+      modal_family_genus_percent == 100 ~
+        "family estimate is virtually certain",
+      modal_family_genus_percent >= 80 ~
+        "high confidence in family estimate",
+      modal_family_genus_percent >= 60 ~
+        "moderate confidence in family estimate",
+      TRUE ~
+        "low confidence in family estimate"
+    )
+  )
+# One row per taxonomic group with a resolved family mode.
+# OTRAS is excluded; groups with no resolved genera remain absent.
+```
+
+```{r Create LikelyFamilyKey - Part 2 taxa-group gapfill}
+colnames(LikelyFamilyKey)
+
+LikelyFamilyKey <- LikelyFamilyKey %>%
+  left_join(
+    TaxaGroupFamilyLookup,
+    by = "estimated_taxa_group"
+  ) %>%
+  mutate(
+    most_likely_family = if_else(
+      (is.na(most_likely_family) | most_likely_family == "") &
+        taxa_group_eligible_for_gapfill,
+      most_likely_family_by_group,
+      most_likely_family
+    ),
+
+    family_source = case_when(
+      !is.na(family_source) ~ family_source,
+      taxa_group_eligible_for_gapfill &
+        !is.na(most_likely_family) &
+        !is.na(most_likely_family_by_group) &
+        most_likely_family == most_likely_family_by_group ~
+        "taxa-group mode gapfill",
+      TRUE ~ family_source
+    )
+  )
+# OTRAS rows keep row-level assignments only; no group-level family is applied.
+```
+
+```{r Restrict OTRAS rows without genus or family information}
+colnames(LikelyFamilyKey)
+
+LikelyFamilyKey <- LikelyFamilyKey %>%
+  mutate(
+    otras_without_taxonomic_info = taxa_group_clean == "otras" &
+      !genus_valid &
+      !family_valid,
+
+    most_likely_family = if_else(
+      otras_without_taxonomic_info,
+      NA_character_,
+      most_likely_family
+    ),
+
+    family_source = if_else(
+      otras_without_taxonomic_info,
+      NA_character_,
+      family_source
+    ),
+
+    most_likely_family_by_group = if_else(
+      taxa_group_clean == "otras",
+      NA_character_,
+      most_likely_family_by_group
+    ),
+
+    modal_family_genus_percent = if_else(
+      taxa_group_clean == "otras",
+      NA_real_,
+      modal_family_genus_percent
+    ),
+
+    family_estimate_likelihood = if_else(
+      taxa_group_clean == "otras",
+      NA_character_,
+      family_estimate_likelihood
+    ),
+
+    n_genera_assigned_to_modal_family = if_else(
+      taxa_group_clean == "otras",
+      NA_integer_,
+      n_genera_assigned_to_modal_family
+    ),
+
+    n_genera_assigned_to_other_family = if_else(
+      taxa_group_clean == "otras",
+      NA_integer_,
+      n_genera_assigned_to_other_family
+    ),
+
+    n_genera_in_group = if_else(
+      taxa_group_clean == "otras",
+      NA_integer_,
+      n_genera_in_group
+    )
+  ) %>%
+  select(
+    estimated_taxa_group,
+    estimated_genus_name,
+    estimated_family_name,
+    most_likely_family,
+    family_source,
+    most_likely_family_by_group,
+    modal_family_genus_percent,
+    family_estimate_likelihood,
+    n_genera_assigned_to_modal_family,
+    n_genera_assigned_to_other_family,
+    n_genera_in_group
+  )
+# 381 obs., 10 vars.
+# OTRAS rows without a valid genus or family remain NA.
+```
+
+```{r Sanity checks on LikelyFamilyKey}
+colnames(LikelyFamilyKey)
+
+table(LikelyFamilyKey$family_source, useNA = "ifany")
+
+sum(is.na(LikelyFamilyKey$most_likely_family) |
+  LikelyFamilyKey$most_likely_family == "")
+# Remaining unresolved rows after row-level and taxa-group gapfill.
+
+LikelyFamilyKey %>%
+  filter(
+    is.na(most_likely_family) | most_likely_family == ""
+  ) %>%
+  count(estimated_taxa_group, sort = TRUE)
+
+# Rows where genus and family inputs were missing but a group-level family was assigned:
+LikelyFamilyKey %>%
+  filter(family_source == "taxa-group mode gapfill") %>%
+  nrow()
+
+# OTRAS should never receive a taxa-group gapfill assignment:
+LikelyFamilyKey %>%
+  filter(
+    tolower(estimated_taxa_group) == "otras",
+    family_source == "taxa-group mode gapfill"
+  ) %>%
+  nrow()
+
+# OTRAS rows without genus or family information should remain unresolved:
+LikelyFamilyKey %>%
+  filter(
+    tolower(estimated_taxa_group) == "otras",
+    (is.na(estimated_genus_name) |
+      estimated_genus_name %in% c("NEI", "unknown", "Especies", "")) &
+      (is.na(estimated_family_name) |
+        estimated_family_name %in% c(
+          "NEI",
+          "family missing but genus available",
+          ""
+        )),
+    !is.na(most_likely_family),
+    most_likely_family != ""
+  ) %>%
+  nrow()
+```
+
+## STEP E: Save the completed key and taxa-group lookup
+
+```{r Save LikelyFamilyKey outputs}
+LikelyFamilyKey_out <- LikelyFamilyKey %>%
+  select(
+    estimated_taxa_group,
+    estimated_genus_name,
+    estimated_family_name,
+    most_likely_family
+  )
+
+write.csv(
+  LikelyFamilyKey_out,
+  file = file.path(KEY_DIR, "LikelyFamilyKey_Jun032026.csv"),
+  row.names = FALSE
+)
+# 381 obs., 4 vars.
+
+write.csv(
+  GenusFamilyLookup,
+  file = file.path(KEY_DIR, "LikelyFamilyKey_GenusFamilyLookup_Jun032026.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  TaxaGroupFamilyLookup,
+  file = file.path(KEY_DIR, "LikelyFamilyKey_TaxaGroupLookup_Jun032026.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  LikelyFamilyKey,
+  file = file.path(KEY_DIR, "LikelyFamilyKey_with_provenance_Jun032026.csv"),
+  row.names = FALSE
+)
+# Provenance file includes family_source and group-level lookup fields.
 ```
