@@ -22,7 +22,7 @@ editor_options:
 
 # CW: Pharmaceuticals - Livestock
 
-## Estimated pharmaceutical discharge
+Estimated pharmaceutical discharge.
 
 ```{r setup}
 library(sf)
@@ -73,6 +73,24 @@ pourpoints_goc <- st_intersection(st_transform(pourpoints, st_crs(union_rgns)), 
 mapview(pourpoints_goc)
 
 mapview(pourpoints_goc) + mapview(watershed_goc)
+```
+
+
+```{r ohi_marine_and_inland}
+inland_50 <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer", "inland_50km_goc.shp"))
+inland_10 <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer", "inland_10km_goc.shp"))
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+
+marine_and_inland50 <- bind_rows(regions_marine, inland_50) %>%
+  dplyr::select(rgn_id, geometry) %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
+
+marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>%
+  dplyr::select(rgn_id, geometry) %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
 ```
 
 
@@ -149,7 +167,7 @@ sum_livestock_municipal <- bind_all_years_livestock %>%
 ```
 
 
-#### Join with municipality polygons
+#### 1. Join with municipality polygons
 
 ```{r}
 # read them in
@@ -173,10 +191,152 @@ siap_municipal_2022 <- siap_municipal %>%
 mapview(siap_municipal_2022, zcol = "toneladas_volumen")
 ```
 
+```{r}
+gridded_cattle_density_2020_10km <- terra::rast(here::here("/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.CTL.tif"))
+
+plot(gridded_cattle_density_2020_10km)
+
+st_crs(gridded_cattle_density_2020_10km) # WGS 84
+
+freq(gridded_cattle_density_2020_10km)
+
+gridded_cattle_density_2020_10km_goc <- terra::crop(terra::project(gridded_cattle_density_2020_10km, crs(marine_and_inland50)), marine_and_inland50)
+
+crs(gridded_cattle_density_2020_10km_goc)
+
+plot(gridded_cattle_density_2020_10km_goc)
+```
+
+#### 2. Cattle density (global 10km raster)
+
+```{r}
+library(terra)
+
+# read in cattle density
+gridded_cattle_density_2020_10km <- terra::rast(here::here("/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.CTL.tif"))
+
+# temp project the 9 polygons to WGS 84 just for the fast global crop
+marine_and_inland50_wgs84 <- st_transform(marine_and_inland50, terra::crs(gridded_cattle_density_2020_10km))
+
+# crop the massive global raster down to marine_and_inland50_wgs84 rectangular box
+cattle_cropped_wgs84 <- terra::crop(gridded_cattle_density_2020_10km, marine_and_inland50_wgs84)
+terra::plot(cattle_cropped_wgs84)
+
+# project only this small cropped raster into our preferred metric CRS (Mexico LCC)
+cattle_projected_lcc <- terra::project(cattle_cropped_wgs84, terra::crs(marine_and_inland50))
+
+# mask the raster to the exact boundaries of the 9 region polygons
+gridded_cattle_density_2020_10km_goc <- terra::mask(cattle_projected_lcc, marine_and_inland50)
+
+# verify the final CRS
+terra::crs(gridded_cattle_density_2020_10km_goc)
+terra::plot(gridded_cattle_density_2020_10km_goc)
+```
+
+#### 3. Resample to 1km
+
+```{r}
+# now resample to 1km
+# make an empty template with 1000m (1km) resolution matching the extent and CRS
+template_1km <- terra::rast(gridded_cattle_density_2020_10km_goc)
+terra::res(template_1km) <- 1000
+
+# resample the data using bilinear interpolation to smoothly estimate new 1km density values. original data is in cattle heads/km^2
+cattle_density_1km <- terra::resample(
+  x = gridded_cattle_density_2020_10km_goc, 
+  y = template_1km, 
+  method = "bilinear"
+)
+
+# reapply the polygon mask to clean up any edge cells bleeding past the borders
+gridded_cattle_density_2020_1km_goc <- terra::mask(cattle_density_1km, marine_and_inland50)
+
+# check and plot
+print(gridded_cattle_density_2020_1km_goc)
+terra::plot(gridded_cattle_density_2020_1km_goc)
+```
+
+### Dasymetric mapping of municipal numbers to the spatially where estimated cattle locations are from the global raster
+
+Because SIAP data is locked to arbitrary administrative boundaries (municipalities), we can't intersect it with watersheds, as a single municipality might span multiple watersheds. The GLW4 raster provides the "spatial proxy" to figure out where within those municipalities the livestock actually are.
+
+
+#### 1. prep the DGSIAP data and rasterize
+
+Ensure municipality polygons (ex: siap_municipal_2022) are in the exact same metric projection (Mexico LCC) as the 1km raster.
+
+```{r}
+library(terra)
+library(sf)
+library(dplyr)
+
+# make the 2022 SIAP sf object a terra SpatVector in Mexico LCC
+mun_vector <- siap_municipal_2022 %>% 
+  st_transform(st_crs(gridded_cattle_density_2020_1km_goc)) %>% 
+  vect()
+```
+
+
+#### 2. calculate the municipal weights
+
+We need to find the total GLW raster value for each municipality and divide each cell by that total.
+
+```{r}
+# sum up the GLW 1km density values inside each municipality
+mun_totals <- terra::extract(gridded_cattle_density_2020_1km_goc, mun_vector, fun = sum, na.rm = TRUE)
+
+# append this municipal total back to the vector object (assuming the extraction order matches the vector rows)
+mun_vector$glw_total_density <- mun_totals[, 2]
+
+# rasterize the municipal totals so we can do raster algebra. we use the 1km cattle raster as a geometry template
+mun_totals_raster <- terra::rasterize(mun_vector, gridded_cattle_density_2020_1km_goc, field = "glw_total_density")
+
+# create the weight raster (Cell Weight = Cell Density / Municipal Total Density). cells will range from 0 to 1, representing the proportion of the municipality's cattle in that cell.
+cattle_weight_raster <- gridded_cattle_density_2020_1km_goc / mun_totals_raster
+
+plot(cattle_weight_raster)
+```
+
+
+#### 3. distribute SIAP values (cattle volume) across the 1km grid
+
+```{r}
+## rasterize the actual SIAP livestock volume (tons) for 2022
+siap_volume_raster <- terra::rasterize(mun_vector, gridded_cattle_density_2020_1km_goc, field = "toneladas_volumen")
+
+# distribute the tons across the 1km grid
+# result: a 1km raster where cell values = estimated SIAP tons of cattle in that specific 1km block
+siap_cattle_tons_1km <- siap_volume_raster * cattle_weight_raster
+
+# quick check: plot it to see the refined 1km distribution of Mexican govt data
+plot(siap_cattle_tons_1km)
+
+```
 
 
 
+### Summarize within watersheds
 
+```{r}
+# load in watershed sf object, project to match, and convert to SpatVector
+watersheds_lcc <- st_read(here::here("/path/to/your/watersheds.shp")) %>% 
+  st_transform(st_crs(siap_cattle_tons_1km)) %>% 
+  vect()
+
+# sum the SIAP cattle tons within each individual watershed
+watershed_cattle_totals <- terra::extract(siap_cattle_tons_1km, watersheds_lcc, fun = sum, na.rm = TRUE)
+
+# bind the calculated tons back to the watershed polygons!!!!
+watersheds_lcc$total_cattle_tons <- watershed_cattle_totals[, 2]
+
+```
+
+
+### Assign to pourpoints and then OHI regions
+
+```{r}
+
+```
 
 
 
