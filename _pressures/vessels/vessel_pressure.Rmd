@@ -1,0 +1,552 @@
+---
+title: "Untitled"
+output: html_document
+date: "2026-06-01"
+---
+
+Getting pressure layers for vessel traffic.
+
+```{r}
+library(tidyverse)
+library(here)
+library(terra)
+library(sf)
+```
+
+## Determine rescaling factor that will be used for all years.
+We used the year 2024 for this.
+```{r}
+vessels <- read_csv("/home/shares/ohi/OHI_GOC/_raw_data/vms_juan_carlos/vessel.csv") %>%
+  filter(state %in% c("BAJA CALIFORNIA", "BAJA CALIFORNIA SUR", "JALISCO",
+                      "NAYARIT", "SINALOA", "SONORA"))
+vms <- read_csv("/home/shares/ohi/OHI_GOC/_raw_data/vms_juan_carlos/vms/vms_2024.csv") %>%
+  select(-name, -port, -economic_unit)
+
+vessel_pressure <- left_join(vms, vessels, by=c("vessel_rnpa"))
+
+### only 5% without gear/fishing information, pretty good!
+60962 / 1248398
+
+ggplot(vessel_pressure, aes(x = lon, y = lat)) +
+  geom_point(alpha = 0.05, size = 0.15, stroke = 0) +
+  coord_fixed() +
+  labs(
+    title = "VMS pings",
+    subtitle = "All points in vessel_pressure",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme_minimal()
+
+hours_sf <- vessel_pressure %>%
+  filter(!is.na(hours), hours > 0) %>%
+  mutate(hours = ifel(hours>3, 3, hours)) %>%
+  filter(!is.na(lat), !is.na(lon)) %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+  st_transform(crs(ohi_marine))
+
+hours_vect <- vect(hours_sf)
+
+hours_count <- rasterize(
+  hours_vect,
+  y = ohi_marine,
+  field = "hours",
+  fun = "sum",
+  background = 0
+)
+
+names(hours_count) <- "hours_count"
+
+#global(hours_count, "sum", na.rm = TRUE)
+#global(hours_count, "mean", na.rm = TRUE)
+
+q99 <- quantile(values(hours_count), 0.99, na.rm = TRUE)
+plot(ifel(hours_count > q99, 1, hours_count), main = "VMS hours per 1 km cell (2024)")
+```
+
+
+## Total hours on 1 km OHI marine raster
+
+Sum of VMS hours per 1 km cell, aligned to `ohi_marine_raster_1km.tif` (EPSG:6372). Non-marine cells are NA.
+
+```{r}
+ohi_marine <- rast(here("spatial/ohi_regions/ohi_marine_raster_1km.tif"))
+
+for(year in 2000:2025){
+#year = 2024
+vessels <- read_csv("/home/shares/ohi/OHI_GOC/_raw_data/vms_juan_carlos/vessel.csv") %>%
+  filter(state %in% c("BAJA CALIFORNIA", "BAJA CALIFORNIA SUR", "JALISCO",
+                      "NAYARIT", "SINALOA", "SONORA"))
+  
+vms <- read_csv(sprintf("/home/shares/ohi/OHI_GOC/_raw_data/vms_juan_carlos/vms/vms_%s.csv", year)) %>%
+  select(-name, -port, -economic_unit)
+
+vessel_pressure_tmp <- left_join(vms, vessels, by=c("vessel_rnpa"))
+
+  hours_sf_tmp <- vessel_pressure_tmp %>%
+  filter(!is.na(hours), hours > 0) %>%
+  mutate(hours = ifel(hours>3, 3, hours)) %>%
+  filter(!is.na(lat), !is.na(lon)) %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+  st_transform(crs(ohi_marine))
+
+hours_vect_tmp <- vect(hours_sf_tmp)
+
+hours_count_tmp <- rasterize(
+  hours_vect,
+  y = ohi_marine,
+  field = "hours",
+  fun = "sum",
+  background = 0
+)
+
+names(hours_count_tmp) <- "hours_count"
+
+hours_count_rescaled <- ifel(hours_count_tmp > q99, q99, hours_count_tmp)
+
+writeRaster(
+   hours_count,
+   here(sprintf("/home/shares/ohi/OHI_GOC/goal_prep/pressures/vessels/benthic_destructive_fishing/vms_hours_%s_1km.tif", year)),
+   overwrite = TRUE
+ )
+
+writeRaster(
+   hours_count_rescaled,
+   here(sprintf("/home/shares/ohi/OHI_GOC/goal_prep/pressures/vessels/benthic_destructive_fishing/vms_hours_%s_1km_rescaled.tif", year)),
+   overwrite = TRUE
+ )
+}
+```
+
+# demersal destructive fishing pressure
+
+## Gear type × target species combinations
+
+All unique pairs in the GoC vessel registry (six states), with vessel counts.
+`bottom_destructive` flags combinations likely to include **bottom trawling** with benthic
+impact (permit-level inference). Rules: **sardine/anchovy** and **tuna-only** targets never
+bottom trawl; **shrimp** with ambiguous gear (`OTRO`, missing gear, `PESCA MULTIPLE`) **is**
+bottom trawl; `NA` + `NA` is unclassified.
+
+```{r}
+gear_target_combos <- vessels %>%
+  count(gear_type, target_species, name = "n_vessels", .drop = FALSE) %>%
+  mutate(
+    gear_chr = coalesce(gear_type, ""),
+    target_chr = coalesce(target_species, ""),
+    has_trawl = str_detect(gear_chr, "ARRASTRE"),
+    has_purse_seine = str_detect(gear_chr, "CERCO"),
+    has_longline = str_detect(gear_chr, "PALANGRE"),
+    has_pesca_multiple = gear_chr == "PESCA MULTIPLE",
+    has_shrimp_target = str_detect(target_chr, "CAMARÓN"),
+    has_finfish_target = str_detect(target_chr, "ESCAMA"),
+    has_sardine_target = str_detect(target_chr, "SARDINA"),
+    has_tuna_target = str_detect(target_chr, "ATÚN"),
+    has_shark_target = str_detect(target_chr, "TIBURÓN"),
+    has_tuna_only = has_tuna_target & !has_shrimp_target & !has_finfish_target &
+      !has_shark_target & !has_sardine_target,
+    has_otras_target = str_detect(target_chr, "OTRAS"),
+    gear_missing = is.na(gear_type) | gear_chr == "",
+    target_missing = is.na(target_species) | target_chr == "",
+    ambiguous_gear = gear_missing | gear_chr == "OTRO" | has_pesca_multiple,
+    bottom_destructive = case_when(
+      gear_missing & target_missing ~ NA,
+      ## Sardine/anchovy: never bottom trawl (even if ARRASTRE on permit)
+      has_sardine_target ~ FALSE,
+      ## Tuna-only target: never bottom trawl (pelagic fishery; even if ARRASTRE on permit)
+      has_tuna_only ~ FALSE,
+      ## Shrimp + ambiguous gear (OTRO, NA gear, PESCA MULTIPLE): treat as bottom trawl
+      has_shrimp_target & ambiguous_gear ~ TRUE,
+      ## Trawl on permit (non-sardine targets)
+      has_trawl ~ TRUE,
+      ## Shrimp with explicit non-trawl gear (e.g. PALANGRE + CAMARÓN)
+      has_shrimp_target ~ FALSE,
+      ## Pelagic / hook gear without trawl
+      !has_trawl & (has_purse_seine | has_longline) ~ FALSE,
+      ## Unspecified buckets without shrimp
+      !has_trawl & (gear_chr == "OTRO" | has_otras_target) ~ FALSE,
+      TRUE ~ FALSE
+    ),
+    confidence = case_when(
+      gear_missing & target_missing ~ NA_character_,
+      has_sardine_target ~ "high",
+      has_tuna_only ~ "high",
+      has_shrimp_target & ambiguous_gear ~ "low",
+      has_trawl & has_shrimp_target & !has_longline & !has_pesca_multiple ~ "high",
+      has_trawl & has_shrimp_target ~ "medium",
+      has_trawl & has_finfish_target & !has_shrimp_target ~ "medium",
+      has_trawl ~ "medium",
+      has_shrimp_target ~ "high",
+      !has_trawl & (has_purse_seine | has_longline) ~ "high",
+      !has_trawl & gear_chr == "OTRO" & has_otras_target ~ "high",
+      !has_trawl & (has_tuna_target) & !has_shrimp_target ~ "high",
+      TRUE ~ "high"
+    )
+  ) %>%
+  select(-gear_chr, -target_chr, -has_trawl, -has_purse_seine, -has_longline,
+         -has_pesca_multiple, -has_shrimp_target, -has_finfish_target,
+         -has_sardine_target, -has_tuna_target, -has_shark_target, -has_tuna_only,
+         -has_otras_target,
+         -gear_missing, -target_missing, -ambiguous_gear) %>%
+  arrange(desc(n_vessels), gear_type, target_species)
+
+dir.create(here("_pressures/vessels/data"), recursive = TRUE, showWarnings = FALSE)
+write_csv(
+  gear_target_combos,
+  here("_pressures/vessels/data/gear_target_benthic_destructive.csv")
+)
+
+gear_target_combos
+```
+
+
+## Filter pings for potential bottom-destructive trawling
+
+Keep VMS pings that plausibly reflect **bottom trawling on the continental shelf**,
+using permit metadata (`gear_target_combos`), depth, and speed. Each step below
+drops pings that fail that step; the table shows how many rows remain.
+
+**Also applied:** each ping’s `hours` is capped at **3 h** before summing (limits inflation
+from long gaps between VMS reports).
+
+**Not applied here (consider later):** port/shore distance, `confidence` weights,
+soft-bottom sediment mask, multi-year VMS files.
+
+```{r filter_step_helper}
+## Shared by bottom-trawl and ghost-pressure filter chunks.
+filter_step <- function(label, n_in, n_out) {
+  message(
+    sprintf(
+      "%s: %s → %s pings (removed %s)",
+      label,
+      format(n_in, big.mark = ","),
+      format(n_out, big.mark = ","),
+      format(n_in - n_out, big.mark = ",")
+    )
+  )
+}
+```
+
+```{r filter_bottom_destructive_pings}
+## Lookup: one row per gear + target combination (from registry, not from VMS pings).
+destructive_lookup <- gear_target_combos %>%
+  select(gear_type, target_species, bottom_destructive)
+
+## Attach permit-based bottom-trawl flag to every ping.
+pings_with_permit <- vessel_pressure %>%
+  left_join(destructive_lookup, by = c("gear_type", "target_species"))
+
+n_start <- nrow(pings_with_permit)
+
+## 1) Drop pings with missing gear or target on the vessel permit (NA + NA combos, etc.).
+pings_known_permit <- pings_with_permit %>%
+  filter(!is.na(gear_type), !is.na(target_species))
+filter_step("1. Known gear and target on permit", n_start, nrow(pings_known_permit))
+
+## 2) Keep only permit combinations classified as bottom-destructive (see gear_target_combos chunk).
+pings_destructive <- pings_known_permit %>%
+  filter(bottom_destructive == TRUE)
+filter_step("2. Bottom-destructive permit combo", nrow(pings_known_permit), nrow(pings_destructive))
+
+## 3) Shelf only: depth_m is negative below sea level → water depth = -depth_m.
+pings_shelf <- pings_destructive %>%
+  mutate(water_depth_m = -depth_m) %>%
+  filter(!is.na(water_depth_m), water_depth_m <= 200)
+filter_step("3. Water depth ≤ 200 m", nrow(pings_destructive), nrow(pings_shelf))
+
+## 4) Drop fast transit legs (speed between consecutive pings, in knots).
+pings_trawling_speed <- pings_shelf %>%
+  filter(!is.na(implied_speed_knots), implied_speed_knots <= 6)
+filter_step("4. Implied speed ≤ 6 knots", nrow(pings_shelf), nrow(pings_trawling_speed))
+
+## 5) Valid positions and positive time step (for later sum(hours) rasters).
+pings_valid <- pings_trawling_speed %>%
+  filter(!is.na(lat), !is.na(lon), !is.na(hours), hours > 0)
+
+filter_step("5. Valid lat/lon and hours > 0", nrow(pings_trawling_speed), nrow(pings_valid))
+
+## 6) Cap hours at 3 h so one long gap between pings cannot add >3 vessel-hours to a cell.
+n_capped <- sum(pings_valid$hours > 3, na.rm = TRUE)
+vessel_pressure_bottom <- pings_valid %>%
+  mutate(hours = pmin(hours, 3))
+
+message(
+  sprintf(
+    "6. Cap hours at 3 h: %s pings had hours > 3 before cap (all %s rows kept)",
+    format(n_capped, big.mark = ","),
+    format(nrow(vessel_pressure_bottom), big.mark = ",")
+  )
+)
+
+## Summary table
+tibble(
+  step = c(
+    "All pings (with permit fields joined)",
+    "After: gear and target known",
+    "After: bottom-destructive permit",
+    "After: depth ≤ 200 m",
+    "After: speed ≤ 6 kn",
+    "After: valid position and hours > 0",
+    "Final: hours capped at 3 h per ping"
+  ),
+  n_pings = c(
+    n_start,
+    nrow(pings_known_permit),
+    nrow(pings_destructive),
+    nrow(pings_shelf),
+    nrow(pings_trawling_speed),
+    nrow(pings_valid),
+    nrow(vessel_pressure_bottom)
+  ),
+  pct_of_start = round(100 * c(
+    n_start,
+    nrow(pings_known_permit),
+    nrow(pings_destructive),
+    nrow(pings_shelf),
+    nrow(pings_trawling_speed),
+    nrow(pings_valid),
+    nrow(vessel_pressure_bottom)
+  ) / n_start, 1)
+)
+
+vessel_pressure_bottom
+```
+
+## Bottom-destructive trawl effort raster (sum of hours, 2024)
+
+Sum of capped **`hours`** per 1 km cell for filtered pings (`vessel_pressure_bottom`).
+Values are **vessel-hours** on the 2024 VMS track (permit + depth + speed filters).
+Aligned to `ohi_marine_raster_1km.tif` (EPSG:6372); non-marine cells are NA.
+
+```{r bottom_trawl_hours_raster}
+ohi_marine <- rast(here("spatial/ohi_regions/ohi_marine_raster_1km.tif"))
+
+bottom_sf <- vessel_pressure_bottom %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE) %>%
+  st_transform(crs(ohi_marine))
+
+bottom_vect <- vect(bottom_sf)
+
+bottom_trawl_hours <- rasterize(
+  bottom_vect,
+  y = ohi_marine,
+  field = "hours",
+  fun = "sum",
+  background = 0
+)
+bottom_trawl_hours <- ifel(is.na(ohi_marine), NA, bottom_trawl_hours)
+names(bottom_trawl_hours) <- "bottom_trawl_hours"
+
+## QC: raster total should match sum of ping hours (small diff if points fall outside extent).
+hours_in_pings <- sum(vessel_pressure_bottom$hours, na.rm = TRUE)
+hours_in_raster <- global(bottom_trawl_hours, "sum", na.rm = TRUE)[1, 1]
+message(
+  "Sum of hours in pings: ", format(round(hours_in_pings), big.mark = ","),
+  " | Sum in raster: ", format(round(hours_in_raster), big.mark = ",")
+)
+
+plot(log(bottom_trawl_hours), main = "Bottom-destructive trawl hours per 1 km cell (2024)")
+
+dir.create(here("_pressures/vessels/output"), recursive = TRUE, showWarnings = FALSE)
+writeRaster(
+  bottom_trawl_hours,
+  here("_pressures/vessels/output/bottom_trawl_hours_2024_1km.tif"),
+  overwrite = TRUE
+)
+```
+
+# Ghost gear risk
+
+Attach Gilman et al. (2021) scores to **every VMS ping** via the vessel permit
+(`gear_type` + `target_species`). Crosswalk: `data/gear_gilman_crosswalk.csv`
+(built from `data/gear_target_benthic_destructive.csv` via
+`scripts/build_gilman_crosswalk.R`).
+
+**Per-ping score:** `ghost_gear_risk` = `H_gear_ghost` = **R × ghost_fishing_mean**
+(Table 2 ALDFG leakage rate **R** × Supplement Table S2 ghost-fishing mean). This is **not**
+`H_gear × ghost_fishing_mean` (that would multiply in Table 2 outcome **O** as well).
+`H_gear` = R × O is the general gear hazard index; we use the ghost-specific index only.
+
+Pings whose permit has **both** gear and target missing stay **NA** (unclassified combo in
+the crosswalk).
+
+```{r ghost_gilman_lookup}
+gilman_by_permit <- read_csv(
+  here("_pressures/vessels/data/gear_gilman_crosswalk.csv"),
+  show_col_types = FALSE
+) %>%
+  select(
+    gear_type,
+    target_species,
+    gilman_gear = gilman_gear_category,
+    gilman_R = R,
+    ghost_fishing_mean,
+    H_gear_ghost)
+
+gilman_by_permit
+```
+
+```{r join_ghost_gear_risk}
+## One row per permit combo → repeated on every ping for that vessel.
+ghost_pressure <- vessel_pressure %>%
+  left_join(gilman_by_permit, by = c("gear_type", "target_species")) %>%
+  mutate(
+    ghost_gear_risk = H_gear_ghost
+  ) %>%
+  select(-H_gear_ghost)
+
+ghost_pressure %>%
+  select(
+    vessel_rnpa, gear_type, target_species,
+    gilman_gear, ghost_gear_risk,
+    hours, lat, lon
+  ) %>%
+  slice_head(n = 5)
+```
+
+## Filter pings for ghost gear pressure
+
+Keep VMS pings that plausibly reflect **fishing activity** (not fast transit), with a
+known permit and Gilman ghost score. Each step drops pings that fail that step.
+
+**Also applied:** `hours` capped at **3 h**; per-ping contribution =
+`ghost_gear_risk × hours_capped` (risk-weighted vessel-hours).
+
+**Not applied here:** bottom-destructive permit filter, depth ≤ 200 m, port distance.
+
+```{r filter_ghost_pressure_pings}
+n_start <- nrow(ghost_pressure)
+
+
+## 1) Drop pings without a Gilman ghost score (e.g. gear and target both missing on permit).
+ghost_scored <- ghost_pressure %>%
+  filter(!is.na(ghost_gear_risk))
+filter_step("1. Gilman ghost score available", nrow(ghost_pressure), nrow(ghost_scored))
+
+## 2) Drop fast transit legs (speed between consecutive pings, in knots).
+ghost_fishing_speed <- ghost_scored %>%
+  filter(!is.na(implied_speed_knots), implied_speed_knots <= 6)
+filter_step("2. Implied speed ≤ 6 knots", nrow(ghost_scored), nrow(ghost_fishing_speed))
+
+## 3) Valid positions and positive time step (for raster sum).
+ghost_valid <- ghost_fishing_speed %>%
+  filter(!is.na(lat), !is.na(lon), !is.na(hours), hours > 0)
+filter_step("3. Valid lat/lon and hours > 0", nrow(ghost_fishing_speed), nrow(ghost_valid))
+
+## 5) Cap hours at 3 h and multiply by permit-level ghost gear risk.
+n_capped <- sum(ghost_valid$hours > 3, na.rm = TRUE)
+ghost_pressure <- ghost_valid %>%
+  mutate(
+    hours_capped = pmin(hours, 3),
+    ghost_risk_hours = ghost_gear_risk * hours_capped
+  )
+
+message(
+  sprintf(
+    "5. Cap hours at 3 h: %s pings had hours > 3 before cap (all %s rows kept)",
+    format(n_capped, big.mark = ","),
+    format(nrow(ghost_pressure), big.mark = ",")
+  )
+)
+
+## Summary table
+tibble(
+  step = c(
+    "All pings (with Gilman scores joined)",
+    "After: gear and target known",
+    "After: ghost_gear_risk available",
+    "After: speed ≤ 6 kn",
+    "After: valid position and hours > 0",
+    "Final: hours capped; ghost_risk_hours computed"
+  ),
+  n_pings = c(
+    n_start,
+    nrow(ghost_pressure),
+    nrow(ghost_scored),
+    nrow(ghost_fishing_speed),
+    nrow(ghost_valid),
+    nrow(ghost_pressure)
+  ),
+  pct_of_start = round(100 * c(
+    n_start,
+    nrow(ghost_pressure),
+    nrow(ghost_scored),
+    nrow(ghost_fishing_speed),
+    nrow(ghost_valid),
+    nrow(ghost_pressure)
+  ) / n_start, 1)
+)
+
+ghost_pressure
+```
+
+## Ghost gear pressure raster (sum of risk-weighted hours, 2024)
+
+Sum of **`ghost_risk_hours`** per 1 km cell for filtered pings (`ghost_pressure`).
+Values are **risk × vessel-hours** (Gilman `ghost_gear_risk` × capped VMS hours).
+Aligned to `ohi_marine_raster_1km.tif` (EPSG:6372); non-marine cells are NA.
+
+**QC note:** Total over all pings is usually **higher** than the raster sum because VMS
+points on land or outside the marine mask are dropped when non-marine cells are set to
+NA. Compare **on-marine ping sum** to the raster total (should be close).
+
+```{r ghost_pressure_hours_raster}
+ohi_marine <- rast(here("spatial/ohi_regions/ohi_marine_raster_1km.tif"))
+
+ghost_sf <- ghost_pressure %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE) %>%
+  st_transform(crs(ohi_marine))
+
+ghost_vect <- vect(ghost_sf)
+
+ghost_risk_hours <- rasterize(
+  ghost_vect,
+  y = ohi_marine,
+  field = "ghost_risk_hours",
+  fun = "sum",
+  background = 0
+)
+ghost_risk_hours <- ifel(is.na(ohi_marine), NA, ghost_risk_hours)
+names(ghost_risk_hours) <- "ghost_risk_hours"
+
+## QC: ping sum exceeds raster sum when pings fall on land or outside the OHI marine mask.
+risk_hours_in_pings <- sum(ghost_pressure$ghost_risk_hours, na.rm = TRUE)
+risk_hours_in_raster <- global(ghost_risk_hours, "sum", na.rm = TRUE)[1, 1]
+
+marine_at_ping <- extract(ohi_marine, ghost_vect, ID = FALSE)[[1]]
+risk_hours_on_marine <- sum(
+  ghost_pressure$ghost_risk_hours[!is.na(marine_at_ping)],
+  na.rm = TRUE
+)
+risk_hours_off_marine <- sum(
+  ghost_pressure$ghost_risk_hours[is.na(marine_at_ping)],
+  na.rm = TRUE
+)
+pct_off_marine <- round(100 * risk_hours_off_marine / risk_hours_in_pings, 1)
+
+message(
+  "Sum of ghost_risk_hours in pings (all locations): ",
+  format(round(risk_hours_in_pings), big.mark = ","),
+  " | On OHI marine cells only: ",
+  format(round(risk_hours_on_marine), big.mark = ","),
+  " | Off marine / outside mask (excluded from raster): ",
+  format(round(risk_hours_off_marine), big.mark = ","),
+  " (", pct_off_marine, "%)"
+)
+message(
+  "Sum in raster (marine cells only): ",
+  format(round(risk_hours_in_raster), big.mark = ","),
+  " | Diff vs on-marine ping sum: ",
+  format(round(risk_hours_on_marine - risk_hours_in_raster), big.mark = ","),
+  " (small values = edge of extent or rasterize rounding)"
+)
+
+plot(log(ghost_risk_hours), main = "Ghost gear risk-weighted hours per 1 km cell (2024)")
+
+dir.create(here("_pressures/vessels/output"), recursive = TRUE, showWarnings = FALSE)
+writeRaster(
+  ghost_risk_hours,
+  here("_pressures/vessels/output/ghost_risk_hours_2024_1km.tif"),
+  overwrite = TRUE
+)
+```
