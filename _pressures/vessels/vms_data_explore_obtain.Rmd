@@ -1,0 +1,374 @@
+---
+title: "Gulf of California: Mexican VMS (BigQuery) — obtain and explore"
+date: "Interactive notebook (not knitted)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+---
+
+## Explore data and then save the datasets we want!
+NOTE: Pings are typically one hour apart. Although there are anomolies.
+
+## Loading packages and setting options
+```{r}
+## Load packages: bigrquery (Google BigQuery), DBI (database interface), tidyverse (dplyr, etc.).
+pacman::p_load(
+  bigrquery,
+  DBI,
+  tidyverse
+)
+
+cfg <- list(
+  ## Your GCP *project id* (the one with billing linked). Queries bill here.
+  billing_project   = "goc-vms",
+  ## If NULL: use cached Google login from a prior bq_auth().
+  ## If set to "you@gmail.com": bq_auth(email = ...) for that account.
+  bq_email          = NULL,
+  ## Hard cap (bytes) BigQuery may scan per query; raises an error if a query would exceed it.
+  max_bytes_billed  = 10737418240
+  ## Table or view name inside dataset mex_vms (see list_tables chunk for names).
+  ##vms_table         = "mex_vms_processed_latest",
+  ## Calendar year used in the “one-year” examples and the GoC sample pull.
+#  explore_year      = 2024L
+)
+
+
+## Tell bigrquery: abort any single query that would bill more than this many bytes scanned.
+options(bigrquery.max_bytes_billed = cfg$max_bytes_billed)
+
+## Google identity for BigQuery API. Opens a browser the first time; then uses cache.
+if (!is.null(cfg$bq_email) && is.character(cfg$bq_email) && nzchar(cfg$bq_email)) {
+  bq_auth(email = cfg$bq_email)
+} else {
+  bq_auth()
+}
+
+## Open a DBI connection to BigQuery:
+## - project + dataset: where the *tables* live (public mex-fisheries data).
+## - billing: YOUR project id — that account pays for bytes scanned.
+## - allowLargeResults: needed for some large result patterns (kept as in mex_fisheries README).
+con <- dbConnect(
+  bigquery(),
+  project = "mex-fisheries",
+  dataset = "mex_vms",
+  billing = cfg$billing_project,
+  use_legacy_sql = FALSE,
+  allowLargeResults = TRUE
+)
+
+```
+
+## Some functions for revealing costs
+```{r bq_helpers, echo=TRUE}
+## Helpers live in bq_vms_helpers.R (same folder). Run the setup chunk first (bigrquery loaded).
+pacman::p_load(here)
+source(here::here("_pressures/vessels/bq_vms_helpers.R"))
+```
+
+
+
+##  View all tables
+
+```{r list_tables, echo=TRUE}
+## INFORMATION_SCHEMA.TABLES lists every table/view in dataset mex_vms (names + type).
+## mex_vms_processed_latest is the most current.
+sql_tables <- "
+SELECT table_name, table_type
+FROM `mex-fisheries.mex_vms.INFORMATION_SCHEMA.TABLES`
+ORDER BY table_name
+"
+## Run SQL synchronously; result is a data.frame in R (small).
+DBI::dbGetQuery(con, sql_tables) %>% print(n=100)
+```
+
+## Explore the variables in each table
+```{r}
+
+## Lazy remote table: 
+## No data is transferred until you dplyr::collect() or dbGetQuery() runs SQL.
+mex_vms <- tbl(con, "mex_vms_processed_latest")
+# peak at data:
+mex_vms
+# To get more information on each variable:
+sql_columns <- paste0(
+  "
+  SELECT column_name, data_type, is_nullable
+  FROM `mex-fisheries.mex_vms.INFORMATION_SCHEMA.COLUMNS`
+  WHERE table_name = '", "mex_vms_processed_latest", "'
+  ORDER BY ordinal_position
+  "
+)
+DBI::dbGetQuery(con, sql_columns) %>% print(n=100)
+
+# get range of years
+## MIN/MAX year across the whole VMS object. Can still scan a lot of data — dry-run shows estimate.
+sql_years <- paste0(
+  "
+  SELECT
+    MIN(year) AS year_min,
+    MAX(year) AS year_max
+  FROM ", fully_qualified_vms_table("mex_vms_processed_latest"), "
+  "
+)
+bq_print_dry_run(sql_years, cfg$billing_project, "Year MIN/MAX (full table scan warning)")
+## Same SQL again, but this time for real — returns two numbers in R.
+DBI::dbGetQuery(con, sql_years)
+
+## How many rows in 2024
+sql_count_year <- paste0(
+  "
+  SELECT year, COUNT(*) AS n_rows
+  FROM ", fully_qualified_vms_table("mex_vms_processed_latest"), "
+  WHERE year = ", as.integer(2024), "
+  GROUP BY year
+  "
+)
+bq_print_dry_run(sql_count_year, cfg$billing_project, paste0("COUNT(*) for year = ", 2024))
+DBI::dbGetQuery(con, sql_count_year)
+
+###
+mex_vessel <- tbl(con, "vessel_info_latest")
+mex_vessel
+
+segment <- tbl(con, "segment_info_v_20240515")
+segment
+
+raw <- tbl(con, "mex_vms_v_20240515")
+raw
+
+spatial <- tbl(con, "spatial_features_v_20240312")
+spatial
+
+```
+
+
+## Now get the data
+
+### VMS data
+Open the channel
+```{r}
+## Lazy remote table: 
+## No data is transferred until you dplyr::collect() or dbGetQuery() runs SQL.
+mex_vms <- tbl(con, "mex_vms_processed_latest")
+
+# peak at data:
+mex_vms
+```
+
+Subset the data, and download a small subset of the data to see what it looks like.
+
+```{r explore_goc_dry_run_then_collect, echo=TRUE}
+## Rough bounding box around the Gulf of California (WGS84 lat/lon). Edit if you want tighter/wider.
+bbox <- list(lat_min = 20, lat_max = 32, lon_min = -115, lon_max = -105)
+
+year = 2024
+## dplyr verbs build a query; still lazy until collect().
+## !! forces cfg$explore_year to be a concrete value in SQL (not a column name).
+vms_goc <- mex_vms |>
+  filter(
+    year == !!as.integer(year),
+    lat >= bbox$lat_min, lat <= bbox$lat_max,
+    lon >= bbox$lon_min, lon <= bbox$lon_max
+  )
+
+## Some potential subsetting ideas
+## head(1000): LIMIT 1000 in SQL — caps rows returned, NOT necessarily bytes scanned.
+ vms_sample <- vms_goc |>
+  #dplyr::select(any_of(c("vessel_rnpa", "lat", "lon", "year", "timestamp", "speed"))) |>
+  head(1000L)
+
+## Show the exact SQL dbplyr will send — useful to copy into BigQuery console for debugging.
+sql_sample <- dbplyr::remote_query(vms_sample)
+bq_print_dry_run(sql_sample, cfg$billing_project, "Filtered sample (dbplyr remote_query)")
+
+## THIS LINE runs the query and pulls data into R (uses network + bytes scanned per dry-run).
+vms_data <- vms_sample |>
+  collect()
+
+```
+
+------------------------------------------------------------------------
+
+## Visualize vessel tracks
+
+Requires **`vms_data`** from the chunk above (local tibble of pings). Tracks connect pings **in time order** within each `vessel_rnpa`.
+
+**Note:** `head(1000)` returns a **mixed sample** of pings (not necessarily full trips). For clearer tracks, pull more rows or filter to fewer vessels before `collect()`.
+
+**Full-year maps:** use the **static** plot below (or density rasters later). **mapview** is only practical for a **small** number of vessels/lines — see `max_vessels_mapview`.
+
+```{r plot_tracks_setup}
+pacman::p_load(sf, ggplot2)
+
+## mapview is optional (interactive); skip this chunk if you only want the static map.
+if (!requireNamespace("mapview", quietly = TRUE)) {
+  message("Install mapview for interactive maps: install.packages(\"mapview\")")
+}
+
+## Map extent (same as exploration bbox if you ran that chunk; otherwise from data).
+if (!exists("bbox")) {
+  bbox <- list(
+    lat_min = min(vms_data$lat, na.rm = TRUE),
+    lat_max = max(vms_data$lat, na.rm = TRUE),
+    lon_min = min(vms_data$lon, na.rm = TRUE),
+    lon_max = max(vms_data$lon, na.rm = TRUE)
+  )
+}
+
+## Time column for ordering pings (processed table uses datetime).
+time_col <- intersect(names(vms_data), c("datetime", "timestamp"))[1]
+if (length(time_col) == 0) {
+  stop("vms_data needs a datetime or timestamp column to order tracks.")
+}
+```
+
+```{r plot_tracks_build_sf}
+## Points as sf (WGS84).
+pts_sf <- vms_data |>
+  dplyr::filter(!is.na(lat), !is.na(lon)) |>
+  dplyr::arrange(vessel_rnpa, .data[[time_col]]) |>
+  sf::st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+
+## One line per vessel (needs at least 2 pings).
+## dplyr::summarise() on sf + sfg geometry in one step fails; use list cols then st_sfc().
+tracks_sf <- pts_sf |>
+  sf::st_drop_geometry() |>
+  dplyr::group_by(vessel_rnpa) |>
+  dplyr::filter(dplyr::n() >= 2L) |>
+  dplyr::summarise(
+    n_pts = dplyr::n(),
+    track_year = dplyr::first(year),
+    lon = list(lon),
+    lat = list(lat),
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(
+    geometry = purrr::map2(
+      lon, lat,
+      function(x, y) sf::st_linestring(cbind(x, y))
+    )
+  ) |>
+  dplyr::select(-lon, -lat) |>
+  sf::st_as_sf(crs = 4326)
+
+message(
+  "Tracks: ", nrow(tracks_sf), " vessels with >= 2 pings; ",
+  nrow(pts_sf), " points total."
+)
+```
+
+
+### Interactive map (mapview) — small subsets only
+
+```{r plot_tracks_mapview, eval=FALSE}
+## Set eval=FALSE so knitting does not open a browser; run this chunk interactively.
+if (!requireNamespace("mapview", quietly = TRUE)) {
+  stop("Install mapview to run this chunk.")
+}
+
+## Keep mapview light: cap how many track lines are drawn.
+max_vessels_mapview <- 25L
+tracks_mv <- tracks_sf |>
+  dplyr::slice_head(n = max_vessels_mapview)
+
+pts_mv <- pts_sf |>
+  dplyr::filter(vessel_rnpa %in% tracks_mv$vessel_rnpa)
+
+mapview::mapviewOptions(fgb = TRUE)
+
+mapview::mapview(
+  tracks_mv,
+  color = "steelblue",
+  lwd = 2,
+  layer.name = paste0("Tracks (first ", max_vessels_mapview, " vessels)")
+) +
+  mapview::mapview(
+    pts_mv,
+    color = "darkorange",
+    cex = 2,
+    layer.name = "Pings"
+  )
+```
+
+## Get the vms data (all the data):
+
+```{r}
+## Lazy remote table: 
+## No data is transferred until you dplyr::collect() or dbGetQuery() runs SQL.
+mex_vms <- tbl(con, "mex_vms_processed_latest")
+
+# peak at data:
+mex_vms
+
+## Rough bounding box around the Gulf of California (WGS84 lat/lon). Edit if you want tighter/wider.
+bbox <- list(lat_min = 20, lat_max = 32, lon_min = -115, lon_max = -105)
+
+for (yr in 2000:2025) {
+  out_path <- here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/vms_juan_carlos/vms",
+    sprintf("vms_%s.csv", yr)
+  )
+
+  if (file.exists(out_path)) {
+    message("Skipping ", yr, " — already saved: ", out_path)
+    next
+  }
+
+  ## dplyr verbs build a query; still lazy until collect().
+  ## !! forces yr to be a concrete value in SQL (not a column name).
+  vms_goc <- mex_vms |>
+    filter(
+      year == !!as.integer(yr),
+      lat >= bbox$lat_min, lat <= bbox$lat_max,
+      lon >= bbox$lon_min, lon <= bbox$lon_max
+    )
+
+  ## Show the exact SQL dbplyr will send — useful to copy into BigQuery console for debugging.
+  sql_sample <- dbplyr::remote_query(vms_goc)
+  bq_print_dry_run(sql_sample, cfg$billing_project, paste0("GoC year ", yr))
+
+  ## THIS LINE runs the query and pulls data into R (uses network + bytes scanned per dry-run).
+  vms_data <- vms_goc |>
+    collect()
+
+  write_csv(vms_data, out_path)
+  message("Saved ", yr, ": ", nrow(vms_data), " rows -> ", out_path)
+}
+
+```
+
+## Get the corresponding vessel data
+```{r}
+
+  ## Lazy remote table: 
+## No data is transferred until you dplyr::collect() or dbGetQuery() runs SQL.
+mex_vessel <- tbl(con, "vessel_info_latest")
+
+# peak at data:
+mex_vessel
+
+  out_path <- here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/vms_juan_carlos/vessel.csv")
+
+
+  if (file.exists(out_path)) {
+    message("Skipping ", yr, " — already saved: ", out_path)
+    next
+  }
+
+  ## dplyr verbs build a query; still lazy until collect().
+  vessel_goc <- mex_vessel
+
+  ## Show the exact SQL dbplyr will send — useful to copy into BigQuery console for debugging.
+  sql_sample <- dbplyr::remote_query(vessel_goc)
+  bq_print_dry_run(sql_sample, cfg$billing_project)
+
+  ## THIS LINE runs the query and pulls data into R (uses network + bytes scanned per dry-run).
+  vms_data <- vessel_goc |>
+    collect()
+
+  write_csv(vms_data, out_path)
+  message("Saved :", nrow(vms_data), " rows -> ", out_path)
+
