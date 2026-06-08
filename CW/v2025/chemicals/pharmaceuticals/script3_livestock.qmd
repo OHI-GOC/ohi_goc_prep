@@ -24,6 +24,8 @@ editor_options:
 
 Estimated pharmaceutical discharge.
 
+**Setup: Bring in watersheds and pour points:**
+
 ```{r setup}
 library(sf)
 library(utils)
@@ -37,8 +39,6 @@ library(stringi)
 library(janitor)
 library(tibble)
 ```
-
-### Watersheds and pour points
 
 ```{r}
 ## lets use the full state for now and then summarize by the full watersheds.
@@ -64,7 +64,6 @@ mapview(watershed_goc)
 # mapview(watershed_goc_50km)
 ```
 
-
 ```{r}
 # here's the associated pourpoints that should match with the watersheds:
 pourpoints <- st_read("/home/shares/ohi/stressors_2021/_dataprep/nutrients/watersheds_pourpoints/pourpoints_mol.shp")
@@ -74,7 +73,6 @@ mapview(pourpoints_goc)
 
 mapview(pourpoints_goc) + mapview(watershed_goc)
 ```
-
 
 ```{r ohi_marine_and_inland}
 inland_50 <- st_read(here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer", "inland_50km_goc.shp"))
@@ -94,13 +92,34 @@ marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>%
 ```
 
 
-## Estimating risk of pharmaceutical discharge based on the intensity of livestock farming in each OHI Region
+# Estimating risk of pharmaceutical discharge based on the intensity of livestock farming in each OHI Region
 
-Here I will plan to aggregate the total number of "cabezas", aka "heads", of all livestock and then rasterize the polygon of each municipio. I will then assume that the production is homogeneously distributed across the municipio, so that every cell has the same value within the municipality. 
+I plan to, instead of using number of heads, use the total volume in tonnes (toneladas) slaughtered per year and region of all livestock animals (by separately determining the raster distribution of volume within each municipality for each livestock type, chickn cattle, goat, sheep and pig, and then once those are in raster form then aggregating for each year and cell so that we have the total yearly livestock slaughtered in tonnes, then convert to kg), then multiply by 11 mg/kg of antimicrobials given per kg of terrestrial livestock animal, which gives estimated mg of antimicrobials that could be present in each cell. THEN I will summarize by watershed polygons, and take that value to each pourpoint and assign them to OHI regions.
 
-I will then summarize the total cabezas in each watershed, and use the associated pourpoints to assign values to OHI regions. I will then aggregate the total livestock produced in each OHI Region, where the more livestock produced means that there is a higher risk of pharmaceutical discharge in that region and year.
+All my current code uses the number of heads from cattle to do the dasymetric mapping, and the FAO maps are livestock density in heads/km^2. We have 5 species, each with their own GLW4 raster, and SIAP provides the `nomespecie`. So the dasymetric step needs to happen **separately per species**, and then we will sum across species at the end. Here is how we can do this:
 
-### Reading in all livestock reared from 2006-2024 (missing 2023 right now)
+---
+
+### Workflow
+
+**For each species × year combination:**
+
+1. Load the species-specific GLW4 raster (e.g. `CTL` for bovino, `CHK` for ave, etc.)
+2. Crop/resample to 1km 
+3. Compute the weight raster for that species (GLW cell density / municipal GLW total), which is the spatial proxy
+4. Filter SIAP to that species × year, get `toneladas_volumen` per municipality
+5. Rasterize the SIAP tonnes onto the municipality polygons
+6. Multiply: `siap_volume_raster * weight_raster` --> tonnes of that species slaughtered in each 1km cell
+
+**Then across species:**
+
+7. Stack the 5 species rasters and sum cellwise, which = total tonnes slaughtered per 1km cell per year
+8. Multiply by 1000 (tonnes --> kg) then by 11 mg/kg, to get mg antimicrobials per cell
+9. Summarize by watershed, assign to pourpoints, assign to OHI regions
+10. Calculate the risk factor by 
+
+
+## Reading in all livestock reared from 2006-2024 (missing 2023 right now)
 
 Data was downloaded from <https://nube.agricultura.gob.mx/datosAbiertos/Pecuario.php>: 
 
@@ -143,6 +162,10 @@ unique(bind_all_years_livestock$nomestado)
 unique(bind_all_years_livestock$cvempio)
 colnames(bind_all_years_livestock)
 
+unique(bind_all_years_livestock$nomespecie)
+# [1] "Abeja"     "Ave"       "Bovino"    "Caprino"   "Ovino"    
+# [6] "Porcino"   "Guajolote"
+
 unique(bind_all_years_livestock$nomproducto)
 # [1] "Miel"          "Carne"         "Huevo-plato"   "Ganado en pie" "Leche"        
 # [6] "Cera"          "Huevo plato"   "Ganado en Pie"
@@ -151,23 +174,25 @@ unique(bind_all_years_livestock$cveestado)
 
 ```
 
-### Aggregate all livestock cabezas for each municipality and year
+## Aggregate all livestock slaughtered volume for each municipality and year
 
-Later, come back and determine how to weigh the different types of livestock appropriately.
+For each livestock type, we will have a separate gridded 10km livestock density map from FAO.
 
 ```{r}
-## check that carne is always less than "ganado en pie" (live cattle), so that we know that carne is a subset of ganado en pie?
-
-# for now, just use ganado en pie only
+# first, we need to isolate the product to tonnes volume of "Carne" of `nomespecies` = c("Ave","Bovino","Caprino","Ovino","Porcino").
 sum_livestock_municipal <- bind_all_years_livestock %>% 
-  filter(nomproducto %in% c("Ganado en pie","Ganado en Pie")) %>% 
-  group_by(anio, cveestado, nomestado, cvempio, nommunicipio) %>% 
-  summarize(toneladas_volumen = sum(volumen, na.rm = TRUE)) %>% 
+  filter(nomproducto %in% "Carne" & nomespecie %in% c("Ave","Bovino","Caprino","Ovino","Porcino")) %>% 
+  group_by(anio, cveestado, nomestado, cvempio, nommunicipio, nomespecie) %>% 
+  summarize(toneladas_volumen = sum(volumen, na.rm = TRUE),
+            cabezas_asacrificados = sum(asacrificado, na.rm = TRUE)) %>% 
+  # mutate(weight = toneladas_volumen / cabezas_asacrificados) %>% 
   ungroup()
+
+
 ```
 
 
-#### 1. Join with municipality polygons
+## Join SIAP data with municipality polygons
 
 ```{r}
 # read them in
@@ -207,7 +232,17 @@ crs(gridded_cattle_density_2020_10km_goc)
 plot(gridded_cattle_density_2020_10km_goc)
 ```
 
-#### 2. Cattle density (global 10km raster)
+### EXAMPLE Cattle density (global 10km raster)
+
+This data is from FAO's gridded 10km raster of heads/km^2 of each livestock type.  The data was downloaded from <https://data.apps.fao.org/catalog//iso/9d1e149b-d63f-4213-978b-317a8eb42d02> and placed into `~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026`:
+
+chicken/ave = ~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.CHK.tif
+cattle/bovino = ~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.CTL.tif
+goat/caprino = ~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.GTS.tif
+pigs/porcino = ~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.PGS.tif
+sheep/ovino = ~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.SHP.tif
+
+For an example of how to do it for just cattle:
 
 ```{r}
 library(terra)
@@ -233,7 +268,7 @@ terra::crs(gridded_cattle_density_2020_10km_goc)
 terra::plot(gridded_cattle_density_2020_10km_goc)
 ```
 
-#### 3. Resample to 1km
+#### 1. Resample to 1km
 
 ```{r}
 # now resample to 1km
@@ -256,12 +291,11 @@ print(gridded_cattle_density_2020_1km_goc)
 terra::plot(gridded_cattle_density_2020_1km_goc)
 ```
 
-### Dasymetric mapping of municipal numbers to the spatially where estimated cattle locations are from the global raster
+#### 2. Dasymetric mapping of municipal numbers to spatially where estimated cattle locations are from the global raster
 
 Because SIAP data is locked to arbitrary administrative boundaries (municipalities), we can't intersect it with watersheds, as a single municipality might span multiple watersheds. The GLW4 raster provides the "spatial proxy" to figure out where within those municipalities the livestock actually are.
 
-
-#### 1. prep the DGSIAP data and rasterize
+###### a. prep the DGSIAP data and rasterize
 
 Ensure municipality polygons (ex: siap_municipal_2022) are in the exact same metric projection (Mexico LCC) as the 1km raster.
 
@@ -277,7 +311,7 @@ mun_vector <- siap_municipal_2022 %>%
 ```
 
 
-#### 2. calculate the municipal weights
+###### b. calculate the municipal weights
 
 We need to find the total GLW raster value for each municipality and divide each cell by that total.
 
@@ -298,7 +332,7 @@ plot(cattle_weight_raster)
 ```
 
 
-#### 3. distribute SIAP values (cattle volume) across the 1km grid
+###### c. distribute SIAP values (cattle volume) across the 1km grid
 
 ```{r}
 ## rasterize the actual SIAP livestock volume (tons) for 2022
@@ -313,13 +347,113 @@ plot(siap_cattle_tons_1km)
 
 ```
 
+###### d. do for all years!
 
+```{r}
+install.packages(c("future", "furrr"))
+
+library(future)
+library(furrr)
+```
+
+
+```{r}
+# ---- define output directory ----------------------------------------------------
+out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/livestock_int"
+# dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ---- per-year function ----------------------------------------------------
+distribute_siap_year <- function(yr, siap_municipal, template_raster,
+                                  weight_raster, out_dir) {
+  
+  message("processing year: ", yr)
+  
+  # 1. filter to this year and attach volume to geometry
+  mun_yr_vector <- municipio_codigo_sf %>% 
+    st_transform(st_crs(template_raster)) %>% 
+    mutate(clv_mnc = as.numeric(clv_mnc),
+           clv_std = as.numeric(clv_std)) %>%   # coerce both keys to match
+    left_join(
+      st_drop_geometry(siap_municipal %>% filter(anio == yr)) %>% 
+        select(cvempio, cveestado, toneladas_volumen),
+      by = c("clv_mnc" = "cvempio", "clv_std" = "cveestado")
+    ) %>% 
+    vect()
+  
+  # 2. rasterize SIAP volume for this year
+  siap_volume_raster <- terra::rasterize(mun_yr_vector, template_raster,
+                                          field = "toneladas_volumen")
+  
+  # 3. dasymetric distribution
+  siap_cattle_tons_1km <- siap_volume_raster * weight_raster
+  
+  # 4. save to disk
+  out_path <- file.path(out_dir, paste0("siap_cattle_tons_1km_", yr, ".tif"))
+  terra::writeRaster(siap_cattle_tons_1km, out_path, overwrite = TRUE)
+  
+  message("  saved: ", basename(out_path))
+  return(out_path)
+}
+
+
+# ---- run in parallel across all years ----------------------------------------------------
+years_to_process <- c(2006:2022, 2024)
+
+output_paths <- purrr::map(
+  years_to_process,
+  \(yr) distribute_siap_year(
+    yr = yr,
+    siap_municipal = siap_municipal,
+    template_raster = gridded_cattle_density_2020_1km_goc,
+    weight_raster = cattle_weight_raster,
+    out_dir = out_dir
+  )
+)
+
+# ---- quick sanity check ----------------------------------------------------
+tibble(
+  year = years_to_process,
+  path = unlist(output_paths),
+  exists = file.exists(unlist(output_paths))
+)
+```
+
+#### 3. In theory, we would do the same thing for not just cattle, but also sheep, pigs, goat, and chicken (birds).
+
+```{r}
+
+```
+
+
+#### 4. Summarize total kg of livestock production in each 1km cell, across all nomespecies.
+
+First, we need to do dimensional analysis to convert from tonnes to kg of volume produced in each municipality and year.
+
+```{r}
+
+```
+
+
+Now that we ideally have a 1km gridded raster of the total livestock production (kg) of all livestock types, we can estimate the mg of antimicrobial quantities for each municipality and year by applying:
+
+*__ kg total volume terrestrial livestock slaughtered × 11 mg/kg of antimicrobials  = __ mg of antimicriobials applied that could potentially discharge into the GoC eventually.*
+
+^ This number was determined based on Table 5 from WOAH <https://www.woah.org/app/uploads/2025/05/en-woah-amu-report-2025-final.pdf>.
+
+
+## Compare across regions
+
+Then, we can take the *__ mg of antimicriobials applied that could potentially discharge into the GoC eventually* and determine, across all regions and time, which region is more likely to discharge pharmaceuticals from livestock relative to other regions and years.
+
+$$current\ status\ _{livestock\_pharma} = 1 - \frac{mg\_antimicrobials\ _{current} - mg\_antimicrobials\ _{ideal}}{mg\_antimicrobials\ _{maximum} - mg\_antimicrobials\ _{ideal}}$$
+
+Where the ideal is zero, and the maximum is the global maximum of estimated antimicrobials given to livestock across all years and regions.
 
 ### Summarize within watersheds
 
 ```{r}
 # load in watershed sf object, project to match, and convert to SpatVector
-watersheds_lcc <- st_read(here::here("/path/to/your/watersheds.shp")) %>% 
+watersheds_lcc <- watershed_goc %>% 
   st_transform(st_crs(siap_cattle_tons_1km)) %>% 
   vect()
 
@@ -338,6 +472,17 @@ watersheds_lcc$total_cattle_tons <- watershed_cattle_totals[, 2]
 
 ```
 
+### Risk factor and current status
 
+```{r}
+
+```
+
+
+### Save to Mazu
+
+```{r}
+
+```
 
 
