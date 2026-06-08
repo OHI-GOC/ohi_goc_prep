@@ -116,7 +116,9 @@ All my current code uses the number of heads from cattle to do the dasymetric ma
 7. Stack the 5 species rasters and sum cellwise, which = total tonnes slaughtered per 1km cell per year
 8. Multiply by 1000 (tonnes --> kg) then by 11 mg/kg, to get mg antimicrobials per cell
 9. Summarize by watershed, assign to pourpoints, assign to OHI regions
-10. Calculate the risk factor by 
+10. Calculate the risk factor by comparing across regions and years
+
+_REMEMBER: GLW4 (FAO livestock density) = **where**, DGSIAP (Mexican Govt) = **how much**!!_
 
 
 ## Reading in all livestock reared from 2006-2024 (missing 2023 right now)
@@ -211,7 +213,9 @@ siap_municipal <- inner_join(sum_livestock_municipal, municipio_codigo_sf) %>%
   st_as_sf()
 
 siap_municipal_2022 <- siap_municipal %>% 
-  filter(anio %in% 2022)
+  filter(anio %in% 2022 & nomespecie %in% "Bovino")
+
+unique(siap_municipal_2022$nomespecie)
 
 mapview(siap_municipal_2022, zcol = "toneladas_volumen")
 ```
@@ -232,7 +236,7 @@ crs(gridded_cattle_density_2020_10km_goc)
 plot(gridded_cattle_density_2020_10km_goc)
 ```
 
-### EXAMPLE Cattle density (global 10km raster)
+### Bring in FAO livestock density rasters
 
 This data is from FAO's gridded 10km raster of heads/km^2 of each livestock type.  The data was downloaded from <https://data.apps.fao.org/catalog//iso/9d1e149b-d63f-4213-978b-317a8eb42d02> and placed into `~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026`:
 
@@ -241,6 +245,24 @@ cattle/bovino = ~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/
 goat/caprino = ~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.GTS.tif
 pigs/porcino = ~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.PGS.tif
 sheep/ovino = ~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.SHP.tif
+
+```{r}
+species_glw_map <- tribble(
+  ~nomespecie, ~glw_file,
+  "Bovino", "GLW4-2020.D-DA.CTL.tif", # cattle
+  "Ave", "GLW4-2020.D-DA.CHK.tif", # bird, which we assume is chicken because turkeys were separate and those classified as Aves also produce eggs which are in the SIAP data
+  "Caprino", "GLW4-2020.D-DA.GTS.tif", # goat
+  "Porcino", "GLW4-2020.D-DA.PGS.tif", # pig
+  "Ovino", "GLW4-2020.D-DA.SHP.tif" # sheep
+)
+
+glw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026"
+out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/livestock_int"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+### EXAMPLE Cattle density (global 10km raster)
 
 For an example of how to do it for just cattle:
 
@@ -441,6 +463,215 @@ Now that we ideally have a 1km gridded raster of the total livestock production 
 ^ This number was determined based on Table 5 from WOAH <https://www.woah.org/app/uploads/2025/05/en-woah-amu-report-2025-final.pdf>.
 
 
+
+
+
+
+
+
+
+
+### Dasymetric mapping 
+
+Because SIAP data is locked to arbitrary administrative boundaries (municipalities), we can't intersect it with watersheds, as a single municipality might span multiple watersheds. The GLW4 (FAO livestock density) rasters provide the "spatial proxy" to figure out where within those municipalities the livestock actually are.
+
+
+#### 2. Crop and resample all GLW4 rasters (for each nomespecie) to 1km
+
+```{r}
+# helper function to crop, project, and resample a single GLW4 raster to 1km
+prep_glw_1km <- function(glw_path, mask_polygon) {
+  
+  glw_raw <- terra::rast(glw_path)
+  mask_wgs84 <- st_transform(mask_polygon, terra::crs(glw_raw))
+  
+  glw_cropped <- terra::crop(glw_raw, mask_wgs84)
+  glw_projected <- terra::project(glw_cropped, terra::crs(mask_polygon))
+  glw_masked <- terra::mask(glw_projected, mask_polygon)
+  
+  # resample to 1km
+  template_1km <- terra::rast(glw_masked)
+  terra::res(template_1km) <- 1000
+  glw_1km <- terra::resample(glw_masked, template_1km, method = "bilinear")
+  glw_1km <- terra::mask(glw_1km, mask_polygon)
+  
+  return(glw_1km)
+}
+
+# apply to all species — named list for easy lookup by nomespecie
+glw_1km_list <- purrr::map(
+  setNames(species_glw_map$glw_file, species_glw_map$nomespecie),
+  \(f) prep_glw_1km(file.path(glw_dir, f), marine_and_inland50)
+)
+```
+
+
+#### 3. Compute the weight raster for that species (GLW cell density / municipal GLW total)
+
+```{r}
+# helper: given a 1km GLW raster and the municipality vector, return a weight raster
+compute_weight_raster <- function(glw_1km, mun_vector_base, municipio_codigo_sf) {
+  
+  mun_vec <- municipio_codigo_sf %>% 
+    st_transform(st_crs(glw_1km)) %>% 
+    mutate(clv_mnc = as.numeric(clv_mnc),
+           clv_std = as.numeric(clv_std)) %>% 
+    vect()
+  
+  mun_totals <- terra::extract(glw_1km, mun_vec, fun = sum, na.rm = TRUE)
+  mun_vec$glw_total <- mun_totals[, 2]
+  mun_totals_raster <- terra::rasterize(mun_vec, glw_1km, field = "glw_total")
+  weight_raster <- glw_1km / mun_totals_raster
+  
+  return(weight_raster)
+}
+
+# pre-compute weight rasters for all species (year-invariant)
+weight_raster_list <- purrr::map(
+  glw_1km_list,
+  \(glw) compute_weight_raster(glw, mun_vector_base, municipio_codigo_sf)
+)
+```
+
+
+#### 4-6. Filter SIAP to that species and year, get `toneladas_volumen` per municipality, rasterize the DIAP tonnes onto the municipality polygons, and multiply: siap_volume_raster * weight_raster
+
+This is the actual dasymetric distribution step right here which will produce tonnes of that species slaughtered in each 1km cell.
+
+```{r}
+# these three steps are in one function per species and year
+distribute_species_year <- function(yr, species, siap_municipal, 
+                                     municipio_codigo_sf, glw_1km, 
+                                     weight_raster, out_dir) {
+  
+  message("  processing: ", species, " - ", yr)
+  
+  # step 4: filter SIAP to species x year
+  siap_yr_sp <- siap_municipal %>% 
+    filter(anio == yr, nomespecie == species) %>% 
+    st_drop_geometry() %>% 
+    select(cvempio, cveestado, toneladas_volumen)
+  
+  # step 5: join to municipality polygons and rasterize
+  mun_vec <- municipio_codigo_sf %>% 
+    st_transform(st_crs(glw_1km)) %>% 
+    mutate(clv_mnc = as.numeric(clv_mnc),
+           clv_std = as.numeric(clv_std)) %>% 
+    left_join(siap_yr_sp, by = c("clv_mnc" = "cvempio", "clv_std" = "cveestado")) %>% 
+    vect()
+  
+  siap_volume_raster <- terra::rasterize(mun_vec, glw_1km, field = "toneladas_volumen")
+  
+  # step 6: dasymetric distribution
+  species_tons_1km <- siap_volume_raster * weight_raster
+  
+  # save intermediate per-species x year raster
+  out_path <- file.path(out_dir, paste0("siap_tons_1km_", species, "_", yr, ".tif"))
+  terra::writeRaster(species_tons_1km, out_path, overwrite = TRUE)
+  
+  return(out_path)
+}
+
+# run across all species x year combinations
+years_to_process <- c(2006:2022, 2024)
+
+combos <- tidyr::crossing(
+  yr  = years_to_process,
+  species = species_glw_map$nomespecie
+)
+
+message("running dasymetric mapping for ", nrow(combos), " species and year combinations...")
+
+purrr::walk2(
+  combos$yr, combos$species,
+  \(yr, sp) distribute_species_year(
+    yr = yr,
+    species = sp,
+    siap_municipal = siap_municipal,
+    municipio_codigo_sf = municipio_codigo_sf,
+    glw_1km = glw_1km_list[[sp]],
+    weight_raster = weight_raster_list[[sp]],
+    out_dir = out_dir
+  )
+)
+```
+
+
+#### 7. Stack across species rasters and sum cellwise
+
+This will produce total tonnes slaughtered per 1km cell per year.
+
+```{r}
+# for each year, read the 5 species rasters, stack, and sum to get total tonnes
+sum_species_year <- function(yr, out_dir) {
+  
+  message("summing species for year: ", yr)
+  
+  species_files <- file.path(out_dir, 
+    paste0("siap_tons_1km_", species_glw_map$nomespecie, "_", yr, ".tif"))
+  
+  # check all files exist before stacking
+  missing <- species_files[!file.exists(species_files)]
+  if (length(missing) > 0) {
+    warning("missing files for year ", yr, ": ", paste(basename(missing), collapse = ", "))
+    return(NULL)
+  }
+  
+  stack <- terra::rast(species_files)
+  total <- terra::app(stack, fun = sum, na.rm = TRUE)
+  
+  out_path <- file.path(out_dir, paste0("siap_total_tons_1km_", yr, ".tif"))
+  terra::writeRaster(total, out_path, overwrite = TRUE)
+  
+  return(out_path)
+}
+
+total_tons_paths <- purrr::map(years_to_process, \(yr) sum_species_year(yr, out_dir))
+
+# sanity check
+tibble(
+  year = years_to_process,
+  path = unlist(total_tons_paths),
+  exists = file.exists(unlist(total_tons_paths))
+)
+```
+
+
+#### 8. Convert to mg of potential antimicrobials
+
+```{r}
+# conversion: tonnes -> kg -> mg antimicrobials
+# 1 tonne = 1000 kg
+# 11.87 mg antimicrobials per kg of terrestrial livestock slaughtered (WOAH 2025, Table 5)
+
+convert_to_antimicrobials <- function(yr, out_dir) {
+  
+  message("Converting to antimicrobial load: ", yr)
+  
+  in_path  <- file.path(out_dir, paste0("siap_total_tons_1km_", yr, ".tif"))
+  total_tonnes <- terra::rast(in_path)
+  
+  # tonnes -> kg -> mg antimicrobials
+  mg_antimicrobials <- total_tonnes * 1000 * 11.87
+  names(mg_antimicrobials) <- paste0("mg_antimicrobials_", yr)
+  
+  out_path <- file.path(out_dir, paste0("mg_antimicrobials_1km_", yr, ".tif"))
+  terra::writeRaster(mg_antimicrobials, out_path, overwrite = TRUE)
+  
+  return(out_path)
+}
+
+antimicrobial_paths <- purrr::map(years_to_process, \(yr) convert_to_antimicrobials(yr, out_dir))
+
+# final sanity check
+tibble(
+  year = years_to_process,
+  path = unlist(antimicrobial_paths),
+  exists = file.exists(unlist(antimicrobial_paths))
+)
+```
+
+
 ## Compare across regions
 
 Then, we can take the *__ mg of antimicriobials applied that could potentially discharge into the GoC eventually* and determine, across all regions and time, which region is more likely to discharge pharmaceuticals from livestock relative to other regions and years.
@@ -449,32 +680,209 @@ $$current\ status\ _{livestock\_pharma} = 1 - \frac{mg\_antimicrobials\ _{curren
 
 Where the ideal is zero, and the maximum is the global maximum of estimated antimicrobials given to livestock across all years and regions.
 
-### Summarize within watersheds
+#### 9a. Summarize within watersheds
 
 ```{r}
-# load in watershed sf object, project to match, and convert to SpatVector
+# project watersheds to match the antimicrobial rasters (Mexico LCC)
+# we use the first year's raster just to grab the CRS
+ref_crs <- terra::crs(terra::rast(file.path(out_dir, paste0("mg_antimicrobials_1km_", years_to_process[1], ".tif"))))
+
 watersheds_lcc <- watershed_goc %>% 
-  st_transform(st_crs(siap_cattle_tons_1km)) %>% 
+  st_transform(ref_crs) %>% 
   vect()
 
-# sum the SIAP cattle tons within each individual watershed
-watershed_cattle_totals <- terra::extract(siap_cattle_tons_1km, watersheds_lcc, fun = sum, na.rm = TRUE)
+# summarize mg antimicrobials within each watershed polygon, for each year
+summarize_watersheds_year <- function(yr, out_dir, watersheds_lcc) {
+  
+  message("summarizing mg antimicrobials within watersheds for ", yr)
+  
+  mg_rast <- terra::rast(file.path(out_dir, paste0("mg_antimicrobials_1km_", yr, ".tif")))
+  
+  # sum all raster cells within each watershed polygon
+  watershed_totals <- terra::extract(mg_rast, watersheds_lcc, fun = sum, na.rm = TRUE) #### need to double check the method
+  
+  # bind back to watershed attributes and tidy
+  result <- as.data.frame(watersheds_lcc) %>% 
+    mutate(
+      year = yr,
+      mg_antimicrobials = watershed_totals[, 2]
+    )
+  
+  return(result)
+}
 
-# bind the calculated tons back to the watershed polygons!!!!
-watersheds_lcc$total_cattle_tons <- watershed_cattle_totals[, 2]
+watershed_antimicrobials <- purrr::map(
+  years_to_process,
+  \(yr) summarize_watersheds_year(yr, out_dir, watersheds_lcc)
+) %>% 
+  bind_rows() %>% 
+  filter(!is.nan(mg_antimicrobials)) # filter out any basins without livestock pharmaceutical use
 
+summary(watershed_antimicrobials)
 ```
 
 
-### Assign to pourpoints and then OHI regions
+#### 9b. Assign to pourpoints and then OHI regions
+
+Note that in the shrimp farming pharmaceutical risk (`~/ohi_goc_prep/CW/v2025/chemicals/pesticides/script3_shrimp_farming_risk.qmd`), dropping zero/NA pourpoints makes sense there because a watershed with no aquaculture genuinely has no shrimp production. It is not a data gap, it's a true absence that shouldn't contribute to the regional score.
+
+HOWEVER, for livestock, it is a bit more nuanced. There are two different reasons a pourpoint might have zero or NA antimicrobials:
+
+(1) Actual absence, where the watershed drains an area with genuinely no livestock. These would be okay to drop.
+(2) There is a data gap, in which the municipality exists but SIAP has no reported `toneladas_volumen` for that species and year. This is a real data gap and dropping it silently could underestimate pressure in that region.
 
 ```{r}
+# project pourpoints to match
+pourpoints_lcc <- pourpoints_goc %>% 
+  st_transform(ref_crs)
 
+# intersect with ohi regions
+pourpoints_rgnid <- st_intersection(st_transform(pourpoints_lcc, st_crs(marine_and_inland50)), marine_and_inland50)
+# mapview(pourpoints_rgnid)
+# st_crs(pourpoints_rgnid)
+
+# each pourpoint sits at the outlet of a watershed. pourpoints and watersheds share the `basin_id`
+watershed_pourpoint_join <- pourpoints_rgnid %>% 
+  select(basin_id, rgn_id) %>% 
+  left_join(
+    watershed_antimicrobials,
+    by = "basin_id"
+  ) %>% 
+  st_as_sf() %>% 
+  mutate(is_within_10km = lengths(st_within(., marine_and_inland10)) > 0) %>% # flag 10km
+  filter(!(is_within_10km == FALSE & rgn_id %in% c("Region_2","Region_4","Region_9"))) # drop Pacific-side
+
+mapview(watershed_pourpoint_join, zcol = "rgn_id")
+
+# aggregate to OHI region: sum all watershed pourpoints that drain into each region
+rgn_antimicrobials <- watershed_pourpoint_join %>% 
+  group_by(rgn_id, year) %>% 
+  summarize(mg_antimicrobials = sum(mg_antimicrobials, na.rm = TRUE), .groups = "drop")
+
+summary(rgn_antimicrobials)
+
+na_years <- rgn_antimicrobials %>% 
+  filter(is.na(year))
+mapview(na_years)
+
+mapview(rgn_antimicrobials, zcol = "mg_antimicrobials")
+
+# drop the pourpoints with zero contributions
+rgn_antimicrobials_drop0 <- rgn_antimicrobials %>% 
+  filter(!mg_antimicrobials == 0)
+mapview(rgn_antimicrobials_drop0, zcol = "mg_antimicrobials")
+
+summary(rgn_antimicrobials_drop0)
 ```
 
-### Risk factor and current status
+#### 10. Risk factor and current status
 
 ```{r}
+# status = 1 - (mg_current - mg_ideal) / (mg_max - mg_ideal)
+# ideal = 0 (no antimicrobial discharge), so: status = 1 - (mg_current / mg_max), where mg_max is the global maximum across all regions and years
+
+mg_max <- max(rgn_antimicrobials$mg_antimicrobials, na.rm = TRUE)
+
+current_status_livestock <- rgn_antimicrobials %>% 
+  mutate(
+   
+     # rescaled pressure score (0 = no pressure, 1 = maximum pressure)
+    pressure_score = mg_antimicrobials / mg_max,
+    risk_factor = pressure_score * 100,
+    
+    # current status (1 = ideal, 0 = worst)
+    current_status = 100 - risk_factor
+  )
+
+# check it to make sure the range is not wild
+summary(current_status_livestock$current_status)
+ #   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+ #   0.00   54.75   89.66   75.94   95.60   99.93
+
+# --------------------- alt ------------------
+mg_max_alt <- max(rgn_antimicrobials_drop0$mg_antimicrobials, na.rm = TRUE)
+
+current_status_livestock_alt <- rgn_antimicrobials_drop0 %>% 
+  mutate(
+   
+     # rescaled pressure score (0 = no pressure, 1 = maximum pressure)
+    pressure_score = mg_antimicrobials / mg_max_alt,
+    risk_factor = pressure_score * 100,
+    
+    # current status (1 = ideal, 0 = worst)
+    current_status = 100 - risk_factor
+  )
+
+# check it to make sure the range is not wild
+summary(current_status_livestock_alt$current_status)
+   # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+   # 0.00   52.47   86.81   73.80   95.71   99.93 
+```
+
+##### ~ plotlys
+
+```{r}
+library(plotly)
+
+rgn_colors <- c(
+  Region_1 = "#C03729",
+  Region_2 = "#E68C7C",
+  Region_3 = "#FC8F24",
+  Region_4 = "#dcaa38",
+  Region_5 = "#cbd2a0",
+  Region_6 = "#98a25a",
+  Region_7 = "#747428",
+  Region_8 = "#627391",
+  Region_9 = "#8d61a9"
+)
+
+## plot the livestock pharma cs over time
+current_status_livestock_plotly <- plotly::plot_ly(
+  current_status_livestock_alt, 
+  x = ~year, 
+  y = ~current_status, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Clean Waters: Current status (1 - risk_factor) of pharmaceutical chemicals from livestock, based on tonnes/year of production",
+    xaxis = list(title = "ano // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines( 
+    x = range(current_status_livestock_alt$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+current_status_livestock_plotly
+
+## plot the livestock pharma rf over time
+rf_livestock_plotly <- plotly::plot_ly(
+  current_status_livestock_alt, 
+  x = ~year, 
+  y = ~risk_factor, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Clean Waters: Relative risk of pharmaceutical chemicals from livestock, based on tonnes/year of production",
+    xaxis = list(title = "ano // Year"),
+    yaxis = list(title = "Risk factor (mg_antimicrobials - ideal)/(maximum - ideal) * 100")
+  ) %>%
+  add_lines( 
+    x = range(current_status_livestock_alt$year), 
+    y = c(0, 0),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (0)",
+    inherit = FALSE
+  )
+rf_livestock_plotly
 
 ```
 
@@ -482,7 +890,13 @@ watersheds_lcc$total_cattle_tons <- watershed_cattle_totals[, 2]
 ### Save to Mazu
 
 ```{r}
+final_out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/livestock_output"
 
+# save full intermediate table (watershed level)
+write_csv(rgn_antimicrobials_drop0, here::here(final_out_dir, "watershed_antimicrobials_livestock.csv"))
+
+# save region-level pressure and status scores
+write_csv(current_status_livestock_alt, here::here(final_out_dir, "rgn_cw_pharmaceuticals_livestock_status.csv"))
 ```
 
 
