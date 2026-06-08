@@ -65,8 +65,16 @@ lowercase_function<- function(x){
 }
 ```
 
+# STEP 0: Set Global Parameters
+
+# **DECISION POINT: Carta Scoring Years, 2018-2024 **
+```{r Carta Scoring Years}
+SCORING_YEARS <- 2018:2024
+```
+
 
 # PICK 2: Catch vs CNP Baseline - species level ------------------------------
+
 
 # STEP 1: Load in raw data, original recommendations for the Carta Nacional Pesquera
 ```{r Load in Carta data}
@@ -562,7 +570,7 @@ Carta_SpeciesRec_for_Genus <- Carta_SpeciesRec_Lookup %>%
 table(Carta_SpeciesRec_for_Genus$estimated_genus_name)
 ```
 
-```{r Create Carta_GenusRec_Lookup - Part 1 genus x region modes}
+```{r Create Carta_GenusRec_Lookup - Part 1 regional modes and genus-wide fallback}
 colnames(Carta_SpeciesRec_for_Genus)
 table(Carta_SpeciesRec_for_Genus$status_adjusted)
            # decreasing development potential   maximally harvested 
@@ -580,15 +588,11 @@ carta_provenance_ORIGINAL <-
 carta_provenance_GAPFILLED <-
   "gapfilled estimate; no Carta recommendation for this species in this specific region"
 
+# Region-specific mode (genus × region) — retained where available:
 Carta_GenusRec_Lookup0 <- Carta_SpeciesRec_for_Genus %>%
   group_by(estimated_genus_name, OHI_region) %>%
   summarise(
-    Year_of_Recommendation = Year_of_Recommendation[
-      !is.na(Year_of_Recommendation)
-    ][1],
-
     n_species = n(),
-
     n_species_original = sum(carta_provenance == carta_provenance_ORIGINAL),
     n_species_gapfilled = sum(carta_provenance == carta_provenance_GAPFILLED),
 
@@ -621,33 +625,19 @@ Carta_GenusRec_Lookup0 <- Carta_SpeciesRec_for_Genus %>%
 
     .groups = "drop"
   )
-# 612 obs., 8 vars.
 
-# One row per genus × region with at least one original species estimate.
-```
-
-```{r Create Carta_GenusRec_Lookup - Part 2 gapfill full genus x region grid}
-colnames(Carta_GenusRec_Lookup0)
-
-OHI_regions_all <- paste0("region_", 1:9)
-
-Carta_GenusRec_Lookup_grid <- expand.grid(
-  estimated_genus_name = unique(
-    Carta_SpeciesRec_for_Genus$estimated_genus_name
-  ),
-  OHI_region = OHI_regions_all,
-  stringsAsFactors = FALSE
-)
-# 612 obs., 2 vars.
-
-genus_modes <- Carta_GenusRec_Lookup0 %>%
+# Genus-wide mode — pooled only from regions with >=1 original species-level Carta rec.
+# (Species-level gapfill fills every species x region, so pooling all regions would
+# incorrectly treat gapfilled-only regions as "present".)
+Carta_Genus_Global <- Carta_GenusRec_Lookup0 %>%
+  filter(n_species_original > 0) %>%
   group_by(estimated_genus_name) %>%
   summarise(
-    Year_of_Recommendation = Year_of_Recommendation[
-      !is.na(Year_of_Recommendation)
-    ][1],
+    n_regions_represented = n_distinct(OHI_region),
+    n_species_original_global = sum(n_species_original, na.rm = TRUE),
+    n_species_gapfilled_global = sum(n_species_gapfilled, na.rm = TRUE),
 
-    status_mode = {
+    status_adjusted_global = {
       valid_status <- status_adjusted[!is.na(status_adjusted) & status_adjusted != ""]
       if (length(valid_status) == 0) {
         NA_character_
@@ -663,7 +653,7 @@ genus_modes <- Carta_GenusRec_Lookup0 %>%
       }
     },
 
-    control_mode = {
+    control_adjusted_global = {
       valid_control <- control_adjusted[!is.na(control_adjusted) & control_adjusted != ""]
       if (length(valid_control) == 0) {
         NA_character_
@@ -676,6 +666,20 @@ genus_modes <- Carta_GenusRec_Lookup0 %>%
 
     .groups = "drop"
   )
+# 68 obs., 7 vars.
+```
+
+```{r Create Carta_GenusRec_Lookup - Part 2 join grid; gapfill missing regions only}
+OHI_regions_all <- paste0("region_", 1:9)
+
+Carta_GenusRec_Lookup_grid <- expand.grid(
+  estimated_genus_name = unique(
+    Carta_SpeciesRec_for_Genus$estimated_genus_name
+  ),
+  OHI_region = OHI_regions_all,
+  year = SCORING_YEARS,
+  stringsAsFactors = FALSE
+)
 
 Carta_GenusRec_Lookup <- Carta_GenusRec_Lookup_grid %>%
   left_join(
@@ -683,21 +687,49 @@ Carta_GenusRec_Lookup <- Carta_GenusRec_Lookup_grid %>%
     by = c("estimated_genus_name", "OHI_region")
   ) %>%
   left_join(
-    genus_modes %>%
-      select(
-        estimated_genus_name,
-        Year_genus = Year_of_Recommendation,
-        status_mode,
-        control_mode
-      ),
+    Carta_Genus_Global,
     by = "estimated_genus_name"
   ) %>%
   mutate(
-    genus_region_present = !is.na(Year_of_Recommendation),
+    # TRUE only when this genus x region has >=1 original (non-gapfilled) species rec.
+    genus_region_present = coalesce(n_species_original, 0L) > 0,
 
-    n_species = if_else(is.na(n_species), 0L, n_species),
-    n_species_original = if_else(is.na(n_species_original), 0L, n_species_original),
-    n_species_gapfilled = if_else(is.na(n_species_gapfilled), 0L, n_species_gapfilled),
+    # Regional values take precedence; genus-wide fills missing regions only (per year):
+    status_adjusted = if_else(
+      genus_region_present,
+      status_adjusted,
+      status_adjusted_global
+    ),
+
+    control_adjusted = if_else(
+      genus_region_present,
+      control_adjusted,
+      control_adjusted_global
+    ),
+
+    n_species = if_else(
+      genus_region_present,
+      n_species,
+      0L
+    ),
+
+    n_species_original = if_else(
+      genus_region_present,
+      n_species_original,
+      0L
+    ),
+
+    n_species_gapfilled = if_else(
+      genus_region_present,
+      n_species_gapfilled,
+      0L
+    ),
+
+    n_regions_represented = if_else(
+      genus_region_present,
+      NA_integer_,
+      n_regions_represented
+    ),
 
     carta_provenance = case_when(
       genus_region_present ~
@@ -706,53 +738,53 @@ Carta_GenusRec_Lookup <- Carta_GenusRec_Lookup_grid %>%
           n_species_original,
           " original and ",
           n_species_gapfilled,
-          " gapfilled species-level recommendations in this region ",
-          "(ties: most conservative status_adjusted and control_adjusted)"
+          " gapfilled species-level recommendations in this region for year ",
+          year,
+          " (ties: most conservative status_adjusted and control_adjusted)"
         ),
-      TRUE ~
-        "genus gapfill; no species-level recommendations for this genus in this region; applied genus-wide mode from other regions"
-    ),
-
-    Year_of_Recommendation = coalesce(
-      Year_of_Recommendation,
-      Year_genus
-    ),
-
-    status_adjusted = if_else(
-      is.na(status_adjusted) | status_adjusted == "",
-      status_mode,
-      status_adjusted
-    ),
-
-    control_adjusted = if_else(
-      is.na(control_adjusted) | control_adjusted == "",
-      control_mode,
-      control_adjusted
+      !is.na(status_adjusted_global) & !is.na(control_adjusted_global) ~
+        paste0(
+          "genus-wide gapfill; carta_status and carta_control for year ",
+          year,
+          " assigned from mode across ",
+          n_species_original_global,
+          " original and ",
+          n_species_gapfilled_global,
+          " gapfilled species-level recommendations pooled across ",
+          n_regions_represented,
+          " OHI regions with original Carta data; same values applied to every missing region"
+        ),
+      TRUE ~ NA_character_
     )
   ) %>%
   select(
     estimated_genus_name,
-    Year_of_Recommendation,
+    year,
     OHI_region,
     status_adjusted,
     control_adjusted,
     n_species,
     n_species_original,
     n_species_gapfilled,
+    n_regions_represented,
+    genus_region_present,
     carta_provenance
   )
-# Now 612 obs., 9 vars.
+# genus × region × scoring year (2018–2024).
+
+# Now 4284 obs., 11 vars.
 ```
 
 ```{r Sanity checks on Carta_GenusRec_Lookup}
 colnames(Carta_GenusRec_Lookup)
 
 table(Carta_GenusRec_Lookup$status_adjusted)
-  # decreasing development potential   maximally harvested 
-  #         64                    45                   503 
+# decreasing development potential   maximally harvested 
+           #        448                   315                  3521 
+
 table(Carta_GenusRec_Lookup$control_adjusted)
    # decrease    increase no increase 
-   #       64          43         505 
+   #      448         301        3535  
 
 # SANITY CHECK:
 Carta_GenusRec_Lookup %>%
@@ -768,12 +800,13 @@ summary(Carta_GenusRec_Lookup$n_species_gapfilled)
 Carta_GenusRec_Lookup %>%
   filter(n_species_original > 0) %>%
   nrow()
+# 3339
 
-# Genus-region rows gapfilled at genus level only (no species in this region):
+# Genus-region rows entirely gapfilled:
 Carta_GenusRec_Lookup %>%
   filter(n_species_original == 0, n_species_gapfilled == 0) %>%
   nrow()
-# Good!
+# 945 estimates are gapfilled at the genus-region.
 
 summary(Carta_GenusRec_Lookup$n_species)
 # Most genus-level estimates were made using 1 species.
@@ -782,13 +815,6 @@ dim(Carta_GenusRec_Lookup)
 ```
 
 ```{r Clean up rows with status_adjusted and control_adjusted that are in conflict}
-table(Carta_GenusRec_Lookup$status_adjusted)
-  # decreasing development potential   maximally harvested 
-  #         64                    45                   503  
-table(Carta_GenusRec_Lookup$control_adjusted)
-  # decrease    increase no increase 
-  #       64          43         505 
-
 Carta_GenusRec_Lookup %>%
   filter(!is.na(status_adjusted)) %>%
   count(status_adjusted, control_adjusted, name = "n")
@@ -803,10 +829,22 @@ Carta_GenusRec_Lookup <- Carta_GenusRec_Lookup %>%
     )
   )
 
-Carta_Recommendations_clean0 %>%
+Carta_GenusRec_Lookup %>%
   filter(!is.na(status_adjusted)) %>%
   count(status_adjusted, control_adjusted, name = "n")
 # Looks good now!
+
+# SANITY CHECK: Let's take a closer look at genera where there is development potential but carta advises no increase...
+TEST<- Carta_GenusRec_Lookup %>%
+  filter(status_adjusted== "development potential" & control_adjusted == "no increase")
+# 63 obs.
+
+# SANITY CHECK: Does the length of this table seem right? Yup!
+length(Carta_GenusRec_Lookup$estimated_genus_name) # 4284 rows.
+unique(Carta_GenusRec_Lookup$estimated_genus_name) # 68 unique genera / stocks.
+unique(Carta_GenusRec_Lookup$OHI_region) # 9 unique genera / stocks.
+unique(Carta_GenusRec_Lookup$year) # 7 unique genera / stocks.
+# 4284 rows = 68 unique stocks * 9 regions * 7 years worth of data (2018-2024)
 ```
 
 
@@ -818,30 +856,15 @@ write.csv(Carta_SpeciesRec_Lookup,
 # 1359 obs., 9 vars.
 
 write.csv(Carta_GenusRec_Lookup,
-          file="/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_GenusRec_Lookup_Jun032026.csv",
+          file="/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_GenusRec_Lookup_Jun052026.csv",
           row.names = FALSE)
-# 612 obs., 8 vars.
+# Now 4284 obs., 11 vars.
 ```
 
 
 # > SKIP TO HERE:
 
-# STEP 7: Score annual catch (2018–2024) vs 2018–2022 reference using Carta genus recommendations
-
-Stock = genus (estimated_genus_name) × OHI region.
-All landings for a genus in a region are summed, regardless of species resolution.
-
-Scoring uses cleaned status_adjusted × control_adjusted pairs (see STEP 4), with control_adjusted-only fallback.
-Catch below the reference mean is never penalized (no underfishing penalty).
-Status / control_adjusted values used here: decreasing, development potential, maximally harvested;
-decrease, increase (development potential only), no increase.
-
-```{r STEP 7a - Load Carta_GenusRec_Lookup as needed}
-Carta_GenusRec_Lookup <- read.csv(
-  "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_GenusRec_Lookup_Jun032026.csv"
-)
-# 612 obs., 8 vars.
-```
+# STEP 6: Prepare to score annual catch by aggregating catch data
 
 ```{r Load in GOC_MarineLandings0 as needed}
 GOC_MarineLandings0 <- readRDS(here(
@@ -849,16 +872,35 @@ GOC_MarineLandings0 <- readRDS(here(
 # 3246583 obs., 58 vars.
 ```
 
-# ── EDIT THESE SCORING PARAMETERS AS NEEDED ───────────────────────────────────────────
-```{r EDIT THESE SCORING PARAMETERS AS NEEDED}
-MIN_ReferenceCatch_kg <- 100   # stocks below this mean 2018-2022 catch are not scored
-ReferencePoint_Buffer <- 0.05   # 5%: catch within this band of C_ref is "functionally equal"
+# **DECISION POINT: Selecting which sectors to include**
+```{r Select Sectors_of_Interest}
+table(GOC_MarineLandings0$sector_estimate_draft)
+
+# SANITY CHECK: Which species are included in the freshwater or marine sector?
+TEST<- GOC_MarineLandings0 %>%
+  filter(sector_estimate_draft== "freshwater or marine: fishery sector yet to be classified")
+
+table(TEST$recorded_taxa_group)
+# Species like Mojarra (the overwhelming majority of catch), trout, and catfish, which can move from freshwater to marine systems and are a bit ambiguous in terms of where they can be caught.
+
+
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
+                          "marine: small-scale capture",
+                          "marine: large-scale capture")
+  
+PossibleMarineFishery_Sectors<- c("freshwater or marine: large-scale capture",
+                          "freshwater or marine: small-scale capture",
+                          "freshwater or marine: fishery sector yet to be classified")
+
+GOC_MarineFisheryLandings0<- GOC_MarineLandings0 %>%
+  filter(sector_estimate_draft %in% c(MarineFishery_Sectors, PossibleMarineFishery_Sectors))
+
+# 3137044 obs., 58 var.
 ```
 
-
-```{r STEP 7b - Summarize landings by stock (genus), year, and region}
+```{r Summarize landings by stock (genus), year, and region}
 # Sum all catch assigned to each genus in each region and year.
-GOC_MarineLandings_stock <- GOC_MarineLandings0 %>%
+GOC_MarineLandings_stock <- GOC_MarineFisheryLandings0 %>%
   mutate(
     OHI_region_est = clean_names_lowercase(OHI_region_est),
     estimated_genus_name = clean_names_lowercase(estimated_genus_name)
@@ -867,7 +909,7 @@ GOC_MarineLandings_stock <- GOC_MarineLandings0 %>%
     !is.na(estimated_genus_name),
     estimated_genus_name != ""
   )
-# 3085101 obs. (-161482 observations down from 3246583)
+# 2976491 obs.
 
 GOC_MarineStocks_summary <- GOC_MarineLandings_stock %>%
   group_by(
@@ -886,15 +928,34 @@ GOC_MarineStocks_summary <- GOC_MarineLandings_stock %>%
       annual_Catch_kg[year %in% 2018:2022],
       na.rm = TRUE
     ),
-    n.years_Catch_2018.22 = sum(year %in% 2018:2022)
+    n_years_Catch_2018.22 = sum(
+      year %in% 2018:2022 & !is.na(annual_Catch_kg)
+    )
   ) %>%
   ungroup() %>%
   arrange(OHI_region_est, estimated_genus_name, year)
-# 12517 obs.
+# 12477 obs.
 # One row per stock (genus) × region × year.
 ```
 
-```{r STEP 7c - Merge genus-level Carta recommendations}
+# STEP 7: Score annual catch (2018–2024) vs 2018–2022 reference using Carta genus recommendations
+
+Stock = genus (estimated_genus_name) × OHI region.
+All landings for a genus in a region are summed, regardless of species resolution.
+
+Scoring uses cleaned status_adjusted × control_adjusted pairs (see STEP 4), with control_adjusted-only fallback.
+Catch below the reference mean is never penalized (no underfishing penalty).
+Status / control_adjusted values used here: decreasing, development potential, maximally harvested;
+decrease, increase (development potential only), no increase.
+
+```{r Load Carta_GenusRec_Lookup as needed}
+Carta_GenusRec_Lookup <- read.csv(
+  "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/Carta_GenusRec_Lookup_Jun052026.csv"
+)
+# Now 4284 obs., 11 vars.
+```
+
+```{r Merge genus-level Carta recommendations}
 Carta_GenusRec_Lookup <- Carta_GenusRec_Lookup %>%
   mutate(
     OHI_region_est = clean_names_lowercase(OHI_region),
@@ -907,16 +968,16 @@ Carta_Stock_Scores0 <- GOC_MarineStocks_summary %>%
   left_join(
     Carta_GenusRec_Lookup %>%
       select(
+        year,
         estimated_genus_name,
         OHI_region_est,
         status_adjusted,
         control_adjusted,
         carta_provenance,
-        Year_of_Recommendation,
         n_species,
         n_species_original
       ),
-    by = c("estimated_genus_name", "OHI_region_est")
+    by = c("year", "estimated_genus_name", "OHI_region_est")
   ) %>%
   mutate(
     carta_recommendation_source = carta_provenance,
@@ -935,6 +996,7 @@ Carta_Stock_Scores0 <- GOC_MarineStocks_summary %>%
       TRUE ~ NA_character_
     )
   )
+# 12477 obs.
 ```
 
 ```{r How common is it that a stock is landed only once in a given year?}
@@ -952,13 +1014,19 @@ Carta_Stock_Scores0 %>%
 # Fairly common.
 ```
 
-```{r STEP 7d - Check status_adjusted and control_adjusted combinations before scoring}
+```{r Check status_adjusted and control_adjusted combinations before scoring}
 Carta_Stock_Scores0 %>%
   filter(!is.na(status_adjusted)) %>%
   count(status_adjusted, control_adjusted, name = "n")
 ```
 
-```{r STEP 7e - Calculate Stock_Status from C_current vs C_ref}
+# **DECISION POINT: EDIT THESE SCORING PARAMETERS AS NEEDED ───────────────────────────────────────────
+```{r EDIT THESE SCORING PARAMETERS AS NEEDED}
+MIN_ReferenceCatch_kg <- 100   # stocks below this mean 2018-2022 catch are not scored
+ReferencePoint_Buffer <- 1.05   # 5%: catch within this band of C_ref is "functionally equal"
+```
+
+```{r Calculate Stock_Status from C_current vs C_ref}
 # C_ref = mean_Catch_2018.22_kg; C_current = annual_Catch_kg for each year.
 # Uses MIN_ReferenceCatch_kg and ReferencePoint_Buffer from STEP 7a.
 #
@@ -967,129 +1035,186 @@ Carta_Stock_Scores0 %>%
 
 Carta_Stock_Scores <- Carta_Stock_Scores0 %>%
   mutate(
-    approx_equal = abs(annual_Catch_kg - mean_Catch_2018.22_kg) <=
-      ReferencePoint_Buffer * mean_Catch_2018.22_kg,
+    # approx_equal = abs(annual_Catch_kg - mean_Catch_2018.22_kg) <=
+    #   ReferencePoint_Buffer * mean_Catch_2018.22_kg,
+    
+    C_ref = mean_Catch_2018.22_kg,
 
     Stock_Status = case_when(
 
-      is.na(status_adjusted) | is.na(control_adjusted) | is.na(mean_Catch_2018.22_kg) ~
+      is.na(status_adjusted) | is.na(control_adjusted) | is.na(C_ref) ~
         NA_real_,
 
       mean_Catch_2018.22_kg < MIN_ReferenceCatch_kg ~
         NA_real_,
 
-      # Scenario 3: development potential (increase control_adjusted only applies here)
-      status_adjusted == "development potential" ~
-        1,
+      # # Scenario 1: development potential (increase control_adjusted only applies here)
+      # status_adjusted == "development potential" ~
+      #   1,
+      # 
+      # # Scenario 2: maximally harvested + no increase
+      # status_adjusted == "maximally harvested" &
+      #   control_adjusted == "no increase" &
+      #   approx_equal ~
+      #   1,
+      # 
+      # status_adjusted == "maximally harvested" &
+      #   control_adjusted == "no increase" &
+      #   annual_Catch_kg > mean_Catch_2018.22_kg ~
+      #   mean_Catch_2018.22_kg / annual_Catch_kg,
+      # 
+      # status_adjusted == "maximally harvested" &
+      #   control_adjusted == "no increase" &
+      #   annual_Catch_kg < mean_Catch_2018.22_kg ~
+      #   1,
+      # 
+      # # Scenario 3: decreasing stock (penalized at/above reference)
+      # status_adjusted == "decreasing" &
+      #   control_adjusted %in% c("decrease", "no increase") &
+      #   approx_equal ~
+      #   0.5,
+      # 
+      # status_adjusted == "decreasing" &
+      #   control_adjusted %in% c("decrease", "no increase") &
+      #   annual_Catch_kg > mean_Catch_2018.22_kg ~
+      #   (mean_Catch_2018.22_kg / annual_Catch_kg) * 0.5,
+      # 
+      # status_adjusted == "decreasing" &
+      #   control_adjusted %in% c("decrease", "no increase") &
+      #   annual_Catch_kg < mean_Catch_2018.22_kg ~
+      #   1,
 
-      # Scenario 1: maximally harvested + no increase
-      status_adjusted == "maximally harvested" &
-        control_adjusted == "no increase" &
-        approx_equal ~
-        1,
+      # Let's use status_adjusted only to dictate scores
+      
+       # Scenario 1: development potential
+      status_adjusted == "development potential" ~ 1,
 
-      status_adjusted == "maximally harvested" &
-        control_adjusted == "no increase" &
-        annual_Catch_kg > mean_Catch_2018.22_kg ~
-        mean_Catch_2018.22_kg / annual_Catch_kg,
+      # Scenario 2: maximally harvested
+      
+      status_adjusted == "maximally harvested" & annual_Catch_kg <= (C_ref * ReferencePoint_Buffer) ~ 1,
+    
+      status_adjusted == "maximally harvested" & annual_Catch_kg > (C_ref * ReferencePoint_Buffer) ~
+        1 * (C_ref / annual_Catch_kg),
+    
+      # Scenario 3: stock is decreasing
+      status_adjusted == "decreasing" & annual_Catch_kg <= (C_ref * ReferencePoint_Buffer) ~ 0.5,
+      
+      status_adjusted == "decreasing" & annual_Catch_kg > (C_ref * ReferencePoint_Buffer) ~ 0.5 * (C_ref / annual_Catch_kg),
 
-      status_adjusted == "maximally harvested" &
-        control_adjusted == "no increase" &
-        annual_Catch_kg < mean_Catch_2018.22_kg ~
-        1,
-
-      # Scenario 2: decreasing stock (penalized at/above reference)
-      status_adjusted == "decreasing" &
-        control_adjusted %in% c("decrease", "no increase") &
-        approx_equal ~
-        0.5,
-
-      status_adjusted == "decreasing" &
-        control_adjusted %in% c("decrease", "no increase") &
-        annual_Catch_kg > mean_Catch_2018.22_kg ~
-        (mean_Catch_2018.22_kg / annual_Catch_kg) * 0.5,
-
-      status_adjusted == "decreasing" &
-        control_adjusted %in% c("decrease", "no increase") &
-        annual_Catch_kg < mean_Catch_2018.22_kg ~
-        1,
-
-      # Option C fallback: control_adjusted-only when status_adjusted x control_adjusted pair is not covered above
-      control_adjusted == "no increase" &
-        approx_equal ~
-        1,
-
-      control_adjusted == "no increase" &
-        annual_Catch_kg > mean_Catch_2018.22_kg ~
-        mean_Catch_2018.22_kg / annual_Catch_kg,
-
-      control_adjusted == "no increase" &
-        annual_Catch_kg < mean_Catch_2018.22_kg ~
-        1,
-
-      control_adjusted == "decrease" &
-        approx_equal ~
-        0.5,
-
-      control_adjusted == "decrease" &
-        annual_Catch_kg > mean_Catch_2018.22_kg ~
-        (mean_Catch_2018.22_kg / annual_Catch_kg) * 0.5,
-
-      control_adjusted == "decrease" &
-        annual_Catch_kg < mean_Catch_2018.22_kg ~
-        1,
-
-      # control_adjusted == "increase" without development potential, and unpaired combos
+      # unpaired combos
       TRUE ~ NA_real_
     )
-  ) %>%
-  select(-approx_equal)
+  )
+# 12477 obs.
 
 # kind of looks like this is working!
 ```
 
-```{r STEP 7f - Filter scored years and reliable reference periods}
-Carta_FIS_StockStatus_scores0 <- Carta_Stock_Scores %>%
-  filter(year >= 2018 & year <= 2024) %>%
-  filter(n.years_Catch_2018.22 >= 4)
-# Stocks without a Carta match retain Stock_Status = NA.
+```{r NA out stock status scores in regions with very few reference years}
+colnames(Carta_Stock_Scores)
 
-dim(Carta_FIS_StockStatus_scores0)
-# 3193   16, genus (stock) × region × year, 2018–2024.
+Carta_Stock_Scores <- Carta_Stock_Scores %>%
+  mutate(
+    Stock_Status = case_when(
+      n_years_Catch_2018.22 < 4 ~ NA,
+      TRUE ~ Stock_Status
+    )
+  )
+# 12477 obs.
+
+# SANITY CHECK Did this work as expected?
+TEST<- Carta_Stock_Scores %>%
+  filter(n_years_Catch_2018.22 >= 4,
+         is.na(Stock_Status))
+# Yes. All of these rows are missing carta recommendations, which is why Stock_Status is NA.
 ```
 
-```{r STEP 7g - Sanity checks on Carta_FIS_StockStatus_scores0}
+```{r Clean Carta_FIS_StockStatus_scores0}
 colnames(Carta_FIS_StockStatus_scores0)
 
+Carta_FIS_StockStatus_scores<- Carta_Stock_Scores %>%
+  filter(!is.na(carta_provenance),
+         year >= 2018 & year <= 2024,
+         mean_Catch_2018.22_kg > MIN_ReferenceCatch_kg)
+# 1480 obs., 16 vars.
+
+table(Carta_FIS_StockStatus_scores0$carta_provenance)
+table(Carta_FIS_StockStatus_scores$carta_provenance)
+# Makes sense.
+
+unique(Carta_FIS_StockStatus_scores$estimated_genus_name)
+# 48 unique genera / stocks for which we have reliable Carta data.
+
+dim(Carta_FIS_StockStatus_scores)
+# 1480   16, genus (stock) × region × year, 2018–2024.
+```
+
+```{r Gapfill scores we don't have enough reference data for}
+# Step 1: find the mean Stock_Status for that genus x year & then coalesce
+Carta_FIS_StockStatus_scores <- Carta_FIS_StockStatus_scores %>%
+  group_by(year, estimated_genus_name) %>%
+  mutate(
+    Stock_Status_year.genus_mean = mean(Stock_Status, na.rm = TRUE)
+  ) %>%
+  rename(
+    Stock_Status_year.genus.region = Stock_Status
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Gapfill missing values
+    Stock_Status_final = coalesce(
+      Stock_Status_year.genus.region,
+      Stock_Status_year.genus_mean
+    )
+  )
+
+dim(Carta_FIS_StockStatus_scores)
+colnames(Carta_FIS_StockStatus_scores)
+
+# Reassign carta provenance in those specific cases:
+Carta_FIS_StockStatus_scores <- Carta_FIS_StockStatus_scores %>%
+  mutate(
+    carta_provenance = case_when(
+      is.na(Stock_Status_year.genus.region) & !is.na(Stock_Status_year.genus_mean) ~
+        "genus-wide gapfill; carta Stock_Status score derived from year x genus mean",
+      TRUE ~ carta_provenance
+    )
+  )
+```
+
+
+```{r SANITY CHECKS on Carta_FIS_StockStatus_scores0}
+colnames(Carta_FIS_StockStatus_scores)
+
 # Rows with catch but no Carta recommendation (Stock_Status should be NA):
-Carta_FIS_StockStatus_scores0 %>%
-  filter(is.na(Stock_Status)) %>%
+Carta_FIS_StockStatus_scores %>%
+  filter(is.na(Stock_Status_final)) %>%
   count(estimated_genus_name, OHI_region_est, name = "n_years") %>%
   arrange(desc(n_years)) %>%
   head(10)
 
 # Rows excluded by minimum reference catch threshold:
-Carta_FIS_StockStatus_scores0 %>%
+Carta_FIS_StockStatus_scores %>%
   filter(
     year >= 2018 & year <= 2024,
-    n.years_Catch_2018.22 >= 4,
     !is.na(status_adjusted),
     mean_Catch_2018.22_kg < MIN_ReferenceCatch_kg
   ) %>%
   nrow()
 
-table(Carta_FIS_StockStatus_scores0$catch_vs_reference_expectation, useNA = "ifany")
-
-Carta_FIS_StockStatus_scores0 %>%
-  count(carta_recommendation_source, name = "n")
-
-summary(Carta_FIS_StockStatus_scores0$Stock_Status)
- #   Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
- # 0.0117  0.7461  1.0000  0.8532  1.0000  1.0000    1894 
+summary(Carta_FIS_StockStatus_scores$Stock_Status_final)
 # Most stocks doing pretty well according to the Carta...
 
+# Before genus gapfill:
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# 0.01168 0.69029 1.00000 0.83034 1.00000 1.00000      44 
+
+# After genus gapfill:
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# 0.01168 0.69029 1.00000 0.83034 1.00000 1.00000      44 
+
 # Example: maximally harvested, no increase — catch above reference should score < 1:
-Carta_FIS_StockStatus_scores0 %>%
+Carta_FIS_StockStatus_scores %>%
   filter(
     control_adjusted == "no increase",
     annual_Catch_kg > mean_Catch_2018.22_kg * 1.05
@@ -1101,44 +1226,29 @@ Carta_FIS_StockStatus_scores0 %>%
     annual_Catch_kg,
     mean_Catch_2018.22_kg,
     control_adjusted,
-    Stock_Status
+    Stock_Status_final
   ) %>%
   head(10)
 # Seems to have worked!
 
 # Confirm one row per stock × region × year in the scored window:
-Carta_FIS_StockStatus_scores0 %>%
+Carta_FIS_StockStatus_scores %>%
   count(estimated_genus_name, OHI_region_est, year, name = "n") %>%
   filter(n > 1)
+# Yup! Zero rows that don't fit this criteria.
 ```
-
-```{r Clean Carta_FIS_StockStatus_scores0}
-colnames(Carta_FIS_StockStatus_scores0)
-
-Carta_FIS_StockStatus_scores<- Carta_FIS_StockStatus_scores0 %>%
-  filter(!is.na(Stock_Status),
-         n.years_Catch_2018.22 >= 4,
-         year >= 2018 & year <= 2024,
-         mean_Catch_2018.22_kg > MIN_ReferenceCatch_kg)
-# 1299 obs., 16 vars.
-
-table(Carta_FIS_StockStatus_scores0$carta_provenance)
-table(Carta_FIS_StockStatus_scores$carta_provenance)
-# Makes sense. The only reason carta_provenance would be different is if you were looking at the species level. There is at least one region-specific species estimate per genus.
-```
-
 
 ## >> FINAL STEP: SAVE the Carta_FIS_StockStatus_scores0 dataframe (uncomment when ready):
 ```{r Write this as a CSV, eval=FALSE}
 write.csv(
   Carta_FIS_StockStatus_scores,
-  file = "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/FIS_CartaScores_Jun032026.csv",
+  file = "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/FIS_CartaScores_Jun052026.csv",
   row.names = FALSE
 )
 ```
 
 
-```{r UNDER CONSTRUCTION - Make key wide so we can plot these data}
+```{r UNDER CONSTRUCTION - Make key wide so we can plot data availability over time}
 # I want to take this dataframe and make a new one where the recommendation per taxa is spread out by years so that I can easily how recommendations change over time per taxa...
 
 Carta_ControlKey_wide <- Carta_Recommendations0 %>%

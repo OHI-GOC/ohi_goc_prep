@@ -37,37 +37,30 @@ setwd("/home/ferrer/ohi_goc_prep/FP/")
 ```
 
 
-# STEP 1: Load input data ------------------------------
-
-```{r Load in FIS_StockStatus scores as necessary}
-StockStatus_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_StockStatusScores_GeoMean_Jun012026.csv")
-
-# Species x year x region; Stock_Status is used as-is.
-```
-
-```{r Load sector-sorted landings}
-GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
-
-dim(GOC_MarineLandings0)
-# 3246583 obs., 57 vars.
-
-# NOTE TO SELF: This file path will change when I create the "fisheries only" dataframe. - June 1 2026
-```
-
-
-# STEP 2: Determine which fisheries are primarily small scale ------------------------------
-
-```{r Identify stocks with >= 15% small-scale capture}
-SSF_CATCH_MIN_SHARE = 0.15
-```
-
+# STEP 1: Load in and summarize GOC_MarineLandings0
 ```{r Let's look into Mar's key}
-Mars_key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/CONAPESCA_Keys/Taxonomic_Keys/Mar_CONAPESCA_SpKey.csv")
+# DONT NEED THIS RIGHT NOW
+# Mars_key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/CONAPESCA_Keys/Taxonomic_Keys/Mar_CONAPESCA_SpKey.csv")
+```
+
+```{r Load in GOC_MarineLandings0 as necessary}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+# NOTE TO SELF: This source file may change in later Summer / Fall run. - EMF, June 4 2026
 ```
 
 # **DECISION POINT: Selecting which sectors to include**
 ```{r Select Sectors_of_Interest}
 table(GOC_MarineLandings0$sector_estimate_draft)
+
+# SANITY CHECK: Which species are included in the freshwater or marine sector?
+TEST<- GOC_MarineLandings0 %>%
+  filter(sector_estimate_draft== "freshwater or marine: fishery sector yet to be classified")
+
+table(TEST$recorded_taxa_group)
+# Species like Mojarra (the overwhelming majority of catch), trout, and catfish, which can move from freshwater to marine systems and are a bit ambiguous in terms of where they can be caught.
+
 
 MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
                           "marine: small-scale capture",
@@ -82,6 +75,9 @@ GOC_MarineFisheryLandings0<- GOC_MarineLandings0 %>%
 
 # 3137044 obs., 58 var.
 ```
+
+
+# STEP 2: Determine which fisheries are primarily small scale ------------------------------
 
 ```{r Generate GOC_MarineSector_summary}
 colnames(GOC_MarineFisheryLandings0)
@@ -105,6 +101,7 @@ GOC_MarineSector_summary<- GOC_MarineSector_summary %>%
     total_value_peso= sum(value, na.rm = TRUE),
     n_records= n()
   )
+# 82. obs.
 ```
 
 
@@ -197,16 +194,15 @@ ggsave(
 )
 ```
 
+# Pull out SSF Stocks
 
 ```{r Lets only look at landings post-2018}
 Landings_Post.2018<- GOC_MarineFisheryLandings0 %>%
   filter(year>= 2018)
 
-table(Landings_Post.2018$sector_reported)
-# sector details were not reported                      aquaculture            small-scale fisheries 
-#                             4914                                0                          1010533 
-#            large-scale fisheries 
-#                           142210 
+table(Landings_Post.2018$reported_fleet)
+# large_scale small_scale 
+#      142210     1010533 
 
 table(Landings_Post.2018$sector_estimate_draft)
               # marine: fishery sector yet to be classified 
@@ -224,19 +220,8 @@ table(Landings_Post.2018$sector_estimate_draft)
 ```
 
 
-
-```{r Small-scale fishery sector helper}
-# Marine and freshwater-or-marine small-scale capture only.
-
-is_small_scale_fishery_sector <- function(sector) {
-  grepl("marine | freshwater or marine", sector, ignore.case = TRUE) &
-    grepl("small-scale capture", sector, ignore.case = TRUE)
-}
-```
-
-
 ```{r Filter landings and assign stock key}
-GOC_Landings <- GOC_Landings0 %>%
+Landings_Post.2018 <- Landings_Post.2018 %>%
   filter(
     GOC_Include_Exclude == "include",
     year >= 2018,
@@ -249,7 +234,6 @@ GOC_Landings <- GOC_Landings0 %>%
     estimated_species_name = clean_names_lowercase(estimated_species_name),
     estimated_genus_name = clean_names_lowercase(estimated_genus_name),
     sector_estimate_draft = as.character(sector_estimate_draft),
-    small_scale_capture = is_small_scale_fishery_sector(sector_estimate_draft),
     
     taxon_key = if_else(
       is.na(estimated_species_name) | estimated_species_name == "",
@@ -263,194 +247,140 @@ GOC_Landings <- GOC_Landings0 %>%
     )
   ) %>%
   filter(!is.na(taxon_key), taxon_key != "")
+
+# 1092972 obs.
 ```
 
 ```{r Summarize total and small-scale catch per stock}
-stock_catch_summary <- GOC_Landings %>%
-  group_by(year, OHI_region_est, taxon_key, taxon_level, estimated_genus_name) %>%
+table(Landings_Post.2018$sector_estimate_draft)
+
+
+# Summarize landings at the genus (i.e., stock) level:
+GOC_Stocks_summary <- Landings_Post.2018 %>%
+  group_by(
+    year,
+    OHI_region_est,
+    taxon_level,
+    estimated_genus_name
+  ) %>%
   summarize(
     total_landings_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    
     small_scale_landings_kg = sum(
-      weight_kg_corrected[small_scale_capture],
+      weight_kg_corrected[sector_estimate_draft %in% SSF_sectors],
       na.rm = TRUE
     ),
-    n_small_scale_records = sum(small_scale_capture, na.rm = TRUE),
+    
+    n_small_scale_records = sum(
+      sector_estimate_draft %in% SSF_sectors,
+      na.rm = TRUE
+    ),
+    
+    industrial_landings_kg = sum(
+      weight_kg_corrected[!(sector_estimate_draft %in% SSF_sectors)],
+      na.rm = TRUE
+    ),
+    
+    n_industrial_records = sum(
+      !(sector_estimate_draft %in% SSF_sectors),
+      na.rm = TRUE
+    ),
+    
     .groups = "drop"
   ) %>%
   mutate(
     small_scale_catch_share = small_scale_landings_kg / total_landings_kg
   )
+# 4034
+```
+
+# ** DECISION POINT: Identify stocks with >= 15% small-scale capture
+
+```{r Identify stocks with >= 15% small-scale capture}
+SSF_CATCH_MIN_SHARE = 0.15
 ```
 
 ```{r Keep stocks with at least 15% small-scale catch}
-AFO_stocks <- stock_catch_summary %>%
+# Stocks meeting the small-scale catch threshold in this region x year.
+AFO_stocks0 <- GOC_Stocks_summary %>%
   filter(
     small_scale_landings_kg > 0,
     small_scale_catch_share >= SSF_CATCH_MIN_SHARE
   )
-# Stocks meeting the small-scale catch threshold in this region x year.
+# 3581 obs.
+```
+
+```{r}
+# Remove NAs and unknowns:
+AFO_stocks <- AFO_stocks0 %>%
+  filter(
+    !is.na(estimated_genus_name) &
+      estimated_genus_name != "unknown"
+  )
+# 3475 obs.
 ```
 
 ```{r Count qualifying stocks}
-n_stock_region_years <- nrow(AFO_stocks)
+nrow(AFO_stocks)
+# 3475 obs.
 
-n_unique_stocks <- AFO_stocks %>%
-  distinct(taxon_key, taxon_level) %>%
-  nrow()
-
-n_unique_species <- AFO_stocks %>%
-  filter(taxon_level == "species") %>%
-  distinct(taxon_key) %>%
-  nrow()
-
-n_unique_genus_stocks <- AFO_stocks %>%
-  filter(taxon_level == "genus") %>%
-  distinct(taxon_key) %>%
-  nrow()
-
-cat(
-  "Stocks (stock x region x year) with >= 15% small-scale catch:",
-  n_stock_region_years,
-  "\n"
-)
-cat("Unique stocks (taxon_key) meeting threshold:", n_unique_stocks, "\n")
-cat("  species-level:", n_unique_species, "\n")
-cat("  genus-level:", n_unique_genus_stocks, "\n")
+# n_unique_genus_stocks
+unique(AFO_stocks$estimated_genus_name)
+# 165 unique stocks / genera
 ```
 
 
 # STEP 3: Pull matching FIS scores (no recalculation) ------------------------------
+
+```{r Load in FIS_StockStatus scores as necessary}
+StockStatus_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/StockStatus_Estimates_Jun072026.csv")
+
+# Species x year x region; Stock_Status is used as-is.
+```
 
 ```{r Prep FIS scores}
 StockStatus_Scores <- StockStatus_Scores0 %>%
   filter(year >= 2018, year <= 2024) %>%
   mutate(
     OHI_region_est = clean_names_lowercase(OHI_region_est),
-    estimated_species_name = clean_names_lowercase(estimated_species_name),
     estimated_genus_name = clean_names_lowercase(estimated_genus_name)
   )
+# 4130 obs.
 ```
 
 ```{r Genus-level stocks: pull all FIS stocks in that genus}
-afo_genus_keys <- AFO_stocks %>%
-  filter(taxon_level == "genus") %>%
-  select(year, OHI_region_est, taxon_key, taxon_level, estimated_genus_name) %>%
-  distinct()
-
-FIS_scores_afo_genus <- StockStatus_Scores %>%
+AFO_StockStatus_Scores <- AFO_stocks %>%
   inner_join(
-    afo_genus_keys,
+    StockStatus_Scores,
     by = c(
       "year",
       "OHI_region_est",
-      "estimated_genus_name" = "taxon_key"
+      "estimated_genus_name"
     )
-  ) %>%
-  left_join(
-    AFO_stocks %>%
-      filter(taxon_level == "genus") %>%
-      select(
-        year,
-        OHI_region_est,
-        taxon_key,
-        total_landings_kg,
-        small_scale_landings_kg,
-        small_scale_catch_share,
-        n_small_scale_records
-      ),
-    by = c(
-      "year",
-      "OHI_region_est",
-      "estimated_genus_name" = "taxon_key"
-    )
-  ) %>%
-  mutate(taxon_level = "genus")
+  )
+# 3475 obs. (as expected), 25 varsity.
 ```
 
 ```{r Sanity check AFO FIS scores}
-colnames(GOC_AFO_Scores)
+colnames(AFO_StockStatus_Scores)
 
-GOC_AFO_Scores %>%
-  count(taxon_level)
+nrow(AFO_StockStatus_Scores)
 
-nrow(GOC_AFO_Scores)
-
-summary(GOC_AFO_Scores$small_scale_catch_share)
+summary(AFO_StockStatus_Scores$small_scale_catch_share)
+ #   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+ # 0.1561  1.0000  1.0000  0.9574  1.0000  1.0000 
 ```
 
 
 # STEP 4: Stock list by OHI region ------------------------------
 
 ```{r Region totals for share calculations}
-region_catch_totals <- GOC_AFO_Scores %>%
+Regional_Catch <- AFO_StockStatus_Scores %>%
   group_by(OHI_region_est) %>%
   summarize(
-    region_total_landings_kg = sum(total_landings_kg, na.rm = TRUE),
-    region_small_scale_landings_kg = sum(small_scale_landings_kg, na.rm = TRUE),
-    .groups = "drop"
-  )
-```
-
-```{r Build stock list organized by region}
-# One row per stock x region (2018-2024 summed). Sorted region_1..region_9,
-# then by small-scale catch share within region.
-
-GOC_AFO_Stock_List <- GOC_AFO_Scores %>%
-  group_by(
-    OHI_region_est,
-    afo_stock_key,
-    taxon_level,
-    estimated_species_name,
-    estimated_genus_name
-  ) %>%
-  summarize(
-    years_present = paste(sort(unique(year)), collapse = ", "),
-    n_years = n_distinct(year),
-    mean_Stock_Status = mean(Stock_Status, na.rm = TRUE),
     total_landings_kg = sum(total_landings_kg, na.rm = TRUE),
     small_scale_landings_kg = sum(small_scale_landings_kg, na.rm = TRUE),
     small_scale_catch_share = small_scale_landings_kg / total_landings_kg,
-    .groups = "drop"
-  ) %>%
-  left_join(region_catch_totals, by = "OHI_region_est") %>%
-  mutate(
-    pct_of_region_total_catch = 100 * total_landings_kg / region_total_landings_kg,
-    pct_of_region_small_scale_catch = 100 * small_scale_landings_kg /
-      region_small_scale_landings_kg,
-    region_num = as.integer(sub("region_", "", OHI_region_est))
-  ) %>%
-  arrange(region_num, desc(small_scale_landings_kg), estimated_species_name) %>%
-  select(
-    OHI_region_est,
-    region_num,
-    afo_stock_key,
-    taxon_level,
-    estimated_species_name,
-    estimated_genus_name,
-    years_present,
-    n_years,
-    mean_Stock_Status,
-    total_landings_kg,
-    small_scale_landings_kg,
-    small_scale_catch_share,
-    pct_of_region_total_catch,
-    pct_of_region_small_scale_catch,
-    region_total_landings_kg,
-    region_small_scale_landings_kg
-  )
-```
-
-```{r Sanity check AFO stock list}
-nrow(GOC_AFO_Stock_List)
-
-GOC_AFO_Stock_List %>%
-  count(OHI_region_est)
-
-GOC_AFO_Stock_List %>%
-  group_by(OHI_region_est) %>%
-  summarize(
-    check_total_pct = sum(pct_of_region_total_catch),
-    check_ssf_pct = sum(pct_of_region_small_scale_catch),
     .groups = "drop"
   )
 ```
@@ -458,19 +388,44 @@ GOC_AFO_Stock_List %>%
 
 # STEP 5: Small-scale catch-weighted AFO_score per OHI region ------------------------------
 
+# AFO Scores: Option 1
 ```{r Small-scale catch-weighted AFO_score per region and year}
 # AFO_score = sum(Stock_Status * small_scale_landings_kg) /
 #             sum(small_scale_landings_kg)
 # Weights are small-scale fishery landings only.
 
-GOC_AFO_Regional_Scores <- GOC_AFO_Scores %>%
+colnames(AFO_StockStatus_Scores)
+
+AFO_Scores_Ex1 <- AFO_StockStatus_Scores %>%
   filter(
-    !is.na(Stock_Status),
+    !is.na(StockStatus_final),
     small_scale_landings_kg > 0
   ) %>%
   group_by(year, OHI_region_est) %>%
   summarize(
-    AFO_score = sum(Stock_Status * small_scale_landings_kg) /
+    AFO_score_mean_SS = mean(StockStatus_final, na.rm = TRUE),
+    n_stocks = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(year, OHI_region_est)
+```
+
+# AFO Scores: Option 2
+```{r Small-scale catch-weighted AFO_score per region and year}
+# AFO_score = sum(Stock_Status * small_scale_landings_kg) /
+#             sum(small_scale_landings_kg)
+# Weights are small-scale fishery landings only.
+
+colnames(AFO_StockStatus_Scores)
+
+AFO_Scores_Ex2 <- AFO_StockStatus_Scores %>%
+  filter(
+    !is.na(StockStatus_final),
+    small_scale_landings_kg > 0
+  ) %>%
+  group_by(year, OHI_region_est) %>%
+  summarize(
+    AFO_score_SSxLandings = sum(StockStatus_final * small_scale_landings_kg) /
       sum(small_scale_landings_kg),
     n_stocks = n(),
     small_scale_catch_kg = sum(small_scale_landings_kg),
@@ -480,19 +435,63 @@ GOC_AFO_Regional_Scores <- GOC_AFO_Scores %>%
   arrange(year, OHI_region_est)
 ```
 
-```{r Sanity check AFO regional scores}
-colnames(GOC_AFO_Regional_Scores)
+```{r Weights and geometric mean}
+# Calculate the proportion of catch each "Stock" (i.e. genus) contributed to its regional total during the study period:
+colnames(StockStatus_Scores)
 
-summary(GOC_AFO_Regional_Scores$AFO_score)
+StudyPeriod_low= 2018
+StudyPeriod_high= 2024
 
-GOC_AFO_Regional_Scores %>%
-  arrange(year, OHI_region_est)
+Weights_data <- GOC_Stocks_summary %>%
+  filter(year >= StudyPeriod_low & year <= StudyPeriod_high) %>%
+  group_by(estimated_genus_name, OHI_region_est) %>%
+  mutate(StockCatch_mt = sum(total_weight_mt)) %>% # total tonnes across all years for each stock and region during the study period
+  ungroup() %>%
+  group_by(OHI_region_est) %>%
+  mutate(TotalCatch_mt = sum(total_weight_mt, na.rm = TRUE)) %>% # total tonnes catch across all years and stocks for each region
+  ungroup() %>%
+  mutate(wprop_2018.24 = StockCatch_mt / TotalCatch_mt) %>% # proportion of catch each stock contributed to the total catch
+  distinct(estimated_genus_name, OHI_region_est, wprop_2018.24)
+
+
+# SANITY CHECK: Do the weights add up to 1?
+TEST<- Weights_data %>%
+  group_by(OHI_region_est) %>%
+  summarize(sum_w = sum(wprop_2018.24, na.rm= TRUE))
+# Yup, looks good!
 ```
 
-# STEP 6: Generate relevant time series including total_catch per region, total_SSF_catch per region, prop_SSF_catch per region
+```{r Add weights data to Stock Status df:}
+colnames(Weights_data)
 
-```{r}
-Help from cursor
+StockStatus_Scores_finalized <- left_join(StockStatus_Scores, 
+                                      Weights_data, 
+                                      by = c("OHI_region_est", "estimated_genus_name"))
+
+
+# This is the geometric mean part:
+StockStatus_GeoMean <- StockStatus_Scores_finalized %>%
+  group_by(OHI_region_est, year) %>%
+  summarize(
+    GeoMean_StockStatus = prod(StockStatus_final ^ wprop_2018.24, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(StockStatus_SubScore= GeoMean_StockStatus * 100)
+```
+
+```{r Save this dataframe}
+write.csv(StockStatus_GeoMean, 
+          "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_StockStatus_SubScores_Jun052026.csv", 
+          row.names = FALSE)
+```
+
+```{r Sanity check AFO regional scores}
+colnames(AFO_Scores)
+
+summary(AFO_Scores$AFO_score)
+
+AFO_Scores %>%
+  arrange(year, OHI_region_est)
 ```
 
 # STEP 7: Plot regional AFO scores over time ------------------------------
@@ -512,7 +511,7 @@ region_colors <- c(
 ```
 
 ```{r Plot AFO_score over time by region}
-GOC_AFO_Regional_Scores_overTime <- GOC_AFO_Regional_Scores %>%
+AFO_Scores_overTime <- AFO_Scores %>%
   ggplot(aes(
     x = year,
     y = AFO_score,
@@ -540,19 +539,19 @@ GOC_AFO_Regional_Scores_overTime <- GOC_AFO_Regional_Scores %>%
     strip.text = element_text(size = 12, face = "bold")
   )
 
-GOC_AFO_Regional_Scores_overTime
+AFO_Scores_overTime
 ```
 
 
 # FINAL STEP: SAVE ------------------------------
 
-```{r SAVE GOC_AFO_Scores and stock-level detail}
+```{r SAVE AFO_StockStatus_Scores and stock-level detail}
 # Stock-level detail (species x year x region) for downstream use.
-GOC_AFO_Stocks <- GOC_AFO_Scores
+GOC_AFO_Stocks <- AFO_StockStatus_Scores
 
 write.csv(
-  GOC_AFO_Scores,
-  file = file.path(WORK_DIR, "GOC_AFO_Scores_Jun012026.csv"),
+  AFO_StockStatus_Scores,
+  file = file.path(WORK_DIR, "AFO_StockStatus_Scores_Jun012026.csv"),
   row.names = FALSE
 )
 
@@ -571,16 +570,16 @@ write.csv(
 )
 
 write.csv(
-  GOC_AFO_Regional_Scores,
-  file = file.path(WORK_DIR, "GOC_AFO_Regional_Scores_Jun012026.csv"),
+  AFO_Scores,
+  file = file.path(WORK_DIR, "AFO_Scores_Jun012026.csv"),
   row.names = FALSE
 )
 ```
 
 ```{r SAVE regional AFO score plot}
 ggsave(
-  filename = file.path(WORK_DIR, "GOC_AFO_Regional_Scores_Jun012026.png"),
-  plot = GOC_AFO_Regional_Scores_overTime,
+  filename = file.path(WORK_DIR, "AFO_Scores_Jun012026.png"),
+  plot = AFO_Scores_overTime,
   width = 12,
   height = 8,
   dpi = 300
