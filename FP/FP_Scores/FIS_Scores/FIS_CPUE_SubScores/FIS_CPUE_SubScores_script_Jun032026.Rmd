@@ -414,7 +414,7 @@ options(scipen = 999)
 # Merge CPUE_baseline to CPUE_recent:
 colnames(CPUE_summary)
 
-CPUE_FIS_scores <- CPUE_summary %>%
+CPUE_estimates <- CPUE_summary %>%
   left_join(CPUE_baseline,
             by = c("Major_Functional_Group")) %>%
   mutate(
@@ -423,7 +423,7 @@ CPUE_FIS_scores <- CPUE_summary %>%
   filter(year<=2024)
 
 # Cap CPUE_score at a max of 1:
-CPUE_FIS_scores <- CPUE_FIS_scores %>%
+CPUE_estimates <- CPUE_estimates %>%
   mutate(
     CPUE_score_capped = if_else(
       CPUE_score > 1,
@@ -434,170 +434,248 @@ CPUE_FIS_scores <- CPUE_FIS_scores %>%
 ```
 
 ```{r Add a GOC region column}
-CPUE_FIS_scores$region<- c("GOC")
+CPUE_estimates$region<- c("GOC")
 
-CPUE_FIS_scores<- CPUE_FIS_scores %>%
+CPUE_estimates<- CPUE_estimates %>%
   relocate(region, .before= year)
 ```
 
 
-# FINAL STEP: SAVE the CPUE_FIS_scores dataframe:
+# SAVE the CPUE_estimates dataframe:
 ```{r Save this CPUE data table}
-write.csv(CPUE_FIS_scores, 
-"/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_CPUE_Scores/FIS_CPUE_Scores_Jun032026.csv", 
-row.names = FALSE)
+# write.csv(CPUE_estimates, 
+# "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_CPUE_SubScores/CPUEs_Compiled_df_Jun092026.csv", 
+# row.names = FALSE)
 ```
 
 
-# UNDER CONSTRUCTION / PURG: Other Inquiries - June 1 2026
 
-Estimate how much biomass per group?
-```{r COMPUTE PERCENT BIOMASS FOR RECENT YEARS}
-CPUE_recent <- CPUE_recent %>%
-  group_by(year) %>%
+# STEP 1: Load in and summarize GOC_MarineLandings0
+```{r Load in GOC_MarineLandings0 as necessary}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+# NOTE TO SELF: This source file may change in later Summer / Fall run. - EMF, June 4 2026
+```
+
+# **DECISION POINT: Selecting which sectors to include**
+```{r Select Sectors_of_Interest}
+table(GOC_MarineLandings0$sector_estimate_draft)
+
+# SANITY CHECK: Which species are included in the freshwater or marine sector?
+TEST<- GOC_MarineLandings0 %>%
+  filter(sector_estimate_draft== "freshwater or marine: fishery sector yet to be classified")
+
+table(TEST$recorded_taxa_group)
+# Species like Mojarra (the overwhelming majority of catch), trout, and catfish, which can move from freshwater to marine systems and are a bit ambiguous in terms of where they can be caught.
+
+
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
+                          "marine: small-scale capture",
+                          "marine: large-scale capture")
+  
+PossibleMarineFishery_Sectors<- c("freshwater or marine: large-scale capture",
+                          "freshwater or marine: small-scale capture",
+                          "freshwater or marine: fishery sector yet to be classified")
+
+GOC_MarineFisheryLandings0<- GOC_MarineLandings0 %>%
+  filter(sector_estimate_draft %in% c(MarineFishery_Sectors, PossibleMarineFishery_Sectors))
+
+# 3137044 obs., 58 var.
+```
+
+```{r Clean up names of GOC_MarineFisheryLandings}
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings0 %>%
   mutate(
-    total_biomass_state_year = sum(Total_Biomass_kg, na.rm = TRUE),
-    pct_of_total_biomass = (Total_Biomass_kg / total_biomass_state_year) * 100
-  ) %>%
-  ungroup()
-```
-
-Take a closer look at CPUE per Region and per Major_Functional_Group:
-```{r Plot CPUE over all years HistoricBaseline_low-2024}
-CPUE_AllYears <- GOC_CPUE_Landings %>%
-  filter(year >= HistoricBaseline_low, year <= 2024) %>%
-  filter(!is.na(OHI_region_est)) %>%
-  group_by(OHI_region_est, year, Major_Functional_Group) %>%
-  summarise(
-    Total_Biomass_kg = sum(weight_kg_corrected, na.rm = TRUE),
-    Total_Value_mxn = sum(value, na.rm = TRUE),
-    Total_Days = sum(days_fishing, na.rm = TRUE),
-    Avg_CPUE = mean(CPUE_kg.day, na.rm = TRUE),
-    n_records = n(),
-    .groups = "drop"
+    OHI_region_est = clean_names_lowercase(OHI_region_est),
+    estimated_genus_name = clean_names_lowercase(estimated_genus_name),
+    Major_Functional_Group = clean_names_lowercase(Major_Functional_Group)
   )
 
-Taxa_colors <- c("darkblue", "royalblue", "skyblue", "orange", "sienna1", "plum", "purple4", "aquamarine3", "gold2", "tomato", "grey")
+# 3137044 obs., 58 var.
+```
 
-Region_colors <- c("royalblue", "skyblue", "orange", "sienna1", "plum", "purple4", "aquamarine3", "gold2", "tomato")
 
-Regions_of_Interest <- c(
-  "Region_1", "Region_2", "Region_3",
-  "Region_4", "Region_5", "Region_6",
-  "Region_7", "Region_8", "Region_9"
+# STEP 1: Generate GOC_Groups_summary ------------------------------
+
+```{r Generate GOC_Groups_summary}
+colnames(GOC_MarineFisheryLandings)
+
+GOC_Groups_summary<- GOC_MarineFisheryLandings %>%
+  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+  summarize(
+    total_weight_mt= sum(weight_kg_corrected, na.rm = TRUE) / 1000,
+    total_value_peso= sum(value, na.rm = TRUE)
+  )
+# 2779 obs.
+```
+
+```{r How much catch is ungrouped unknown or not assigned to a region between 2018 and 2024 for CPUE?}
+table(GOC_Groups_summary$Major_Functional_Group)
+
+GOC_Groups_summary %>%
+  filter(year >= 2018 & year <= 2024) %>%
+  mutate(
+    in_filter = is.na(Major_Functional_Group) |
+                Major_Functional_Group == "unknown" |
+                is.na(OHI_region_est)
+  ) %>%
+  group_by(year) %>%
+  summarise(
+    total_mass_mt = sum(total_weight_mt, na.rm = TRUE),
+    mass_in_filter = sum(total_weight_mt[in_filter], na.rm = TRUE),
+    mass_not_in_filter = sum(total_weight_mt[!in_filter], na.rm = TRUE),
+    percent_unaccounted = (mass_in_filter/total_mass_mt)*100
+  )
+
+# Less than 1% unaccounted for by CPUE in any given year.
+```
+
+# STEP 4: Calculate GEOMETRIC MEAN of stock landings * CPUE ------------------------------
+```{r Load in CPUE data as necessary}
+CPUE_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_CPUE_Scores/FIS_CPUE_Scores_Jun032026.csv")
+# 101 obs., 11 vars.
+
+# Winnow down and clean this dataframe:
+colnames(CPUE_Scores0)
+
+CPUE_Scores<- CPUE_Scores0 %>%
+  select(year, Major_Functional_Group, CPUE_score, CPUE_score_capped) %>%
+  filter(year >= StudyPeriod_low & year <= StudyPeriod_high) %>%
+  mutate(
+    Major_Functional_Group = clean_names_lowercase(Major_Functional_Group)
+    )
+# 101 obs., 6 vars.
+```
+
+```{r Weights and geometric mean}
+# Calculate the proportion of catch each "Stock" (i.e. genus) contributed to its regional total during that 5-year reference period.
+colnames(CPUE_Scores)
+
+StudyPeriod_low= 2018
+StudyPeriod_high= 2024
+
+GroupWeights_data <- GOC_Groups_summary %>%
+  filter(year >= StudyPeriod_low & year <= StudyPeriod_high) %>%
+  
+  group_by(Major_Functional_Group, OHI_region_est) %>%
+  # total tonnes across all years for each stock and region during the study period 2018-2024
+  mutate(GroupCatch_2018.24 = sum(total_weight_mt)) %>% 
+
+  ungroup() %>%
+  
+  group_by(OHI_region_est) %>%
+  mutate(TotalCatch_2018.24 = sum(total_weight_mt, na.rm = TRUE)) %>% # total tonnes catch across all years and stocks for each region
+  ungroup() %>%
+  
+  mutate(wprop_2018.24 = GroupCatch_2018.24 / TotalCatch_2018.24) %>% # proportion of catch each stock contributed to the total catch
+  distinct(Major_Functional_Group, OHI_region_est, wprop_2018.24)
+
+
+# SANITY CHECK: Do the weights add up to 1?
+TEST<- GroupWeights_data %>%
+  group_by(OHI_region_est) %>%
+  summarize(sum_w = sum(wprop_2018.24, na.rm= TRUE))
+# Yup, looks good!
+```
+
+```{r Add weights data to Stock Status df:}
+colnames(GOC_Groups_summary)
+colnames(GroupWeights_data)
+colnames(CPUE_Scores)
+
+CPUE_Scores_GeoMean0 <- left_join(GOC_Groups_summary %>% filter(year>= StudyPeriod_low & year<= StudyPeriod_high),
+                                   GroupWeights_data,
+                                   by = c("Major_Functional_Group", "OHI_region_est"))
+# 818 obs., 6 vars.
+
+CPUE_Scores_GeoMean00 <- left_join(CPUE_Scores_GeoMean0,
+                                   CPUE_Scores,
+                                   by = c("year", "Major_Functional_Group"))
+# 818 obs., 8 vars.
+
+# This is the geometric mean part:
+CPUE_Scores_GeoMean <- CPUE_Scores_GeoMean00 %>%
+  group_by(OHI_region_est, year) %>%
+  summarize(
+    GeoMean_CPUE = prod(CPUE_score_capped ^ wprop_2018.24, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    CPUE_SubScore= GeoMean_CPUE * 100
+  )
+```
+
+# >> COMPLETE: CPUE_SubScores!
+
+# PLOT: CPUE Sub-Score (Geometric Mean) over time
+```{r Plot CPUE Scores over time}
+Region_colors <- c(
+  "royalblue",
+  "skyblue",
+  "orange",
+  "sienna1",
+  "plum",
+  "purple4",
+  "aquamarine3",
+  "gold2",
+  "tomato"
 )
 
+Regions_of_Interest <- c(
+  "region_1", "region_2", "region_3",
+  "region_4", "region_5", "region_6",
+  "region_7", "region_8", "region_9"
+)
 
-# PLOT 1: CPUE overTime per Region, facet by Major_Functional_Group
-CPUE_overTime_byRegion_perTaxa<- CPUE_AllYears %>%
+CPUE_GeoMean_overTime <- CPUE_Scores_GeoMean %>%
   filter(OHI_region_est %in% Regions_of_Interest) %>%
-  ggplot(
-       aes(x = year, 
-           y = Avg_CPUE, 
-           group = OHI_region_est, 
-           color = OHI_region_est)) +
-  geom_line(size = 1) +                # lines connecting the points
-  facet_wrap(~ Major_Functional_Group, scales = "free_y") +  # facet by region
-  labs(
-    title = "Average CPUE Over Time by Functional Group",
-    x = "Year",
-    y = "Avg CPUE (kg/day)",
-    color = "Functional Group"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(
-    legend.position = "bottom",
-    axis.text.x = element_text(angle = 45, hjust = 1)
-  ) +
-  scale_color_manual(values = Taxa_colors) +  # nice palette
-  geom_vline(xintercept = HistoricBaseline_high, linetype= "solid", color = "grey5")
-
-CPUE_overTime_byRegion_perTaxa
-
-  # # Save as PNG
-  # ggsave(
-  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_FIS_scores/CPUE_PlotOverTime_byRegion_perTaxa_Dec092025.png"),
-  #   plot = CPUE_overTime_byRegion_perTaxa,
-  #   width = 12,
-  #   height = 12,
-  #   dpi = 300
-  # )
-
-
-# PLOT 2: CPUE overTime per Major_Functional_Group, facet by Region
-CPUE_overTime_byRegion_perTaxa<- CPUE_AllYears %>%
-  filter(OHI_region_est %in% Regions_of_Interest) %>%
-  ggplot(
-       aes(x = year, 
-           y = Avg_CPUE, 
-           group = Major_Functional_Group, 
-           color = Major_Functional_Group)) +
-  geom_line(size = 1) +                # lines connecting the points
-  facet_wrap(~ OHI_region_est, scales = "free_y") +  # facet by region
-  labs(
-    title = "Average CPUE Over Time by Functional Group",
-    x = "Year",
-    y = "Avg CPUE (kg/day)",
-    color = "Functional Group"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(
-    legend.position = "bottom",
-    axis.text.x = element_text(angle = 45, hjust = 1)
-  ) +
-  scale_color_manual(values = Taxa_colors) +  # nice palette
-  geom_vline(xintercept = HistoricBaseline_high, linetype= "solid", color = "grey5")
-
-CPUE_overTime_byRegion_perTaxa
-
-  # # Save as PNG
-  # ggsave(
-  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_FIS_scores/CPUE_PlotOverTime_byTaxa_perRegion_Dec092025.png"),
-  #   plot = CPUE_overTime_byTaxa,
-  #   width = 12,
-  #   height = 12,
-  #   dpi = 300
-  # )
-
-
-# PLOT 3: CPUE overTime per Major_Functional_Group, facet by Region - normalized 0 to 1
-CPUE_overTime_byRegion_perTaxa_normalized<- CPUE_AllYears %>%
-  filter(OHI_region_est %in% Regions_of_Interest) %>%
-  # Normalize Avg_CPUE per functional group across all years
-  group_by(Major_Functional_Group) %>%
-  mutate(Avg_CPUE_norm = (Avg_CPUE - min(Avg_CPUE, na.rm = TRUE)) /
-                            (max(Avg_CPUE, na.rm = TRUE) - min(Avg_CPUE, na.rm = TRUE))) %>%
-  ungroup() %>%
   ggplot(aes(
-    x = year, 
-    y = Avg_CPUE_norm, 
-    group = Major_Functional_Group, 
-    color = Major_Functional_Group
+    x = year,
+    y = CPUE_SubScore,
+    color = OHI_region_est
   )) +
-  geom_line(size = 1) +
-  facet_wrap(~ OHI_region_est, scales = "free_y") +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ OHI_region_est, scales = "fixed") +
+  
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  
+  scale_color_manual(values = Region_colors) +
+  
   labs(
-    title = "Normalized CPUE Over Time by Functional Group",
-    x = "Year",
-    y = "Normalized CPUE (0-1)",
-    color = "Functional Group"
+    title = expression(bold("FIS: Regional " * bolditalic("CPUE") * " Sub-Scores (Geometric Mean)")),
+    y = "CPUE Scores (CPUE_present : CPUE_baseline capped at 1)",
+    x = "Year"
   ) +
-  theme_minimal(base_size = 14) +
+  ylim(0, 101) +
+  
+  theme_bw(base_size = 14) +
+  
   theme(
-    legend.position = "bottom",
-    axis.text.x = element_text(angle = 45, hjust = 1)
-  ) +
-  scale_color_manual(values = Taxa_colors) +
-  geom_vline(xintercept = HistoricBaseline_high, linetype = "solid", color = "grey5")
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold")
+    # plot.title = element_text(size = 18, face = "bold")
+  )
 
-CPUE_overTime_byRegion_perTaxa_normalized
+CPUE_GeoMean_overTime
+```
 
-  # Save as PNG
-  # ggsave(
-  #   filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FIS/v2025/OHI_CPUE_FIS_scores/CPUE_PlotOverTime_byTaxa_perRegion_normalized_Dec092025.png"),
-  #   plot = CPUE_overTime_byTaxa_normalized,
-  #   width = 12,
-  #   height = 12,
-  #   dpi = 300
-  # )
+```{r Save this plot}
+# Save as PNG
+ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Visualizations_Jun2026/CPUE_SubScores_plot_Jun042026.png"),
+    plot = CPUE_GeoMean_overTime,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+```
+
+# FINAL STEP: SAVE the CPUE_GeoMean_overTime dataframe:
+```{r Save this CPUE data table}
+# write.csv(CPUE_GeoMean_overTime, 
+# "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_CPUE_SubScores/FIS_CPUE_SubScores_df_Jun092026.csv", 
+# row.names = FALSE)
 ```
