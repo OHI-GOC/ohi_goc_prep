@@ -95,7 +95,7 @@ GOC_MarineSector_summary<- GOC_MarineFisheryLandings0 %>%
          )
 
 GOC_MarineSector_summary<- GOC_MarineSector_summary %>%
-  group_by(year, sector_estimate_draft) %>%
+  group_by(year, OHI_region_est, sector_estimate_draft) %>%
   summarize(
     total_weight_mt= sum(weight_kg_corrected, na.rm = TRUE) / 1000,
     total_value_peso= sum(value, na.rm = TRUE),
@@ -160,6 +160,8 @@ Landings_byEstimatedSector_plot<- GOC_MarineSector_summary %>%
     subtitle = "Small-scale vs. large-scale estimates are based directly on report details"
   ) +
   
+  facet_wrap(~OHI_region_est) +
+  
   # Minimal theme and sleek styling
   theme_bw(base_size = 14) +
   theme(
@@ -174,12 +176,7 @@ Landings_byEstimatedSector_plot<- GOC_MarineSector_summary %>%
     plot.subtitle = element_text(size = 13, color = "grey30")
   ) +
   scale_x_continuous(
-  breaks = 2000:2025) +
-  
-  # Optional: better legend layout
-  guides(
-    fill = guide_legend(nrow = 3, byrow = TRUE, title.position = "top")
-  )
+  breaks = 2000:2025)
 
 Landings_byEstimatedSector_plot
 ```
@@ -254,6 +251,7 @@ Landings_Post.2018 <- Landings_Post.2018 %>%
 ```{r Summarize total and small-scale catch per stock}
 table(Landings_Post.2018$sector_estimate_draft)
 
+SSF_sectors<- c("marine: small-scale capture", "freshwater or marine: small-scale capture")
 
 # Summarize landings at the genus (i.e., stock) level:
 GOC_Stocks_summary <- Landings_Post.2018 %>%
@@ -403,12 +401,43 @@ AFO_Scores_Ex1 <- AFO_StockStatus_Scores %>%
   ) %>%
   group_by(year, OHI_region_est) %>%
   summarize(
-    AFO_score_mean_SS = mean(StockStatus_final, na.rm = TRUE),
+    AFO_score_mean_SS = mean(StockStatus_final, na.rm = TRUE)*100,
     n_stocks = n(),
     .groups = "drop"
   ) %>%
   arrange(year, OHI_region_est)
 ```
+
+```{r Plot Example 1}
+AFO_Scores_overTime <- AFO_Scores_Ex1 %>%
+  ggplot(aes(
+    x = year,
+    y = AFO_score_mean_SS,
+    color = OHI_region_est
+  )) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ OHI_region_est, scales = "fixed") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  scale_color_manual(values = region_colors) +
+  labs(
+    title = "AFO - Option 1: mean Stock_Status scores of regional SSF stocks",
+    subtitle = paste0(
+      "mean Stock_Status of qualifying stocks, not weighted by landings"
+    ),
+    y = "AFO_score (0 to 100)",
+    x = "Year"
+  ) +
+  ylim(0, 105) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 12, face = "bold")
+  )
+
+AFO_Scores_overTime
+```
+
 
 # AFO Scores: Option 2
 ```{r Small-scale catch-weighted AFO_score per region and year}
@@ -425,8 +454,8 @@ AFO_Scores_Ex2 <- AFO_StockStatus_Scores %>%
   ) %>%
   group_by(year, OHI_region_est) %>%
   summarize(
-    AFO_score_SSxLandings = sum(StockStatus_final * small_scale_landings_kg) /
-      sum(small_scale_landings_kg),
+    AFO_score_SSxLandings = (sum(StockStatus_final * small_scale_landings_kg) /
+      sum(small_scale_landings_kg))*100,
     n_stocks = n(),
     small_scale_catch_kg = sum(small_scale_landings_kg),
     total_catch_kg = sum(total_landings_kg),
@@ -435,64 +464,45 @@ AFO_Scores_Ex2 <- AFO_StockStatus_Scores %>%
   arrange(year, OHI_region_est)
 ```
 
-```{r Weights and geometric mean}
-# Calculate the proportion of catch each "Stock" (i.e. genus) contributed to its regional total during the study period:
-colnames(StockStatus_Scores)
-
-StudyPeriod_low= 2018
-StudyPeriod_high= 2024
-
-Weights_data <- GOC_Stocks_summary %>%
-  filter(year >= StudyPeriod_low & year <= StudyPeriod_high) %>%
-  group_by(estimated_genus_name, OHI_region_est) %>%
-  mutate(StockCatch_mt = sum(total_weight_mt)) %>% # total tonnes across all years for each stock and region during the study period
-  ungroup() %>%
-  group_by(OHI_region_est) %>%
-  mutate(TotalCatch_mt = sum(total_weight_mt, na.rm = TRUE)) %>% # total tonnes catch across all years and stocks for each region
-  ungroup() %>%
-  mutate(wprop_2018.24 = StockCatch_mt / TotalCatch_mt) %>% # proportion of catch each stock contributed to the total catch
-  distinct(estimated_genus_name, OHI_region_est, wprop_2018.24)
-
-
-# SANITY CHECK: Do the weights add up to 1?
-TEST<- Weights_data %>%
-  group_by(OHI_region_est) %>%
-  summarize(sum_w = sum(wprop_2018.24, na.rm= TRUE))
-# Yup, looks good!
-```
-
-```{r Add weights data to Stock Status df:}
-colnames(Weights_data)
-
-StockStatus_Scores_finalized <- left_join(StockStatus_Scores, 
-                                      Weights_data, 
-                                      by = c("OHI_region_est", "estimated_genus_name"))
-
-
-# This is the geometric mean part:
-StockStatus_GeoMean <- StockStatus_Scores_finalized %>%
-  group_by(OHI_region_est, year) %>%
-  summarize(
-    GeoMean_StockStatus = prod(StockStatus_final ^ wprop_2018.24, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(StockStatus_SubScore= GeoMean_StockStatus * 100)
-```
-
-```{r Save this dataframe}
-write.csv(StockStatus_GeoMean, 
-          "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_StockStatus_SubScores_Jun052026.csv", 
-          row.names = FALSE)
-```
-
 ```{r Sanity check AFO regional scores}
-colnames(AFO_Scores)
+colnames(AFO_Scores_Ex2)
 
-summary(AFO_Scores$AFO_score)
+summary(AFO_Scores_Ex2$AFO_score)
 
-AFO_Scores %>%
+AFO_Scores_Ex2 %>%
   arrange(year, OHI_region_est)
 ```
+
+```{r Plot Example 2}
+AFO_Scores_overTime <- AFO_Scores_Ex2 %>%
+  ggplot(aes(
+    x = year,
+    y = AFO_score_SSxLandings,
+    color = OHI_region_est
+  )) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ OHI_region_est, scales = "fixed") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  scale_color_manual(values = region_colors) +
+  labs(
+    title = "AFO - Option 2: mean Stock_Status of SSF stocks weighted by total SSF catch",
+    subtitle = paste0(
+      "weighted by landings"
+    ),
+    y = "AFO_score (0 to 100)",
+    x = "Year"
+  ) +
+  ylim(0, 105) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 12, face = "bold")
+  )
+
+AFO_Scores_overTime
+```
+
 
 # STEP 7: Plot regional AFO scores over time ------------------------------
 
