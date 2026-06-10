@@ -1,0 +1,485 @@
+---
+title: "Vessel pressure rasters — mean by OHI region"
+output: html_document
+date: "`r format(Sys.Date())`"
+---
+
+For each **1 km vessel pressure GeoTIFF**, compute the **mean cell value** within every
+**marine** OHI Gulf of California region (`spatial/ohi_regions/goc_ohi_rgns.shp`).
+
+**Two raster versions:**
+
+| Suffix | Use in this notebook |
+|--------|----------------------|
+| `{stub}_{year}_1km.tif` | **Regional summaries** → CSV (uncapped values) |
+| `{stub}_{year}_1km_capped.tif` | **Visualization only** (99th-percentile cap from 2024) |
+
+**Outputs:** one CSV per pressure layer with columns:
+
+| Column | Description |
+|--------|-------------|
+| `pressure_name` | Short pressure identifier |
+| `ohi_rgn` | Region ID from shapefile (`rgn_id`, e.g. `Region_1`) |
+| `year` | Calendar year from the raster filename |
+| `mean` | Mean uncapped raster value in that region (NA cells excluded) |
+
+**Rasters read from:** `/home/shares/ohi/OHI_GOC/goal_prep/pressures/vessels/`
+
+```{r setup}
+library(tidyverse)
+library(here)
+library(sf)
+library(terra)
+
+figures_dir <- here("_pressures/vessels/figures")
+```
+
+## OHI regions (marine only)
+
+Vessel pressures are marine; land polygons in the shapefile are dropped.
+
+```{r load_regions}
+ohi_rgns <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp"), quiet = TRUE)
+
+ohi_rgns_marine <- ohi_rgns %>%
+  filter(location == "marine") %>%
+  arrange(rgn_id)
+
+ohi_rgns_marine %>%
+  st_drop_geometry() %>%
+  select(rgn_id, estado, ecorgn)
+
+region_labels <- ohi_rgns_marine %>%
+  st_drop_geometry() %>%
+  transmute(
+    ohi_rgn = rgn_id,
+    region_label = paste0(rgn_id, " · ", ecorgn)
+  )
+
+region_palette <- setNames(
+  hcl.colors(nrow(region_labels), palette = "Zissou1"),
+  region_labels$region_label
+)
+
+```
+
+## Pressure layer definitions
+
+Edit paths here if filenames or folders change.
+
+```{r pressure_config}
+PRESSURE_ROOT <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/vessels"
+VIZ_YEAR <- 2024L
+
+pressures <- tibble(
+  pressure_name = c(
+    "vessel_traffic",
+    "benthic_destructive_fishing",
+    "ghost_gear"
+  ),
+  subdir = c(
+    "vessel_traffic",
+    "benthic_destructive_fishing",
+    "ghost_gear"
+  ),
+  file_stub = c(
+    "vms_hours",
+    "destructive_fishing_hours",
+    "ghost_gear_risk"
+  ),
+  plot_title = c(
+    "Vessel traffic hours (capped)",
+    "Bottom-destructive fishing hours (capped)",
+    "Ghost gear risk (capped)"
+  ),
+  trend_title = c(
+    "Vessel traffic by OHI region",
+    "Bottom-destructive fishing by OHI region",
+    "Ghost gear risk by OHI region"
+  ),
+  ylab = c(
+    "Mean vessel-hours per cell",
+    "Mean bottom-trawl hours per cell",
+    "Mean ghost risk-hours per cell"
+  )
+)
+
+pressures
+```
+
+```{r helpers}
+## Uncapped: vms_hours_2024_1km.tif | Capped: vms_hours_2024_1km_capped.tif
+pressure_tif_path <- function(subdir, file_stub, year, capped = FALSE) {
+  dir_path <- file.path(PRESSURE_ROOT, subdir)
+  suffix <- if (capped) "_1km_capped.tif" else "_1km.tif"
+  path <- file.path(dir_path, sprintf("%s_%s%s", file_stub, year, suffix))
+
+  if (file.exists(path)) {
+    return(path)
+  }
+  NA_character_
+}
+
+## Years with an uncapped raster (used for CSV summaries).
+available_years <- function(subdir, file_stub, capped = FALSE) {
+  dir_path <- file.path(PRESSURE_ROOT, subdir)
+  pattern <- if (capped) {
+    paste0("^", file_stub, "_[0-9]{4}_1km_capped\\.tif$")
+  } else {
+    paste0("^", file_stub, "_[0-9]{4}_1km\\.tif$")
+  }
+  files <- list.files(dir_path, pattern = pattern)
+  as.integer(str_extract(files, "[0-9]{4}"))
+}
+
+## Mean raster value per polygon. terra::zonal rows match polygon order in regions_vect.
+mean_by_ohi_region <- function(raster_path, regions_sf) {
+  r <- rast(raster_path)
+  regions_ll <- st_transform(regions_sf, crs(r))
+  regions_vect <- vect(regions_ll)
+
+  zonal_out <- zonal(r, regions_vect, fun = "mean", na.rm = TRUE)
+  zonal_df <- as_tibble(zonal_out)
+
+  if ("ID" %in% names(zonal_df)) {
+    zonal_df <- zonal_df %>%
+      rename(zone_id = ID, mean = -ID)
+  } else {
+    if (nrow(zonal_df) != nrow(regions_sf)) {
+      stop(
+        "Zonal row count (", nrow(zonal_df), ") does not match regions (",
+        nrow(regions_sf), ") for ", basename(raster_path)
+      )
+    }
+    zonal_df <- tibble(
+      zone_id = seq_len(nrow(zonal_df)),
+      mean = zonal_df[[1]]
+    )
+  }
+
+  regions_sf %>%
+    mutate(zone_id = row_number()) %>%
+    st_drop_geometry() %>%
+    select(zone_id, ohi_rgn = rgn_id) %>%
+    left_join(zonal_df, by = "zone_id") %>%
+    select(ohi_rgn, mean)
+}
+```
+
+## Summarize each pressure (uncapped rasters → CSV)
+
+```{r summarize_all_pressures}
+
+pressure_tables <- map(seq_len(nrow(pressures)), function(i) {
+  p <- pressures[i, ]
+  years <- sort(available_years(p$subdir, p$file_stub, capped = FALSE))
+
+  message(
+    "\n=== ", p$pressure_name, " (uncapped) ===\n",
+    "Years found: ", paste(years, collapse = ", ")
+  )
+
+  if (length(years) == 0) {
+    warning("No uncapped rasters found for ", p$pressure_name)
+    return(NULL)
+  }
+
+  map_dfr(years, function(year) {
+    tif <- pressure_tif_path(p$subdir, p$file_stub, year, capped = FALSE)
+    if (is.na(tif)) {
+      warning("Missing uncapped raster for ", p$pressure_name, " year ", year)
+      return(NULL)
+    }
+
+    message("  ", year, ": ", basename(tif))
+
+    mean_by_ohi_region(tif, ohi_rgns_marine) %>%
+      mutate(
+        pressure_name = p$pressure_name,
+        year = year,
+        .before = ohi_rgn
+      )
+  })
+})
+
+names(pressure_tables) <- pressures$pressure_name
+```
+
+## Preview summary tables
+
+```{r preview}
+walk(pressure_tables, ~ print(.x %>% arrange(year, ohi_rgn)))
+```
+
+## Save one CSV per pressure
+
+Files written to `_pressures/vessels/data/` (means from **uncapped** rasters).
+
+```{r write_csv}
+iwalk(pressure_tables, function(tbl, name) {
+  if (is.null(tbl) || nrow(tbl) == 0) {
+    message("Skipping ", name, " (no data)")
+    return(invisible(NULL))
+  }
+
+  out_path <- here(
+    "_pressures/vessels/data",
+    paste0(name, "_mean_by_ohi_rgn.csv")
+  )
+
+  tbl %>%
+    select(pressure_name, ohi_rgn, year, mean) %>%
+    arrange(year, ohi_rgn) %>%
+    write_csv(out_path)
+
+  message("Wrote ", nrow(tbl), " rows → ", out_path)
+})
+```
+
+## Line plots: regional mean vs year
+
+One line per **marine** OHI region (uncapped means). Points mark each year.
+
+```{r plot_trends_setup}
+region_labels <- ohi_rgns_marine %>%
+  st_drop_geometry() %>%
+  transmute(
+    ohi_rgn = rgn_id,
+    region_label = paste0(rgn_id, " · ", ecorgn)
+  )
+
+pressure_trends <- imap(pressure_tables, function(tbl, name) {
+  if (is.null(tbl) || nrow(tbl) == 0) {
+    return(NULL)
+  }
+  tbl %>%
+    left_join(region_labels, by = "ohi_rgn") %>%
+    mutate(region_label = factor(region_label, levels = region_labels$region_label))
+}) %>%
+  compact()
+
+
+plot_pressure_trends <- function(tbl, title, ylab) {
+  ggplot(tbl, aes(x = year, y = mean, color = region_label, group = region_label)) +
+    geom_line(linewidth = 0.85, alpha = 0.95) +
+    geom_point(size = 2.4, alpha = 0.95) +
+    scale_x_continuous(breaks = scales::breaks_width(1)) +
+    scale_color_manual(values = region_palette, name = "OHI region") +
+    labs(
+      title = title,
+      subtitle = "Mean uncapped raster value per 1 km cell within each region",
+      x = "Year",
+      y = ylab
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(color = "grey35", size = 10),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = "grey92"),
+      legend.key.height = unit(0.45, "cm"),
+      legend.text = element_text(size = 9)
+    )
+}
+```
+
+```{r plot_trends, fig.height=5.5, fig.width=9}
+
+walk(seq_len(nrow(pressures)), function(i) {
+  p <- pressures[i, ]
+  tbl <- pressure_trends[[p$pressure_name]]
+
+  if (is.null(tbl)) {
+    message("No trend data for ", p$pressure_name)
+    return(invisible(NULL))
+  }
+
+  p_plot <- plot_pressure_trends(tbl, p$trend_title, p$ylab)
+  out_path <- file.path(figures_dir, paste0(p$pressure_name, "_mean_by_ohi_rgn_trend.png"))
+
+  ggsave(
+    out_path,
+    plot = p_plot,
+    width = 9,
+    height = 5.5,
+    dpi = 300,
+    bg = "white"
+  )
+  message("Wrote figure → ", out_path)
+
+  print(p_plot)
+})
+```
+
+## Hydrocarbon pollution risk (rescaled vessel traffic)
+
+Rescale **vessel traffic** regional means to **0–1** for use as hydrocarbon pollution risk:
+
+1. Reference = mean of the **top 5** regional mean values across all regions and years.
+2. `pressure = min(mean / reference, 1)`.
+
+```{r hydrocarbon_pollution_risk}
+vessel_traffic_tbl <- read_csv(here("_pressures/vessels/data/vessel_traffic_mean_by_ohi_rgn.csv"))
+
+
+top5_means <- vessel_traffic_tbl %>%
+  arrange(desc(mean)) %>%
+  slice_head(n = 5)
+
+hydrocarbon_ref <- mean(top5_means$mean)
+
+hydrocarbon_pollution_risk <- vessel_traffic_tbl %>%
+  transmute(
+    rgn_id = ohi_rgn,
+    year = year,
+    pressure = pmin(mean / hydrocarbon_ref, 1)
+  ) %>%
+  arrange(year, rgn_id)
+
+hydrocarbon_pollution_risk
+
+output_dir <- here("_pressures/vessels/output")
+
+hydrocarbon_out <- file.path(output_dir, "hydrocarbon_pollution_risk.csv")
+write_csv(hydrocarbon_pollution_risk, hydrocarbon_out)
+
+message("Wrote ", nrow(hydrocarbon_pollution_risk), " rows → ", hydrocarbon_out)
+```
+
+## Hydrocarbon pollution risk — regional trend plot
+
+```{r plot_hydrocarbon_trends, fig.height=5.5, fig.width=9}
+
+hydrocarbon_trends <- hydrocarbon_pollution_risk %>%
+  left_join(region_labels, by = c("rgn_id" = "ohi_rgn")) %>%
+  mutate(region_label = factor(region_label, levels = region_labels$region_label))
+
+hydrocarbon_trend_plot <- ggplot(
+  hydrocarbon_trends,
+  aes(x = year, y = pressure, color = region_label, group = region_label)
+) +
+  geom_line(linewidth = 0.85, alpha = 0.95) +
+  geom_point(size = 2.4, alpha = 0.95) +
+  scale_x_continuous(breaks = scales::breaks_width(1)) +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = c(0.02, 0.02))) +
+  scale_color_manual(values = region_palette, name = "OHI region") +
+  labs(
+    title = "Hydrocarbon pollution risk by OHI region",
+    subtitle = "Vessel traffic rescaled to 0–1 (reference = mean of top 5 regional means)",
+    x = "Year",
+    y = "Pressure (0–1)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(color = "grey35", size = 10),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey92"),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.key.height = unit(0.45, "cm"),
+    legend.text = element_text(size = 9)
+  )
+
+hydrocarbon_fig_path <- file.path(figures_dir, "hydrocarbon_pollution_risk_trend.png")
+ggsave(
+  hydrocarbon_fig_path,
+  plot = hydrocarbon_trend_plot,
+  width = 9,
+  height = 5.5,
+  dpi = 300,
+  bg = "white"
+)
+
+hydrocarbon_trend_plot
+```
+
+## Ghost gear risk (rescaled ghost gear pressure)
+
+Rescale **ghost gear** regional means to **0–1**:
+
+1. Reference = mean of the **top 5** regional mean values across all regions and years.
+2. `pressure = min(mean / reference, 1)`.
+
+```{r ghost_gear_risk}
+ghost_gear_tbl <- read_csv(here("_pressures/vessels/data/ghost_gear_mean_by_ohi_rgn.csv"))
+
+top5_means <- ghost_gear_tbl %>%
+  arrange(desc(mean)) %>%
+  slice_head(n = 5)
+
+ghost_gear_ref <- mean(top5_means$mean)
+
+ghost_gear_risk <- ghost_gear_tbl %>%
+  transmute(
+    rgn_id = ohi_rgn,
+    year = year,
+    pressure = pmin(mean / ghost_gear_ref, 1)
+  ) %>%
+  arrange(year, rgn_id)
+
+output_dir <- here("_pressures/vessels/output")
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+ghost_gear_out <- file.path(output_dir, "ghost_gear_risk.csv")
+write_csv(ghost_gear_risk, ghost_gear_out)
+
+message(
+  "Ghost gear reference (mean of top 5 regional means): ",
+  signif(ghost_gear_ref, 5)
+)
+message("Wrote ", nrow(ghost_gear_risk), " rows → ", ghost_gear_out)
+
+top5_means %>%
+  select(ohi_rgn, year, mean) %>%
+  mutate(rank = row_number())
+
+ghost_gear_risk
+```
+
+## Ghost gear risk — regional trend plot
+
+```{r plot_ghost_gear_risk_trends, fig.height=5.5, fig.width=9}
+ghost_gear_trends <- ghost_gear_risk %>%
+  left_join(region_labels, by = c("rgn_id" = "ohi_rgn")) %>%
+  mutate(region_label = factor(region_label, levels = region_labels$region_label))
+
+ghost_gear_trend_plot <- ggplot(
+  ghost_gear_trends,
+  aes(x = year, y = pressure, color = region_label, group = region_label)
+) +
+  geom_line(linewidth = 0.85, alpha = 0.95) +
+  geom_point(size = 2.4, alpha = 0.95) +
+  scale_x_continuous(breaks = scales::breaks_width(1)) +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = c(0.02, 0.02))) +
+  scale_color_manual(values = region_palette, name = "OHI region") +
+  labs(
+    title = "Ghost gear risk by OHI region",
+    subtitle = "Rescaled to 0–1 (reference = mean of top 5 regional means)",
+    x = "Year",
+    y = "Pressure (0–1)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(color = "grey35", size = 10),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey92"),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.key.height = unit(0.45, "cm"),
+    legend.text = element_text(size = 9)
+  )
+
+ghost_gear_fig_path <- file.path(figures_dir, "ghost_gear_risk_trend.png")
+ggsave(
+  ghost_gear_fig_path,
+  plot = ghost_gear_trend_plot,
+  width = 9,
+  height = 5.5,
+  dpi = 300,
+  bg = "white"
+)
+message("Wrote figure → ", ghost_gear_fig_path)
+
+ghost_gear_trend_plot
+```
+
