@@ -1,0 +1,471 @@
+---
+title: "Gulf of California fishing effort by gear and taxa"
+output: html_document
+date: "`r format(Sys.Date())`"
+---
+
+Summarize **VMS fishing effort** (vessel-hours) for the six GoC states.
+
+**Data**
+
+- Vessel registry: `vessel.csv`
+- Yearly VMS pings: `vms_{year}.csv`
+- Catch by economic unit and taxonomic group: `CatchPerEconomicUnit_group_summary_Jun102026.csv`
+
+**Effort unit:** sum of `hours` per ping, capped at **3 h** per ping.
+
+```{r setup}
+library(tidyverse)
+library(here)
+library(patchwork)
+
+GOC_STATES <- c(
+  "BAJA CALIFORNIA",
+  "BAJA CALIFORNIA SUR",
+  "JALISCO",
+  "NAYARIT",
+  "SINALOA",
+  "SONORA"
+)
+
+VMS_ROOT <- "/home/shares/ohi/OHI_GOC/_raw_data/vms_juan_carlos"
+CATCH_FILE <- here(
+  "FP/FP_Scores/FIS_Scores/FIS_CPUE_SubScores/CPUE_In_Progress",
+  "CatchPerEconomicUnit_group_summary_Jun102026.csv"
+)
+FIGURES_DIR <- here("_pressures/vessels/figures")
+EFFORT_OUT <- here("_pressures/vessels/data/fishing_effort_by_major_taxonomic_group.csv")
+
+CATCH_YEAR_MIN <- 2018L
+HOURS_CAP_PER_PING <- 3
+FIGURE_DPI <- 300
+
+MAIN_TAXONOMIC_GROUPS <- c(
+  "Anchovy & Sardine (small pelagics)",
+  "Demersal marine fishes",
+  "Pelagic marine fish (excl. anchovy & sardine)",
+  "Sharks",
+  "Shrimps, prawns"
+)
+```
+
+## Helper functions
+
+```{r helpers}
+# Turn a group name into a safe file name.
+figure_slug <- function(text) {
+  str_replace_all(tolower(text), "[^a-z0-9]+", "_")
+}
+
+# Read one year of VMS pings and return effort by economic unit.
+load_effort_by_economic_unit <- function(year, vessel_registry) {
+  vms_file <- file.path(VMS_ROOT, "vms", sprintf("vms_%s.csv", year))
+
+  read_csv(vms_file, show_col_types = FALSE) %>%
+    select(-name, -port, -economic_unit) %>%
+    left_join(vessel_registry, by = "vessel_rnpa") %>%
+    filter(!is.na(hours), hours > 0, !is.na(eu_rnpa)) %>%
+    mutate(hours_capped = pmin(hours, HOURS_CAP_PER_PING)) %>%
+    group_by(year, eu_rnpa) %>%
+    summarize(
+      hours_raw = sum(hours),
+      hours_capped = sum(hours_capped),
+      .groups = "drop"
+    )
+}
+
+# Keep the five main groups; put everything else in "Other".
+collapse_to_main_taxonomic_groups <- function(group_name) {
+  if_else(group_name %in% MAIN_TAXONOMIC_GROUPS, group_name, "Other")
+}
+
+# Shared styling for line plots with years on the x-axis.
+theme_effort_plot <- function() {
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      plot.subtitle = element_text(color = "grey35", size = 10),
+      panel.grid.minor = element_blank(),
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+    )
+}
+```
+
+## Load vessel registry
+
+```{r load_vessel_registry}
+vessel_registry <- read_csv(
+  file.path(VMS_ROOT, "vessel.csv"),
+  show_col_types = FALSE
+) %>%
+  filter(state %in% GOC_STATES)
+```
+
+## Load VMS effort by year and economic unit
+
+One row per `year` × `eu_rnpa`. This table is used to decide whether an economic
+unit has VMS effort in a given year.
+
+```{r load_effort_by_year}
+vms_years_on_disk <- list.files(
+  file.path(VMS_ROOT, "vms"),
+  pattern = "^vms_[0-9]{4}\\.csv$"
+) %>%
+  str_extract("[0-9]{4}") %>%
+  as.integer() %>%
+  sort()
+
+years_to_load <- vms_years_on_disk[vms_years_on_disk >= CATCH_YEAR_MIN]
+
+effort_by_eu_year <- map_dfr(years_to_load, function(year) {
+  message("Loading VMS effort for ", year)
+  load_effort_by_economic_unit(year, vessel_registry)
+})
+
+effort_2024_by_eu <- effort_by_eu_year %>%
+  filter(year == 2024)
+
+message(
+  "Economic units with VMS effort: ",
+  n_distinct(effort_by_eu_year$eu_rnpa), " across all years; ",
+  nrow(effort_2024_by_eu), " in 2024"
+)
+```
+
+## Load catch and label VMS vs non-VMS (per year)
+
+An economic unit is **VMS-linked** only in years where it appears in
+`effort_by_eu_year`.
+
+```{r load_catch_and_label_vms}
+catch_by_group <- read_csv(CATCH_FILE, show_col_types = FALSE)
+
+economic_units_with_vms <- effort_by_eu_year %>%
+  distinct(year, eu_rnpa) %>%
+  mutate(has_vms_effort = TRUE)
+
+catch_by_group <- catch_by_group %>%
+  left_join(economic_units_with_vms, by = c("year", "eu_rnpa")) %>%
+  mutate(
+    has_vms_effort = !is.na(has_vms_effort),
+    vms_record = if_else(has_vms_effort, "yes", "no")
+  ) %>%
+  select(-has_vms_effort) %>%
+  group_by(eu_rnpa, year) %>%
+  mutate(total_eu_catch_kg = sum(total_catch_kg)) %>%
+  ungroup()
+
+# Quick check: catch economic units missing from 2024 VMS effort
+catch_eu_missing_from_vms_2024 <- setdiff(
+  catch_by_group %>% filter(year == 2024) %>% pull(eu_rnpa),
+  effort_2024_by_eu %>% pull(eu_rnpa)
+)
+
+message(
+  "Catch economic units in 2024 without VMS match: ",
+  length(catch_eu_missing_from_vms_2024)
+)
+```
+
+## VMS vs non-VMS fleet structure
+
+```{r vms_vs_nonvms_summary}
+fleet_summary_by_year <- catch_by_group %>%
+  group_by(year, vms_record) %>%
+  summarize(
+    n_economic_units = n_distinct(eu_rnpa),
+    total_catch_kg = sum(total_catch_kg),
+    .groups = "drop"
+  ) %>%
+  group_by(year) %>%
+  mutate(
+    share_of_units = n_economic_units / sum(n_economic_units),
+    share_of_catch = total_catch_kg / sum(total_catch_kg)
+  ) %>%
+  ungroup()
+
+summary(lm(data=filter(fleet_summary_by_year, vms_record=="no"), share_of_units~year))
+
+summary(lm(data=filter(fleet_summary_by_year, vms_record=="yes"), n_economic_units~year))
+summary(lm(data=filter(fleet_summary_by_year, vms_record=="no"), n_economic_units~year))
+summary(lm(data=filter(fleet_summary_by_year, vms_record=="yes"), total_catch_kg~year))
+summary(lm(data=filter(fleet_summary_by_year, vms_record=="no"), total_catch_kg~year))
+
+ggplot(fleet_summary_by_year, aes(year, share_of_units, color = vms_record)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_color_manual(
+    values = c("yes" = "#2c7fb8", "no" = "#d95f0e"),
+    name = "VMS-linked"
+  ) +
+  labs(
+    title = "Share of economic units with vs without VMS effort",
+    x = "Year",
+    y = "Share of economic units"
+  ) +
+  theme_effort_plot()
+
+ggplot(fleet_summary_by_year, aes(year, share_of_catch, color = vms_record)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_color_manual(
+    values = c("yes" = "#2c7fb8", "no" = "#d95f0e"),
+    name = "VMS-linked"
+  ) +
+  labs(
+    title = "Share of catch from VMS-linked vs non-VMS economic units",
+    x = "Year",
+    y = "Share of catch"
+  ) +
+  theme_effort_plot()
+
+fleet_summary_by_year
+```
+
+## Non-VMS sector trends
+
+```{r nonvms_trends}
+non_vms_summary_by_year <- catch_by_group %>%
+  filter(vms_record == "no") %>%
+  group_by(year) %>%
+  summarize(
+    n_economic_units = n_distinct(eu_rnpa),
+    total_catch_kg = sum(total_catch_kg),
+    .groups = "drop"
+  ) %>%
+  mutate(catch_kg_per_eu = total_catch_kg / n_economic_units)
+
+ggplot(non_vms_summary_by_year, aes(year, catch_kg_per_eu)) +
+  geom_line(linewidth = 0.9, color = "#d95f0e") +
+  geom_point(size = 2.5, color = "#d95f0e") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "Catch per non-VMS economic unit",
+    x = "Year",
+    y = "Catch (kg per economic unit)"
+  ) +
+  theme_effort_plot()
+
+ggplot(non_vms_summary_by_year, aes(year, n_economic_units)) +
+  geom_line(linewidth = 0.9, color = "#d95f0e") +
+  geom_point(size = 2.5, color = "#d95f0e") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "Number of non-VMS economic units",
+    x = "Year",
+    y = "Economic units"
+  ) +
+  theme_effort_plot()
+
+summary(lm(total_catch_kg ~ year, data = non_vms_summary_by_year))
+summary(lm(n_economic_units ~ year, data = non_vms_summary_by_year))
+summary(lm(catch_kg_per_eu ~ year, data = non_vms_summary_by_year))
+
+non_vms_summary_by_year
+```
+
+Adding in taxonmic grouping
+(note might need to weight the unit by proportion of catch)
+```{r}
+
+non_vms_summary_by_year <- catch_by_group %>%
+  filter(vms_record == "no") %>%
+  group_by(year, Major_Functional_Group) %>%
+  summarize(
+    n_economic_units = n_distinct(eu_rnpa),
+    total_catch_kg = sum(total_catch_kg),
+    .groups = "drop"
+  ) %>%
+  mutate(catch_kg_per_eu = total_catch_kg / n_economic_units)
+
+
+```
+
+
+## Fishing effort by major taxonomic group with VMS data
+
+For each economic unit with both catch and VMS effort:
+
+1. Split VMS hours across taxonomic groups in proportion to catch.
+2. Sum by year and collapsed taxonomic group.
+3. Compute catch per hour.
+
+```{r effort_by_major_taxonomic_group}
+summarize_one_year_by_taxonomic_group <- function(year) {
+  vms_effort <- effort_by_eu_year %>%
+    filter(year == {{ year }}) %>%
+    transmute(year, eu_rnpa, hours = hours_capped)
+
+  catch_this_year <- catch_by_group %>%
+    filter(year == {{ year }})
+
+  if (nrow(vms_effort) == 0 || nrow(catch_this_year) == 0) {
+    return(NULL)
+  }
+
+  vms_effort %>%
+    inner_join(catch_this_year, by = c("year", "eu_rnpa")) %>%
+    mutate(
+      taxonomic_group = collapse_to_main_taxonomic_groups(Major_Functional_Group),
+      catch_share = total_catch_kg / total_eu_catch_kg,
+      hours_for_group = hours * catch_share
+    ) %>%
+    group_by(year, taxonomic_group) %>%
+    summarize(
+      hours_effort = sum(hours_for_group, na.rm = TRUE),
+      catch_kg = sum(total_catch_kg, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      catch_kg_per_hour = if_else(hours_effort > 0, catch_kg / hours_effort, NA_real_)
+    )
+}
+
+years_with_catch_and_vms <- sort(
+  intersect(unique(catch_by_group$year), unique(effort_by_eu_year$year))
+)
+
+message(
+  "Summarizing taxonomic groups for years: ",
+  paste(years_with_catch_and_vms, collapse = ", ")
+)
+
+effort_by_taxonomic_group <- map_dfr(
+  years_with_catch_and_vms,
+  summarize_one_year_by_taxonomic_group
+) %>%
+  rename(major_taxonomic_group = taxonomic_group) %>%
+  arrange(year, major_taxonomic_group)
+
+dir.create(dirname(EFFORT_OUT), recursive = TRUE, showWarnings = FALSE)
+write_csv(effort_by_taxonomic_group, EFFORT_OUT)
+
+message("Wrote ", nrow(effort_by_taxonomic_group), " rows → ", EFFORT_OUT)
+
+effort_by_taxonomic_group
+```
+
+## Catch per hour by taxonomic group
+
+```{r plot_catch_per_hour, fig.height=4, fig.width=7}
+dir.create(FIGURES_DIR, showWarnings = FALSE, recursive = TRUE)
+
+all_taxonomic_groups <- effort_by_taxonomic_group %>%
+  distinct(major_taxonomic_group) %>%
+  arrange(major_taxonomic_group) %>%
+  pull(major_taxonomic_group)
+
+for (group_name in all_taxonomic_groups) {
+  group_data <- effort_by_taxonomic_group %>%
+    filter(major_taxonomic_group == group_name)
+
+  catch_per_hour_plot <- ggplot(group_data, aes(year, catch_kg_per_hour)) +
+    geom_line(linewidth = 0.9, color = "steelblue") +
+    geom_point(size = 2.5, color = "steelblue") +
+    scale_x_continuous(breaks = scales::breaks_width(1)) +
+    scale_y_continuous(labels = scales::label_comma()) +
+    labs(
+      title = group_name,
+      subtitle = "Catch per VMS-allocated hour (kg/h)",
+      x = "Year",
+      y = "Catch (kg per hour)"
+    ) +
+    theme_effort_plot()
+
+  figure_path <- file.path(
+    FIGURES_DIR,
+    paste0("catch_kg_per_hour_", figure_slug(group_name), ".png")
+  )
+
+  ggsave(figure_path, catch_per_hour_plot, width = 7, height = 4, dpi = FIGURE_DPI, bg = "white")
+  message("Wrote figure → ", figure_path)
+  print(catch_per_hour_plot)
+}
+```
+
+## Catch and effort over time (five main groups)
+
+```{r plot_catch_and_effort, fig.height=8, fig.width=10}
+effort_main_groups <- effort_by_taxonomic_group %>%
+  filter(major_taxonomic_group %in% MAIN_TAXONOMIC_GROUPS) %>%
+  mutate(
+    major_taxonomic_group = factor(major_taxonomic_group, levels = MAIN_TAXONOMIC_GROUPS),
+    catch_tonnes = catch_kg / 1000
+  )
+
+for (group_name in MAIN_TAXONOMIC_GROUPS) {
+  group_data <- effort_main_groups %>%
+    filter(major_taxonomic_group == group_name)
+
+  catch_plot <- ggplot(group_data, aes(year, catch_tonnes)) +
+    geom_line(linewidth = 0.9, color = "#2c7fb8") +
+    geom_point(size = 2.5, color = "#2c7fb8") +
+    scale_x_continuous(breaks = scales::breaks_width(1)) +
+    scale_y_continuous(labels = scales::label_comma()) +
+    labs(title = group_name, x = NULL, y = "Catch (tonnes)") +
+    theme_effort_plot()
+
+  effort_plot <- ggplot(group_data, aes(year, hours_effort)) +
+    geom_line(linewidth = 0.9, color = "#d95f0e") +
+    geom_point(size = 2.5, color = "#d95f0e") +
+    scale_x_continuous(breaks = scales::breaks_width(1)) +
+    scale_y_continuous(labels = scales::label_comma()) +
+    labs(x = "Year", y = "VMS effort (hours)") +
+    theme_effort_plot()
+
+  combined_plot <- catch_plot / effort_plot
+
+  figure_path <- file.path(
+    FIGURES_DIR,
+    paste0("catch_and_effort_", figure_slug(group_name), ".png")
+  )
+
+  ggsave(figure_path, combined_plot, width = 7, height = 5, dpi = FIGURE_DPI, bg = "white")
+  message("Wrote figure → ", figure_path)
+  print(combined_plot)
+}
+```
+
+```{r plot_catch_and_effort_overview, fig.height=6, fig.width=12}
+effort_main_long <- effort_main_groups %>%
+  select(year, major_taxonomic_group, catch_tonnes, hours_effort) %>%
+  pivot_longer(
+    cols = c(catch_tonnes, hours_effort),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  mutate(
+    metric = recode(
+      metric,
+      catch_tonnes = "Catch (tonnes)",
+      hours_effort = "VMS effort (hours)"
+    )
+  )
+
+overview_plot <- ggplot(effort_main_long, aes(year, value, group = 1)) +
+  geom_line(linewidth = 0.85) +
+  geom_point(size = 2) +
+  facet_grid(metric ~ major_taxonomic_group, scales = "free_y") +
+  scale_x_continuous(breaks = scales::breaks_width(1)) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "Catch and VMS effort by major taxonomic group",
+    subtitle = "Five main groups (2018–2024)",
+    x = "Year",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8),
+    strip.text = element_text(size = 8)
+  )
+
+overview_path <- file.path(FIGURES_DIR, "catch_and_effort_main_groups_overview.png")
+ggsave(overview_path, overview_plot, width = 12, height = 6, dpi = FIGURE_DPI, bg = "white")
+message("Wrote figure → ", overview_path)
+
+overview_plot
+```

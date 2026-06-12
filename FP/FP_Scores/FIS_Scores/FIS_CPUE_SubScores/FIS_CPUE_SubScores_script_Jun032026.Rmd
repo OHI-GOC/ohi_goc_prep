@@ -1,0 +1,681 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+# CPUE Estimates per Major_Functional_Group ------------------------------
+
+# STEP 1: Interrogate the economic unit (eu_rnpa) and vessel (vessel_name) columns. ------------------------------
+
+```{r Load in dataframe as needed}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 vars.
+
+dim(GOC_MarineLandings0)
+# 3246583 obs., 58 vars.
+
+# NOTE TO SELF: This file path will change when I create the "fisheries only" dataframe. - June 1 2026
+# And when I patch any remaining species, genus, family, or sector adjustments - June 3 2026
+
+table(GOC_MarineLandings0$GOC_Include_Exclude)
+```
+
+```{r Filter out sectors of interest}
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified" , 
+                          "marine: small-scale capture", 
+                          "marine: large-scale capture")
+
+GOC_MarineFishery_Landings<- GOC_MarineLandings0 %>% 
+  filter(sector_estimate_draft %in% MarineFishery_Sectors)
+
+dim(GOC_MarineFishery_Landings)
+# 3039221 obs., 58 vars.
+
+range(GOC_MarineFishery_Landings$year)
+```
+
+```{r First look}
+length(unique(GOC_MarineFishery_Landings$eu_name))
+# 4774 unique economic units in the dataframe.
+
+length(unique(GOC_MarineFishery_Landings$eu_rnpa))
+# 4435 unique permits given to economic units in the dataframe.
+
+length(unique(GOC_MarineFishery_Landings$vessel_name))
+# 1981 unique vessel names in the dataframe.
+
+length(unique(GOC_MarineFishery_Landings$vessel_rnpa))
+# 1974 unique vessel permit numbers in the dataframe.
+
+# So, for the most part, each vessel is registered to a unique vessel permit.
+
+# How many of the 3229063 total observations have no economic unit name associated with them? Only ~2% of all records.
+GOC_MarineFishery_Landings %>%
+  count(eu_name == "NO DISPONIBLE")
+# 62343 / 3039221
+
+# How many of all observations have no vessel name associated with them? About 50% of all records.
+GOC_MarineFishery_Landings %>%
+  count(vessel_rnpa == "00000000")
+# 1530584 / 3039221
+
+# This tells us that about half of all records have no information about the fishers' vessel, but nearly all (98%) have permit info.
+```
+
+```{r Testing some ideas}
+table(GOC_MarineFishery_Landings$reported_aquaculture_production)
+table(GOC_MarineFishery_Landings$est_aquaculture_production)
+# Potentially a small number of aquaculture records hiding in here (>0.03%)...
+
+# Look into a specific unit:
+subset<- GOC_MarineFishery_Landings %>%
+  filter(eu_name == "SCPP DE SERV LA CAIMANERA SC DE RL")
+
+table(subset$reported_aquaculture_production)
+# Notice that some of these economic units say nothing about aquaculture, whereas others do. 
+
+# Look into another specific unit:
+subset2<- GOC_MarineFishery_Landings %>%
+  filter(eu_name == "SCPP PUNTA TIBURON, S DE RL DE CV")
+
+table(subset2$reported_aquaculture_production)
+# It looks like this particular economic unit (possibly a cooperative?) does not work in aquaculture. 
+
+# Keep workspace clean:
+rm(subset, subset2)
+```
+
+```{r Let's plot missing data over time}
+# Summarize missing vessel IDs over time
+vessel_missing_over_time <- GOC_MarineFishery_Landings %>%
+  mutate(missing_vessel = is.na(vessel_rnpa) | vessel_rnpa == "00000000" | vessel_rnpa == "0000000_") %>%
+  group_by(year) %>%   # Replace 'year' with your time column
+  summarise(
+    total = n(),
+    missing_count = sum(missing_vessel),
+    missing_percent = 100 * missing_count / total
+  )
+
+# Plot missing vessel prevalence over time
+ggplot(vessel_missing_over_time, aes(x = year, y = missing_percent)) +
+  geom_line(color = "orange", size = 1.2) +
+  geom_point(color = "tomato", size = 2) +
+  labs(
+    title = "Prevalence of Missing Vessel IDs Over Time",
+    x = "Year",
+    y = "Percentage of Records Missing Vessel ID"
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +
+  theme_bw()
+
+# Vessel data is missing throughout the time series.
+
+# Plot the opposite: what's not missing?
+vessel_present_over_time <- GOC_MarineFishery_Landings %>%
+  mutate(missing_vessel = is.na(vessel_rnpa) | vessel_rnpa == "00000000" | vessel_rnpa == "0000000_") %>%
+  group_by(year) %>%
+  summarise(
+    total = n(),
+    present_count = sum(!missing_vessel),
+    present_percent = 100 * present_count / total
+  )
+
+ggplot(vessel_present_over_time, aes(x = year, y = present_percent)) +
+  geom_line(color = "steelblue", size = 1.2) +
+  geom_point(color = "navy", size = 2) +
+  
+  labs(
+    title = "Proportion of Records WITH Vessel IDs Over Time",
+    x = "Year",
+    y = "Percentage of Records with Vessel ID"
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +
+  theme_bw()
+
+# Plot the opposite: what's not missing?
+eu_present_over_time <- GOC_MarineFishery_Landings %>%
+  mutate(missing_eu = eu_name == "NO DISPONIBLE") %>%
+  group_by(year) %>%
+  summarise(
+    total = n(),
+    present_count = sum(!missing_eu),
+    present_percent = 100 * present_count / total
+  )
+
+ggplot(eu_present_over_time, aes(x = year, y = present_percent)) +
+  geom_line(color = "lavender", size = 1.2) +
+  geom_point(color = "orchid", size = 2) +
+  
+  labs(
+    title = "Proportion of Records WITH EU Details Over Time",
+    x = "Year",
+    y = "Percentage of Records with EU details"
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +
+  theme_bw()
+```
+
+```{r Investigate vessel names since 2018}
+GOC_CPUE_Landings<- GOC_MarineFishery_Landings %>%
+  filter(year >= 2018)
+# 1123506 obs., 57 vars.
+
+length(unique(GOC_CPUE_Landings$vessel_name))
+# 1167 unique vessel names in the dataframe.
+
+length(unique(GOC_CPUE_Landings$vessel_rnpa))
+# 1148 unique vessel permit numbers in the dataframe.
+# So, for the most part, each vessel is registered to a unique vessel permit.
+
+# How many of the 1104876 total observations have no economic unit name associated with them? Essentially 0% of records.
+GOC_CPUE_Landings %>%
+  count(eu_name == "NO DISPONIBLE")
+# 4 / 1123506
+
+# How many of all observations have no vessel PERMIT associated with them? 87% of all records.
+GOC_CPUE_Landings %>%
+  count(vessel_rnpa == "00000000" | vessel_rnpa == "0000000_" | is.na(vessel_rnpa))
+# 977629 / 1123506
+
+# How many of all observations have no vessel NAME associated with them? About 87% of all records.
+# Okay, so we know vessel name alone won't be a good estimator for CPUE...
+GOC_CPUE_Landings %>%
+  count(is.na(vessel_name))
+# 977629 / 1123506
+
+# Take a look at a random assortment of rnpas versus names to understand what's missing and what's not:
+names_missing_slice <- GOC_CPUE_Landings %>%
+  filter(is.na(vessel_name)) %>%
+  select(vessel_rnpa, vessel_name, eu_name, eu_rnpa) %>%
+  distinct() %>%
+  slice_sample(n = 200)
+# This shows that records missing vessel details do still have unique eu names.
+```
+
+```{r Testing some ideas}
+colnames(GOC_CPUE_Landings)
+
+# Case studies (eu_rnpa from names_missing_slice)
+subset <- GOC_CPUE_Landings %>%
+  filter(eu_rnpa == "2607603921")
+
+length(unique(subset$vessel_name))
+# 1 vessel registered to this economic unit permit
+
+subset2<- GOC_CPUE_Landings %>%
+  filter(eu_rnpa =="2611000700")
+
+length(unique(subset2$vessel_name))
+# 1 vessel name registered to this economic unit permit
+
+length(unique(subset2$eu_name))
+# 1 name for this economic unit
+
+unique(subset2$vessel_rnpa)
+# 1 vessel permit for this economic unit, 0000000_
+
+range(subset2$year)
+# From 2018 to 2025
+
+unique(subset2$recorded_taxa_name_clean)
+# Across 34 taxa
+
+table(subset2$sector_estimate_reported)
+# All small-scale fisheries, so at least the same eu doesn't appear to be switching between sector types.
+```
+
+
+# STEP 2: Esitmate CPUE per economic unit 2018-2024 
+```{r Estimate CPUE per economic unit 2018-2024}
+# Let's look through unit Economic Units. All records have a non-NA economic unit (at least since 2018)
+EconomicUnits <- GOC_MarineLandings0 %>%
+  distinct(eu_rnpa)    # Keeps unique values as a one-column tibble
+# 2773 obs.
+
+# Estimate Catch per economic unit 2018-2024: summarize weight_kg_corrected by eu_rnpa per year
+CatchPerEconomicUnit_summary <- GOC_CPUE_Landings %>%
+  filter(year >= 2018 & year <= 2024) %>%   # filter the years
+  group_by(year, eu_rnpa) %>%              # group by year and economic unit
+  summarize(
+    total_catch_kg = sum(weight_kg_corrected, na.rm = TRUE)  # sum catch, ignore NAs
+  ) %>%
+  ungroup()  # remove grouping after summarizing
+# 13163 obs., 3 vars.
+```
+
+```{r Pull out the eu_rnpas that are consistently present in all years 2018-2025}
+# Using these eu_rnpas only, estimate the total catch of Major_Taxa_Group divided by the total eu_rnpa per year
+
+# Step 1: Identify eu_rnpa present in all years
+ConsistentEconomicUnits <- GOC_CPUE_Landings %>%
+  filter(year >= 2018 & year <= 2025) %>%
+  group_by(eu_rnpa) %>%
+  summarize(years_present = n_distinct(year), .groups = "drop") %>%
+  filter(years_present == 8) %>%    # 2018–2025 = 8 years
+  pull(eu_rnpa)                     # get vector of eu_rnpa
+# 1003 eu.rnpas are consistently present in all years 2018-2025
+
+# Step 2: Filter data to only include these eu_rnpa
+GOC_CPUE_Landings <- GOC_CPUE_Landings %>%
+  filter(year >= 2018 & year <= 2025) %>%
+  filter(eu_rnpa %in% ConsistentEconomicUnits)
+# 860336 obs., 57 vars. (down -263170 obs.)
+
+# SANITY CHECK: Do all landings have a Major_Functional_Group assigned? Yes!
+sum(is.na(GOC_CPUE_Landings$Major_Functional_Group))
+```
+
+```{r Summarize catch per EU by Major_Functional_Group per year}
+colnames(GOC_CPUE_Landings)
+
+CPUE_summary <- GOC_CPUE_Landings %>%
+  group_by(year, Major_Functional_Group) %>%
+  summarize(
+    total_catch_mt = sum(weight_kg_corrected, na.rm = TRUE)/1000,
+    n_eu = n_distinct(eu_rnpa),                    # number of economic units that year
+    catch.mt_per_eu = total_catch_mt / n_eu          # divide total catch by number of units
+  ) %>%
+  ungroup()
+
+# Looking promising! Let's plot it...
+```
+
+```{r Plot CPUE for each Major_Functional_Group}
+# PLOT FOR ALL GROUPS, excluding Small Pelagics:
+# Remove NAs or 'unknown' if you don’t want them cluttering the plot
+# First compute overall yearly mean (across all groups)
+
+# First we need mean CPUE over years per group (2018-2024)
+CPUE_mean_df <- CPUE_summary %>%
+  filter(year > 2017 & year < 2025) %>%
+  group_by(Major_Functional_Group) %>%
+  summarise(mean_cpue = mean(catch.mt_per_eu), 
+            .groups = "drop")
+
+CPUE_perEU_plot <- 
+  
+  CPUE_summary %>%
+  filter(year < 2025) %>%
+  
+  ggplot(aes(x = year, y = catch.mt_per_eu)) +
+  
+  # Group-specific lines
+  geom_line(aes(color = Major_Functional_Group), size = 1.1) +
+  geom_point(aes(color = Major_Functional_Group), size = 2) +
+  
+  facet_wrap(~ Major_Functional_Group, scales = "free_y") +
+  
+  geom_hline(
+  data = CPUE_mean_df,
+  aes(yintercept = mean_cpue, group = Major_Functional_Group),
+  color = "grey40",
+  linetype = "dashed",
+  linewidth = 0.8) +
+  
+  labs(
+    title = "CPUE per Economic Unit by Functional Group (2018-2024)",
+    x = "Year",
+    y = "Catch per Economic Unit (mt)"
+  ) +
+  
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+CPUE_perEU_plot
+```
+
+```{r Save CPUE_perEU_plot}
+# Save the plot as a high-resolution PNG
+ggsave(
+  filename = "/home/ferrer/ohi_goc_prep/FP/CONAPESCA_CleanUp/CPUE_perEU_plot_Apr022026.png",
+  plot = CPUE_perEU_plot,
+  width = 10,       # width in inches
+  height = 6,       # height in inches
+  dpi = 300         # resolution
+)
+```
+
+# STEP 2: Estimate CPUE now and over a "historic" baseline
+```{r Establish what is the "historic" baseline?}
+HistoricBaseline_low= 2018
+HistoricBaseline_high= 2022
+
+# It was previously 2003 to 2013 (December 2025), but now I will make it 2018-2022 to be consistent with the Carta baseline.
+```
+
+```{r Estimate CPUE for each Major Functional Group per region per year versus "historic" baseline}
+# Turn off scientific notation:
+options(scipen = 999)
+
+colnames(CPUE_summary)
+
+# Calculate CPUE values (at the group-level) over the "historic" baseline period defined above:
+CPUE_baseline <- CPUE_summary %>%
+  filter(year >= HistoricBaseline_low, year <= HistoricBaseline_high) %>%
+  group_by(Major_Functional_Group) %>%
+  summarise(
+    CPUE_baseline_2018.2024 = mean(catch.mt_per_eu, na.rm = TRUE),
+    n_eu_baseline = sum(n_eu, na.rm = TRUE),
+    n_years_baseline = n_distinct(year),
+    .groups = "drop"
+  )
+
+
+# Calculate CPUE values (at the group-level) from 2018 to 2024
+# CPUE_ <- CPUE_summary %>%
+#   filter(year >= 2018 & year <= 2024) %>%
+#   group_by(year, Major_Functional_Group) %>%
+#   summarise(
+#     CPUE_current = catch.mt_per_eu,
+#     n_eu = sum(n_eu, na.rm = TRUE),
+#     .groups = "drop"
+#   )
+```
+
+```{r Merge baseline to present}
+options(scipen = 999)
+
+# Merge CPUE_baseline to CPUE_recent:
+colnames(CPUE_summary)
+
+CPUE_estimates <- CPUE_summary %>%
+  left_join(CPUE_baseline,
+            by = c("Major_Functional_Group")) %>%
+  mutate(
+    CPUE_score = catch.mt_per_eu / CPUE_baseline_2018.2024
+  ) %>%
+  filter(year<=2024)
+
+# Cap CPUE_score at a max of 1:
+CPUE_estimates <- CPUE_estimates %>%
+  mutate(
+    CPUE_score_capped = if_else(
+      CPUE_score > 1,
+      1,
+      CPUE_score
+    )
+  )
+```
+
+```{r Add a GOC region column}
+CPUE_estimates$region<- c("GOC")
+
+CPUE_estimates<- CPUE_estimates %>%
+  relocate(region, .before= year)
+```
+
+
+# SAVE the CPUE_estimates dataframe:
+```{r Save this CPUE data table}
+# write.csv(CPUE_estimates, 
+# "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_CPUE_SubScores/CPUEs_Compiled_df_Jun092026.csv", 
+# row.names = FALSE)
+```
+
+
+
+# STEP 1: Load in and summarize GOC_MarineLandings0
+```{r Load in GOC_MarineLandings0 as necessary}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+# NOTE TO SELF: This source file may change in later Summer / Fall run. - EMF, June 4 2026
+```
+
+# **DECISION POINT: Selecting which sectors to include**
+```{r Select Sectors_of_Interest}
+table(GOC_MarineLandings0$sector_estimate_draft)
+
+# SANITY CHECK: Which species are included in the freshwater or marine sector?
+TEST<- GOC_MarineLandings0 %>%
+  filter(sector_estimate_draft== "freshwater or marine: fishery sector yet to be classified")
+
+table(TEST$recorded_taxa_group)
+# Species like Mojarra (the overwhelming majority of catch), trout, and catfish, which can move from freshwater to marine systems and are a bit ambiguous in terms of where they can be caught.
+
+
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
+                          "marine: small-scale capture",
+                          "marine: large-scale capture")
+  
+PossibleMarineFishery_Sectors<- c("freshwater or marine: large-scale capture",
+                          "freshwater or marine: small-scale capture",
+                          "freshwater or marine: fishery sector yet to be classified")
+
+GOC_MarineFisheryLandings0<- GOC_MarineLandings0 %>%
+  filter(sector_estimate_draft %in% c(MarineFishery_Sectors, PossibleMarineFishery_Sectors))
+
+# 3137044 obs., 58 var.
+```
+
+```{r Clean up names of GOC_MarineFisheryLandings}
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings0 %>%
+  mutate(
+    OHI_region_est = clean_names_lowercase(OHI_region_est),
+    estimated_genus_name = clean_names_lowercase(estimated_genus_name),
+    Major_Functional_Group = clean_names_lowercase(Major_Functional_Group)
+  )
+
+# 3137044 obs., 58 var.
+```
+
+
+# STEP 1: Generate GOC_Groups_summary ------------------------------
+
+```{r Generate GOC_Groups_summary}
+colnames(GOC_MarineFisheryLandings)
+
+GOC_Groups_summary<- GOC_MarineFisheryLandings %>%
+  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+  summarize(
+    total_weight_mt= sum(weight_kg_corrected, na.rm = TRUE) / 1000,
+    total_value_peso= sum(value, na.rm = TRUE)
+  )
+# 2779 obs.
+```
+
+```{r How much catch is ungrouped unknown or not assigned to a region between 2018 and 2024 for CPUE?}
+table(GOC_Groups_summary$Major_Functional_Group)
+
+GOC_Groups_summary %>%
+  filter(year >= 2018 & year <= 2024) %>%
+  mutate(
+    in_filter = is.na(Major_Functional_Group) |
+                Major_Functional_Group == "unknown" |
+                is.na(OHI_region_est)
+  ) %>%
+  group_by(year) %>%
+  summarise(
+    total_mass_mt = sum(total_weight_mt, na.rm = TRUE),
+    mass_in_filter = sum(total_weight_mt[in_filter], na.rm = TRUE),
+    mass_not_in_filter = sum(total_weight_mt[!in_filter], na.rm = TRUE),
+    percent_unaccounted = (mass_in_filter/total_mass_mt)*100
+  )
+
+# Less than 1% unaccounted for by CPUE in any given year.
+```
+
+# STEP 4: Calculate GEOMETRIC MEAN of stock landings * CPUE ------------------------------
+```{r Load in CPUE data as necessary}
+CPUE_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_CPUE_Scores/FIS_CPUE_Scores_Jun032026.csv")
+# 101 obs., 11 vars.
+
+# Winnow down and clean this dataframe:
+colnames(CPUE_Scores0)
+
+CPUE_Scores<- CPUE_Scores0 %>%
+  select(year, Major_Functional_Group, CPUE_score, CPUE_score_capped) %>%
+  filter(year >= StudyPeriod_low & year <= StudyPeriod_high) %>%
+  mutate(
+    Major_Functional_Group = clean_names_lowercase(Major_Functional_Group)
+    )
+# 101 obs., 6 vars.
+```
+
+```{r Weights and geometric mean}
+# Calculate the proportion of catch each "Stock" (i.e. genus) contributed to its regional total during that 5-year reference period.
+colnames(CPUE_Scores)
+
+StudyPeriod_low= 2018
+StudyPeriod_high= 2024
+
+GroupWeights_data <- GOC_Groups_summary %>%
+  filter(year >= StudyPeriod_low & year <= StudyPeriod_high) %>%
+  
+  group_by(Major_Functional_Group, OHI_region_est) %>%
+  # total tonnes across all years for each stock and region during the study period 2018-2024
+  mutate(GroupCatch_2018.24 = sum(total_weight_mt)) %>% 
+
+  ungroup() %>%
+  
+  group_by(OHI_region_est) %>%
+  mutate(TotalCatch_2018.24 = sum(total_weight_mt, na.rm = TRUE)) %>% # total tonnes catch across all years and stocks for each region
+  ungroup() %>%
+  
+  mutate(wprop_2018.24 = GroupCatch_2018.24 / TotalCatch_2018.24) %>% # proportion of catch each stock contributed to the total catch
+  distinct(Major_Functional_Group, OHI_region_est, wprop_2018.24)
+
+
+# SANITY CHECK: Do the weights add up to 1?
+TEST<- GroupWeights_data %>%
+  group_by(OHI_region_est) %>%
+  summarize(sum_w = sum(wprop_2018.24, na.rm= TRUE))
+# Yup, looks good!
+```
+
+```{r Add weights data to Stock Status df:}
+colnames(GOC_Groups_summary)
+colnames(GroupWeights_data)
+colnames(CPUE_Scores)
+
+CPUE_Scores_GeoMean0 <- left_join(GOC_Groups_summary %>% filter(year>= StudyPeriod_low & year<= StudyPeriod_high),
+                                   GroupWeights_data,
+                                   by = c("Major_Functional_Group", "OHI_region_est"))
+# 818 obs., 6 vars.
+
+CPUE_Scores_GeoMean00 <- left_join(CPUE_Scores_GeoMean0,
+                                   CPUE_Scores,
+                                   by = c("year", "Major_Functional_Group"))
+# 818 obs., 8 vars.
+
+# This is the geometric mean part:
+CPUE_Scores_GeoMean <- CPUE_Scores_GeoMean00 %>%
+  group_by(OHI_region_est, year) %>%
+  summarize(
+    GeoMean_CPUE = prod(CPUE_score_capped ^ wprop_2018.24, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    CPUE_SubScore= GeoMean_CPUE * 100
+  )
+```
+
+# >> COMPLETE: CPUE_SubScores!
+
+# PLOT: CPUE Sub-Score (Geometric Mean) over time
+```{r Plot CPUE Scores over time}
+Region_colors <- c(
+  "royalblue",
+  "skyblue",
+  "orange",
+  "sienna1",
+  "plum",
+  "purple4",
+  "aquamarine3",
+  "gold2",
+  "tomato"
+)
+
+Regions_of_Interest <- c(
+  "region_1", "region_2", "region_3",
+  "region_4", "region_5", "region_6",
+  "region_7", "region_8", "region_9"
+)
+
+CPUE_GeoMean_overTime <- CPUE_Scores_GeoMean %>%
+  filter(OHI_region_est %in% Regions_of_Interest) %>%
+  ggplot(aes(
+    x = year,
+    y = CPUE_SubScore,
+    color = OHI_region_est
+  )) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ OHI_region_est, scales = "fixed") +
+  
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  labs(
+    title = expression(bold("FIS: Regional " * bolditalic("CPUE") * " Sub-Scores (Geometric Mean)")),
+    y = "CPUE Scores (CPUE_present : CPUE_baseline capped at 1)",
+    x = "Year"
+  ) +
+  ylim(0, 101) +
+  
+  theme_bw(base_size = 14) +
+  
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold")
+    # plot.title = element_text(size = 18, face = "bold")
+  )
+
+CPUE_GeoMean_overTime
+```
+
+```{r Save this plot}
+# Save as PNG
+ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Visualizations_Jun2026/CPUE_SubScores_plot_Jun042026.png"),
+    plot = CPUE_GeoMean_overTime,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+```
+
+# FINAL STEP: SAVE the CPUE_GeoMean_overTime dataframe:
+```{r Save this CPUE data table}
+# write.csv(CPUE_GeoMean_overTime, 
+# "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_CPUE_SubScores/FIS_CPUE_SubScores_df_Jun092026.csv", 
+# row.names = FALSE)
+```

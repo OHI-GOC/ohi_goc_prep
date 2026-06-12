@@ -1,0 +1,528 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+## clean_names_lowercase function
+```{r Load clean_names_lowercase function}
+# Takes text and standardizes it, which we will need for merging later on:
+
+clean_names_lowercase <- function(x) {
+
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+
+  x %>%
+    tolower() %>%
+    trimws()
+}
+```
+
+## lowercase_function function
+```{r lowercase_function}
+# Turns all entries lower-case
+lowercase_function<- function(x){
+  if(is.character(x)){
+    tolower(x)
+  } else if (is.factor(x)){
+    tolower(as.character(x))
+  } else {
+    x
+  }
+}
+```
+
+
+# STEP 2: Load and merge the various FIS scores ------------------------------
+
+```{r Load the indicator dataframes as necessary}
+RAM_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_RAM_Scores/FIS_RAM_Scores_Jun032026.csv")
+# 216 obs., 14 vars.
+
+Carta_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Carta_Scores/FIS_CartaScores_Jun052026.csv")
+# 1480 obs., 17 vars.
+
+CMSY_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_CMSY_Scores/FIS_CMSY_Scores_Jun012026.csv")
+# 1569 obs., 11 vars.
+```
+
+## RAM Data
+```{r Augment the RAM dataframe by collapsing all stock info into one score per genus per year}
+colnames(RAM_Scores0)
+
+RAM_Scores <- RAM_Scores0 %>%
+  group_by(year, Genus) %>%
+  summarize(
+    RAM_BBmsy = mean(RAM_BBmsy_final, na.rm = TRUE),
+    n_Formal_Assessments = sum(!is.na(RAM_BBmsy_numeric)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    RAM_provenance = case_when(
+      n_Formal_Assessments == 0 ~ "value was interpolated based on formal assessment from other years (RAM or other*)",
+      n_Formal_Assessments == 1 ~ "value was sourced from 1 formal assessment (RAM or other*)",
+      n_Formal_Assessments >= 2 ~ "value was sourced from 2 or more formal assessments (RAM or other*)"
+    )
+  )
+# 168 obs., 5 var.
+# The total number of observations is reduced because we are meaning across species to the genus level.
+
+# lowercase to make sure matching works
+RAM_Scores <- RAM_Scores %>%
+  mutate(estimated_genus_name = tolower(Genus),
+         Stock_Status_RAM= RAM_BBmsy) %>%
+  select(-c(Genus, RAM_BBmsy))
+# 168 obs., 6 var. 
+
+# Add 0 helpful columns for merging:
+# RAM_Scores$StockStatus_source<- c("formal assessment (RAM or other*)")
+# RAM_Scores$StockStatus_est.level<- c("genus level, across the GOC")
+# RAM_Scores$OHI_region_est<- c("GOC")
+```
+
+```{r Rename the Stock_Status column in Carta_Scores}
+Carta_Scores<- Carta_Scores0 %>%
+  mutate(
+    Stock_Status_Carta= Stock_Status_final
+  ) %>%
+  select(-c(Stock_Status_final))
+
+# Add 0 helpful column for merging:
+# Carta_Scores$StockStatus_source<- c("Carta")
+# Carta_Scores$StockStatus_est.level<- c("genus-region level")
+```
+
+```{r Rename the Stock_Status column in Stock_Status_CMSY}
+CMSY_Scores<- CMSY_Scores0 %>%
+  mutate(
+    Stock_Status_CMSY= B.Bmsy
+  ) %>%
+  rename(year= yr)
+
+# Add 1 helpful columns for merging:
+# CMSY_Scores$StockStatus_source<- c("CMSY")
+# CMSY_Scores$StockStatus_est.level<- c("genus level, across the GOC")
+# CMSY_Scores$OHI_region_est<- c("GOC")
+CMSY_Scores$CMSY_provenance<- c("CMSY model run from May 28")
+```
+
+# Join dataframes together the long way:
+
+```{r Create a backbone to merge to and then add}
+# Join in RAM data, merge by year x genus:
+Stock_Statuses0 <- GOC_Stocks_summary %>%
+  left_join(RAM_Scores, by = c("year", "estimated_genus_name"))
+# 12696 obs.
+
+# Join in Carta data, merge is more specific by year x genus x region:
+colnames(Carta_Scores)
+
+Stock_Statuses00 <- Stock_Statuses0 %>%
+  left_join(Carta_Scores, by = c("year", "estimated_genus_name", "OHI_region_est"))
+# 12696 obs.
+
+# Join in CMSY data, merge is more specific by year x genus x region:
+colnames(CMSY_Scores)
+
+Stock_Statuses000 <- Stock_Statuses00 %>%
+  left_join(CMSY_Scores, by = c("year", "estimated_genus_name"))
+# 12696 obs., 34 varsity.
+```
+
+```{r Clean up this dataframe}
+colnames(Stock_Statuses000)
+
+Stock_Statuses<- Stock_Statuses000 %>%
+  select(year, Major_Functional_Group, estimated_genus_name, estimated_family_name,
+         OHI_region_est,
+         total_weight_mt, total_value_peso,
+         Stock_Status_RAM, Stock_Status_Carta, Stock_Status_CMSY,
+         Carta_provenance= carta_provenance, RAM_provenance
+         ) %>%
+  mutate(Stock_Status_RAM_capped = pmin(Stock_Status_RAM, 1),
+         Stock_Status_Carta_capped = pmin(Stock_Status_Carta, 1), 
+         Stock_Status_CMSY_capped = pmin(Stock_Status_CMSY, 1))
+```
+
+# **DECISION POINT: Pick 1 Stock Status**
+```{r Pick one StockStatus_final}
+# A hierarchy of which score to pick!
+Stock_Statuses <- Stock_Statuses %>%
+  mutate(
+    StockStatus_final = coalesce(
+      Stock_Status_RAM_capped,
+      Stock_Status_Carta_capped,
+      Stock_Status_CMSY_capped
+    ),
+    StockStatus_source = case_when(
+      !is.na(Stock_Status_RAM_capped)   ~ "RAM",
+      !is.na(Stock_Status_Carta_capped) ~ "Carta",
+      !is.na(Stock_Status_CMSY_capped)  ~ "CMSY",
+      TRUE ~ NA_character_
+    ),
+    StockStatus_est.level = case_when(
+      !is.na(Stock_Status_RAM_capped)   ~ "genus level",
+      !is.na(Stock_Status_Carta_capped) ~ "genus x region level",
+      !is.na(Stock_Status_CMSY_capped)  ~ "genus level",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Still some NAs in here. Let's proceed.
+```
+
+```{r How much is left unassigned at the stock level?}
+unique(Stock_Statuses$estimated_genus_name)
+# 196 unique genera in landings
+
+Stock_Statuses %>%
+  filter(year >= 2018 & year <= 2024) %>%
+  mutate(
+    in_filter = is.na(StockStatus_final) |
+                is.na(OHI_region_est)
+  ) %>%
+  group_by(year) %>%
+  summarise(
+    total_mass_mt = sum(total_weight_mt, na.rm = TRUE),
+    mass_in_filter = sum(total_weight_mt[in_filter], na.rm = TRUE),
+    mass_not_in_filter = sum(total_weight_mt[!in_filter], na.rm = TRUE),
+    percent_unaccounted = (mass_in_filter/total_mass_mt)*100
+  )
+
+# Less than ~32% of total biomass unaccounted for by Stock Status in any given year.
+# Estimates seem poorer in 2023 and 2024 (this is because genus estimates are poorer these years)...
+```
+
+```{r Save this dataframe as needed}
+write.csv(Stock_Statuses, 
+          "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/Stock_Statuses_Compiled_df_Jun072026.csv", 
+          row.names = FALSE)
+```
+
+# STEP 3: Calculate GEOMETRIC MEAN of stock landings * Stock_Status ------------------------------
+
+```{r Load in this dataframe as needed}
+Stock_Statuses<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/Stock_Statuses_Compiled_df_Jun072026.csv")
+```
+
+# STEP 1: Load in and summarize GOC_MarineLandings0
+```{r Load in GOC_MarineLandings0 as necessary}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+# NOTE TO SELF: This source file may change in later Summer / Fall run. - EMF, June 4 2026
+```
+
+# **DECISION POINT: Selecting which sectors to include**
+```{r Select Sectors_of_Interest}
+table(GOC_MarineLandings0$sector_estimate_draft)
+
+# SANITY CHECK: Which species are included in the freshwater or marine sector?
+TEST<- GOC_MarineLandings0 %>%
+  filter(sector_estimate_draft== "freshwater or marine: fishery sector yet to be classified")
+
+table(TEST$recorded_taxa_group)
+# Species like Mojarra (the overwhelming majority of catch), trout, and catfish, which can move from freshwater to marine systems and are a bit ambiguous in terms of where they can be caught.
+
+
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
+                          "marine: small-scale capture",
+                          "marine: large-scale capture")
+  
+PossibleMarineFishery_Sectors<- c("freshwater or marine: large-scale capture",
+                          "freshwater or marine: small-scale capture",
+                          "freshwater or marine: fishery sector yet to be classified")
+
+GOC_MarineFisheryLandings0<- GOC_MarineLandings0 %>%
+  filter(sector_estimate_draft %in% c(MarineFishery_Sectors, PossibleMarineFishery_Sectors))
+
+# 3137044 obs., 58 var.
+```
+
+```{r Clean up names of GOC_MarineFisheryLandings}
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings0 %>%
+  mutate(
+    OHI_region_est = clean_names_lowercase(OHI_region_est),
+    estimated_genus_name = clean_names_lowercase(estimated_genus_name),
+    Major_Functional_Group = clean_names_lowercase(Major_Functional_Group)
+  )
+
+# 3137044 obs., 58 var.
+```
+
+# STEP 1: Generate GOC_Stocks_summary ------------------------------
+
+```{r Generate GOC_Stocks_summary}
+colnames(GOC_MarineFisheryLandings)
+
+GOC_Stocks_summary<- GOC_MarineFisheryLandings %>%
+  select(year, 
+         state, office_name_clean, landing_site_clean,
+         GOC_est, GOC_Include_Exclude, OHI_region_est, OHI_region_name,
+         eu_rnpa, eu_name, sector_estimate_draft, 
+         Major_Functional_Group, recorded_taxa_group, estimated_taxa_group,
+         recorded_taxa_name, recorded_taxa_name_clean,
+         estimated_species_name, estimated_genus_name,
+         landed_weight, live_weight, weight_kg_corrected, value
+         )
+
+GOC_Stocks_summary<- GOC_Stocks_summary %>%
+  group_by(year, OHI_region_est, estimated_genus_name) %>%
+  summarize(
+    total_weight_mt= sum(weight_kg_corrected, na.rm = TRUE) / 1000,
+    total_value_peso= sum(value, na.rm = TRUE)
+  )
+# 12696 obs.
+```
+
+```{r Weights and geometric mean}
+# Calculate the proportion of catch each "Stock" (i.e. genus) contributed to its regional total during the study period:
+colnames(Stock_Statuses)
+
+StudyPeriod_low= 2018
+StudyPeriod_high= 2024
+
+Weights_data <- GOC_Stocks_summary %>%
+  filter(year >= StudyPeriod_low & year <= StudyPeriod_high) %>%
+  group_by(estimated_genus_name, OHI_region_est) %>%
+  mutate(StockCatch_mt = sum(total_weight_mt)) %>% # total tonnes across all years for each stock and region during the study period
+  ungroup() %>%
+  group_by(OHI_region_est) %>%
+  mutate(TotalCatch_mt = sum(total_weight_mt, na.rm = TRUE)) %>% # total tonnes catch across all years and stocks for each region
+  ungroup() %>%
+  mutate(wprop_2018.24 = StockCatch_mt / TotalCatch_mt) %>% # proportion of catch each stock contributed to the total catch
+  distinct(estimated_genus_name, OHI_region_est, wprop_2018.24)
+
+
+# SANITY CHECK: Do the weights add up to 1?
+TEST<- Weights_data %>%
+  group_by(OHI_region_est) %>%
+  summarize(sum_w = sum(wprop_2018.24, na.rm= TRUE))
+# Yup, looks good!
+```
+
+```{r Add weights data to Stock Status df:}
+colnames(Weights_data)
+
+StockStatus_Scores_finalized <- left_join(Stock_Statuses, 
+                                      Weights_data, 
+                                      by = c("OHI_region_est", "estimated_genus_name"))
+
+
+# This is the geometric mean part:
+StockStatus_GeoMean <- StockStatus_Scores_finalized %>%
+  group_by(OHI_region_est, year) %>%
+  summarize(
+    GeoMean_StockStatus = prod(StockStatus_final ^ wprop_2018.24, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(StockStatus_SubScore= GeoMean_StockStatus * 100)
+```
+
+```{r Save this dataframe}
+write.csv(StockStatus_GeoMean, 
+          "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_StockStatus_SubScores_Jun052026.csv", 
+          row.names = FALSE)
+```
+
+# >> COMPLETE: StockStatus_SubScores!
+
+```{r}
+StockStatus_GeoMean<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_StockStatus_SubScores_Jun052026.csv")
+```
+
+
+# PLOT: Stock_Status Sub-Score (Geometric Mean) over time
+```{r Plot Stock Status Geo Mean over time}
+# Region Colors:
+Region_colors <- c(
+  "royalblue",
+  "skyblue",
+  "orange",
+  "sienna1",
+  "plum",
+  "purple4",
+  "aquamarine3",
+  "gold2",
+  "tomato"
+)
+
+Regions_of_Interest <- c(
+  "Region_1", "Region_2", "Region_3",
+  "Region_4", "Region_5", "Region_6",
+  "Region_7", "Region_8", "Region_9"
+)
+
+Regions_of_Interest<- tolower(Regions_of_Interest)
+
+StockStatus_GeoMean_overTime <- StockStatus_GeoMean %>%
+  filter(OHI_region_est %in% Regions_of_Interest,
+         year>=2018 & year <= 2024) %>%
+  ggplot(aes(
+    x = year,
+    y = StockStatus_SubScore,
+    color = OHI_region_est
+  )) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ OHI_region_est, scales = "fixed") +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  scale_color_manual(values = Region_colors) +
+  labs(
+    title = expression(bold("FIS: Regional " * bolditalic("Stock_Status") * " Sub-Scores (Geometric Mean)")),
+    y = "Stock_Status Sub-Score (from 0 to 1)",
+    x = "Year"
+  ) +
+  ylim(0, 101) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold")
+  )
+
+StockStatus_GeoMean_overTime
+```
+
+```{r Save this plot}
+# Save as PNG
+ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Visualizations_Jun2026/StockStatus_SubScores_plot_Jun042026.png"),
+    plot = StockStatus_GeoMean_overTime,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+```
+
+# Closer look into the scores of Region 1:
+```{r Whats happening in Region 1 lately?}
+colnames(Stock_Statuses)
+
+Region1_Look <- Stock_Statuses %>%
+  filter(year>= StudyPeriod_low & year<= StudyPeriod_high, 
+         OHI_region_est == "region_1") %>%
+  group_by(year, Major_Functional_Group) %>%
+  summarize(
+    mean_StockStatus = mean(StockStatus_final, na.rm = TRUE),
+    mode_StockStatus_est.level =
+      names(which.max(table(na.omit(StockStatus_source)))),
+    .groups = "drop"
+  )
+# Looks like the change in small pelagics might be driving the changes, and those changes aren't only reflected in the CMSY.
+
+ggplot(Region1_Look,
+       aes(x = year,
+           y = mean_StockStatus,
+           color = mode_StockStatus_est.level,
+           group = Major_Functional_Group)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ Major_Functional_Group, scales = "free_y") +
+  
+  scale_color_brewer(palette = "Dark2") +
+  
+  scale_y_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, by = 0.2)
+  ) +
+  
+  labs(
+    x = "Year",
+    y = "Mean Stock Status",
+    color = "Average assessment level",
+    title = "Region 1: Mean Stock Status through Time by Functional Group",
+    subtitle = "Diagnosing decline in FIS"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "bottom"
+  )
+```
+
+```{r Let's continue this close look}
+Region1_CloserLook <- Stock_Statuses %>%
+  filter(year>= StudyPeriod_low & year<= StudyPeriod_high, 
+         OHI_region_est == "region_1",
+         Major_Functional_Group == "Pelagic marine fish (excl. anchovy & sardine)") %>%
+  group_by(year, estimated_genus_name) %>%
+  summarize(
+    mean_StockStatus = mean(StockStatus_final, na.rm = TRUE),
+    mode_StockStatus_est.level =
+      names(which.max(table(na.omit(StockStatus_source)))),
+    .groups = "drop"
+  )
+
+ggplot(Region1_CloserLook,
+       aes(x = year,
+           y = mean_StockStatus,
+           color = mode_StockStatus_est.level,
+           group = estimated_genus_name)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ estimated_genus_name, scales = "free_y") +
+  
+  scale_color_brewer(palette = "Dark2") +
+  
+  scale_y_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, by = 0.2)
+  ) +
+  
+  labs(
+    x = "Year",
+    y = "Mean Stock Status",
+    color = "Average assessment level",
+    title = "Region 1: Mean Stock Status through Time by Functional Group",
+    subtitle = "Diagnosing decline in FIS"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "bottom"
+  )
+
+# Here we go. Catch for scomberomorus has been incredibly high in recent years.
+
+Region1_CloserLook <- Stock_Statuses %>%
+    filter(year>= StudyPeriod_low & year<= StudyPeriod_high, 
+         OHI_region_est == "region_1",
+         estimated_genus_name == "scomberomorus")
+
+# This decline could be real, frankly. Look at the declining Carta and CMSY scores.
+```
