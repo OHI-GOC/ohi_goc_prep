@@ -27,6 +27,7 @@ library(data.table)
 library(zoo) # used for gapfilling RAM data.
 # Visualization
 library(ggplot2)
+library(colorspace)
 library(ggforce)
 library(plotly)
 library(htmlwidgets)
@@ -36,26 +37,87 @@ library(htmltools)
 setwd("/home/ferrer/ohi_goc_prep/FP/")
 ```
 
+```{r Load clean_names_lowercase function}
+clean_names_lowercase <- function(x) {
+
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+
+  x %>%
+    tolower() %>%
+    trimws()
+}
+```
+
 
 # STEP 1: Load in and summarize GOC_MarineLandings0
-```{r Let's look into Mar's key}
-# DONT NEED THIS RIGHT NOW
-# Mars_key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/CONAPESCA_Keys/Taxonomic_Keys/Mar_CONAPESCA_SpKey.csv")
-```
 
 ```{r Load in GOC_MarineLandings0 as necessary}
 GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
 # 3246583 obs., 58 var.
 
 # NOTE TO SELF: This source file may change in later Summer / Fall run. - EMF, June 4 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
 ```
+
+
+# PATCH: Look into groups that are unassigned to a Major_Functional_Group:
+NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+```{r Review generathat are not assigned to a Major_Functional_Group}
+TEST<- GOC_MarineFisheryLandings0 %>%
+  filter(estimated_genus_name== "Sardinops")
+
+TEST2<- GOC_MarineFisheryLandings0 %>%
+  filter(is.na(Major_Functional_Group))
+
+table(TEST2$estimated_genus_name)
+```
+
+```{r Load in GenusFamilyGroup_Key as needed}
+GenusFamilyGroup_Key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Taxonomic_Keys/GenusFamilyGroupKey_COMPLETE_Apr042026.csv")
+
+# NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+MajorFunctionalGroup_Key<- GenusFamilyGroup_Key %>%
+  select(estimated_genus_name, Major_Functional_Group)
+```
+
+```{r Major_Functional_Group patch for GOC_MarineLandings}
+# Fill in missing values based on MajorFunctionalGroup_Key:
+GOC_MarineLandings <- GOC_MarineLandings0 %>%
+  left_join(
+    MajorFunctionalGroup_Key %>%
+      select(estimated_genus_name, Major_Functional_Group),
+    by = "estimated_genus_name",
+    suffix = c("", ".lookup")
+  )
+
+GOC_MarineLandings <- GOC_MarineLandings %>%
+  mutate(
+    Major_Functional_Group = coalesce(
+      Major_Functional_Group,
+      Major_Functional_Group.lookup
+    )
+  ) %>%
+  select(-Major_Functional_Group.lookup)
+
+# 3246583 obs., 58 var.
+
+# SANITY CHECK:
+sum(is.na(GOC_MarineLandings$Major_Functional_Group))
+# Only 26 records unassigned. Looks good!
+```
+
 
 # **DECISION POINT: Selecting which sectors to include**
 ```{r Select Sectors_of_Interest}
-table(GOC_MarineLandings0$sector_estimate_draft)
+table(GOC_MarineLandings$sector_estimate_draft)
 
 # SANITY CHECK: Which species are included in the freshwater or marine sector?
-TEST<- GOC_MarineLandings0 %>%
+TEST<- GOC_MarineLandings %>%
   filter(sector_estimate_draft== "freshwater or marine: fishery sector yet to be classified")
 
 table(TEST$recorded_taxa_group)
@@ -70,19 +132,92 @@ PossibleMarineFishery_Sectors<- c("freshwater or marine: large-scale capture",
                           "freshwater or marine: small-scale capture",
                           "freshwater or marine: fishery sector yet to be classified")
 
-GOC_MarineFisheryLandings0<- GOC_MarineLandings0 %>%
+GOC_MarineFisheryLandings0<- GOC_MarineLandings %>%
   filter(sector_estimate_draft %in% c(MarineFishery_Sectors, PossibleMarineFishery_Sectors))
 
 # 3137044 obs., 58 var.
 ```
 
+```{r Re-level sector_estimate_draft and Major_Functional_Group}
+# Re-level sectors (mainly for plotting purposes):
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings0 %>%
+  filter(
+    sector_estimate_draft %in% c(
+      MarineFishery_Sectors,
+      PossibleMarineFishery_Sectors
+    )
+  ) %>%
+  mutate(
+    sector_estimate_draft = factor(
+      sector_estimate_draft,
+      levels = c(
+        "marine: large-scale capture",
+        "marine: small-scale capture",
+        "marine: fishery sector yet to be classified",
+        "freshwater or marine: large-scale capture",
+        "freshwater or marine: small-scale capture",
+        "freshwater or marine: fishery sector yet to be classified"
+      )
+    )
+  )
 
-# STEP 2: Determine which fisheries are primarily small scale ------------------------------
+# SANITY CHECK: How many Major_Functional_Group unassigned?
+sum(is.na(GOC_MarineFisheryLandings$Major_Functional_Group))
+# Only 18 records unassigned. Looks good!
+
+table(GOC_MarineFisheryLandings$Major_Functional_Group)
+
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings %>%
+  mutate(
+    Major_Functional_Group = factor(
+      Major_Functional_Group,
+      levels= c(
+        
+        # Crustaceans
+        "Shrimps, prawns",
+        "Crustaceans",
+        
+        # Molluscs
+        "Cephalopods",
+        "Molluscs excl. Cephalopods",
+        
+        # Other invertebrates
+        "Echinoderms",
+        "Jellies",
+        "Other marine invertebrates",
+        
+        # Fishes
+        "Anchovy & Sardine (small pelagics)",
+        "Pelagic marine fish (excl. anchovy & sardine)",
+        "Demersal marine fishes",
+        "Marine fishes NEI",
+        "Marine or freshwater fishes NEI",
+        "Diadromous fishes",
+        
+        # Elasmobranchs
+        "Sharks",
+        
+        # Miscellaneous / unresolved
+        "Marine algae",
+        "Marine species NEI",
+        "unknown",
+        NA_character_
+      )
+    )
+  )
+
+# SANITY CHECK:
+sum(is.na(GOC_MarineFisheryLandings$Major_Functional_Group))
+# Only 18 records unassigned. Looks good!
+```
+
+
+# STEP 2: Review & Plot Sector Data ------------------------------
 
 ```{r Generate GOC_MarineSector_summary}
-colnames(GOC_MarineFisheryLandings0)
+colnames(GOC_MarineFisheryLandings)
 
-GOC_MarineSector_summary<- GOC_MarineFisheryLandings0 %>%
+GOC_MarineSector_summary<- GOC_MarineFisheryLandings %>%
   select(year, 
          state, office_name_clean, landing_site_clean,
          sector_estimate_draft,
@@ -101,66 +236,154 @@ GOC_MarineSector_summary<- GOC_MarineSector_summary %>%
     total_value_peso= sum(value, na.rm = TRUE),
     n_records= n()
   )
-# 82. obs.
-```
+# 646 obs.
 
+# Regions 7 and 8 produce A LOT of catch relative to the other regions!
+# Work (in the next two chunks) reveal that most of this catch is "Anchovy & Sardine (small pelagics)"
+```
 
 ## Plotting sector estimates:
 ```{r Plot each sector of interest over time}
-# SECTORS OF INTEREST:
-Sectors_of_Interest<- c("marine: fishery sector yet to be classified" , "marine: small-scale capture", "marine: large-scale capture" , "marine: aquaculture", "freshwater: aquaculture")
-  
 # Define colors for each sector (fleet distinction = lighter for small-scale)
 sector_colors <- c(
   # Marine (blues)
-  "marine: fishery sector yet to be classified"       = "#cce0ff",  # very light blue for unknown
-  "marine: small-scale capture"                       = "#6699cc",  # medium blue
   "marine: large-scale capture"                       = "#336699",  # darker blue
-  "marine: aquaculture"                               = "#33cccc",  # teal/aquaculture cue
-  
-  # Freshwater (warm shades)
-  "freshwater: aquaculture"                          = "#ff9933"  # bright orange
-  # "freshwater: fishery sector yet to be classified" = "#ffe0cc",  # light orange for unknown - IGNORE THIS SECTOR FOR NOW.
-  # "freshwater: small-scale capture"                  = "#ff6666",  # strong red/orange - IGNORE THIS SECTOR FOR NOW.
-  # "freshwater: large-scale capture"                  = "#ffb366",  # lighter orange/yellow - IGNORE THIS SECTOR FOR NOW.
+  "marine: small-scale capture"                       = "#33cccc",  # teal/aquaculture cue
+  "marine: fishery sector yet to be classified"       = "#E78AC3"  # pink
   
   # Freshwater or Marine (grey and purple shades) - IGNORE FOR NOW.
   # "freshwater or marine: fishery sector yet to be classified"  = "#e0e0e0",  # light grey
   # "freshwater or marine: small-scale capture"                    = "#b399cc",  # light purple
   # "freshwater or marine: large-scale capture"                    = "#8040a0",  # medium purple
-  # "freshwater or marine: aquaculture"                             = "#999999"   # neutral grey
 )
 
 # Plot
-Landings_byEstimatedSector_plot<- GOC_MarineSector_summary %>%
- # filter(year >= 2018 & year <= 2024) %>%
-  filter(sector_estimate_draft %in% Sectors_of_Interest) %>%
-  ggplot(aes(x = year, y = total_weight_mt, fill = sector_estimate_draft)) +
-  
-  # Area plot with slight border for separation
- # geom_area(alpha = 0.9, color = "white", linewidth = 0.2) +
+Landings_bySector_plot <- GOC_MarineSector_summary %>%
+  filter(sector_estimate_draft %in% MarineFishery_Sectors,
+         year >= 2018,
+         year <= 2024) %>%
+  ggplot(
+    aes(
+      x = factor(year),
+      y = total_weight_mt,
+      fill = sector_estimate_draft
+    )
+  ) +
+  geom_col(
+    position = position_dodge2(width = 0.8, preserve = "single"),
+    width = 0.7,
+    color = "white",
+    linewidth = 0.2
+  ) +
+  facet_wrap(~ OHI_region_est, ncol = 3) +
+  scale_y_continuous(
+    trans = "log10",
+    labels = scales::comma
+  ) +
+  scale_fill_manual(
+    name = "Fishery sector",
+    values= sector_colors
+  ) +
+  labs(
+    x = NULL,
+    y = "Annual catch (metric tons, log-scale)",
+    title = "Catch by Sector in the Gulf of California",
+    subtitle = "Small-scale versus large-scale classification reported directly to CONAPESCA"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  guides(
+  fill = guide_legend(nrow = 2, byrow = TRUE)
+)
+
+Landings_bySector_plot
+```
+
+```{r Save Landings_bySector_plot}
+ggsave(
+  "/home/ferrer/ohi_goc_prep/AO/v2025/ExploratoryResearch/Landings_bySector_Jun152026.png",
+  plot = Landings_bySector_plot,
+  width = 10,
+  height = 10,
+  dpi = 300
+)
+```
+
+
+## Look into catches from Region 7 & 8
+```{r Summarize what they are catching in Region 7 and 8}
+colnames(GOC_MarineFisheryLandings0)
+
+Region_summary<- GOC_MarineFisheryLandings %>%
+  select(year, OHI_region_est, Major_Functional_Group, weight_kg_corrected) %>%
+  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+  summarize(
+    total_weight_mt= sum(weight_kg_corrected, na.rm = TRUE) / 1000,
+    n_records= n()
+  )
+
+Region78_summary<- GOC_MarineFisheryLandings %>%
+  filter(OHI_region_est %in% c("Region_7", "Region_8")) %>%
+  select(year, OHI_region_est, Major_Functional_Group, weight_kg_corrected) %>%
+  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+  summarize(
+    total_weight_mt= sum(weight_kg_corrected, na.rm = TRUE) / 1000,
+    n_records= n()
+  )
+
+# Remove anything less than 2 metric tons:
+
+Region78_summary<- Region78_summary %>%
+  filter(year >= 2018 & year <= 2024) %>%
+  group_by(Major_Functional_Group) %>%
+  filter(max(total_weight_mt, na.rm = TRUE) >= 5) %>%
+  ungroup()
+```
+
+
+```{r Plot what they are catching in Region 7 and 8}
+unique(Region78_summary$Major_Functional_Group)
+
+# Colors for these 13 groups:
+mfg_cols <- qualitative_hcl(
+  17,
+  palette = "Dark 3"
+)
+
+# Pelagics<- c("Anchovy & Sardine (small pelagics)", 
+#              "Pelagic marine fish (excl. anchovy & sardine)")
+
+
+Region78_plot<- Region78_summary %>%
+  filter(year >= 2018 & year <= 2024) %>%
+  ggplot(aes(x = year, y = total_weight_mt, group= OHI_region_est)) +
   
     geom_col(
+    aes(color= OHI_region_est, fill= OHI_region_est), 
     position = position_dodge(width = 0.8),
-    width = 0.7,
-    color = "white"
+    width = 0.7
   ) +
   
-  # Manual fill palette
-  scale_fill_manual(
-    values = sector_colors,
-    name = "Sector"
-  ) +
-  
+  # Colors (most useful when grouping by Major_Functional_Group)
+  # scale_fill_manual(values = mfg_cols) +
+  # scale_color_manual(values = mfg_cols) +
+
   # Labels
   labs(
     x = "Year",
-    y = "Est Annual Catch (metric tons)",
-    title = "Catch by Sector (GOC)",
-    subtitle = "Small-scale vs. large-scale estimates are based directly on report details"
+    y = "Annual Catch (metric tons)",
+    title = "Catch by Major_Functional_Group (Regions 7 and 8)"
   ) +
   
-  facet_wrap(~OHI_region_est) +
+  facet_wrap(~Major_Functional_Group) +
   
   # Minimal theme and sleek styling
   theme_bw(base_size = 14) +
@@ -174,166 +397,30 @@ Landings_byEstimatedSector_plot<- GOC_MarineSector_summary %>%
     panel.grid.major = element_line(color = "grey85"),
     plot.title = element_text(face = "bold", size = 16),
     plot.subtitle = element_text(size = 13, color = "grey30")
-  ) +
-  scale_x_continuous(
-  breaks = 2000:2025)
+  )
 
-Landings_byEstimatedSector_plot
+Region78_plot
 ```
 
-```{r Save plot}
+```{r Save Landings_bySector_plot}
 ggsave(
-  "/home/ferrer/ohi_goc_prep/AO/FisheryLandings_bySector_Jun042026.png",
-  plot = Landings_byEstimatedSector_plot,
+  "/home/ferrer/ohi_goc_prep/AO/v2025/ExploratoryResearch/Rgn78_Landings_byGroup_Jun152026.png",
+  plot = Region78_plot,
   width = 10,
-  height = 6,
+  height = 10,
   dpi = 300
 )
-```
-
-# Pull out SSF Stocks
-
-```{r Lets only look at landings post-2018}
-Landings_Post.2018<- GOC_MarineFisheryLandings0 %>%
-  filter(year>= 2018)
-
-table(Landings_Post.2018$reported_fleet)
-# large_scale small_scale 
-#      142210     1010533 
-
-table(Landings_Post.2018$sector_estimate_draft)
-              # marine: fishery sector yet to be classified 
-              #                                        4884 
-              #                 marine: large-scale capture 
-              #                                      141145 
-              #                 marine: small-scale capture 
-              #                                      977477
-#                 freshwater or marine: small-scale capture 
-#                                                     33056 
-#                 freshwater or marine: large-scale capture 
-#                                                      1065 
-# freshwater or marine: fishery sector yet to be classified 
-#                                                        30
-```
-
-
-```{r Filter landings and assign stock key}
-Landings_Post.2018 <- Landings_Post.2018 %>%
-  filter(
-    GOC_Include_Exclude == "include",
-    year >= 2018,
-    year <= 2024,
-    !is.na(OHI_region_est),
-    OHI_region_est != ""
-  ) %>%
-  mutate(
-    OHI_region_est = clean_names_lowercase(OHI_region_est),
-    estimated_species_name = clean_names_lowercase(estimated_species_name),
-    estimated_genus_name = clean_names_lowercase(estimated_genus_name),
-    sector_estimate_draft = as.character(sector_estimate_draft),
-    
-    taxon_key = if_else(
-      is.na(estimated_species_name) | estimated_species_name == "",
-      estimated_genus_name,
-      estimated_species_name
-    ),
-    taxon_level = if_else(
-      is.na(estimated_species_name) | estimated_species_name == "",
-      "genus",
-      "species"
-    )
-  ) %>%
-  filter(!is.na(taxon_key), taxon_key != "")
-
-# 1092972 obs.
-```
-
-```{r Summarize total and small-scale catch per stock}
-table(Landings_Post.2018$sector_estimate_draft)
-
-SSF_sectors<- c("marine: small-scale capture", "freshwater or marine: small-scale capture")
-
-# Summarize landings at the genus (i.e., stock) level:
-GOC_Stocks_summary <- Landings_Post.2018 %>%
-  group_by(
-    year,
-    OHI_region_est,
-    taxon_level,
-    estimated_genus_name
-  ) %>%
-  summarize(
-    total_landings_kg = sum(weight_kg_corrected, na.rm = TRUE),
-    
-    small_scale_landings_kg = sum(
-      weight_kg_corrected[sector_estimate_draft %in% SSF_sectors],
-      na.rm = TRUE
-    ),
-    
-    n_small_scale_records = sum(
-      sector_estimate_draft %in% SSF_sectors,
-      na.rm = TRUE
-    ),
-    
-    industrial_landings_kg = sum(
-      weight_kg_corrected[!(sector_estimate_draft %in% SSF_sectors)],
-      na.rm = TRUE
-    ),
-    
-    n_industrial_records = sum(
-      !(sector_estimate_draft %in% SSF_sectors),
-      na.rm = TRUE
-    ),
-    
-    .groups = "drop"
-  ) %>%
-  mutate(
-    small_scale_catch_share = small_scale_landings_kg / total_landings_kg
-  )
-# 4034
-```
-
-# ** DECISION POINT: Identify stocks with >= 15% small-scale capture
-
-```{r Identify stocks with >= 15% small-scale capture}
-SSF_CATCH_MIN_SHARE = 0.15
-```
-
-```{r Keep stocks with at least 15% small-scale catch}
-# Stocks meeting the small-scale catch threshold in this region x year.
-AFO_stocks0 <- GOC_Stocks_summary %>%
-  filter(
-    small_scale_landings_kg > 0,
-    small_scale_catch_share >= SSF_CATCH_MIN_SHARE
-  )
-# 3581 obs.
-```
-
-```{r}
-# Remove NAs and unknowns:
-AFO_stocks <- AFO_stocks0 %>%
-  filter(
-    !is.na(estimated_genus_name) &
-      estimated_genus_name != "unknown"
-  )
-# 3475 obs.
-```
-
-```{r Count qualifying stocks}
-nrow(AFO_stocks)
-# 3475 obs.
-
-# n_unique_genus_stocks
-unique(AFO_stocks$estimated_genus_name)
-# 165 unique stocks / genera
 ```
 
 
 # STEP 3: Pull matching FIS scores (no recalculation) ------------------------------
 
 ```{r Load in FIS_StockStatus scores as necessary}
-StockStatus_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/StockStatus_Estimates_Jun072026.csv")
+StockStatus_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Stock_Status_SubScores/Stock_Statuses_Compiled_df_Jun072026.csv")
 
 # Species x year x region; Stock_Status is used as-is.
+
+# CSV was previously titled: StockStatus_Estimates_Jun072026.csv
 ```
 
 ```{r Prep FIS scores}
@@ -345,6 +432,70 @@ StockStatus_Scores <- StockStatus_Scores0 %>%
   )
 # 4130 obs.
 ```
+
+# Prep AFO dataframe:
+```{r Create GOC_ArtisanalLandings}
+colnames(GOC_MarineFisheryLandings)
+unique(GOC_MarineFisheryLandings$sector_estimate_draft)
+
+Artisanal_Sectors<- c("marine: small-scale capture", "freshwater or marine: small-scale capture ")
+
+GOC_ArtisanalLandings <- GOC_MarineFisheryLandings %>%
+  select(state, OHI_region_est,
+         office_name_clean, landing_site_clean, 
+         year,
+         est_aquaculture_production, reported_fleet, sector_estimate_reported, sector_estimate_draft,
+         recorded_taxa_name, recorded_taxa_name_clean, common_name_clean, 
+         recorded_taxa_group, estimated_taxa_group, Major_Functional_Group,
+         estimated_species_name, estimated_genus_name, estimated_family_name,
+         landed_weight, live_weight, weight_kg_corrected, value
+         ) %>%
+  filter(sector_estimate_draft %in% Artisanal_Sectors)
+# 977477 obs., 22 vars.
+
+ArtisanalLandings_summary <- GOC_ArtisanalLandings %>%
+  group_by(year, OHI_region_est, estimated_genus_name) %>%
+  summarize(
+    total_landings_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    estimated_genus_name= clean_names_lowercase(estimated_genus_name),
+    OHI_region_est= clean_names_lowercase(OHI_region_est)
+  )
+# 4295 obs., 4 vars.
+```
+
+```{r Merge StockStatus_Scores to ArtisanalLandings_summary}
+colnames(StockStatus_Scores)
+
+TEST <- ArtisanalLandings_summary %>%
+  left_join(
+    StockStatus_Scores %>%
+      select(
+        OHI_region_est,
+        year,
+        estimated_genus_name,
+        StockStatus_final,
+        StockStatus_source,
+        StockStatus_est.level
+      ),
+    by = c(
+      "year",
+      "estimated_genus_name",
+      "OHI_region_est"
+    )
+  ) %>%
+  filter(year <= 2024)
+
+# 4295 obs. (as expected!), 7 vars.
+```
+
+```{r penaeus patch}
+
+```
+
+
 
 ```{r Genus-level stocks: pull all FIS stocks in that genus}
 AFO_StockStatus_Scores <- AFO_stocks %>%
@@ -594,5 +745,143 @@ ggsave(
   height = 8,
   dpi = 300
 )
+```
+
+
+# PURG as of June 15 2026
+# First Strategy: Pull out only SSF stocks ------------------------------
+
+```{r Lets only look at landings post-2018}
+Landings_Post.2018<- GOC_MarineFisheryLandings0 %>%
+  filter(year>= 2018)
+
+table(Landings_Post.2018$reported_fleet)
+# large_scale small_scale 
+#      142210     1010533 
+
+table(Landings_Post.2018$sector_estimate_draft)
+              # marine: fishery sector yet to be classified 
+              #                                        4884 
+              #                 marine: large-scale capture 
+              #                                      141145 
+              #                 marine: small-scale capture 
+              #                                      977477
+#                 freshwater or marine: small-scale capture 
+#                                                     33056 
+#                 freshwater or marine: large-scale capture 
+#                                                      1065 
+# freshwater or marine: fishery sector yet to be classified 
+#                                                        30
+```
+
+
+```{r Filter landings and assign stock key}
+Landings_Post.2018 <- Landings_Post.2018 %>%
+  filter(
+    GOC_Include_Exclude == "include",
+    year >= 2018,
+    year <= 2024,
+    !is.na(OHI_region_est),
+    OHI_region_est != ""
+  ) %>%
+  mutate(
+    OHI_region_est = clean_names_lowercase(OHI_region_est),
+    estimated_species_name = clean_names_lowercase(estimated_species_name),
+    estimated_genus_name = clean_names_lowercase(estimated_genus_name),
+    sector_estimate_draft = as.character(sector_estimate_draft),
+    
+    taxon_key = if_else(
+      is.na(estimated_species_name) | estimated_species_name == "",
+      estimated_genus_name,
+      estimated_species_name
+    ),
+    taxon_level = if_else(
+      is.na(estimated_species_name) | estimated_species_name == "",
+      "genus",
+      "species"
+    )
+  ) %>%
+  filter(!is.na(taxon_key), taxon_key != "")
+
+# 1092972 obs.
+```
+
+```{r Summarize total and small-scale catch per stock}
+table(Landings_Post.2018$sector_estimate_draft)
+
+SSF_sectors<- c("marine: small-scale capture", "freshwater or marine: small-scale capture")
+
+# Summarize landings at the genus (i.e., stock) level:
+GOC_Stocks_summary <- Landings_Post.2018 %>%
+  group_by(
+    year,
+    OHI_region_est,
+    taxon_level,
+    estimated_genus_name
+  ) %>%
+  summarize(
+    total_landings_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    
+    small_scale_landings_kg = sum(
+      weight_kg_corrected[sector_estimate_draft %in% SSF_sectors],
+      na.rm = TRUE
+    ),
+    
+    n_small_scale_records = sum(
+      sector_estimate_draft %in% SSF_sectors,
+      na.rm = TRUE
+    ),
+    
+    industrial_landings_kg = sum(
+      weight_kg_corrected[!(sector_estimate_draft %in% SSF_sectors)],
+      na.rm = TRUE
+    ),
+    
+    n_industrial_records = sum(
+      !(sector_estimate_draft %in% SSF_sectors),
+      na.rm = TRUE
+    ),
+    
+    .groups = "drop"
+  ) %>%
+  mutate(
+    small_scale_catch_share = small_scale_landings_kg / total_landings_kg
+  )
+# 4034
+```
+
+# ** DECISION POINT: Identify stocks with >= 15% small-scale capture
+
+```{r Identify stocks with >= 15% small-scale capture}
+SSF_CATCH_MIN_SHARE = 0.15
+```
+
+```{r Keep stocks with at least 15% small-scale catch}
+# Stocks meeting the small-scale catch threshold in this region x year.
+AFO_stocks0 <- GOC_Stocks_summary %>%
+  filter(
+    small_scale_landings_kg > 0,
+    small_scale_catch_share >= SSF_CATCH_MIN_SHARE
+  )
+# 3581 obs.
+```
+
+```{r}
+# Remove NAs and unknowns:
+AFO_stocks <- AFO_stocks0 %>%
+  filter(
+    !is.na(estimated_genus_name) &
+      estimated_genus_name != "unknown"
+  )
+# 3475 obs.
+```
+
+```{r Count qualifying stocks}
+nrow(AFO_stocks)
+# 3475 obs.
+
+# n_unique_genus_stocks
+unique(AFO_stocks$estimated_genus_name)
+# 165 unique stocks / genera
 ```
 
