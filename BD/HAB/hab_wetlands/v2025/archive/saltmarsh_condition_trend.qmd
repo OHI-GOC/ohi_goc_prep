@@ -1,0 +1,820 @@
+---
+title: "Saltmarsh Habitat Condition and Trend - Gulf of California OHI"
+author: "Austin Martinez"
+date: 04/06/2026
+format: 
+  html:
+    code-fold: show
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+
+```{r}
+# Load in Libraries
+library(sf)
+library(dplyr)
+library(here)
+library(terra)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tmap)
+library(stringr)
+```
+
+```{r}
+source(here::here("BD", "HAB", "temp_processing", "setup_temp.R"))
+```
+
+```{r}
+# Read in OHI region boundaries
+ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |> st_make_valid()
+```
+## Testing to see how changes in CRS change area values
+```{r}
+# Read in hem saltmarsh area shape files
+Saltmarsh_data_hem_raw <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/wetlands/wetlands_merge.shp"), options = "ENCODING=LATIN1") |>
+  st_make_valid()
+
+Saltmarsh_data_hem <- st_transform(Saltmarsh_data_hem_raw, st_crs(ohi_regions))
+
+paste("before transform:", sum(st_area(Saltmarsh_data_hem_raw)))
+paste("after tranform:", sum(st_area(Saltmarsh_data_hem)))
+```
+
+
+```{r}
+# check
+canabio_landcover_2020_raw <- rast(here("/home/shares/ohi/OHI_GOC/_raw_data/mexico_land_cover_conabio/land_cover_MEX_2020_30m/nalcmsmx20cw.tif"))
+
+canabio_landcover_2020_14_raw <- ifel(canabio_landcover_2020_raw == 14, 1, NA)
+
+canabio_landcover_2020 <- project(canabio_landcover_2020_14_raw, crs(ohi_regions), method = "near")
+
+CONABIO_before <- global(cellSize(canabio_landcover_2020_14_raw, unit = "m"), "sum", na.rm = TRUE)
+CONABIO_after <- global(cellSize(canabio_landcover_2020, unit = "m"), "sum", na.rm = TRUE)
+
+paste("before transform:", CONABIO_before)
+paste("after transform:", CONABIO_after)
+```
+
+```{r}
+# Read in hem CONABIO Land use and vegetation area shape file
+saltmarsh_canabio_landuse_raw <-st_read("/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/usv250s7gw/usv250s7gw.shp") |>
+  st_make_valid()
+
+saltmarsh_canabio_landuse <- st_transform(saltmarsh_canabio_landuse_raw, st_crs(ohi_regions))
+
+paste("before transform:", sum(st_area(saltmarsh_canabio_landuse_raw)))
+paste("after tranform:", sum(st_area(saltmarsh_canabio_landuse)))
+```
+
+
+```{r}
+# Read in Oceanplus data
+saltmarsh_oceanplus2_raw <-st_read("/home/shares/ohi/OHI_GOC/_raw_data/oceanplus_WCMC027_Saltmarsh_v6_1/01_Data/WCMC027_Saltmarshes_Py_v6_1.shp") |> 
+  st_make_valid()
+
+saltmarsh_oceanplus2 <- st_transform(saltmarsh_oceanplus2_raw, st_crs(ohi_regions))
+
+paste("before transform:", sum(st_area(saltmarsh_oceanplus2_raw)))
+paste("after tranform:", sum(st_area(saltmarsh_oceanplus2)))
+```
+
+```{r}
+Blue_Carbon_saltmarsh_raw <-st_read("/home/shares/ohi/OHI_GOC/_raw_data/bluecarbon_saltmarsh_shapefile/NA_BlueCarbon_Saltmarsh_2021/data/North_America_Saltmarshes_Py.shp") |>
+  st_make_valid()
+
+Blue_Carbon_saltmarsh <- st_transform(Blue_Carbon_saltmarsh_raw, st_crs(ohi_regions))
+
+paste("before transform:", sum(st_area(Blue_Carbon_saltmarsh_raw)))
+paste("after tranform:", sum(st_area(Blue_Carbon_saltmarsh)))
+```
+
+```{r}
+# Path to folder containing raster tiles
+folder <- "/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/2020"
+
+# Get bounding box of OHI regions in geographic coordinates (lat/lon)
+bbox <- st_bbox(st_transform(ohi_regions, 4326))
+
+# Create sequence of longitudes and latitudes at 5-degree intervals (matches naming convention of raster tiles)
+lons <- seq(floor(bbox$xmin / 5) * 5, floor(bbox$xmax / 5) * 5, by = 5)
+lats <- seq(floor(bbox$ymin / 5) * 5, floor(bbox$ymax / 5) * 5, by = 5)
+
+# Create all combinations of lon/lat tiles and format names
+tiles_needed <- expand.grid(lon = lons, lat = lats) |>
+  mutate(
+    lon_str = ifelse(lon >= 0, paste0("E", abs(lon)), paste0("W", abs(lon))),
+    lat_str = ifelse(lat >= 0, paste0("N", lat), paste0("S", abs(lat))),
+    tile_name = paste0(lon_str, lat_str)
+  )
+
+# Extract tile names needed for filtering files
+needed <- tiles_needed$tile_name
+
+# List only raster files that match required tile names
+files <- list.files(
+  "/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/2020",
+  pattern = paste(needed, collapse = "|"),
+  full.names = TRUE
+)
+
+# Creates a virtual raster (VRT)
+tifs <- vrt(files)
+
+# Mask to salt marsh only (value 186)
+saltmarsh_raw <- ifel(tifs == 186, 1, NA)
+
+# Compute area BEFORE transform (m²)
+area_before <- global(cellSize(saltmarsh_raw, unit = "m"), "sum", na.rm = TRUE)
+
+# Project masked raster into OHI CRS
+saltmarsh_proj <- project(saltmarsh_raw, crs(ohi_regions), method = "near")
+
+# Compute area AFTER transform (m²) ---
+area_after <- global(cellSize(saltmarsh_proj, unit = "m"), "sum", na.rm = TRUE)
+
+
+paste("before transform:", area_before)
+paste("after transform:",  area_after)
+```
+
+
+
+## Redo the group bys
+
+# This is data from Hem
+
+```{r}
+# Read in hem saltmarsh area shape files
+Saltmarsh_data_hem_raw <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/wetlands/wetlands_merge.shp"), options = "ENCODING=LATIN1") |>
+  st_make_valid()
+
+# Transform crs of ohi_regions to Saltmarsh_data_hem_raw crs
+ohi_regions <- st_transform(ohi_regions, st_crs(Saltmarsh_data_hem_raw))
+
+# Only keep Saltmarsh_data that intersects ohi_regions
+saltmarsh_ohi_hem <- st_intersection(Saltmarsh_data_hem_raw, ohi_regions)
+
+# Intersect, dissolve within regions, calculate area
+saltmarsh_area_hem_2 <- st_intersection(Saltmarsh_data_hem_raw, ohi_regions) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6) |>
+  st_drop_geometry()
+
+saltmarsh_area_hem_2
+
+# make sure no double counting is happening
+Saltmarsh_data_hem_raw <- st_union(Saltmarsh_data_hem_raw)
+# Extract area of Hem's saltmarsh data by region lets do this now
+saltmarsh_area_hem_2 <- saltmarsh_ohi_hem |> 
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6) |> 
+  group_by(rgn_id) |> 
+  summarise(area_km2 = sum(area_km2)) |>
+  st_drop_geometry()
+```
+
+
+# This is data from CONABIO: http://www.conabio.gob.mx/informacion/gis/?vns=gis_root/usv/otras/nalcmsmx20gw for 2020
+
+```{r}
+# check
+canabio_landcover_2020_raw <- rast(here("/home/shares/ohi/OHI_GOC/_raw_data/mexico_land_cover_conabio/land_cover_MEX_2020_30m/nalcmsmx20cw.tif"))
+
+ohi_regions_vect <- vect(ohi_regions)
+
+
+# Project regions to match raster CRS
+ohi_regions_vect <- project(ohi_regions_vect, crs(canabio_landcover_2020_raw))
+```
+
+```{r}
+# Crop and mask to OHI regions
+canabio_landcover_2020_crop <- crop(canabio_landcover_2020_raw, ohi_regions_vect)
+canabio_landcover_2020_mask <- mask(canabio_landcover_2020_crop, ohi_regions_vect)
+
+# Makes wetland (14) = 1, everything else = NA
+canabio_landcover_2020_14 <- ifel(canabio_landcover_2020_mask == 14, 1, NA)
+
+# Pixel area in km²
+pixel_area_2020_canabio <- prod(res(canabio_landcover_2020_14)) / 1e6
+```
+
+```{r}
+# Summarize by OHI region
+wetland_2020_zonal <- zonal(canabio_landcover_2020_14, ohi_regions_vect, fun = "sum", na.rm = TRUE)
+total_2020_zonal <- zonal(!is.na(canabio_landcover_2020_mask), ohi_regions_vect, fun = "sum", na.rm = TRUE)
+
+
+
+wetland_area_2020_canabio_2 <- wetland_2020_zonal |>
+  as_tibble() |>
+  mutate(rgn_id = ohi_regions_vect$rgn_id,
+         area_km2 = OID * pixel_area_2020_canabio) |>
+  select(rgn_id, area_km2)
+
+wetland_area_2020_canabio_2 <- wetland_area_2020_canabio_2 |>
+  group_by(rgn_id) |>
+  summarise(area_km2 = sum(area_km2, na.rm = TRUE))
+
+wetland_density_2020_canabio <- wetland_area_2020_canabio_2 |>
+  mutate(total_area_km2 = total_2020_zonal$OID * pixel_area_2020_canabio,
+         density = area_km2 / total_area_km2) |>
+  select(rgn_id, density)
+wetland_density_2020_canabio
+```
+
+# This is the CONABIO Land use and vegetation data : http://www.conabio.gob.mx/informacion/gis/?vns=gis_root/usv/inegi/usv250s7gw
+```{r}
+sf::sf_use_s2(FALSE)
+
+# read in CONABIO Land use and vegetation data
+saltmarsh_canabio_landuse <-st_read("/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/usv250s7gw/usv250s7gw.shp") |>
+  st_make_valid()
+
+# Filter for Saltmarsh variables
+saltmarsh_canabio <- saltmarsh_canabio_landuse |>
+  dplyr::filter(
+    DESCRIPCIO %in% c(
+      "VEGETACIÓN HALÓFILA HIDRÓFILA",
+      "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA HIDRÓFILA"
+    )
+  )
+
+# Transform crs of ohi_regions to saltmarsh_canabio crs
+ohi_regions <- st_transform(ohi_regions, st_crs(saltmarsh_canabio))
+
+# Intersect, dissolve within regions, calculate area
+saltmarsh_canabio_2021_area2 <- st_intersection(saltmarsh_canabio, ohi_regions) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6, year = 2021) |>
+  st_drop_geometry()
+saltmarsh_canabio_2021_area2
+```
+
+## This data comes from Oceanplus: https://habitats.oceanplus.org/mexico from March 2021
+```{r}
+# Read in Oceanplus data
+saltmarsh_oceanplus2_raw <-st_read("/home/shares/ohi/OHI_GOC/_raw_data/oceanplus_WCMC027_Saltmarsh_v6_1/01_Data/WCMC027_Saltmarshes_Py_v6_1.shp") |> 
+  st_make_valid()
+
+# Transform crs of ohi_regions to saltmarsh_canabio crs
+ohi_regions <- st_transform(ohi_regions, st_crs(saltmarsh_oceanplus2_raw))
+
+# Intersect, dissolve within regions, calculate area
+saltmarsh_oceanplus2_area_2 <- st_intersection(saltmarsh_oceanplus2_raw, ohi_regions) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6) |>
+  st_drop_geometry()
+saltmarsh_oceanplus2_area_2
+```
+
+## This data comes from Zenodo: https://zenodo.org/records/10068479 from March 2021
+
+
+```{r}
+# Path to folder containing raster tiles
+folder <- "/home/shares/ohi/OHI_GOC/_raw_data/zenodo_saltmarsh/2020"
+
+# Get bounding box of OHI regions in geographic coordinates (lat/lon)
+bbox <- st_bbox(st_transform(ohi_regions, 4326))
+
+# Create sequence of longitudes and latitudes at 5-degree intervals (matches naming convention of raster tiles)
+lons <- seq(floor(bbox$xmin / 5) * 5, floor(bbox$xmax / 5) * 5, by = 5)
+lats <- seq(floor(bbox$ymin / 5) * 5, floor(bbox$ymax / 5) * 5, by = 5)
+
+# Create all combinations of lon/lat tiles and format names
+tiles_needed <- expand.grid(lon = lons, lat = lats) |>
+  mutate(
+    lon_str = ifelse(lon >= 0, paste0("E", abs(lon)), paste0("W", abs(lon))),
+    lat_str = ifelse(lat >= 0, paste0("N", lat), paste0("S", abs(lat))),
+    tile_name = paste0(lon_str, lat_str)
+  )
+
+# Extract tile names needed for filtering files
+needed <- tiles_needed$tile_name
+
+# List only raster files that match required tile names
+files <- list.files(
+  "/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/2020",
+  pattern = paste(needed, collapse = "|"),
+  full.names = TRUE
+)
+```
+
+```{r}
+# Load and mosaic the tiles
+tifs <- vrt(files)  # virtual mosaic, no need to load into memory
+
+# Mask to salt marsh only (value 186)
+saltmarsh_raster <- ifel(tifs == 186, 1, NA)
+
+
+# Reproject ohi_regions to match raster CRs
+ohi_vect <- vect(st_transform(ohi_regions, crs(tifs)))
+
+# Compute per-cell area in km²
+cell_areas <- cellSize(saltmarsh_raster, unit = "km")
+cell_areas_masked <- mask(cell_areas, saltmarsh_raster)
+
+# Zonal sum by region (this already groups correctly)
+# IMPORTANT: explicitly use zone field
+
+
+saltmarsh_area2 <- zonal(
+  cell_areas_masked,
+  ohi_vect,
+  fun = "sum",
+  na.rm = TRUE
+)
+
+saltmarsh_area2$rgn_id <- ohi_vect$rgn_id
+
+saltmarsh_area2_saltmarsh <- saltmarsh_area2 |>
+  group_by(rgn_id) |>
+  summarise(area_km2 = sum(area, na.rm = TRUE)) |>
+  mutate(area_km2 = ifelse(area_km2 == 0, NA, area_km2))
+
+saltmarsh_area2_saltmarsh
+```
+
+
+
+## This data comes from North American Blue Carbon: https://www.cec.org/north-american-environmental-atlas/north-american-blue-carbon-2021/ extent for 2021
+
+```{r}
+# Read in Blue Carbon data
+Blue_Carbon_saltmarsh_raw <-st_read("/home/shares/ohi/OHI_GOC/_raw_data/bluecarbon_saltmarsh_shapefile/NA_BlueCarbon_Saltmarsh_2021/data/North_America_Saltmarshes_Py.shp")
+
+# Make saltmarsh_oceanplus2 layer have the same CRS as OHI regions
+ohi_regions <- st_transform(ohi_regions, st_crs(Blue_Carbon_saltmarsh_raw))
+
+# Intersect, dissolve within regions, calculate area
+blue_carbon_saltmarsh_area <- st_intersection(Blue_Carbon_saltmarsh_raw, ohi_regions) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6) |>
+  st_drop_geometry()
+blue_carbon_saltmarsh_area
+```
+
+
+# Create ktable
+```{r}
+full_join(saltmarsh_canabio_2021_area2, saltmarsh_area_hem_2, by = "rgn_id", suffix = c("_conabio", "_hem")) |>
+  full_join(saltmarsh_oceanplus2_area_2, by = "rgn_id") |>
+  rename(area_km2_oceanplus = area_km2) |>
+  full_join(wetland_area_2020_canabio_2, by = "rgn_id") |>
+  rename(area_km2_wetland_2020 = area_km2) |>
+  full_join(saltmarsh_area2_saltmarsh, by = "rgn_id") |>
+  rename(area_km2_zenodo = area_km2) |>
+  full_join(blue_carbon_saltmarsh_area, by = "rgn_id") |>
+  rename(area_km2_bluecarbon = area_km2) |>
+  select(
+    rgn_id,
+    area_km2_hem,
+    area_km2_conabio,
+    area_km2_oceanplus,
+    area_km2_wetland_2020,
+    area_km2_zenodo,
+    area_km2_bluecarbon
+  ) |>
+  arrange(rgn_id) |>
+  kable(
+    digits = 4,
+    col.names = c(
+      "Region",
+      "Hem (km²)",
+      "CONABIO LU shp 2021 (km²)",
+      "Oceanplus (km²)",
+      "CONABIO LC tif 2020 (km²)",
+      "Zenodo 2020 (km²)",
+      "Blue Carbon (km²)"
+    )
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "bordered"))
+
+```
+
+```{r}
+sf::sf_use_s2(FALSE)
+
+# Filter for Saltmarsh variables
+saltmarsh_canabio <- saltmarsh_canabio_landuse |>
+  dplyr::filter(
+    DESCRIPCIO %in% c(
+      "VEGETACIÓN HALÓFILA HIDRÓFILA",
+      "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA HIDRÓFILA"
+    )
+  )
+
+# Transform crs of ohi_regions to saltmarsh_canabio crs
+ohi_regions <- st_transform(ohi_regions, st_crs(saltmarsh_canabio))
+
+# Intersect, dissolve within regions, calculate area
+saltmarsh_canabio_2021_area2 <- st_intersection(saltmarsh_canabio, ohi_regions) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6, year = 2021) |>
+  st_drop_geometry()
+```
+
+
+
+
+
+# CANABIO Land Use and Vegitation all yeats
+
+```{r}
+saltmarsh_canabio_landuse_1980_91 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/usv250kcs1agw/usv250kcs1agw.shp") |> st_make_valid()
+
+saltmarsh_canabio_landuse_2001 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/usv250ks2gw/usv250ks2gw.shp") |> st_make_valid()
+
+saltmarsh_canabio_landuse_2005 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/usv250ks3gw/usv250ks3gw.shp") |> st_make_valid()
+
+saltmarsh_canabio_landuse_2009 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/usv250ks4gw/usv250ks4gw.shp") |> st_make_valid()
+
+saltmarsh_canabio_landuse_2013 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/usv250s5ugw/usv250s5ugw.shp") |> st_make_valid()
+
+saltmarsh_canabio_landuse_2016 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/usv250s6gw/usv250s6gw.shp") |> st_make_valid()
+
+saltmarsh_canabio_landuse_2021 <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/CANABIO_Saltmarsh_landuse_veg/usv250s7gw/usv250s7gw.shp") |> st_make_valid()
+```
+
+VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA 
+VEGETACIÓN HALÓFILA
+
+```{r}
+# 1980-91
+saltmarsh_canabio_1980_91 <- saltmarsh_canabio_landuse_1980_91 |>
+  dplyr::filter(
+    descripcio %in% c(
+      "VEGETACIÓN HALÓFILA",
+      "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA"
+    )
+  )
+
+ohi_regions_1980_91 <- st_transform(ohi_regions, st_crs(saltmarsh_canabio_1980_91))
+
+saltmarsh_canabio_1980_91_area <- st_intersection(saltmarsh_canabio_1980_91, ohi_regions_1980_91) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 1980
+  ) |>
+  st_drop_geometry()
+
+saltmarsh_canabio_1980_91_area
+```
+
+
+```{r}
+# 2001
+
+saltmarsh_canabio_2001 <- saltmarsh_canabio_landuse_2001 |>
+  dplyr::filter(
+    descripcio %in% c(
+      "VEGETACIÓN HALÓFILA HIDRÓFILA",
+      "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA HIDRÓFILA"
+    )
+  )
+
+ohi_regions_2001 <- st_transform(ohi_regions, st_crs(saltmarsh_canabio_2001))
+
+saltmarsh_canabio_2001_area <- st_intersection(saltmarsh_canabio_2001, ohi_regions_2001) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 2001
+  ) |>
+  st_drop_geometry()
+
+saltmarsh_canabio_2001_area
+```
+
+
+```{r}
+# 2005
+
+saltmarsh_canabio_2005 <- saltmarsh_canabio_landuse_2005 |>
+  dplyr::filter(
+    descripcio %in% c(
+      "VEGETACIÓN HALÓFILA HIDRÓFILA",
+      "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA HIDRÓFILA"
+    )
+  )
+
+ohi_regions_2005 <- st_transform(ohi_regions, st_crs(saltmarsh_canabio_2005))
+
+saltmarsh_canabio_2005_area <- st_intersection(saltmarsh_canabio_2005, ohi_regions_2005) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 2005
+  ) |>
+  st_drop_geometry()
+
+saltmarsh_canabio_2005_area
+```
+
+
+```{r}
+# 2009
+
+saltmarsh_canabio_2009 <- saltmarsh_canabio_landuse_2009 |>
+  dplyr::filter(
+    descripcio %in% c(
+      "VEGETACIÓN HALÓFILA HIDRÓFILA",
+      "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA HIDRÓFILA"
+    )
+  )
+
+
+ohi_regions_2009 <- st_transform(ohi_regions, st_crs(saltmarsh_canabio_2009))
+
+saltmarsh_canabio_2009_area <- st_intersection(saltmarsh_canabio_2009, ohi_regions_2009) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 2009
+  ) |>
+  st_drop_geometry() |>
+    complete(rgn_id = unique(ohi_regions_2009$rgn_id), fill = list(area_km2 = 0, year = 2009))
+
+saltmarsh_canabio_2009_area
+```
+
+
+```{r}
+# 2013
+saltmarsh_canabio_2013 <- saltmarsh_canabio_landuse_2013 |>
+  dplyr::filter(
+    descripcio %in% c(
+      "VEGETACIÓN HALÓFILA HIDRÓFILA",
+      "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA HIDRÓFILA"
+    )
+  )
+
+ohi_regions_2013 <- st_transform(ohi_regions, st_crs(saltmarsh_canabio_2013))
+
+saltmarsh_canabio_2013_area <- st_intersection(saltmarsh_canabio_2013, ohi_regions_2013) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 2013
+  ) |>
+  st_drop_geometry()
+
+saltmarsh_canabio_2013_area
+```
+
+
+```{r}
+# 2016
+
+saltmarsh_canabio_2016 <- saltmarsh_canabio_landuse_2016 |>
+  dplyr::filter(
+    DESCRIPCIO %in% c(
+      "VEGETACIÓN HALÓFILA HIDRÓFILA",
+      "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA HIDRÓFILA"
+    )
+  )
+
+ohi_regions_2016 <- st_transform(ohi_regions, st_crs(saltmarsh_canabio_2016))
+
+saltmarsh_canabio_2016_area <- st_intersection(saltmarsh_canabio_2016, ohi_regions_2016) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 2016
+  ) |>
+  st_drop_geometry() |>
+    complete(rgn_id = unique(ohi_regions_2016$rgn_id), fill = list(area_km2 = 0, year = 2016))
+
+saltmarsh_canabio_2016_area
+```
+
+
+```{r}
+# 2021
+
+saltmarsh_canabio_2021 <- saltmarsh_canabio_landuse_2021 |>
+  dplyr::filter(
+    DESCRIPCIO %in% c(
+      "VEGETACIÓN HALÓFILA HIDRÓFILA",
+      "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA HIDRÓFILA"
+    )
+  )
+
+ohi_regions_2021 <- st_transform(ohi_regions, st_crs(saltmarsh_canabio_2021))
+
+saltmarsh_canabio_2021_area <- st_intersection(saltmarsh_canabio_2021, ohi_regions_2021) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 2021
+  ) |>
+  st_drop_geometry()
+
+saltmarsh_canabio_2021_area
+```
+
+
+```{r}
+# Combine all years into one long table
+saltmarsh_all_years <- dplyr::bind_rows(
+  saltmarsh_canabio_1980_91_area,
+  saltmarsh_canabio_2001_area,
+  saltmarsh_canabio_2005_area,
+  saltmarsh_canabio_2009_area,
+  saltmarsh_canabio_2013_area,
+  saltmarsh_canabio_2016_area,
+  saltmarsh_canabio_2021_area
+)
+
+# Pivot wider: regions on rows, years on columns
+saltmarsh_wide <- saltmarsh_all_years |>
+  tidyr::pivot_wider(
+    names_from = year,
+    values_from = area_km2) |>
+  dplyr::arrange(rgn_id)
+
+# Make the kable
+saltmarsh_wide |>
+  kable( digits = 4,
+    col.names = c(
+      "Region ID", "1991", "2001", "2005", "2009", "2013", "2016", "2021")) |>
+  kable_styling(
+    bootstrap_options = c("striped", "bordered", "hover")) |>
+  add_header_above(
+    c("Saltmarsh Extent CONABIO Land Use (All Years)" = 8))
+
+```
+
+```{r}
+print(paste("1980_91 unique values:", 
+            length(unique(saltmarsh_canabio_landuse_1980_91$descripcio))))
+
+print(paste("2001 unique values:", 
+            length(unique(saltmarsh_canabio_landuse_2001$descripcio))))
+
+print(paste("2005 unique values:", 
+            length(unique(saltmarsh_canabio_landuse_2005$descripcio))))
+
+print(paste("2009 unique values:", 
+            length(unique(saltmarsh_canabio_landuse_2009$descripcio))))
+
+print(paste("2013 unique values:", 
+            length(unique(saltmarsh_canabio_landuse_2013$descripcio))))
+
+print(paste("2016 unique values:", 
+            length(unique(saltmarsh_canabio_landuse_2016$DESCRIPCIO))))
+
+print(paste("2021 unique values:", 
+            length(unique(saltmarsh_canabio_landuse_2021$DESCRIPCIO))))
+```
+```{r}
+library(ggplot2)
+
+ggplot(saltmarsh_all_years, aes(x = year, y = area_km2, group = rgn_id, color = factor(rgn_id))) +
+  geom_point(size = 3) +
+  geom_line(linewidth = 1) +
+  labs(
+    title = "Saltmarsh Extent Over Time (CONABIO Land Use)",
+    x = "Year",
+    y = "Saltmarsh Extent (km²)",
+    color = "Region ID"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+```{r}
+saltmarsh_total <- saltmarsh_all_years |>
+  group_by(year) |>
+  summarise(total_km2 = sum(area_km2, na.rm = TRUE))
+
+ggplot(saltmarsh_total, aes(x = year, y = total_km2)) +
+  geom_point(size = 3) +
+  geom_line(linewidth = 1.2) +
+  labs(
+    title = "Total Saltmarsh Extent Over Time",
+    x = "Year",
+    y = "Total Extent (km²)"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+
+# Extent: 2021
+# This is the CONABIO Land use and vegetation data : http://www.conabio.gob.mx/informacion/gis/?vns=gis_root/usv/inegi/usv250s7gw
+```{r}
+# 2021
+# Filter for saltmarsh classes in 2021 CONABIO land use data
+saltmarsh_canabio_2021 <- saltmarsh_canabio_landuse_2021 |>
+  dplyr::filter(
+    DESCRIPCIO %in% c(
+      "VEGETACIÓN HALÓFILA HIDRÓFILA",
+      "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA HIDRÓFILA"
+    )
+  )
+
+# Transform OHI regions to match the CRS of the saltmarsh data
+ohi_regions_2021 <- st_transform(ohi_regions, st_crs(saltmarsh_canabio_2021))
+
+# Intersect saltmarsh polygons with OHI regions and calculate area
+saltmarsh_canabio_2021_area <- st_intersection(saltmarsh_canabio_2021, ohi_regions_2021) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 2021
+  ) |>
+  st_drop_geometry()
+
+# Make a nice kable table
+saltmarsh_canabio_2021_area |>
+select(rgn_id, year, area_km2) |>
+  kable(
+    digits = 4,
+    col.names = c('Region ID', 'Year', 'Extent (km²)'),
+    align = c('c', 'c', 'r')
+  ) |>
+  kable_styling(
+    bootstrap_options = c('striped', 'bordered', 'hover')
+  ) |>
+  add_header_above(
+    c('Saltmarsh Extent - CONABIO Land Use and Vegetation (2021)' = 3)
+  )
+```
+
+
+
+
+# Trend: 2021/2013
+
+```{r}
+# File 3: saltmarsh_trend.csv using CANABIO LU data
+canabio_trend <- bind_rows(saltmarsh_canabio_2021_area, saltmarsh_canabio_2013_area) |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  mutate(
+    trend = (`2021` / `2013`)^(1/8) - 1,
+    year = 2021
+  ) |>
+  select(rgn_id, year, trend)
+
+canabio_trend |>
+  kable(digits = 4, col.names = c('Region ID', 'Year', 'Trend')) |>
+  kable_styling(bootstrap_options = c('striped', 'bordered', 'hover')) |>
+  add_header_above(c('Saltmarsh Trend CONABIO 2021/2013' = 3))
+```
+
+
+
+
+
+# Condition
+
+```{r}
+# File 1: saltmarsh_condition using CANABIO LU data
+saltmarsh_condition <- bind_rows(saltmarsh_canabio_2001_area, saltmarsh_canabio_2021_area) |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  mutate(condition = `2021` / `2001`, year = 2021) |>
+  select(rgn_id, year, condition)
+
+saltmarsh_condition |>
+  kable(digits = 4, col.names = c('Region ID', 'Year', 
+                                   'Condition (2021/2001)')) |>
+  kable_styling(bootstrap_options = c('striped', 'bordered', 'hover')) |>
+  add_header_above(c('Saltmarsh Condition' = 3)) # make above 1 values 1, and 2 decimal places 
+```
+
+```{r}
+# Write CSVs to output_data directory
+write.csv(saltmarsh_canabio_2021_area,
+          "output_data/saltmarsh_extent_2021.csv",
+          row.names = FALSE)
+
+write.csv(canabio_trend,
+          "output_data/saltmarsh_trend.csv",
+          row.names = FALSE)
+
+write.csv(saltmarsh_condition,
+          "output_data/saltmarsh_condition.csv",
+          row.names = FALSE)
+```
+
