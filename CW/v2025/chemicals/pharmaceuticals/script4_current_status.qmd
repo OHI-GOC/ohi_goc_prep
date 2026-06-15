@@ -22,7 +22,16 @@ editor_options:
 
 # CW: Pharmaceuticals
 
-## Current status
+Now that we have the mg of pharmaceuticals from each source (WWTP wastewater, livestock rearing, and shrimp farming), we can aggregate these values by each region and year to determine the overall potential effluent of pharmaceuticals into the Gulf of California.
+
+However, we needed a few multipliers to make them more comparable.
+
+- Sewage: Concentration of pharmaceuticals per L that leaves sewage water. We will assume this is mostly making it to the ocean.
+- Aquaculture: Some absorbed by the animal, but then directly excreted into the ocean
+- Livestock: Some absorbed by the animal, then it must leach/runoff into the ocean.
+
+See this github issue for more details: <https://github.com/OHI-GOC/OHI_GOC_issues/issues/98#issuecomment-4693378056>
+
 
 ```{r setup}
 library(sf)
@@ -38,31 +47,110 @@ library(janitor)
 library(tibble)
 ```
 
-### Read in agriculture estimates
+### WWTP (human wastewater) estimates
 
+Here, we will assume that all of the discharge is making it to the ocean. 
 
 ```{r}
-total_ag_pharmaceuticals_kg <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/int", "total_agriculture_pharmaceuticals_kg_pourpoints_rgnid_allyears.gpkg")) %>% 
-  rename(ag_pharmaceutical_kg = total_pharmaceutical_kg)
+wwtp_pharma <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/humans_output/wwtp_mg_rgnid_pharma.csv")) %>% 
+  st_drop_geometry() %>% 
+  rename(estimated_mg = total_pharma_mg) %>% 
+  mutate(source = "human") %>% 
+  select(rgn_id, year, estimated_mg, source)
 ```
 
 
-### Read in shrimp farming estimates
+### Shrimp farming estimates
+
+We will assume that some of the pharmaceuticals are absorbed by the animal, but ultimately that everything excreted is going straight into the ocean.
+
+<https://www.researchgate.net/publication/225113603_Pharmacokinetics_and_bioavailability_of_oxytetracycline_in_vannamei_shrimp_Penaeus_vannamei_and_the_effect_of_processing_on_the_residues_in_muscle_and_shell>
+
+Based on this paper, the oral bioavailability of oxytetracycline (OTC) in vannamei shrimp was 43.6-48.2% (at doses of 50 and 10 mg/kg, respectively). This means roughly 44-48% is absorbed by the shrimp, leaving approximately 52-56% unabsorbed and directly released into the water.
+
+So essentially, if ~52-56% passes through unabsorbed → directly into water and ~44-48% absorbed → largely excreted back into water, nearly 100% of applied OTC can be assumed to reach the ocean, just via two pathways.
+
+To account for any metabolic degradation, we will multiply the values by 0.95, assuming that not all of the chemicals applied to shrimp farming are going to be as bioavailable as OTC.
 
 ```{r}
-total_aq_lime_kg <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/int/shrimp_lime_kg_by_rgnid_lyle_fritch.csv")) %>% 
-  select(rgn_id, year, aqua_lime_kg = lime_kg)
+shrimp_pharma <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/shrimp_production_chemicals/int/shrimp_mg_pharmaceuticals_rgnid.csv")) %>% 
+  mutate(estimated_mg = mg_antimicrobials * 0.95,
+         source = "shrimp") %>% 
+  st_drop_geometry() %>% 
+  select(rgn_id, year, estimated_mg, source) 
 ```
 
+### Livestock estimates
 
-### Agriculture + aquaculture estimates per region and year
+Here, we are assuming that not only are pharmaceuticals absorbed by the animal, possibly 30-90% [1], but also that only ~0.2-5% seems to leach/runoff into the ocean [2].  Note that in the experiment that had higher runoff water losses, antibiotic losses ranged from 1.2 to 1.8% of total extractable antibiotics in manure. In the experiment with lower runoff water losses, antibiotic losses varied from 0.2 to 0.6% of the total extractable antibiotics in manure. So if we use the 0.2% value, this is specifically the fraction of antibiotics already in stored manure stockpiles that then leaches/runs off into surface water, not the fraction reaching the ocean specifically. It also covers only runoff from manure piles, not field-applied manure or other pathways.
+
+[1] <https://www.oecd.org/en/publications/management-of-pharmaceutical-household-waste_3854026c-en/full-report/component-6.html>
+[2] <https://acsess.onlinelibrary.wiley.com/doi/epdf/10.2134/jeq2007.0391>
+
+mg antimicrobials administered × excretion fraction = mg in manure 
+
+mg in manure × runoff fraction = mg reaching surface water
+
+Let's use the midpoint of the absorbtion value, and the most conservative of the leaching values (0.2%).
+
+That means that the estimate mg is 0.0012 (0.12%) of the original value applied to the animals.
 
 ```{r}
-total_pharmaceutical_and_chem_kg <- full_join(total_ag_pharmaceuticals_kg, total_aq_lime_kg) %>% 
-  mutate(aqua_lime_kg = ifelse(is.na(aqua_lime_kg), 0, aqua_lime_kg),
-         ag_pharmaceutical_kg = ifelse(is.na(ag_pharmaceutical_kg), 0, ag_pharmaceutical_kg)) %>% 
-  mutate(total_chem_kg = ag_pharmaceutical_kg + aqua_lime_kg)
+livestock_pharma <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/livestock_output/watershed_antimicrobials_livestock.csv")) %>% 
+  mutate(estimated_mg = mg_antimicrobials * 0.60 * 0.002,
+         source = "livestock") %>%  # 60% is the midpoint between 30 and 90, use 0.20% which is 0.002
+  st_drop_geometry() %>% 
+  select(rgn_id, year, estimated_mg, source)
 ```
+
+### Pharmaceutical estimates per region and year
+
+```{r}
+total_pharma <- bind_rows(livestock_pharma, shrimp_pharma, wwtp_pharma) %>% 
+  group_by(rgn_id, year) %>% 
+  summarize(
+    total_estimated_mg = sum(estimated_mg, na.drop = TRUE)
+  ) %>% 
+  ungroup()
+```
+
+```{r}
+# % contribution by source, region, and year
+pharma_contributions <- bind_rows(livestock_pharma, shrimp_pharma, wwtp_pharma) %>% 
+  group_by(rgn_id, year) %>% 
+  mutate(
+    total_mg = sum(estimated_mg, na.rm = TRUE),
+    pct_contribution = (estimated_mg / total_mg) * 100
+  ) %>% 
+  ungroup()
+
+# summary across all regions and years
+pharma_summary <- pharma_contributions %>% 
+  group_by(source) %>% 
+  summarize(
+    total_mg = sum(estimated_mg, na.rm = TRUE),
+    mean_pct = mean(pct_contribution, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  mutate(overall_pct = (total_mg / sum(total_mg)) * 100)
+
+print(pharma_summary)
+
+# viz percent contribution by source over time (averaged across regions)
+pharma_contributions %>% 
+  group_by(year, source) %>% 
+  summarize(estimated_mg = sum(estimated_mg, na.rm = TRUE), .groups = "drop") %>% 
+  group_by(year) %>% 
+  mutate(pct = (estimated_mg / sum(estimated_mg)) * 100) %>% 
+  ggplot(aes(x = year, y = pct, fill = source)) +
+  geom_col(position = "stack") +
+  labs(
+    title = "Percent Contribution to Total Pharmaceutical Effluent by Source",
+    x = "Year", y = "% Contribution", fill = "Source"
+  ) +
+  theme_minimal()
+```
+
 
 
 ## Current status

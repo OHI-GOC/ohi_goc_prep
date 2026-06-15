@@ -102,10 +102,10 @@ All my current code uses the number of heads from cattle to do the dasymetric ma
 
 ### Workflow
 
-**For each species × year combination:**
+**For each species + year combination:**
 
 1. Load the species-specific GLW4 raster (e.g. `CTL` for bovino, `CHK` for ave, etc.)
-2. Crop/resample to 1km 
+2. Crop/resample to 1km using nearest neighbor
 3. Compute the weight raster for that species (GLW cell density / municipal GLW total), which is the spatial proxy
 4. Filter SIAP to that species × year, get `toneladas_volumen` per municipality
 5. Rasterize the SIAP tonnes onto the municipality polygons
@@ -116,7 +116,7 @@ All my current code uses the number of heads from cattle to do the dasymetric ma
 7. Stack the 5 species rasters and sum cellwise, which = total tonnes slaughtered per 1km cell per year
 8. Multiply by 1000 (tonnes --> kg) then by 11 mg/kg, to get mg antimicrobials per cell
 9. Summarize by watershed, assign to pourpoints, assign to OHI regions
-10. Calculate the risk factor by comparing across regions and years
+10. Calculate the current status by comparing across regions and years
 
 _REMEMBER: GLW4 (FAO livestock density) = **where**, DGSIAP (Mexican Govt) = **how much**!!_
 
@@ -190,7 +190,6 @@ sum_livestock_municipal <- bind_all_years_livestock %>%
   # mutate(weight = toneladas_volumen / cabezas_asacrificados) %>% 
   ungroup()
 
-
 ```
 
 
@@ -209,34 +208,231 @@ mapview(municipio_codigo_sf)
 ```
 
 ```{r}
-siap_municipal <- inner_join(sum_livestock_municipal, municipio_codigo_sf) %>% 
-  st_as_sf()
+islands_polygons <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/from_hem_POEM_ANP/232_ANP-ITRF08_16062025/232_ANP-ITRF08_16062025.shp")) %>% 
+  janitor::clean_names() %>% 
+  filter(nombre %in% "Islas del Golfo de California")
+mapview(islands_polygons)
 
-siap_municipal_2022 <- siap_municipal %>% 
-  filter(anio %in% 2022 & nomespecie %in% "Bovino")
+# erase the island polygons from the municipality polygons, using st_difference, which removes the island area from any municipality that overlaps it
+municipio_codigo_sf_no_islands <- municipio_codigo_sf %>%
+  st_transform(st_crs(islands_polygons)) %>%
+  st_difference(st_union(st_buffer(islands_polygons, dist = 110))) %>% # crop out island areas
+  st_make_valid()
 
-unique(siap_municipal_2022$nomespecie)
-
-mapview(siap_municipal_2022, zcol = "toneladas_volumen")
+# compare before and after around the GoC islands
+mapview(municipio_codigo_sf, col.regions = "blue", alpha.regions = 0.3) +
+mapview(municipio_codigo_sf_no_islands, col.regions = "red", alpha.regions = 0.3) +
+mapview(islands_polygons, col.regions = "yellow", alpha.regions = 0.5) # looks good!!!!
 ```
 
 ```{r}
-gridded_cattle_density_2020_10km <- terra::rast(here::here("/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.CTL.tif"))
-
-plot(gridded_cattle_density_2020_10km)
-
-st_crs(gridded_cattle_density_2020_10km) # WGS 84
-
-freq(gridded_cattle_density_2020_10km)
-
-gridded_cattle_density_2020_10km_goc <- terra::crop(terra::project(gridded_cattle_density_2020_10km, crs(marine_and_inland50)), marine_and_inland50)
-
-crs(gridded_cattle_density_2020_10km_goc)
-
-plot(gridded_cattle_density_2020_10km_goc)
+# make sure mun_union is a proper sf object in WGS84 (matching GLW rasters)
+mun_union <- municipio_codigo_sf_no_islands %>%
+  st_union() %>%
+  st_make_valid() %>%
+  st_as_sf() %>%
+  st_transform(4326)  # keep in WGS84 to match GLW rasters
+mapview(mun_union) # check that the buffer covered the full island polygon in municipio_codigo_sf
 ```
 
-### Bring in FAO livestock density rasters
+```{r}
+siap_municipal <- sum_livestock_municipal %>%
+  left_join(
+    municipio_codigo_sf_no_islands %>%
+      mutate(cvempio = as.numeric(clv_mnc),
+             cveestado = as.numeric(clv_std)) %>%
+      select(cvempio, cveestado, geometry),
+    by = c("cvempio", "cveestado")
+  ) %>%
+  st_as_sf()
+```
+
+
+
+<!-- ### EXAMPLE Cattle density (global 10km raster) -->
+
+<!-- For an example of how to do it for just cattle: -->
+
+<!-- ```{r} -->
+<!-- library(terra) -->
+
+<!-- # read in cattle density -->
+<!-- gridded_cattle_density_2020_10km <- terra::rast(here::here("/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.CTL.tif")) -->
+
+<!-- # temp project the 9 polygons to WGS 84 just for the fast global crop -->
+<!-- marine_and_inland50_wgs84 <- st_transform(marine_and_inland50, terra::crs(gridded_cattle_density_2020_10km)) -->
+
+<!-- # crop the massive global raster down to marine_and_inland50_wgs84 rectangular box -->
+<!-- cattle_cropped_wgs84 <- terra::crop(gridded_cattle_density_2020_10km, marine_and_inland50_wgs84) -->
+<!-- terra::plot(cattle_cropped_wgs84) -->
+
+<!-- # project only this small cropped raster into our preferred metric CRS (Mexico LCC) -->
+<!-- cattle_projected_lcc <- terra::project(cattle_cropped_wgs84, terra::crs(marine_and_inland50)) -->
+
+<!-- # mask the raster to the exact boundaries of the 9 region polygons -->
+<!-- gridded_cattle_density_2020_10km_goc <- terra::mask(cattle_projected_lcc, marine_and_inland50) -->
+
+<!-- # verify the final CRS -->
+<!-- terra::crs(gridded_cattle_density_2020_10km_goc) -->
+<!-- terra::plot(gridded_cattle_density_2020_10km_goc) -->
+<!-- ``` -->
+
+<!-- #### 1. Resample to 1km  -->
+
+<!-- ```{r} -->
+<!-- # now resample to 1km using nearest neighbor -->
+<!-- # make an empty template with 1000m (1km) resolution matching the extent and CRS -->
+<!-- template_1km <- terra::rast(gridded_cattle_density_2020_10km_goc) -->
+<!-- terra::res(template_1km) <- 1000 -->
+
+<!-- # resample the data using nearest neighbor to smoothly estimate new 1km density values. original data is in cattle heads/km^2 -->
+<!-- cattle_density_1km <- terra::resample( -->
+<!--   x = gridded_cattle_density_2020_10km_goc,  -->
+<!--   y = template_1km,  -->
+<!--   method = "near" -->
+<!-- ) -->
+
+<!-- # reapply the polygon mask to clean up any edge cells bleeding past the borders -->
+<!-- gridded_cattle_density_2020_1km_goc <- terra::mask(cattle_density_1km, marine_and_inland50) -->
+
+<!-- # check and plot -->
+<!-- print(gridded_cattle_density_2020_1km_goc) -->
+<!-- terra::plot(gridded_cattle_density_2020_1km_goc) -->
+<!-- ``` -->
+
+<!-- #### 2. Dasymetric mapping of municipal numbers to spatially where estimated cattle locations are from the global raster -->
+
+<!-- Because SIAP data is locked to arbitrary administrative boundaries (municipalities), we can't intersect it with watersheds, as a single municipality might span multiple watersheds. The GLW4 raster provides the "spatial proxy" to figure out where within those municipalities the livestock actually are. -->
+
+<!-- ###### a. prep the DGSIAP data and rasterize -->
+
+<!-- Ensure municipality polygons (ex: siap_municipal_2022) are in the exact same metric projection (Mexico LCC) as the 1km raster. -->
+
+<!-- ```{r} -->
+<!-- library(terra) -->
+<!-- library(sf) -->
+<!-- library(dplyr) -->
+
+<!-- # make the 2022 SIAP sf object a terra SpatVector in Mexico LCC -->
+<!-- mun_vector <- siap_municipal_2022 %>%  -->
+<!--   st_transform(st_crs(gridded_cattle_density_2020_1km_goc)) %>%  -->
+<!--   vect() -->
+<!-- ``` -->
+
+
+<!-- ###### b. calculate the municipal weights -->
+
+<!-- We need to find the total GLW raster value for each municipality and divide each cell by that total. -->
+
+<!-- ```{r} -->
+<!-- # sum up the GLW 1km density values inside each municipality -->
+<!-- mun_totals <- terra::extract(gridded_cattle_density_2020_1km_goc, mun_vector, fun = sum, na.rm = TRUE) -->
+
+<!-- # append this municipal total back to the vector object (assuming the extraction order matches the vector rows) -->
+<!-- mun_vector$glw_total_density <- mun_totals[, 2] -->
+
+<!-- # rasterize the municipal totals so we can do raster algebra. we use the 1km cattle raster as a geometry template -->
+<!-- mun_totals_raster <- terra::rasterize(mun_vector, gridded_cattle_density_2020_1km_goc, field = "glw_total_density") -->
+
+<!-- # create the weight raster (Cell Weight = Cell Density / Municipal Total Density). cells will range from 0 to 1, representing the proportion of the municipality's cattle in that cell. -->
+<!-- cattle_weight_raster <- gridded_cattle_density_2020_1km_goc / mun_totals_raster -->
+
+<!-- plot(cattle_weight_raster) -->
+<!-- ``` -->
+
+
+<!-- ###### c. distribute SIAP values (cattle volume) across the 1km grid -->
+
+<!-- ```{r} -->
+<!-- ## rasterize the actual SIAP livestock volume (tons) for 2022 -->
+<!-- siap_volume_raster <- terra::rasterize(mun_vector, gridded_cattle_density_2020_1km_goc, field = "toneladas_volumen") -->
+
+<!-- # distribute the tons across the 1km grid -->
+<!-- # result: a 1km raster where cell values = estimated SIAP tons of cattle in that specific 1km block -->
+<!-- siap_cattle_tons_1km <- siap_volume_raster * cattle_weight_raster -->
+
+<!-- # quick check: plot it to see the refined 1km distribution of Mexican govt data -->
+<!-- plot(siap_cattle_tons_1km) -->
+
+<!-- ``` -->
+
+<!-- ###### d. do for all years! -->
+
+<!-- ```{r} -->
+<!-- install.packages(c("future", "furrr")) -->
+
+<!-- library(future) -->
+<!-- library(furrr) -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- # ---- define output directory ---------------------------------------------------- -->
+<!-- out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/livestock_int" -->
+<!-- # dir.create(out_dir, recursive = TRUE, showWarnings = FALSE) -->
+
+<!-- # ---- per-year function ---------------------------------------------------- -->
+<!-- distribute_siap_year <- function(yr, siap_municipal, template_raster, -->
+<!--                                   weight_raster, out_dir) { -->
+
+<!--   message("processing year: ", yr) -->
+
+<!--   # 1. filter to this year and attach volume to geometry -->
+<!--   mun_yr_vector <- municipio_codigo_sf %>%  -->
+<!--     st_transform(st_crs(template_raster)) %>%  -->
+<!--     mutate(clv_mnc = as.numeric(clv_mnc), -->
+<!--            clv_std = as.numeric(clv_std)) %>%   # coerce both keys to match -->
+<!--     left_join( -->
+<!--       st_drop_geometry(siap_municipal %>% filter(anio == yr)) %>%  -->
+<!--         select(cvempio, cveestado, toneladas_volumen), -->
+<!--       by = c("clv_mnc" = "cvempio", "clv_std" = "cveestado") -->
+<!--     ) %>%  -->
+<!--     vect() -->
+
+<!--   # 2. rasterize SIAP volume for this year -->
+<!--   siap_volume_raster <- terra::rasterize(mun_yr_vector, template_raster, -->
+<!--                                           field = "toneladas_volumen") -->
+
+<!--   # 3. dasymetric distribution -->
+<!--   siap_cattle_tons_1km <- siap_volume_raster * weight_raster -->
+
+<!--   # 4. save to disk -->
+<!--   out_path <- file.path(out_dir, paste0("siap_cattle_tons_1km_", yr, ".tif")) -->
+<!--   terra::writeRaster(siap_cattle_tons_1km, out_path, overwrite = TRUE) -->
+
+<!--   message("  saved: ", basename(out_path)) -->
+<!--   return(out_path) -->
+<!-- } -->
+
+
+<!-- # ---- run in parallel across all years ---------------------------------------------------- -->
+<!-- years_to_process <- c(2006:2022, 2024) -->
+
+<!-- output_paths <- purrr::map( -->
+<!--   years_to_process, -->
+<!--   function(yr) distribute_siap_year( -->
+<!--     yr = yr, -->
+<!--     siap_municipal = siap_municipal, -->
+<!--     template_raster = gridded_cattle_density_2020_1km_goc, -->
+<!--     weight_raster = cattle_weight_raster, -->
+<!--     out_dir = out_dir -->
+<!--   ) -->
+<!-- ) -->
+
+<!-- # ---- quick sanity check ---------------------------------------------------- -->
+<!-- tibble( -->
+<!--   year = years_to_process, -->
+<!--   path = unlist(output_paths), -->
+<!--   exists = file.exists(unlist(output_paths)) -->
+<!-- ) -->
+<!-- ``` -->
+
+
+### Dasymetric mapping 
+
+Because SIAP data is locked to arbitrary administrative boundaries (municipalities), we can't intersect it with watersheds, as a single municipality might span multiple watersheds. The GLW4 (FAO livestock density) rasters provide the "spatial proxy" to figure out where within those municipalities the livestock actually are.
+
+#### 1. Bring in FAO livestock density rasters
 
 This data is from FAO's gridded 10km raster of heads/km^2 of each livestock type.  The data was downloaded from <https://data.apps.fao.org/catalog//iso/9d1e149b-d63f-4213-978b-317a8eb42d02> and placed into `~/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026`:
 
@@ -262,219 +458,6 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 ```
 
 
-### EXAMPLE Cattle density (global 10km raster)
-
-For an example of how to do it for just cattle:
-
-```{r}
-library(terra)
-
-# read in cattle density
-gridded_cattle_density_2020_10km <- terra::rast(here::here("/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/GLW4-2020.D-DA.CTL.tif"))
-
-# temp project the 9 polygons to WGS 84 just for the fast global crop
-marine_and_inland50_wgs84 <- st_transform(marine_and_inland50, terra::crs(gridded_cattle_density_2020_10km))
-
-# crop the massive global raster down to marine_and_inland50_wgs84 rectangular box
-cattle_cropped_wgs84 <- terra::crop(gridded_cattle_density_2020_10km, marine_and_inland50_wgs84)
-terra::plot(cattle_cropped_wgs84)
-
-# project only this small cropped raster into our preferred metric CRS (Mexico LCC)
-cattle_projected_lcc <- terra::project(cattle_cropped_wgs84, terra::crs(marine_and_inland50))
-
-# mask the raster to the exact boundaries of the 9 region polygons
-gridded_cattle_density_2020_10km_goc <- terra::mask(cattle_projected_lcc, marine_and_inland50)
-
-# verify the final CRS
-terra::crs(gridded_cattle_density_2020_10km_goc)
-terra::plot(gridded_cattle_density_2020_10km_goc)
-```
-
-#### 1. Resample to 1km
-
-```{r}
-# now resample to 1km
-# make an empty template with 1000m (1km) resolution matching the extent and CRS
-template_1km <- terra::rast(gridded_cattle_density_2020_10km_goc)
-terra::res(template_1km) <- 1000
-
-# resample the data using bilinear interpolation to smoothly estimate new 1km density values. original data is in cattle heads/km^2
-cattle_density_1km <- terra::resample(
-  x = gridded_cattle_density_2020_10km_goc, 
-  y = template_1km, 
-  method = "bilinear"
-)
-
-# reapply the polygon mask to clean up any edge cells bleeding past the borders
-gridded_cattle_density_2020_1km_goc <- terra::mask(cattle_density_1km, marine_and_inland50)
-
-# check and plot
-print(gridded_cattle_density_2020_1km_goc)
-terra::plot(gridded_cattle_density_2020_1km_goc)
-```
-
-#### 2. Dasymetric mapping of municipal numbers to spatially where estimated cattle locations are from the global raster
-
-Because SIAP data is locked to arbitrary administrative boundaries (municipalities), we can't intersect it with watersheds, as a single municipality might span multiple watersheds. The GLW4 raster provides the "spatial proxy" to figure out where within those municipalities the livestock actually are.
-
-###### a. prep the DGSIAP data and rasterize
-
-Ensure municipality polygons (ex: siap_municipal_2022) are in the exact same metric projection (Mexico LCC) as the 1km raster.
-
-```{r}
-library(terra)
-library(sf)
-library(dplyr)
-
-# make the 2022 SIAP sf object a terra SpatVector in Mexico LCC
-mun_vector <- siap_municipal_2022 %>% 
-  st_transform(st_crs(gridded_cattle_density_2020_1km_goc)) %>% 
-  vect()
-```
-
-
-###### b. calculate the municipal weights
-
-We need to find the total GLW raster value for each municipality and divide each cell by that total.
-
-```{r}
-# sum up the GLW 1km density values inside each municipality
-mun_totals <- terra::extract(gridded_cattle_density_2020_1km_goc, mun_vector, fun = sum, na.rm = TRUE)
-
-# append this municipal total back to the vector object (assuming the extraction order matches the vector rows)
-mun_vector$glw_total_density <- mun_totals[, 2]
-
-# rasterize the municipal totals so we can do raster algebra. we use the 1km cattle raster as a geometry template
-mun_totals_raster <- terra::rasterize(mun_vector, gridded_cattle_density_2020_1km_goc, field = "glw_total_density")
-
-# create the weight raster (Cell Weight = Cell Density / Municipal Total Density). cells will range from 0 to 1, representing the proportion of the municipality's cattle in that cell.
-cattle_weight_raster <- gridded_cattle_density_2020_1km_goc / mun_totals_raster
-
-plot(cattle_weight_raster)
-```
-
-
-###### c. distribute SIAP values (cattle volume) across the 1km grid
-
-```{r}
-## rasterize the actual SIAP livestock volume (tons) for 2022
-siap_volume_raster <- terra::rasterize(mun_vector, gridded_cattle_density_2020_1km_goc, field = "toneladas_volumen")
-
-# distribute the tons across the 1km grid
-# result: a 1km raster where cell values = estimated SIAP tons of cattle in that specific 1km block
-siap_cattle_tons_1km <- siap_volume_raster * cattle_weight_raster
-
-# quick check: plot it to see the refined 1km distribution of Mexican govt data
-plot(siap_cattle_tons_1km)
-
-```
-
-###### d. do for all years!
-
-```{r}
-install.packages(c("future", "furrr"))
-
-library(future)
-library(furrr)
-```
-
-
-```{r}
-# ---- define output directory ----------------------------------------------------
-out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/livestock_int"
-# dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-
-# ---- per-year function ----------------------------------------------------
-distribute_siap_year <- function(yr, siap_municipal, template_raster,
-                                  weight_raster, out_dir) {
-  
-  message("processing year: ", yr)
-  
-  # 1. filter to this year and attach volume to geometry
-  mun_yr_vector <- municipio_codigo_sf %>% 
-    st_transform(st_crs(template_raster)) %>% 
-    mutate(clv_mnc = as.numeric(clv_mnc),
-           clv_std = as.numeric(clv_std)) %>%   # coerce both keys to match
-    left_join(
-      st_drop_geometry(siap_municipal %>% filter(anio == yr)) %>% 
-        select(cvempio, cveestado, toneladas_volumen),
-      by = c("clv_mnc" = "cvempio", "clv_std" = "cveestado")
-    ) %>% 
-    vect()
-  
-  # 2. rasterize SIAP volume for this year
-  siap_volume_raster <- terra::rasterize(mun_yr_vector, template_raster,
-                                          field = "toneladas_volumen")
-  
-  # 3. dasymetric distribution
-  siap_cattle_tons_1km <- siap_volume_raster * weight_raster
-  
-  # 4. save to disk
-  out_path <- file.path(out_dir, paste0("siap_cattle_tons_1km_", yr, ".tif"))
-  terra::writeRaster(siap_cattle_tons_1km, out_path, overwrite = TRUE)
-  
-  message("  saved: ", basename(out_path))
-  return(out_path)
-}
-
-
-# ---- run in parallel across all years ----------------------------------------------------
-years_to_process <- c(2006:2022, 2024)
-
-output_paths <- purrr::map(
-  years_to_process,
-  \(yr) distribute_siap_year(
-    yr = yr,
-    siap_municipal = siap_municipal,
-    template_raster = gridded_cattle_density_2020_1km_goc,
-    weight_raster = cattle_weight_raster,
-    out_dir = out_dir
-  )
-)
-
-# ---- quick sanity check ----------------------------------------------------
-tibble(
-  year = years_to_process,
-  path = unlist(output_paths),
-  exists = file.exists(unlist(output_paths))
-)
-```
-
-#### 3. In theory, we would do the same thing for not just cattle, but also sheep, pigs, goat, and chicken (birds).
-
-```{r}
-
-```
-
-
-#### 4. Summarize total kg of livestock production in each 1km cell, across all nomespecies.
-
-First, we need to do dimensional analysis to convert from tonnes to kg of volume produced in each municipality and year.
-
-```{r}
-
-```
-
-
-Now that we ideally have a 1km gridded raster of the total livestock production (kg) of all livestock types, we can estimate the mg of antimicrobial quantities for each municipality and year by applying:
-
-*__ kg total volume terrestrial livestock slaughtered × 11 mg/kg of antimicrobials  = __ mg of antimicriobials applied that could potentially discharge into the GoC eventually.*
-
-^ This number was determined based on Table 5 from WOAH <https://www.woah.org/app/uploads/2025/05/en-woah-amu-report-2025-final.pdf>.
-
-
-
-
-
-
-
-
-
-
-### Dasymetric mapping 
-
-Because SIAP data is locked to arbitrary administrative boundaries (municipalities), we can't intersect it with watersheds, as a single municipality might span multiple watersheds. The GLW4 (FAO livestock density) rasters provide the "spatial proxy" to figure out where within those municipalities the livestock actually are.
-
 
 #### 2. Crop and resample all GLW4 rasters (for each nomespecie) to 1km
 
@@ -483,25 +466,32 @@ Because SIAP data is locked to arbitrary administrative boundaries (municipaliti
 prep_glw_1km <- function(glw_path, mask_polygon) {
   
   glw_raw <- terra::rast(glw_path)
+  
+  # step 1: crop in native WGS84 (fast, small extent)
   mask_wgs84 <- st_transform(mask_polygon, terra::crs(glw_raw))
-  
   glw_cropped <- terra::crop(glw_raw, mask_wgs84)
-  glw_projected <- terra::project(glw_cropped, terra::crs(mask_polygon))
-  glw_masked <- terra::mask(glw_projected, mask_polygon)
   
-  # resample to 1km
+  # step 2: project to metric CRS (Mexico LCC) BEFORE setting 1km resolution
+  target_crs <- "+proj=lcc +lat_1=17.5 +lat_2=29.5 +lat_0=12 +lon_0=-102 +x_0=2500000 +y_0=0 +datum=WGS84 +units=m +no_defs"
+  glw_projected <- terra::project(glw_cropped, target_crs)
+  
+  # step 3: mask to municipality union (now both in metric CRS)
+  mask_lcc <- st_transform(mask_polygon, target_crs)
+  glw_masked <- terra::mask(glw_projected, vect(mask_lcc))
+  
+  # step 4: resample to 1km (now res=1000 means 1000 metres)
   template_1km <- terra::rast(glw_masked)
   terra::res(template_1km) <- 1000
-  glw_1km <- terra::resample(glw_masked, template_1km, method = "bilinear")
-  glw_1km <- terra::mask(glw_1km, mask_polygon)
+  glw_1km <- terra::resample(glw_masked, template_1km, method = "near")
+  glw_1km <- terra::mask(glw_1km, vect(mask_lcc))
   
   return(glw_1km)
 }
 
-# apply to all species — named list for easy lookup by nomespecie
+# apply to all species
 glw_1km_list <- purrr::map(
   setNames(species_glw_map$glw_file, species_glw_map$nomespecie),
-  \(f) prep_glw_1km(file.path(glw_dir, f), marine_and_inland50)
+  function(f) prep_glw_1km(file.path(glw_dir, f), mun_union) # use municipality union here instead of inland_marine_50 because we do not want to include the islands!!!!
 )
 ```
 
@@ -510,7 +500,7 @@ glw_1km_list <- purrr::map(
 
 ```{r}
 # helper: given a 1km GLW raster and the municipality vector, return a weight raster
-compute_weight_raster <- function(glw_1km, mun_vector_base, municipio_codigo_sf) {
+compute_weight_raster <- function(glw_1km, mun_vector_base, municipio_codigo_sf_no_islands) {
   
   mun_vec <- municipio_codigo_sf %>% 
     st_transform(st_crs(glw_1km)) %>% 
@@ -529,7 +519,7 @@ compute_weight_raster <- function(glw_1km, mun_vector_base, municipio_codigo_sf)
 # pre-compute weight rasters for all species (year-invariant)
 weight_raster_list <- purrr::map(
   glw_1km_list,
-  \(glw) compute_weight_raster(glw, mun_vector_base, municipio_codigo_sf)
+  function(glw) compute_weight_raster(glw, mun_vector_base, municipio_codigo_sf_no_islands)
 )
 ```
 
@@ -541,7 +531,7 @@ This is the actual dasymetric distribution step right here which will produce to
 ```{r}
 # these three steps are in one function per species and year
 distribute_species_year <- function(yr, species, siap_municipal, 
-                                     municipio_codigo_sf, glw_1km, 
+                                     municipio_codigo_sf_no_islands, glw_1km, 
                                      weight_raster, out_dir) {
   
   message("  processing: ", species, " - ", yr)
@@ -553,7 +543,7 @@ distribute_species_year <- function(yr, species, siap_municipal,
     select(cvempio, cveestado, toneladas_volumen)
   
   # step 5: join to municipality polygons and rasterize
-  mun_vec <- municipio_codigo_sf %>% 
+  mun_vec <- municipio_codigo_sf_no_islands %>% 
     st_transform(st_crs(glw_1km)) %>% 
     mutate(clv_mnc = as.numeric(clv_mnc),
            clv_std = as.numeric(clv_std)) %>% 
@@ -584,11 +574,11 @@ message("running dasymetric mapping for ", nrow(combos), " species and year comb
 
 purrr::walk2(
   combos$yr, combos$species,
-  \(yr, sp) distribute_species_year(
+  function(yr, sp) distribute_species_year(
     yr = yr,
     species = sp,
     siap_municipal = siap_municipal,
-    municipio_codigo_sf = municipio_codigo_sf,
+    municipio_codigo_sf_no_islands = municipio_codigo_sf_no_islands,
     glw_1km = glw_1km_list[[sp]],
     weight_raster = weight_raster_list[[sp]],
     out_dir = out_dir
@@ -626,7 +616,7 @@ sum_species_year <- function(yr, out_dir) {
   return(out_path)
 }
 
-total_tons_paths <- purrr::map(years_to_process, \(yr) sum_species_year(yr, out_dir))
+total_tons_paths <- purrr::map(years_to_process, function(yr) sum_species_year(yr, out_dir))
 
 # sanity check
 tibble(
@@ -639,10 +629,17 @@ tibble(
 
 #### 8. Convert to mg of potential antimicrobials
 
+Now that we ideally have a 1km gridded raster of the total livestock production (kg) of all livestock types, we can estimate the mg of antimicrobial quantities for each municipality and year by applying:
+
+*__ kg total volume terrestrial livestock slaughtered × 95.37 mg/kg of antimicrobials  = __ mg of antimicriobials applied that could potentially discharge into the GoC eventually.*
+
+^ This number was determined based on Table 5 from WOAH <https://www.woah.org/app/uploads/2025/05/en-woah-amu-report-2025-final.pdf>.
+
+
 ```{r}
 # conversion: tonnes -> kg -> mg antimicrobials
 # 1 tonne = 1000 kg
-# 11.87 mg antimicrobials per kg of terrestrial livestock slaughtered (WOAH 2025, Table 5)
+# 95.37 mg antimicrobials per kg of terrestrial livestock slaughtered (WOAH 2025, Table 5)
 
 convert_to_antimicrobials <- function(yr, out_dir) {
   
@@ -652,7 +649,7 @@ convert_to_antimicrobials <- function(yr, out_dir) {
   total_tonnes <- terra::rast(in_path)
   
   # tonnes -> kg -> mg antimicrobials
-  mg_antimicrobials <- total_tonnes * 1000 * 11.87
+  mg_antimicrobials <- total_tonnes * 1000 * 95.37
   names(mg_antimicrobials) <- paste0("mg_antimicrobials_", yr)
   
   out_path <- file.path(out_dir, paste0("mg_antimicrobials_1km_", yr, ".tif"))
@@ -661,7 +658,7 @@ convert_to_antimicrobials <- function(yr, out_dir) {
   return(out_path)
 }
 
-antimicrobial_paths <- purrr::map(years_to_process, \(yr) convert_to_antimicrobials(yr, out_dir))
+antimicrobial_paths <- purrr::map(years_to_process, function(yr) convert_to_antimicrobials(yr, out_dir))
 
 # final sanity check
 tibble(
@@ -713,7 +710,7 @@ summarize_watersheds_year <- function(yr, out_dir, watersheds_lcc) {
 
 watershed_antimicrobials <- purrr::map(
   years_to_process,
-  \(yr) summarize_watersheds_year(yr, out_dir, watersheds_lcc)
+  function(yr) summarize_watersheds_year(yr, out_dir, watersheds_lcc)
 ) %>% 
   bind_rows() %>% 
   filter(!is.nan(mg_antimicrobials)) # filter out any basins without livestock pharmaceutical use
@@ -730,6 +727,8 @@ HOWEVER, for livestock, it is a bit more nuanced. There are two different reason
 
 (1) Actual absence, where the watershed drains an area with genuinely no livestock. These would be okay to drop.
 (2) There is a data gap, in which the municipality exists but SIAP has no reported `toneladas_volumen` for that species and year. This is a real data gap and dropping it silently could underestimate pressure in that region.
+
+We can acknowledge that the pourpoints without values are case (1), so we can drop them.
 
 ```{r}
 # project pourpoints to match
@@ -765,39 +764,49 @@ na_years <- rgn_antimicrobials %>%
   filter(is.na(year))
 mapview(na_years)
 
-mapview(rgn_antimicrobials, zcol = "mg_antimicrobials")
+mapview(rgn_antimicrobials, zcol = "mg_antimicrobials") + mapview(watershed_goc)
 
 # drop the pourpoints with zero contributions
 rgn_antimicrobials_drop0 <- rgn_antimicrobials %>% 
   filter(!mg_antimicrobials == 0)
-mapview(rgn_antimicrobials_drop0, zcol = "mg_antimicrobials")
+mapview(rgn_antimicrobials_drop0, zcol = "mg_antimicrobials") + mapview(watershed_goc) # great!!
 
 summary(rgn_antimicrobials_drop0)
 ```
 
-#### 10. Risk factor and current status
+
+```{r}
+###########################
+# test_plot <- terra::rast(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/livestock_int/mg_antimicrobials_1km_2024.tif"))
+# mapview(test_plot)
+# 
+# test_glw4 <- terra::rast(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/livestock_int/siap_total_tons_1km_2024.tif"))
+# mapview(test_glw4)
+```
+
+#### 10. Current status
 
 ```{r}
 # status = 1 - (mg_current - mg_ideal) / (mg_max - mg_ideal)
 # ideal = 0 (no antimicrobial discharge), so: status = 1 - (mg_current / mg_max), where mg_max is the global maximum across all regions and years
 
-mg_max <- max(rgn_antimicrobials$mg_antimicrobials, na.rm = TRUE)
-
-current_status_livestock <- rgn_antimicrobials %>% 
-  mutate(
-   
-     # rescaled pressure score (0 = no pressure, 1 = maximum pressure)
-    pressure_score = mg_antimicrobials / mg_max,
-    risk_factor = pressure_score * 100,
-    
-    # current status (1 = ideal, 0 = worst)
-    current_status = 100 - risk_factor
-  )
-
-# check it to make sure the range is not wild
-summary(current_status_livestock$current_status)
- #   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
- #   0.00   54.75   89.66   75.94   95.60   99.93
+# mg_max <- max(rgn_antimicrobials$mg_antimicrobials, na.rm = TRUE)
+# 
+# current_status_livestock <- rgn_antimicrobials %>% 
+#   mutate(
+#    
+#      # rescaled pressure score (0 = no pressure, 1 = maximum pressure)
+#     pressure_score = mg_antimicrobials / mg_max,
+#     risk_factor = pressure_score * 100,
+#     
+#     # current status (1 = ideal, 0 = worst)
+#     current_status = 100 - risk_factor
+#   )
+# 
+# # check it to make sure the range is not wild
+# summary(current_status_livestock$current_status)
+#  #   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#  #   0.00   54.75   89.66   75.94   95.60   99.93
 
 # --------------------- alt ------------------
 mg_max_alt <- max(rgn_antimicrobials_drop0$mg_antimicrobials, na.rm = TRUE)
@@ -816,7 +825,7 @@ current_status_livestock_alt <- rgn_antimicrobials_drop0 %>%
 # check it to make sure the range is not wild
 summary(current_status_livestock_alt$current_status)
    # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
-   # 0.00   52.47   86.81   73.80   95.71   99.93 
+   # 0.00   50.83   90.89   75.10   98.98   99.96 
 ```
 
 ##### ~ plotlys
@@ -847,7 +856,7 @@ current_status_livestock_plotly <- plotly::plot_ly(
   mode = "lines+markers"
 ) %>% 
   layout(
-    title = "Clean Waters: Current status (1 - risk_factor) of pharmaceutical chemicals from livestock, based on tonnes/year of production",
+    title = "Clean Waters: Current status of pharmaceutical chemicals from livestock (mg)",
     xaxis = list(title = "ano // Year"),
     yaxis = list(title = "Puntaje // Percent (out of 100)")
   ) %>%
@@ -860,29 +869,29 @@ current_status_livestock_plotly <- plotly::plot_ly(
   )
 current_status_livestock_plotly
 
-## plot the livestock pharma rf over time
-rf_livestock_plotly <- plotly::plot_ly(
-  current_status_livestock_alt, 
-  x = ~year, 
-  y = ~risk_factor, 
-  color = ~rgn_id, 
-  colors = rgn_colors,
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "Clean Waters: Relative risk of pharmaceutical chemicals from livestock, based on tonnes/year of production",
-    xaxis = list(title = "ano // Year"),
-    yaxis = list(title = "Risk factor (mg_antimicrobials - ideal)/(maximum - ideal) * 100")
-  ) %>%
-  add_lines( 
-    x = range(current_status_livestock_alt$year), 
-    y = c(0, 0),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal (0)",
-    inherit = FALSE
-  )
-rf_livestock_plotly
+# ## plot the livestock pharma rf over time
+# rf_livestock_plotly <- plotly::plot_ly(
+#   current_status_livestock_alt, 
+#   x = ~year, 
+#   y = ~risk_factor, 
+#   color = ~rgn_id, 
+#   colors = rgn_colors,
+#   type = "scatter", 
+#   mode = "lines+markers"
+# ) %>% 
+#   layout(
+#     title = "Clean Waters: Relative risk of pharmaceutical chemicals from livestock, based on tonnes/year of production",
+#     xaxis = list(title = "ano // Year"),
+#     yaxis = list(title = "Risk factor (mg_antimicrobials - ideal)/(maximum - ideal) * 100")
+#   ) %>%
+#   add_lines( 
+#     x = range(current_status_livestock_alt$year), 
+#     y = c(0, 0),
+#     line = list(color = "black", width = 2, dash = "dash"),
+#     name = "Meta // Goal (0)",
+#     inherit = FALSE
+#   )
+# rf_livestock_plotly
 
 ```
 

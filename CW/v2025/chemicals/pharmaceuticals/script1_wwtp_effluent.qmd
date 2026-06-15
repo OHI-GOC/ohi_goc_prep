@@ -297,7 +297,80 @@ pourpoints_wwtp_liters_rgnid <- st_intersection(pourpoints_wwtp_liters_final, go
 pourpoints_wwtp_liters_rgnid
 ```
 
-### Calculate risk factor
+### WWTP effluent concentration values
+
+```{r}
+concentrations_lit <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/VazquezTapia_2022_supplemental/table_of_lit_manually_adding_tula_valley_2023/VazquezTapia_et_al_2020_S2-isolated_priority_list_env_risk_WITH_tula_valley.csv")) %>% 
+  janitor::clean_names() %>% 
+  mutate(across(everything(), ~ str_replace_all(.x, "ND", NA_character_)))
+
+concentrations_tidy <- concentrations_lit %>%
+  mutate(
+    garduno_jimenez_et_al_2023_minimum = garduno_jimenez_et_al_2023,
+    garduno_jimenez_et_al_2023_maximum = garduno_jimenez_et_al_2023
+  ) %>%
+  select(-garduno_jimenez_et_al_2023) %>%
+  pivot_longer(
+    cols = -compound_reference_ng_per_liter,
+    names_to = c("paper", "bound"),
+    names_pattern = "(.*)_(minimum|maximum)$",
+    values_to = "value"
+  ) %>%
+  pivot_wider(names_from = bound, values_from = value) 
+
+concentrations_midpoint <- concentrations_tidy %>%
+  mutate(
+    minimum = as.numeric(minimum),
+    maximum = as.numeric(maximum)
+  ) %>% 
+  mutate(
+    geometric_mean = sqrt(minimum * maximum),
+    midpoint = (minimum + maximum) / 2, 
+    end_value = case_when(
+      is.na(minimum) & is.na(maximum) ~ NA_real_,
+      is.na(minimum) ~ maximum,
+      is.na(maximum) ~ minimum,
+      TRUE ~ midpoint
+    )
+  )
+
+concentractions_per_compound <- concentrations_midpoint %>% 
+  group_by(compound_reference_ng_per_liter) %>% 
+  summarize(
+    mean_ng_per_liter = mean(end_value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## save to Mazu
+write_csv(concentractions_per_compound, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/humans_int","concentractions_per_compound_across_lit_ng_per_liter.csv"))
+
+concentraction_pharmaceuticals <- concentractions_per_compound %>% 
+  summarize(
+    mean_ng_per_liter = mean(mean_ng_per_liter),
+    .groups = "drop"
+  )
+
+## save to Mazu
+write_csv(concentraction_pharmaceuticals, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/humans_int","concentraction_all_env_risk_pharmaceuticals_ng_per_liter.csv"))
+```
+
+### Convert to mg
+
+Now that we have the ng/L estimated pharmaceutical chemicals per liter of WWTP effluent, we can take the aggregated L/year found for each region and multiply by the ng/L to obtain total ng potentially flowing into the GoC.
+
+To harmonize units across different chemical sources, we can convert to mg from ng.
+
+```{r}
+mean_ng_per_liter_value <- unique(concentraction_pharmaceuticals$mean_ng_per_liter)
+
+pourpoints_wwtp_mg_rgnid <- pourpoints_wwtp_liters_rgnid %>% 
+  mutate(total_pharma_ng = total_ef_l_yr * mean_ng_per_liter_value,
+         total_pharma_mg = total_pharma_ng * (1/1000000)) # 1000000 ng in 1 mg
+```
+
+
+
+### Current status
 
 Note that the risk factor is essentially the pressure on the system.  The current status is the inverse of that (1 - risk_factor).
 
@@ -313,6 +386,16 @@ current_status_wwtp_effluent <- pourpoints_wwtp_liters_rgnid %>%
     current_status = 1 - ((total_ef_l_yr - ideal)/(maximum - ideal)),
     current_status_final = current_status * 100
   )
+
+current_status_wwtp_effluent_drop2020 <- pourpoints_wwtp_liters_rgnid %>% 
+  filter(!year %in% 2020) %>% 
+  mutate(
+    ideal = 0,
+    maximum = max(total_ef_l_yr),
+    current_status = 1 - ((total_ef_l_yr - ideal)/(maximum - ideal)),
+    current_status_final = current_status * 100
+  )
+
 ```
 
 #### plotly
@@ -357,6 +440,30 @@ wwtp_plotly <- plotly::plot_ly(
     inherit = FALSE
   )
 wwtp_plotly
+
+## plot the wwtp effluent rf over time
+wwtp_drop2020_plotly <- plotly::plot_ly(
+  current_status_wwtp_effluent_drop2020, 
+  x = ~year, 
+  y = ~current_status_final, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Current status of WWTP effluent, estimation of pharmaceutical risk from human wastewater (dropped 2020)",
+    xaxis = list(title = "ano // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines( 
+    x = range(current_status_wwtp_effluent_drop2020$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+wwtp_drop2020_plotly
 
 # ---
 
@@ -561,8 +668,128 @@ wwtps_flagged_timeseries_plotly <- plotly::plot_ly(
 wwtps_flagged_timeseries_plotly
 ```
 
+### Interpolate 2020
+
+Because 2020 seems to have database entry errors, we should interpolate and drop any of the original 2020 values.
+
+```{r}
+library(zoo) # for na.approx
+
+# set 2020 values to NA so they can be interpolated
+pourpoints_wwtp_mg_rgnid_interp <- pourpoints_wwtp_mg_rgnid %>%
+  mutate(
+    total_ef_l_yr_raw = total_ef_l_yr,
+    total_pharma_ng_raw = total_pharma_ng,
+    total_pharma_mg_raw = total_pharma_mg,
+    total_ef_l_yr = if_else(year == 2020, NA_real_, total_ef_l_yr),
+    total_pharma_ng = if_else(year == 2020, NA_real_, total_pharma_ng),
+    total_pharma_mg= if_else(year == 2020, NA_real_, total_pharma_mg)
+  ) %>%
+  # interpolate within each region 
+  arrange(rgn_id, year) %>%
+  group_by(rgn_id) %>%
+  mutate(
+    total_ef_l_yr = zoo::na.approx(total_ef_l_yr,   x = year, na.rm = FALSE),
+    total_pharma_ng = zoo::na.approx(total_pharma_ng, x = year, na.rm = FALSE),
+    total_pharma_mg = zoo::na.approx(total_pharma_mg, x = year, na.rm = FALSE),
+    interpolated_2020 = if_else(year == 2020, TRUE, FALSE)
+  ) %>%
+  ungroup()
+
+# sanity check, compare raw vs interpolated for 2020
+pourpoints_wwtp_mg_rgnid_interp %>%
+  filter(year == 2020) %>%
+  select(rgn_id, year,
+         total_ef_l_yr_raw, total_ef_l_yr,
+         total_pharma_mg_raw, total_pharma_mg)
+```
+
+
+## FIXED current status
+
+```{r}
+current_status_wwtp_effluent <- pourpoints_wwtp_mg_rgnid_interp %>%  # use interpolated
+  mutate(
+    ideal = 0,
+    maximum = max(total_pharma_mg),
+    current_status = 1 - ((total_pharma_mg - ideal) / (maximum - ideal)),
+    current_status_final = current_status * 100
+  )
+
+### using the alt maximum, not one value but 5
+top5_avg_mg <- pourpoints_wwtp_mg_rgnid_interp %>%
+  slice_max(total_pharma_mg, n = 5) %>%
+  pull(total_pharma_mg) %>%
+  mean()
+
+current_status_wwtp_effluent_5top_max <- pourpoints_wwtp_mg_rgnid_interp %>%  # use interpolated
+  mutate(
+    ideal = 0,
+    maximum = top5_avg_mg,
+    current_status = (1 - ((total_pharma_mg - ideal) / (maximum - ideal)))* 100,
+    current_status_final = ifelse(current_status < 0, 0, current_status)
+  )
+
+## plot the wwtp effluent cs over time
+wwtp_cs_plotly <- plotly::plot_ly(
+  current_status_wwtp_effluent, 
+  x = ~year, 
+  y = ~current_status_final, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Current status of WWTP effluent, potential pharmaceutical chemicals from human wastewater (interpolated 2020)",
+    xaxis = list(title = "ano // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines( 
+    x = range(current_status_wwtp_effluent$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+wwtp_cs_plotly
+
+## using the new maximum
+wwtp_cs_5top_plotly <- plotly::plot_ly(
+  current_status_wwtp_effluent_5top_max, 
+  x = ~year, 
+  y = ~current_status_final, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Current status of WWTP effluent, potential pharmaceutical chemicals from human wastewater (interpolated 2020)",
+    xaxis = list(title = "ano // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines( 
+    x = range(current_status_wwtp_effluent_5top_max$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+wwtp_cs_5top_plotly
+```
+
+
 
 # Save to mazu
+
+```{r save}
+total_pharma_mg <- pourpoints_wwtp_mg_rgnid_interp %>% 
+  select(rgn_id, year, total_pharma_mg)
+
+write_csv(total_pharma_mg, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/humans_output/wwtp_mg_rgnid_pharma.csv"))
+```
+
 
 ```{r save}
 write_csv(risk_factor_wwtp_effluent, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/output/risk_factor_wwtp_effluent_pharma_risk.csv"))
