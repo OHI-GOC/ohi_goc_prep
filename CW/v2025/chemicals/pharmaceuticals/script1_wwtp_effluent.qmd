@@ -32,7 +32,36 @@ We will be doing this by estimating the total liters per year of effluent from e
 
 From there, we can classify which OHI Region each pourpoint falls into, and aggregate the total liters per year of WWTP effluent for each year and region. This will then represent pharmaceutical discharge risk for each year and region.
 
-The regions will then be compared across time, using the global historical maximum (global meaning across-Gulf) as the highest risk.  That specific year and region will receive a risk factor of 100, and a current status of 0. Everything else will be scaled accordingly, assuming that the ideal is that zero liters per year of wastewater effluent is released into the GoC. 
+The regions will then be compared across time in `script4_current_status.qmd`.
+
+### Workflow
+
+*For each WWTP x year combination:*
+
+1. Load the year-specific WWTP shapefile from SINA/CONAGUA (ex: m29_vwplantastarm_2021)
+2. Filter to GoC states (Baja California, BCS, Jalisco, Sinaloa, Sonora, Nayarit) and fix encoding
+3. Flag whether each WWTP is over capacity (caudal > capacidad)
+4. Convert flow rate to annual volume: caudal (L/s) * 31,536,000 → estimated L/year per WWTP (upper bound, assumes continuous operation)
+
+*Then spatially:*
+
+5. Reproject WWTPs to match watershed CRS, then intersect with GoC watersheds (wwtps_watershed)
+6. Summarize by basin_id x year: sum ef_l_yr, count total WWTPs, count over-capacity plants
+7. Join watershed summaries to GoC pourpoints (pourpoints_goc) by basin_id
+8. Spatially filter pourpoints: keep only those within the 50km inland buffer, and exclude Pacific-side peninsula pourpoints (Regions 4, 5, 9) not within the 10km buffer
+9. Intersect with OHI regions and aggregate total_ef_l_yr by rgn_id x year
+
+*Convert to mg pharmaceuticals:*
+
+10. Multiply total_ef_l_yr by the mean pharmaceutical concentration across literature compounds (mean_ng/L from Vázquez-Tapia et al. 2020 + Garduño-Jiménez et al. 2023), then convert ng → mg (* 1/1,000,000)
+
+*Data quality:*
+
+11a. Flag 2020 anomalies: for each WWTP, compare 2020 caudal to its non-2020 median — flag if ratio > 3x or < 0.33x, or if treatment process changed
+11b. Set 2020 values to NA and linearly interpolate within each region using zoo::na.approx
+12. Move to script4_current_status.qmd to aggregate the total mg from WWTPs with livestock and shrimp farming, and use the total_pharma_mg against the global maximum (or top-5 average maximum) across all regions and years to obtain a current status score.
+
+### Setup
 
 ```{r setup}
 library(sf)
@@ -48,7 +77,6 @@ library(janitor)
 library(tibble)
 ```
 
-### Watersheds and pour points
 
 First, let's isolate the watersheds and associated pourpoints in the Gulf of California.
 
@@ -86,7 +114,7 @@ mapview(pourpoints_goc)
 mapview(pourpoints_goc) + mapview(watershed_goc)
 ```
 
-### Reading in all WWTP capacities and usages from 2017-2023
+### 1-3. Reading in all WWTP capacities and usages from 2017-2023
 
 Data was downloaded from <https://sinav30.conagua.gob.mx:8080/SINA/?opcion=salud#infrah>: 
 
@@ -139,7 +167,7 @@ mapview(bind_all_years_wwtp, zcol = "over_proc")
 ```
 
 
-#### Understanding WWTPs over time
+#### Exploring WWTPs over time
 
 This is just some exploratory stats to understand the landscape better.
 
@@ -165,7 +193,7 @@ number_of_wwtp <- bind_all_years_wwtp %>%
   ungroup()
 ```
 
-### Assign to watersheds
+### 4. Reproject WWTPs to match watershed CRS, then intersect with GoC watersheds (wwtps_watershed)
 
 Now that we have data about the capacity and the actual L/s of each WWTP, let's assign each WWTP to its respective watershed.
 
@@ -198,7 +226,7 @@ mapview(wwtps_watershed_2021, zcol = "basin_id") + mapview(watershed_goc, zcol =
 ```
 
 
-#### Exploring liters of effluent caluclation
+### 5. Convert flow rate to annual volume
 
 To go from L/s to L/year, we need to multiply by 31536000.  Note that this is a rough assumption... it assumes that the WWTP is running constantly, but it is likely not running 24/7/365.  This is basically an upper bound for the year.
 
@@ -212,9 +240,9 @@ effluent_liters_wwtp_yearly <- bind_all_years_wwtp %>%
   )
 ```
 
-#### Summarize liters per watershed per year
+### 6. Summarize liters per watershed per year
 
-We can now aggregate the total L/year for each watershed.
+We can now aggregate the total L/year for each watershed. Here, you can summarize by basin_id x year: sum ef_l_yr, count total WWTPs, and count over-capacity plants.
 
 ```{r}
 # summarize liters per watershed per year
@@ -235,7 +263,7 @@ wwtp_liters_effluent_by_watershed <- wwtps_watershed %>%
   mutate(year = as.numeric(anio))
 ```
 
-### Pour points and OHI regions
+### 7-8. Join watershed summaries to GoC pourpoints (pourpoints_goc) by basin_id
 
 And now we can take that to the pourpoints!
 
@@ -246,6 +274,8 @@ pourpoints_wwtp_liters <- pourpoints_goc %>%
 
 mapview(pourpoints_wwtp_liters)
 ```
+
+Now, spatially filter pourpoints: keep only those within the 50km inland buffer, and exclude Pacific-side peninsula pourpoints (Regions 4, 5, 9) not within the 10km buffer.
 
 *This is just so that we are not losing any WWTPs that may be on the coastal border:*
 
@@ -279,6 +309,9 @@ pourpoints_wwtp_liters_final <- pourpoints_wwtp_liters %>%
 mapview(pourpoints_wwtp_liters_final, zcol = "total_ef_l_yr") + mapview(wwtps_watershed, col.regions = "red") + mapview(watershed_goc, col.regions = "pink")
 ```
 
+
+### 9. Aggregate total_ef_l_yr by rgn_id x year
+
 And now we can aggregate by region to determine the total L/year and region.
 
 ```{r pourpoints}
@@ -297,7 +330,9 @@ pourpoints_wwtp_liters_rgnid <- st_intersection(pourpoints_wwtp_liters_final, go
 pourpoints_wwtp_liters_rgnid
 ```
 
-### WWTP effluent concentration values
+### 10. Convert to mg pharmaceuticals
+
+#### a. WWTP effluent concentration values
 
 ```{r}
 concentrations_lit <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/VazquezTapia_2022_supplemental/table_of_lit_manually_adding_tula_valley_2023/VazquezTapia_et_al_2020_S2-isolated_priority_list_env_risk_WITH_tula_valley.csv")) %>% 
@@ -354,7 +389,7 @@ concentraction_pharmaceuticals <- concentractions_per_compound %>%
 write_csv(concentraction_pharmaceuticals, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/humans_int","concentraction_all_env_risk_pharmaceuticals_ng_per_liter.csv"))
 ```
 
-### Convert to mg
+#### b. Use the values to convert to mg
 
 Now that we have the ng/L estimated pharmaceutical chemicals per liter of WWTP effluent, we can take the aggregated L/year found for each region and multiply by the ng/L to obtain total ng potentially flowing into the GoC.
 
@@ -370,122 +405,125 @@ pourpoints_wwtp_mg_rgnid <- pourpoints_wwtp_liters_rgnid %>%
 
 
 
-### Current status
+<!-- ### Current status -->
 
-Note that the risk factor is essentially the pressure on the system.  The current status is the inverse of that (1 - risk_factor).
+<!-- Note that the risk factor is essentially the pressure on the system.  The current status is the inverse of that (1 - risk_factor). -->
 
-$$current\ status\ _{human\_wastewater\_pharmaceutical\_risk} = 1 - \frac{wastewater\_in\_liters\ _{current} - wastewater\_in\_liters\ _{ideal}}{wastewater\_in\_liters\ _{maximum} - wastewater\_in\_liters\ _{ideal}}$$
+<!-- $$current\ status\ _{human\_wastewater\_pharmaceutical\_risk} = 1 - \frac{wastewater\_in\_liters\ _{current} - wastewater\_in\_liters\ _{ideal}}{wastewater\_in\_liters\ _{maximum} - wastewater\_in\_liters\ _{ideal}}$$ -->
 
-Where the ideal is zero, and the maximum is the global maximum of liters estimated across all years and regions.
+<!-- Where the ideal is zero, and the maximum is the global maximum of liters estimated across all years and regions. -->
 
-```{r}
-current_status_wwtp_effluent <- pourpoints_wwtp_liters_rgnid %>% 
-  mutate(
-    ideal = 0,
-    maximum = max(total_ef_l_yr),
-    current_status = 1 - ((total_ef_l_yr - ideal)/(maximum - ideal)),
-    current_status_final = current_status * 100
-  )
+<!-- ```{r} -->
+<!-- current_status_wwtp_effluent <- pourpoints_wwtp_liters_rgnid %>%  -->
+<!--   mutate( -->
+<!--     ideal = 0, -->
+<!--     maximum = max(total_ef_l_yr), -->
+<!--     current_status = 1 - ((total_ef_l_yr - ideal)/(maximum - ideal)), -->
+<!--     current_status_final = current_status * 100 -->
+<!--   ) -->
 
-current_status_wwtp_effluent_drop2020 <- pourpoints_wwtp_liters_rgnid %>% 
-  filter(!year %in% 2020) %>% 
-  mutate(
-    ideal = 0,
-    maximum = max(total_ef_l_yr),
-    current_status = 1 - ((total_ef_l_yr - ideal)/(maximum - ideal)),
-    current_status_final = current_status * 100
-  )
+<!-- current_status_wwtp_effluent_drop2020 <- pourpoints_wwtp_liters_rgnid %>%  -->
+<!--   filter(!year %in% 2020) %>%  -->
+<!--   mutate( -->
+<!--     ideal = 0, -->
+<!--     maximum = max(total_ef_l_yr), -->
+<!--     current_status = 1 - ((total_ef_l_yr - ideal)/(maximum - ideal)), -->
+<!--     current_status_final = current_status * 100 -->
+<!--   ) -->
 
-```
+<!-- ``` -->
 
-#### plotly
+<!-- #### plotly -->
 
-Plot both the current status, but also the L/year across all regions and years to understand how the current status was derived.
+<!-- Plot both the current status, but also the L/year across all regions and years to understand how the current status was derived. -->
 
-```{r}
-library(plotly)
+<!-- ```{r} -->
+<!-- library(plotly) -->
 
-rgn_colors <- c(
-  Region_1 = "#C03729",
-  Region_2 = "#E68C7C",
-  Region_3 = "#FC8F24",
-  Region_4 = "#dcaa38",
-  Region_5 = "#cbd2a0",
-  Region_6 = "#98a25a",
-  Region_7 = "#747428",
-  Region_8 = "#627391",
-  Region_9 = "#8d61a9"
-)
+<!-- rgn_colors <- c( -->
+<!--   Region_1 = "#C03729", -->
+<!--   Region_2 = "#E68C7C", -->
+<!--   Region_3 = "#FC8F24", -->
+<!--   Region_4 = "#dcaa38", -->
+<!--   Region_5 = "#cbd2a0", -->
+<!--   Region_6 = "#98a25a", -->
+<!--   Region_7 = "#747428", -->
+<!--   Region_8 = "#627391", -->
+<!--   Region_9 = "#8d61a9" -->
+<!-- ) -->
 
-## plot the wwtp effluent rf over time
-wwtp_plotly <- plotly::plot_ly(
-  current_status_wwtp_effluent, 
-  x = ~year, 
-  y = ~current_status_final, 
-  color = ~rgn_id, 
-  colors = rgn_colors,
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "Clean Waters: current status of WWTP effluent, estimation of pharmaceutical risk from human wastewater",
-    xaxis = list(title = "ano // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines( 
-    x = range(current_status_wwtp_effluent$year), 
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal (100/100)",
-    inherit = FALSE
-  )
-wwtp_plotly
+<!-- ## plot the wwtp effluent rf over time -->
+<!-- wwtp_plotly <- plotly::plot_ly( -->
+<!--   current_status_wwtp_effluent,  -->
+<!--   x = ~year,  -->
+<!--   y = ~current_status_final,  -->
+<!--   color = ~rgn_id,  -->
+<!--   colors = rgn_colors, -->
+<!--   type = "scatter",  -->
+<!--   mode = "lines+markers" -->
+<!-- ) %>%  -->
+<!--   layout( -->
+<!--     title = "Clean Waters: current status of WWTP effluent, estimation of pharmaceutical risk from human wastewater", -->
+<!--     xaxis = list(title = "ano // Year"), -->
+<!--     yaxis = list(title = "Puntaje // Percent (out of 100)") -->
+<!--   ) %>% -->
+<!--   add_lines(  -->
+<!--     x = range(current_status_wwtp_effluent$year),  -->
+<!--     y = c(100, 100), -->
+<!--     line = list(color = "black", width = 2, dash = "dash"), -->
+<!--     name = "Meta // Goal (100/100)", -->
+<!--     inherit = FALSE -->
+<!--   ) -->
+<!-- wwtp_plotly -->
 
-## plot the wwtp effluent rf over time
-wwtp_drop2020_plotly <- plotly::plot_ly(
-  current_status_wwtp_effluent_drop2020, 
-  x = ~year, 
-  y = ~current_status_final, 
-  color = ~rgn_id, 
-  colors = rgn_colors,
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "Current status of WWTP effluent, estimation of pharmaceutical risk from human wastewater (dropped 2020)",
-    xaxis = list(title = "ano // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines( 
-    x = range(current_status_wwtp_effluent_drop2020$year), 
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal (100/100)",
-    inherit = FALSE
-  )
-wwtp_drop2020_plotly
+<!-- ## plot the wwtp effluent rf over time -->
+<!-- wwtp_drop2020_plotly <- plotly::plot_ly( -->
+<!--   current_status_wwtp_effluent_drop2020,  -->
+<!--   x = ~year,  -->
+<!--   y = ~current_status_final,  -->
+<!--   color = ~rgn_id,  -->
+<!--   colors = rgn_colors, -->
+<!--   type = "scatter",  -->
+<!--   mode = "lines+markers" -->
+<!-- ) %>%  -->
+<!--   layout( -->
+<!--     title = "Current status of WWTP effluent, estimation of pharmaceutical risk from human wastewater (dropped 2020)", -->
+<!--     xaxis = list(title = "ano // Year"), -->
+<!--     yaxis = list(title = "Puntaje // Percent (out of 100)") -->
+<!--   ) %>% -->
+<!--   add_lines(  -->
+<!--     x = range(current_status_wwtp_effluent_drop2020$year),  -->
+<!--     y = c(100, 100), -->
+<!--     line = list(color = "black", width = 2, dash = "dash"), -->
+<!--     name = "Meta // Goal (100/100)", -->
+<!--     inherit = FALSE -->
+<!--   ) -->
+<!-- wwtp_drop2020_plotly -->
 
-# ---
+<!-- # --- -->
 
-## plot the liters per year of effluent for all rgns
-rgn_eff_plotly <- plotly::plot_ly(
-  pourpoints_wwtp_liters_rgnid, 
-  x = ~year, 
-  y = ~total_ef_l_yr, 
-  color = ~rgn_id, 
-  colors = rgn_colors,
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "Clean Waters: liters per year effluent from WWTPs",
-    xaxis = list(title = "ano // Year"),
-    yaxis = list(title = "Liters of effluent at pourpoints within the region")
-  )
-rgn_eff_plotly
-```
+<!-- ## plot the liters per year of effluent for all rgns -->
+<!-- rgn_eff_plotly <- plotly::plot_ly( -->
+<!--   pourpoints_wwtp_liters_rgnid,  -->
+<!--   x = ~year,  -->
+<!--   y = ~total_ef_l_yr,  -->
+<!--   color = ~rgn_id,  -->
+<!--   colors = rgn_colors, -->
+<!--   type = "scatter",  -->
+<!--   mode = "lines+markers" -->
+<!-- ) %>%  -->
+<!--   layout( -->
+<!--     title = "Clean Waters: liters per year effluent from WWTPs", -->
+<!--     xaxis = list(title = "ano // Year"), -->
+<!--     yaxis = list(title = "Liters of effluent at pourpoints within the region") -->
+<!--   ) -->
+<!-- rgn_eff_plotly -->
+<!-- ``` -->
 
-#### Examining the spike in 2020 found in Region 8 and 9
+### 11. Deal w 2020
+
+#### a. Examining the spike in 2020 found in Region 8 and 9
+
 ```{r}
 wwtps_watershed_na_80866_2020 <- wwtps_watershed %>% 
   filter(basin_id %in% "na_80866") %>% 
@@ -584,9 +622,9 @@ inspecting_basins_76895_80866_plotly <- plotly::plot_ly(
 inspecting_basins_76895_80866_plotly
 ```
 
-#### Flagging anomalies
+#### b. Flagging anomalies
 
-Check for 2020 anomalies across all WWTPs in the GoC
+Check for 2020 anomalies across all WWTPs in the GoC.
 
 ```{r check-2020-anomalies}
 # for each WWTP (clvplanta), find the median caudal across non-2020 years, then flag 2020 rows where caudal deviates by more than 3x (or is zero/NA when it shouldnt be)
@@ -668,7 +706,7 @@ wwtps_flagged_timeseries_plotly <- plotly::plot_ly(
 wwtps_flagged_timeseries_plotly
 ```
 
-### Interpolate 2020
+#### c. Interpolate 2020
 
 Because 2020 seems to have database entry errors, we should interpolate and drop any of the original 2020 values.
 
@@ -705,83 +743,81 @@ pourpoints_wwtp_mg_rgnid_interp %>%
 ```
 
 
-## FIXED current status
+<!-- ## FIXED current status -->
 
-```{r}
-current_status_wwtp_effluent <- pourpoints_wwtp_mg_rgnid_interp %>%  # use interpolated
-  mutate(
-    ideal = 0,
-    maximum = max(total_pharma_mg),
-    current_status = 1 - ((total_pharma_mg - ideal) / (maximum - ideal)),
-    current_status_final = current_status * 100
-  )
+<!-- ```{r} -->
+<!-- current_status_wwtp_effluent <- pourpoints_wwtp_mg_rgnid_interp %>%  # use interpolated -->
+<!--   mutate( -->
+<!--     ideal = 0, -->
+<!--     maximum = max(total_pharma_mg), -->
+<!--     current_status = 1 - ((total_pharma_mg - ideal) / (maximum - ideal)), -->
+<!--     current_status_final = current_status * 100 -->
+<!--   ) -->
 
-### using the alt maximum, not one value but 5
-top5_avg_mg <- pourpoints_wwtp_mg_rgnid_interp %>%
-  slice_max(total_pharma_mg, n = 5) %>%
-  pull(total_pharma_mg) %>%
-  mean()
+<!-- ### using the alt maximum, not one value but 5 -->
+<!-- top5_avg_mg <- pourpoints_wwtp_mg_rgnid_interp %>% -->
+<!--   slice_max(total_pharma_mg, n = 5) %>% -->
+<!--   pull(total_pharma_mg) %>% -->
+<!--   mean() -->
 
-current_status_wwtp_effluent_5top_max <- pourpoints_wwtp_mg_rgnid_interp %>%  # use interpolated
-  mutate(
-    ideal = 0,
-    maximum = top5_avg_mg,
-    current_status = (1 - ((total_pharma_mg - ideal) / (maximum - ideal)))* 100,
-    current_status_final = ifelse(current_status < 0, 0, current_status)
-  )
+<!-- current_status_wwtp_effluent_5top_max <- pourpoints_wwtp_mg_rgnid_interp %>%  # use interpolated -->
+<!--   mutate( -->
+<!--     ideal = 0, -->
+<!--     maximum = top5_avg_mg, -->
+<!--     current_status = (1 - ((total_pharma_mg - ideal) / (maximum - ideal)))* 100, -->
+<!--     current_status_final = ifelse(current_status < 0, 0, current_status) -->
+<!--   ) -->
 
-## plot the wwtp effluent cs over time
-wwtp_cs_plotly <- plotly::plot_ly(
-  current_status_wwtp_effluent, 
-  x = ~year, 
-  y = ~current_status_final, 
-  color = ~rgn_id, 
-  colors = rgn_colors,
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "Current status of WWTP effluent, potential pharmaceutical chemicals from human wastewater (interpolated 2020)",
-    xaxis = list(title = "ano // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines( 
-    x = range(current_status_wwtp_effluent$year), 
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal (100/100)",
-    inherit = FALSE
-  )
-wwtp_cs_plotly
+<!-- ## plot the wwtp effluent cs over time -->
+<!-- wwtp_cs_plotly <- plotly::plot_ly( -->
+<!--   current_status_wwtp_effluent,  -->
+<!--   x = ~year,  -->
+<!--   y = ~current_status_final,  -->
+<!--   color = ~rgn_id,  -->
+<!--   colors = rgn_colors, -->
+<!--   type = "scatter",  -->
+<!--   mode = "lines+markers" -->
+<!-- ) %>%  -->
+<!--   layout( -->
+<!--     title = "Current status of WWTP effluent, potential pharmaceutical chemicals from human wastewater (interpolated 2020)", -->
+<!--     xaxis = list(title = "ano // Year"), -->
+<!--     yaxis = list(title = "Puntaje // Percent (out of 100)") -->
+<!--   ) %>% -->
+<!--   add_lines(  -->
+<!--     x = range(current_status_wwtp_effluent$year),  -->
+<!--     y = c(100, 100), -->
+<!--     line = list(color = "black", width = 2, dash = "dash"), -->
+<!--     name = "Meta // Goal (100/100)", -->
+<!--     inherit = FALSE -->
+<!--   ) -->
+<!-- wwtp_cs_plotly -->
 
-## using the new maximum
-wwtp_cs_5top_plotly <- plotly::plot_ly(
-  current_status_wwtp_effluent_5top_max, 
-  x = ~year, 
-  y = ~current_status_final, 
-  color = ~rgn_id, 
-  colors = rgn_colors,
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "Current status of WWTP effluent, potential pharmaceutical chemicals from human wastewater (interpolated 2020)",
-    xaxis = list(title = "ano // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines( 
-    x = range(current_status_wwtp_effluent_5top_max$year), 
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal (100/100)",
-    inherit = FALSE
-  )
-wwtp_cs_5top_plotly
-```
+<!-- ## using the new maximum -->
+<!-- wwtp_cs_5top_plotly <- plotly::plot_ly( -->
+<!--   current_status_wwtp_effluent_5top_max,  -->
+<!--   x = ~year,  -->
+<!--   y = ~current_status_final,  -->
+<!--   color = ~rgn_id,  -->
+<!--   colors = rgn_colors, -->
+<!--   type = "scatter",  -->
+<!--   mode = "lines+markers" -->
+<!-- ) %>%  -->
+<!--   layout( -->
+<!--     title = "Current status of WWTP effluent, potential pharmaceutical chemicals from human wastewater (interpolated 2020)", -->
+<!--     xaxis = list(title = "ano // Year"), -->
+<!--     yaxis = list(title = "Puntaje // Percent (out of 100)") -->
+<!--   ) %>% -->
+<!--   add_lines(  -->
+<!--     x = range(current_status_wwtp_effluent_5top_max$year),  -->
+<!--     y = c(100, 100), -->
+<!--     line = list(color = "black", width = 2, dash = "dash"), -->
+<!--     name = "Meta // Goal (100/100)", -->
+<!--     inherit = FALSE -->
+<!--   ) -->
+<!-- wwtp_cs_5top_plotly -->
+<!-- ``` -->
 
-
-
-# Save to mazu
+## Save to mazu
 
 ```{r save}
 total_pharma_mg <- pourpoints_wwtp_mg_rgnid_interp %>% 
@@ -792,7 +828,7 @@ write_csv(total_pharma_mg, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v20
 
 
 ```{r save}
-write_csv(risk_factor_wwtp_effluent, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/output/risk_factor_wwtp_effluent_pharma_risk.csv"))
+# write_csv(risk_factor_wwtp_effluent, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/output/risk_factor_wwtp_effluent_pharma_risk.csv"))
 
 write_csv(wwtp_liters_effluent_by_watershed, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/int/wwtp_liters_effluent_by_watershed.csv"))
 
@@ -800,7 +836,7 @@ write_csv(pourpoints_wwtp_liters_rgnid, here::here("/home/shares/ohi/OHI_GOC/goa
 
 st_write(pourpoints_wwtp_liters_final,here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/int/pourpoints_effluent_wwtp_liters_final.gpkg"), delete_dsn = TRUE) # so it can overwrite if changes are made.
 
-write_csv(current_status_wwtp_effluent, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/output/current_status_wwtp_effluent_pharma_risk.csv"))
+# write_csv(current_status_wwtp_effluent, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/output/current_status_wwtp_effluent_pharma_risk.csv"))
 ```
 
 
