@@ -102,21 +102,24 @@ All my current code uses the number of heads from cattle to do the dasymetric ma
 
 ### Workflow
 
-**For each species + year combination:**
+**For each species x year combination:**
 
-1. Load the species-specific GLW4 raster (e.g. `CTL` for bovino, `CHK` for ave, etc.)
+1. Load the species-specific GLW4 raster (ex: `CTL` for bovino, `CHK` for aves, etc.)
 2. Crop/resample to 1km using nearest neighbor
 3. Compute the weight raster for that species (GLW cell density / municipal GLW total), which is the spatial proxy
-4. Filter SIAP to that species × year, get `toneladas_volumen` per municipality
+4. Filter SIAP to that species and year, get `toneladas_volumen` per municipality
 5. Rasterize the SIAP tonnes onto the municipality polygons
-6. Multiply: `siap_volume_raster * weight_raster` --> tonnes of that species slaughtered in each 1km cell
+6. Multiply: `siap_volume_raster * weight_raster` --> tonnes of that taxa slaughtered in each 1km cell
+
 
 **Then across species:**
 
 7. Stack the 5 species rasters and sum cellwise, which = total tonnes slaughtered per 1km cell per year
-8. Multiply by 1000 (tonnes --> kg) then by 11 mg/kg, to get mg antimicrobials per cell
-9. Summarize by watershed, assign to pourpoints, assign to OHI regions
-10. Calculate the current status by comparing across regions and years
+8. Multiply by 1000 (tonnes --> kg) then by 101 mg/kg (using North America value from Acosta et al. 2025), to get mg antimicrobials per cell
+9a. Summarize by watershed
+9b. Assign to pourpoints and OHI regions
+9c. Interpolate values for 2023
+10. Move to the `script4_current_status.qmd` script to multiply by the proportion of antibiotics absorbed by the animal, then later that actually is leached into the GoC, and then aggregate with the mg from other sources before calculating current status.
 
 _REMEMBER: GLW4 (FAO livestock density) = **where**, DGSIAP (Mexican Govt) = **how much**!!_
 
@@ -635,11 +638,13 @@ Now that we ideally have a 1km gridded raster of the total livestock production 
 
 ^ This number was determined based on Table 5 from WOAH <https://www.woah.org/app/uploads/2025/05/en-woah-amu-report-2025-final.pdf>.
 
+**UPDATE:** we will now be using the estimate from Acosta et al. 2025, which is 101 mg/kg, because it is more specific to North America. <https://www.nature.com/articles/s41467-025-56825-7>
+
 
 ```{r}
 # conversion: tonnes -> kg -> mg antimicrobials
 # 1 tonne = 1000 kg
-# 95.37 mg antimicrobials per kg of terrestrial livestock slaughtered (WOAH 2025, Table 5)
+# 101 mg antimicrobials per kg of terrestrial livestock slaughtered (Acosta et al. 2025, Fig 1)
 
 convert_to_antimicrobials <- function(yr, out_dir) {
   
@@ -649,7 +654,7 @@ convert_to_antimicrobials <- function(yr, out_dir) {
   total_tonnes <- terra::rast(in_path)
   
   # tonnes -> kg -> mg antimicrobials
-  mg_antimicrobials <- total_tonnes * 1000 * 95.37
+  mg_antimicrobials <- total_tonnes * 1000 * 101
   names(mg_antimicrobials) <- paste0("mg_antimicrobials_", yr)
   
   out_path <- file.path(out_dir, paste0("mg_antimicrobials_1km_", yr, ".tif"))
@@ -751,7 +756,7 @@ watershed_pourpoint_join <- pourpoints_rgnid %>%
   mutate(is_within_10km = lengths(st_within(., marine_and_inland10)) > 0) %>% # flag 10km
   filter(!(is_within_10km == FALSE & rgn_id %in% c("Region_2","Region_4","Region_9"))) # drop Pacific-side
 
-mapview(watershed_pourpoint_join, zcol = "rgn_id")
+#mapview(watershed_pourpoint_join, zcol = "rgn_id")
 
 # aggregate to OHI region: sum all watershed pourpoints that drain into each region
 rgn_antimicrobials <- watershed_pourpoint_join %>% 
@@ -764,7 +769,7 @@ na_years <- rgn_antimicrobials %>%
   filter(is.na(year))
 mapview(na_years)
 
-mapview(rgn_antimicrobials, zcol = "mg_antimicrobials") + mapview(watershed_goc)
+#mapview(rgn_antimicrobials, zcol = "mg_antimicrobials") + mapview(watershed_goc)
 
 # drop the pourpoints with zero contributions
 rgn_antimicrobials_drop0 <- rgn_antimicrobials %>% 
@@ -784,116 +789,279 @@ summary(rgn_antimicrobials_drop0)
 # mapview(test_glw4)
 ```
 
-#### 10. Current status
+#### 9c. Interpolate 2023
 
 ```{r}
-# status = 1 - (mg_current - mg_ideal) / (mg_max - mg_ideal)
-# ideal = 0 (no antimicrobial discharge), so: status = 1 - (mg_current / mg_max), where mg_max is the global maximum across all regions and years
+summary(rgn_antimicrobials_drop0)
+ #    rgn_id               year      mg_antimicrobials            geometry  
+ # Length:162         Min.   :2006   Min.   :1.245e+07   MULTIPOINT   :162  
+ # Class :character   1st Qu.:2010   1st Qu.:2.873e+08   epsg:6372    :  0  
+ # Mode  :character   Median :2014   Median :2.571e+09   +proj=lcc ...:  0  
+ #                    Mean   :2015   Mean   :7.024e+09                      
+ #                    3rd Qu.:2019   3rd Qu.:1.387e+10                      
+ #                    Max.   :2024   Max.   :2.821e+10        
+                    
+library(zoo) # for na.approx
 
-# mg_max <- max(rgn_antimicrobials$mg_antimicrobials, na.rm = TRUE)
-# 
-# current_status_livestock <- rgn_antimicrobials %>% 
-#   mutate(
-#    
-#      # rescaled pressure score (0 = no pressure, 1 = maximum pressure)
-#     pressure_score = mg_antimicrobials / mg_max,
-#     risk_factor = pressure_score * 100,
-#     
-#     # current status (1 = ideal, 0 = worst)
-#     current_status = 100 - risk_factor
-#   )
-# 
-# # check it to make sure the range is not wild
-# summary(current_status_livestock$current_status)
-#  #   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
-#  #   0.00   54.75   89.66   75.94   95.60   99.93
-
-# --------------------- alt ------------------
-mg_max_alt <- max(rgn_antimicrobials_drop0$mg_antimicrobials, na.rm = TRUE)
-
-current_status_livestock_alt <- rgn_antimicrobials_drop0 %>% 
+# bring in 2023 values as NA so they can be interpolated
+rgn_antimicrobials_interp <- rgn_antimicrobials_drop0 %>%
+  st_drop_geometry() %>% 
+  complete(rgn_id, year = c(unique(year), 2023)) %>% # add missing 2023 rows with NA for each region
+  arrange(rgn_id, year) %>%
+  group_by(rgn_id) %>%
   mutate(
-   
-     # rescaled pressure score (0 = no pressure, 1 = maximum pressure)
-    pressure_score = mg_antimicrobials / mg_max_alt,
-    risk_factor = pressure_score * 100,
-    
-    # current status (1 = ideal, 0 = worst)
-    current_status = 100 - risk_factor
-  )
+    mg_antimicrobials = na.approx(mg_antimicrobials, x = year, na.rm = FALSE) # # interpolate within each region
+  ) %>%
+  ungroup()
 
-# check it to make sure the range is not wild
-summary(current_status_livestock_alt$current_status)
-   # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
-   # 0.00   50.83   90.89   75.10   98.98   99.96 
+# rgn_antimicrobials_interp %>% 
+  # filter(year == 2023, !is.na(mg_antimicrobials))
+
+# sanity check, plot values over time to ensure 2023 does not have a spike or drop.
+ggplot(rgn_antimicrobials_interp, aes(x = year, y = mg_antimicrobials, group = rgn_id)) +
+  geom_line(alpha = 0.4) +
+  geom_point(data = filter(rgn_antimicrobials_interp, year == 2023),
+             aes(color = "interpolated 2023"), size = 2) +
+  scale_color_manual(values = c("interpolated 2023" = "red")) +
+  labs(title = "antimicrobials over time by region",
+       y = "mg antimicrobials", x = "year", color = "") +
+  theme_minimal()
+
+summary(rgn_antimicrobials_interp)
 ```
 
-##### ~ plotlys
+##### Check 2023 drop
+
+Note that 2024 Bovino (cattle) slaughter volume in Regions 1 and 2 showed a notable decline relative to 2021 and 2022 values. To investigate whether this represented a true data gap or a real change in production, I compared the number of reporting municipalities and total slaughter volume across years at both the regional and state levels. The number of reporting municipalities remained constant across all years, indicating that the drop was not caused by missing reporters in the 2024 SIAP dataset. When I examined the raw SIAP data at the state level prior to any spatial processing, Sonora showed a slight increase in Bovino volume in 2024 and Baja California Sur remained stable, while Baja California showed a decline from approximately 113,000 tonnes in 2022 to approximately 67,000 tonnes in 2024. This confirmed that the drop was present in the raw source data and was not introduced by the dasymetric mapping or spatial join.
+
+Given that the decline was isolated to Baja California and was consistent across all reporting municipalities within that state, I concluded (in my opinion) that the 2024 values reflected a real change in livestock production rather than a data artifact. This could be due to drought conditions reducing cattle carrying capacity in the region, a reduction in local slaughterhouse capacity, or an increase in live cattle exports to the United States, which would not be captured in SIAP slaughter volume records. 
+
+For these reasons, I retained the 2024 values as observed rather than interpolating over them. That said, we really do need to note this anomaly as something that will influence current status scores for Regions 1 and 2 in that year
 
 ```{r}
-library(plotly)
-
-rgn_colors <- c(
-  Region_1 = "#C03729",
-  Region_2 = "#E68C7C",
-  Region_3 = "#FC8F24",
-  Region_4 = "#dcaa38",
-  Region_5 = "#cbd2a0",
-  Region_6 = "#98a25a",
-  Region_7 = "#747428",
-  Region_8 = "#627391",
-  Region_9 = "#8d61a9"
-)
-
-## plot the livestock pharma cs over time
-current_status_livestock_plotly <- plotly::plot_ly(
-  current_status_livestock_alt, 
-  x = ~year, 
-  y = ~current_status, 
-  color = ~rgn_id, 
-  colors = rgn_colors,
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "Clean Waters: Current status of pharmaceutical chemicals from livestock (mg)",
-    xaxis = list(title = "ano // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines( 
-    x = range(current_status_livestock_alt$year), 
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal (100/100)",
-    inherit = FALSE
-  )
-current_status_livestock_plotly
-
-# ## plot the livestock pharma rf over time
-# rf_livestock_plotly <- plotly::plot_ly(
-#   current_status_livestock_alt, 
-#   x = ~year, 
-#   y = ~risk_factor, 
-#   color = ~rgn_id, 
-#   colors = rgn_colors,
-#   type = "scatter", 
-#   mode = "lines+markers"
-# ) %>% 
-#   layout(
-#     title = "Clean Waters: Relative risk of pharmaceutical chemicals from livestock, based on tonnes/year of production",
-#     xaxis = list(title = "ano // Year"),
-#     yaxis = list(title = "Risk factor (mg_antimicrobials - ideal)/(maximum - ideal) * 100")
-#   ) %>%
-#   add_lines( 
-#     x = range(current_status_livestock_alt$year), 
-#     y = c(0, 0),
-#     line = list(color = "black", width = 2, dash = "dash"),
-#     name = "Meta // Goal (0)",
-#     inherit = FALSE
-#   )
-# rf_livestock_plotly
-
+# 1. quick line plot for Region_2 only, to see the full time series
+rgn_antimicrobials_interp %>%
+  filter(rgn_id == "Region_2") %>%
+  ggplot(aes(x = year, y = mg_antimicrobials)) +
+  geom_line(color = "#E68C7C", linewidth = 1) +
+  geom_point(color = "#E68C7C", size = 3) +
+  scale_x_continuous(breaks = seq(2006, 2024, 2)) +
+  labs(
+    title = "Region 2: mg antimicrobials from livestock over time",
+    x = "year", y = "mg antimicrobials"
+  ) +
+  theme_minimal()
 ```
+
+```{r}
+# spatial join: which rgn_id does each municipality fall in?
+mun_to_rgn <- municipio_codigo_sf_no_islands %>%
+  st_transform(st_crs(marine_and_inland50)) %>%
+  st_join(marine_and_inland50 %>% select(rgn_id), join = st_intersects) %>%
+  st_drop_geometry() %>%
+  select(clv_mnc, clv_std, rgn_id) %>%
+  mutate(clv_mnc = as.numeric(clv_mnc),
+         clv_std = as.numeric(clv_std)) %>%
+  distinct()
+
+# now join to siap_municipal and filter to Region_2
+siap_municipal %>%
+  st_drop_geometry() %>%
+  left_join(mun_to_rgn, by = c("cvempio" = "clv_mnc", "cveestado" = "clv_std")) %>%
+  filter(rgn_id == "Region_2", anio %in% c(2020:2022, 2024)) %>%
+  group_by(anio, nomespecie) %>%
+  summarize(total_tonnes = sum(toneladas_volumen, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = anio, y = total_tonnes, color = nomespecie)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  labs(
+    title = "Region 2: raw SIAP tonnes by species (2020-2024)",
+    x = "year", y = "tonnes slaughtered", color = "species"
+  ) +
+  theme_minimal()
+
+siap_municipal %>%
+  st_drop_geometry() %>%
+  left_join(mun_to_rgn, by = c("cvempio" = "clv_mnc", "cveestado" = "clv_std")) %>%
+  filter(anio %in% c(2020:2022, 2024), !is.na(rgn_id)) %>%
+  group_by(anio, nomespecie, rgn_id) %>%
+  summarize(total_tonnes = sum(toneladas_volumen, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = anio, y = total_tonnes, color = nomespecie)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  facet_wrap(~rgn_id, scales = "free_y", ncol = 3) +
+  labs(
+    title = "raw SIAP tonnes by species and region (2020-2024)",
+    x = "year", y = "tonnes slaughtered", color = "species"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+    strip.text  = element_text(face = "bold")
+  )
+```
+
+```{r}
+# 3. compare 2022 vs 2024 side by side across ALL regions 
+# to see if the drop is unique to Region_2 or widespread
+rgn_antimicrobials_interp %>%
+  filter(year %in% c(2022, 2024)) %>%
+  mutate(year = factor(year)) %>%
+  ggplot(aes(x = rgn_id, y = mg_antimicrobials, fill = year)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("2022" = "#627391", "2024" = "#C03729")) +
+  labs(
+    title = "mg antimicrobials: 2022 vs 2024 by region",
+    x = NULL, y = "mg antimicrobials", fill = "year"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# check how many municipalities are reporting in Region_2 and Region_5 each year
+# to see if the drop is from fewer reporters or lower values per reporter
+check_n_municipios <- siap_municipal %>%
+  st_drop_geometry() %>%
+  left_join(mun_to_rgn, by = c("cvempio" = "clv_mnc", "cveestado" = "clv_std")) %>%
+  filter(
+   # rgn_id %in% c("Region_1", "Region_2", "Region_5"),
+    nomespecie == "Bovino",
+    anio %in% c(2020:2022, 2024)) %>%
+  group_by(anio, rgn_id) %>%
+  summarize(
+    n_municipalities = n_distinct(cvempio),
+    total_tonnes = sum(toneladas_volumen, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  arrange(rgn_id)
+```
+
+```{r}
+# compare the raw 2022 vs 2024 files for Bovino in those states
+# to make sure the download/read-in wasn't corrupted
+test <- bind_all_years_livestock %>%
+  filter(nomespecie == "Bovino",
+         nomproducto == "Carne",
+         nomestado %in% c("Baja California Sur", "Baja California", "Sonora"),
+         anio %in% c(2021, 2022, 2024)) %>%
+  group_by(anio, nomestado) %>%
+  summarize(total_tonnes = sum(volumen, na.rm = TRUE), .groups = "drop") 
+```
+
+
+
+
+<!-- #### 10. Current status -->
+
+<!-- ```{r} -->
+<!-- # status = 1 - (mg_current - mg_ideal) / (mg_max - mg_ideal) -->
+<!-- # ideal = 0 (no antimicrobial discharge), so: status = 1 - (mg_current / mg_max), where mg_max is the global maximum across all regions and years -->
+
+<!-- # mg_max <- max(rgn_antimicrobials$mg_antimicrobials, na.rm = TRUE) -->
+<!-- #  -->
+<!-- # current_status_livestock <- rgn_antimicrobials %>%  -->
+<!-- #   mutate( -->
+<!-- #     -->
+<!-- #      # rescaled pressure score (0 = no pressure, 1 = maximum pressure) -->
+<!-- #     pressure_score = mg_antimicrobials / mg_max, -->
+<!-- #     risk_factor = pressure_score * 100, -->
+<!-- #      -->
+<!-- #     # current status (1 = ideal, 0 = worst) -->
+<!-- #     current_status = 100 - risk_factor -->
+<!-- #   ) -->
+<!-- #  -->
+<!-- # # check it to make sure the range is not wild -->
+<!-- # summary(current_status_livestock$current_status) -->
+<!-- #  #   Min. 1st Qu.  Median    Mean 3rd Qu.    Max.  -->
+<!-- #  #   0.00   54.75   89.66   75.94   95.60   99.93 -->
+
+<!-- # --------------------- alt ------------------ -->
+<!-- mg_max_alt <- max(rgn_antimicrobials_drop0$mg_antimicrobials, na.rm = TRUE) -->
+
+<!-- current_status_livestock_alt <- rgn_antimicrobials_drop0 %>%  -->
+<!--   mutate( -->
+
+<!--      # rescaled pressure score (0 = no pressure, 1 = maximum pressure) -->
+<!--     pressure_score = mg_antimicrobials / mg_max_alt, -->
+<!--     risk_factor = pressure_score * 100, -->
+
+<!--     # current status (1 = ideal, 0 = worst) -->
+<!--     current_status = 100 - risk_factor -->
+<!--   ) -->
+
+<!-- # check it to make sure the range is not wild -->
+<!-- summary(current_status_livestock_alt$current_status) -->
+<!--    # Min. 1st Qu.  Median    Mean 3rd Qu.    Max.  -->
+<!--    # 0.00   50.83   90.89   75.10   98.98   99.96  -->
+<!-- ``` -->
+
+<!-- ##### ~ plotlys -->
+
+<!-- ```{r} -->
+<!-- library(plotly) -->
+
+<!-- rgn_colors <- c( -->
+<!--   Region_1 = "#C03729", -->
+<!--   Region_2 = "#E68C7C", -->
+<!--   Region_3 = "#FC8F24", -->
+<!--   Region_4 = "#dcaa38", -->
+<!--   Region_5 = "#cbd2a0", -->
+<!--   Region_6 = "#98a25a", -->
+<!--   Region_7 = "#747428", -->
+<!--   Region_8 = "#627391", -->
+<!--   Region_9 = "#8d61a9" -->
+<!-- ) -->
+
+<!-- ## plot the livestock pharma cs over time -->
+<!-- current_status_livestock_plotly <- plotly::plot_ly( -->
+<!--   current_status_livestock_alt,  -->
+<!--   x = ~year,  -->
+<!--   y = ~current_status,  -->
+<!--   color = ~rgn_id,  -->
+<!--   colors = rgn_colors, -->
+<!--   type = "scatter",  -->
+<!--   mode = "lines+markers" -->
+<!-- ) %>%  -->
+<!--   layout( -->
+<!--     title = "Clean Waters: Current status of pharmaceutical chemicals from livestock (mg)", -->
+<!--     xaxis = list(title = "ano // Year"), -->
+<!--     yaxis = list(title = "Puntaje // Percent (out of 100)") -->
+<!--   ) %>% -->
+<!--   add_lines(  -->
+<!--     x = range(current_status_livestock_alt$year),  -->
+<!--     y = c(100, 100), -->
+<!--     line = list(color = "black", width = 2, dash = "dash"), -->
+<!--     name = "Meta // Goal (100/100)", -->
+<!--     inherit = FALSE -->
+<!--   ) -->
+<!-- current_status_livestock_plotly -->
+
+<!-- # ## plot the livestock pharma rf over time -->
+<!-- # rf_livestock_plotly <- plotly::plot_ly( -->
+<!-- #   current_status_livestock_alt,  -->
+<!-- #   x = ~year,  -->
+<!-- #   y = ~risk_factor,  -->
+<!-- #   color = ~rgn_id,  -->
+<!-- #   colors = rgn_colors, -->
+<!-- #   type = "scatter",  -->
+<!-- #   mode = "lines+markers" -->
+<!-- # ) %>%  -->
+<!-- #   layout( -->
+<!-- #     title = "Clean Waters: Relative risk of pharmaceutical chemicals from livestock, based on tonnes/year of production", -->
+<!-- #     xaxis = list(title = "ano // Year"), -->
+<!-- #     yaxis = list(title = "Risk factor (mg_antimicrobials - ideal)/(maximum - ideal) * 100") -->
+<!-- #   ) %>% -->
+<!-- #   add_lines(  -->
+<!-- #     x = range(current_status_livestock_alt$year),  -->
+<!-- #     y = c(0, 0), -->
+<!-- #     line = list(color = "black", width = 2, dash = "dash"), -->
+<!-- #     name = "Meta // Goal (0)", -->
+<!-- #     inherit = FALSE -->
+<!-- #   ) -->
+<!-- # rf_livestock_plotly -->
+
+<!-- ``` -->
 
 
 ### Save to Mazu
@@ -902,10 +1070,10 @@ current_status_livestock_plotly
 final_out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/livestock_output"
 
 # save full intermediate table (watershed level)
-write_csv(rgn_antimicrobials_drop0, here::here(final_out_dir, "watershed_antimicrobials_livestock.csv"))
+write_csv(rgn_antimicrobials_interp, here::here(final_out_dir, "watershed_antimicrobials_livestock.csv"))
 
 # save region-level pressure and status scores
-write_csv(current_status_livestock_alt, here::here(final_out_dir, "rgn_cw_pharmaceuticals_livestock_status.csv"))
+# write_csv(current_status_livestock_alt, here::here(final_out_dir, "rgn_cw_pharmaceuticals_livestock_status.csv"))
 ```
 
 

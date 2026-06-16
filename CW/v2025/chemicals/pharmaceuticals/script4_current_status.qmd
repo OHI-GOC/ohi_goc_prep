@@ -41,11 +41,13 @@ library(here)
 library(raster)
 library(mapview)
 library(purrr)
-library(stringr) # fuzzy string matching
+library(stringr)
 library(stringi)
 library(janitor)
 library(tibble)
 ```
+
+## Read in all mg estimates
 
 ### WWTP (human wastewater) estimates
 
@@ -54,9 +56,18 @@ Here, we will assume that all of the discharge is making it to the ocean.
 ```{r}
 wwtp_pharma <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/humans_output/wwtp_mg_rgnid_pharma.csv")) %>% 
   st_drop_geometry() %>% 
-  rename(estimated_mg = total_pharma_mg) %>% 
+  mutate(estimated_mg = total_pharma_mg * 0.80) %>% # not all of the WWTPs release right into the GoC, it needs to runoff
   mutate(source = "human") %>% 
   select(rgn_id, year, estimated_mg, source)
+
+summary(wwtp_pharma)
+ #    rgn_id               year       estimated_mg          source         
+ # Length:56          Min.   :2017   Min.   :3.728e+06   Length:56         
+ # Class :character   1st Qu.:2018   1st Qu.:2.633e+07   Class :character  
+ # Mode  :character   Median :2020   Median :5.438e+08   Mode  :character  
+ #                    Mean   :2020   Mean   :1.040e+09                     
+ #                    3rd Qu.:2022   3rd Qu.:1.125e+09                     
+ #                    Max.   :2023   Max.   :4.762e+09  
 ```
 
 
@@ -78,6 +89,16 @@ shrimp_pharma <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v202
          source = "shrimp") %>% 
   st_drop_geometry() %>% 
   select(rgn_id, year, estimated_mg, source) 
+
+summary(shrimp_pharma)
+ #    rgn_id               year       estimated_mg          source         
+ # Length:133         Min.   :2005   Min.   :2.086e+06   Length:133        
+ # Class :character   1st Qu.:2009   1st Qu.:1.480e+07   Class :character  
+ # Mode  :character   Median :2014   Median :8.619e+07   Mode  :character  
+ #                    Mean   :2014   Mean   :4.051e+08                     
+ #                    3rd Qu.:2019   3rd Qu.:6.051e+08                     
+ #                    Max.   :2023   Max.   :1.912e+09                     
+ #                                   NA's   :4   
 ```
 
 ### Livestock estimates
@@ -97,24 +118,119 @@ That means that the estimate mg is 0.0012 (0.12%) of the original value applied 
 
 ```{r}
 livestock_pharma <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals/livestock_output/watershed_antimicrobials_livestock.csv")) %>% 
-  mutate(estimated_mg = mg_antimicrobials * 0.60 * 0.002,
+  mutate(estimated_mg = mg_antimicrobials * 0.60 * 0.05,
          source = "livestock") %>%  # 60% is the midpoint between 30 and 90, use 0.20% which is 0.002
-  st_drop_geometry() %>% 
   select(rgn_id, year, estimated_mg, source)
+
+summary(livestock_pharma)
+ #    rgn_id               year       estimated_mg         source         
+ # Length:162         Min.   :2006   Min.   :   14937   Length:162        
+ # Class :character   1st Qu.:2010   1st Qu.:  344768   Class :character  
+ # Mode  :character   Median :2014   Median : 3085379   Mode  :character  
+ #                    Mean   :2015   Mean   : 8429249                     
+ #                    3rd Qu.:2019   3rd Qu.:16647773                     
+ #                    Max.   :2024   Max.   :33857378     
 ```
 
-### Pharmaceutical estimates per region and year
+Note that 2024 Bovino (cattle) slaughter volume in Regions 1 and 2 showed a notable decline relative to 2021 and 2022 values. To investigate whether this represented a true data gap or a real change in production, I compared the number of reporting municipalities and total slaughter volume across years at both the regional and state levels. The number of reporting municipalities remained constant across all years, indicating that the drop was not caused by missing reporters in the 2024 SIAP dataset. When I examined the raw SIAP data at the state level prior to any spatial processing, Sonora showed a slight increase in Bovino volume in 2024 and Baja California Sur remained stable, while Baja California showed a decline from approximately 113,000 tonnes in 2022 to approximately 67,000 tonnes in 2024. This confirmed that the drop was present in the raw source data and was not introduced by the dasymetric mapping or spatial join.
+
+Given that the decline was isolated to Baja California and was consistent across all reporting municipalities within that state, I concluded (in my opinion) that the 2024 values reflected a real change in livestock production rather than a data artifact. This could be due to drought conditions reducing cattle carrying capacity in the region, a reduction in local slaughterhouse capacity, or an increase in live cattle exports to the United States, which would not be captured in SIAP slaughter volume records. 
+
+For these reasons, I retained the 2024 values as observed rather than interpolating over them. That said, we really do need to note this anomaly as something that will influence current status scores for Regions 1 and 2 in that year.
+
+## Total mg per region and year
 
 ```{r}
-total_pharma <- bind_rows(livestock_pharma, shrimp_pharma, wwtp_pharma) %>% 
+bind_pharma <- bind_rows(livestock_pharma, shrimp_pharma, wwtp_pharma) %>% 
+  filter(year %in% 2017:2023) # because we cannot do any years where we do not have WWTP current status, since it is the greatest contributor 
+
+summary(bind_pharma)
+
+total_pharma <- bind_pharma %>% 
   group_by(rgn_id, year) %>% 
   summarize(
-    total_estimated_mg = sum(estimated_mg, na.drop = TRUE)
+    total_estimated_mg = sum(estimated_mg, na.rm = TRUE)
   ) %>% 
   ungroup()
+
+summary(total_pharma)
+ #    rgn_id               year      total_estimated_mg 
+ # Length:63          Min.   :2017   Min.   :3.621e+06  
+ # Class :character   1st Qu.:2018   1st Qu.:3.475e+07  
+ # Mode  :character   Median :2020   Median :3.812e+08  
+ #                    Mean   :2020   Mean   :1.353e+09  
+ #                    3rd Qu.:2022   3rd Qu.:1.892e+09  
+ #                    Max.   :2023   Max.   :4.400e+09 
+
+bind_pharma_plotly <- plotly::plot_ly(
+  bind_pharma,
+  x = ~year,
+  y = ~estimated_mg,
+  color = ~source,
+  split = ~rgn_id,
+  #colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Total mg of pharmaceuticals potentially entering the GoC",
+    xaxis = list(title = "año // year"),
+    yaxis = list(title = "mg of pharmaceuticals"),
+    legend = list(title = list(text = "source"))
+  )
+bind_pharma_plotly
 ```
 
 ```{r}
+source_colors <- c(
+  "shrimp" = "#3B8BD4",  
+  "livestock" = "#1D9E75", 
+  "human" = "#9B59B6" 
+)
+
+rgn_colors <- c(
+  Region_1 = "#C03729",
+  Region_2 = "#E68C7C",
+  Region_3 = "#FC8F24",
+  Region_4 = "#dcaa38",
+  Region_5 = "#cbd2a0",
+  Region_6 = "#98a25a",
+  Region_7 = "#747428",
+  Region_8 = "#627391",
+  Region_9 = "#8d61a9"
+)
+
+bind_pharma_gg <- ggplot(bind_pharma, aes(x = year, y = estimated_mg)) +
+  geom_line(aes(color = source, group = source), linewidth = 0.9) +
+  geom_point(aes(color = source), size = 2) +
+  facet_wrap(~rgn_id, ncol = 3, scales = "fixed") +
+  scale_color_manual(values = source_colors) +
+  scale_x_continuous(breaks = 2017:2023) +
+  labs(
+    title = "Pharmaceuticals potentially entering the GoC by region (mg)",
+    subtitle = "each panel shows mg estimates by source type (2017-2023)",
+    x = "año // year",
+    y  = "mg of pharmaceuticals",
+    color = "source"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold", 
+                                    color = "white", 
+                                    size  = 10),
+    strip.background = element_rect(fill = rgn_colors[levels(factor(bind_pharma$rgn_id))]),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+    panel.spacing = unit(1, "lines"),
+    legend.position = "bottom"
+  )
+
+bind_pharma_gg
+```
+
+
+```{r}
+#################### ------- all years ------ ####################
+
 # % contribution by source, region, and year
 pharma_contributions <- bind_rows(livestock_pharma, shrimp_pharma, wwtp_pharma) %>% 
   group_by(rgn_id, year) %>% 
@@ -145,11 +261,145 @@ pharma_contributions %>%
   ggplot(aes(x = year, y = pct, fill = source)) +
   geom_col(position = "stack") +
   labs(
-    title = "Percent Contribution to Total Pharmaceutical Effluent by Source",
-    x = "Year", y = "% Contribution", fill = "Source"
+    title = "Percent contribution to total pharmaceutical effluent by source and year",
+    x = "year", y = "% contribution", fill = "source"
+  ) +
+  theme_minimal()
+
+#################### ------ now, only including 2017-2023.... ------ ####################
+
+# % contribution by source, region, and year
+pharma_contributions <- bind_rows(livestock_pharma, shrimp_pharma, wwtp_pharma) %>% 
+  filter(year %in% 2017:2023) %>% 
+  group_by(rgn_id, year) %>% 
+  mutate(
+    total_mg = sum(estimated_mg, na.rm = TRUE),
+    pct_contribution = (estimated_mg / total_mg) * 100
+  ) %>% 
+  ungroup()
+
+# summary across all regions and years
+pharma_summary <- pharma_contributions %>% 
+  group_by(source) %>% 
+  summarize(
+    total_mg = sum(estimated_mg, na.rm = TRUE),
+    mean_pct = mean(pct_contribution, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  mutate(overall_pct = (total_mg / sum(total_mg)) * 100)
+
+print(pharma_summary)
+#   source        total_mg mean_pct overall_pct
+#   <chr>            <dbl>    <dbl>       <dbl>
+# 1 human     46582876155.     54.8        54.7
+# 2 livestock 15737685849.     33.7        18.5
+# 3 shrimp    22911906505.     22.6        26.9
+
+# viz percent contribution by source over time (averaged across regions)
+pharma_contributions %>% 
+  group_by(year, source) %>% 
+  summarize(estimated_mg = sum(estimated_mg, na.rm = TRUE), .groups = "drop") %>% 
+  group_by(year) %>% 
+  mutate(pct = (estimated_mg / sum(estimated_mg)) * 100) %>% 
+  ggplot(aes(x = year, y = pct, fill = source)) +
+  geom_col(position = "stack") +
+  labs(
+    title = "Percent contribution to total pharmaceutical effluent by source and year",
+    x = "year", y = "% contribution", fill = "source"
   ) +
   theme_minimal()
 ```
+
+```{r}
+total_pharma_plotly <- plotly::plot_ly(
+  total_pharma,
+  x = ~year,
+  y = ~total_estimated_mg,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Total mg of pharmaceuticals potentially entering the GoC",
+    xaxis = list(title = "año // year"),
+    yaxis = list(title = "mg of pharmaceuticals"),
+    legend = list(title = list(text = "source"))
+  )
+total_pharma_plotly
+```
+
+## Standardize by coastline length
+
+To allow for comparison of pharmaceutical pressure across regions of different sizes, total estimated mg of pharmaceuticals were standardized by the length of each region's coastline in kilometers. Coastline data were obtained from Natural Earth (version 4.1.0, 1:10m scale; naturalearthdata.com), which derives primarily from World Data Bank 2. The global coastline shapefile was clipped to the Gulf of California study area and reprojected to match the Mexico ITRF2008 Lambert Conformal Conic coordinate reference system. Island coastlines were removed by erasing a 1,500 m buffer around the Islas del Golfo de California protected area polygon prior to calculating lengths, so that only mainland coastline contributed to each region's total. Coastline segments were then intersected with each OHI region boundary and summed using st_length in the sf package in R, which returned lengths in meters that were subsequently converted to kilometers. Total estimated mg of pharmaceuticals per region and year were then divided by the corresponding coastline length to produce a standardized pressure metric of mg of pharmaceuticals per kilometer of coastline.
+
+```{r}
+world_coastline <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/ne_10m_coastline/ne_10m_coastline.shp"))
+
+st_crs(marine_and_inland10) == st_crs(world_coastline) # FALSE
+
+goc_coastline <- st_intersection(st_transform(world_coastline, st_crs(marine_and_inland10)), marine_and_inland10)
+mapview(goc_coastline)
+
+## I want to get rid of the island coastlines!!
+
+islands_polygons <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/from_hem_POEM_ANP/232_ANP-ITRF08_16062025/232_ANP-ITRF08_16062025.shp")) %>% 
+  janitor::clean_names() %>% 
+  filter(nombre %in% "Islas del Golfo de California") %>% 
+  st_transform(st_crs(goc_coastline))
+mapview(islands_polygons)
+
+# erase the island polygons from the municipality polygons, using st_difference, which removes the island area from any municipality that overlaps it
+goc_coastline_no_islands <- goc_coastline %>%
+  st_difference(st_union(st_buffer(islands_polygons, dist = 1500))) %>% # crop out island areas
+  st_make_valid()
+mapview(goc_coastline_no_islands)
+```
+
+
+```{r}
+## find length of the coastline for each region using `st_length`
+st_crs(goc_coastline_no_islands) # meters, Mexico ITRF2008 / LCC 
+
+## calculate coastline length per region
+coastline_by_rgn <- goc_coastline_no_islands %>%
+  st_intersection(marine_and_inland10 %>% select(rgn_id)) %>%  # assign rgn_id to each coastline segment
+  mutate(segment_length_m = as.numeric(st_length(.))) %>%  # length of each segment in meters
+  st_drop_geometry() %>%
+  group_by(rgn_id) %>%
+  summarize(coastline_length_m = sum(segment_length_m, na.rm = TRUE), .groups = "drop") %>%
+  mutate(coastline_length_km = coastline_length_m / 1000)
+```
+
+```{r}
+## join coastline length to total mg estimates and divide
+total_pharma_standardized <- total_pharma %>%
+  left_join(coastline_by_rgn %>% select(rgn_id, coastline_length_km), by = "rgn_id") %>%
+  mutate(mg_per_km_coastline = total_estimated_mg / coastline_length_km)
+
+summary(total_pharma_standardized)
+```
+
+```{r}
+## quick plot to see standardized values over time
+ggplot(total_pharma_standardized, aes(x = year, y = mg_per_km_coastline, color = rgn_id)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_color_manual(values = rgn_colors) +
+  scale_x_continuous(breaks = seq(2006, 2024, 2)) +
+  labs(
+    title = "Total pharmaceuticals (mg) standardized by coastline length",
+    x = "year",
+    y = "mg pharmaceuticals per km of coastline"
+    #color = "region"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+## save to mazu
+write_csv(total_pharma_standardized, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pharmaceuticals","total_mg_pharma_standardized_coastline.csv"))
+```
+
 
 
 
@@ -157,15 +407,21 @@ pharma_contributions %>%
 
 $$current\ status\ _{pharmaceuticals} = 1 - \frac{pharmaceuticals\ _{current} - pharmaceuticals\ _{ideal}}{pharmaceuticals\ _{maximum} - pharmaceuticals\ _{ideal}}$$
 
-Where the ideal is zero, and the maximum is the global maximum of kg estimated across all years and regions.
+Where the ideal is zero, and the maximum is the arithmetic mean of the top 5 contributing observations across all years and regions.
 
 ```{r}
-current_status_pharmaceuticals <- total_pharmaceutical_and_chem_kg %>% 
+### using the maximum, not one value but 5
+top5_avg_mg <- total_pharma_standardized %>%
+  slice_max(mg_per_km_coastline, n = 5) %>%
+  pull(mg_per_km_coastline) %>%
+  mean()
+
+current_status_pharmaceuticals <- total_pharma_standardized %>% 
   mutate(
     ideal = 0,
-    maximum = max(total_chem_kg),
-    current_status = 1 - ((total_chem_kg - ideal)/(maximum - ideal)),
-    current_status_final = current_status * 100
+    maximum = top5_avg_mg,
+    current_status = (1 - ((mg_per_km_coastline - ideal) / (maximum - ideal)))* 100,
+    current_status_final = ifelse(current_status < 0, 0, current_status)
   )
 ```
 
@@ -198,7 +454,7 @@ pharmaceutical_plotly <- plotly::plot_ly(
   mode = "lines+markers"
 ) %>% 
   layout(
-    title = "Clean Waters: pharmaceutical Current Status",
+    title = "Clean Waters: pharmaceutical current status",
     xaxis = list(title = "ano // Year"),
     yaxis = list(title = "Puntaje // Percent (out of 100)")
   ) %>%
