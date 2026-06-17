@@ -1,0 +1,230 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(colorspace)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+```{r Load clean_names_lowercase function}
+clean_names_lowercase <- function(x) {
+
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+
+  x %>%
+    tolower() %>%
+    trimws()
+}
+```
+
+
+# STEP 1: Load in and summarize GOC_MarineLandings0
+
+```{r Load in GOC_MarineLandings0 as necessary}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+# NOTE TO SELF: This source file may change in later Summer / Fall run. - EMF, June 4 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+```
+
+
+# PATCH 1 - Look into groups that are unassigned to a Major_Functional_Group:
+NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+```{r Review generathat are not assigned to a Major_Functional_Group}
+TEST<- GOC_MarineFisheryLandings0 %>%
+  filter(estimated_genus_name== "Sardinops")
+
+TEST2<- GOC_MarineFisheryLandings0 %>%
+  filter(is.na(Major_Functional_Group))
+
+table(TEST2$estimated_genus_name)
+```
+
+```{r Load in GenusFamilyGroup_Key as needed}
+GenusFamilyGroup_Key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Taxonomic_Keys/GenusFamilyGroupKey_COMPLETE_Apr042026.csv")
+
+# NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+MajorFunctionalGroup_Key<- GenusFamilyGroup_Key %>%
+  select(estimated_genus_name, Major_Functional_Group)
+```
+
+```{r Major_Functional_Group patch for GOC_MarineLandings}
+# Fill in missing values based on MajorFunctionalGroup_Key:
+GOC_MarineLandings <- GOC_MarineLandings0 %>%
+  left_join(
+    MajorFunctionalGroup_Key %>%
+      select(estimated_genus_name, Major_Functional_Group),
+    by = "estimated_genus_name",
+    suffix = c("", ".lookup")
+  )
+
+GOC_MarineLandings <- GOC_MarineLandings %>%
+  mutate(
+    Major_Functional_Group = coalesce(
+      Major_Functional_Group,
+      Major_Functional_Group.lookup
+    )
+  ) %>%
+  select(-Major_Functional_Group.lookup)
+
+# 3246583 obs., 58 var.
+
+# SANITY CHECK:
+sum(is.na(GOC_MarineLandings$Major_Functional_Group))
+# Only 26 records unassigned. Looks good!
+```
+
+# PATCH 2 - Re-assign paneus as litopenaeus:
+NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+```{r Re-assign paneus as litopenaeus}
+GOC_MarineLandings <- GOC_MarineLandings %>%
+  mutate(
+    estimated_genus_name = case_when(
+      estimated_genus_name == "Penaeus" ~ "Litopenaeus",
+      TRUE ~ estimated_genus_name
+    )
+  )
+
+unique(GOC_MarineLandings$estimated_genus_name)
+```
+
+
+
+# **DECISION POINT: Selecting which sectors to include**
+```{r Select Sectors_of_Interest}
+table(GOC_MarineLandings$sector_estimate_draft)
+
+# SANITY CHECK: Which species are included in the freshwater or marine sector?
+TEST<- GOC_MarineLandings %>%
+  filter(sector_estimate_draft== "freshwater or marine: fishery sector yet to be classified")
+
+table(TEST$recorded_taxa_group)
+# Species like Mojarra (the overwhelming majority of catch), trout, and catfish, which can move from freshwater to marine systems and are a bit ambiguous in terms of where they can be caught.
+
+
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
+                          "marine: small-scale capture",
+                          "marine: large-scale capture")
+  
+PossibleMarineFishery_Sectors<- c("freshwater or marine: large-scale capture",
+                          "freshwater or marine: small-scale capture",
+                          "freshwater or marine: fishery sector yet to be classified")
+
+GOC_MarineFisheryLandings0<- GOC_MarineLandings %>%
+  filter(sector_estimate_draft %in% c(MarineFishery_Sectors, PossibleMarineFishery_Sectors))
+
+# 3137044 obs., 58 var.
+```
+
+```{r Re-level sector_estimate_draft and Major_Functional_Group}
+# Re-level sectors (mainly for plotting purposes):
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings0 %>%
+  filter(
+    sector_estimate_draft %in% c(
+      MarineFishery_Sectors,
+      PossibleMarineFishery_Sectors
+    )
+  ) %>%
+  mutate(
+    sector_estimate_draft = factor(
+      sector_estimate_draft,
+      levels = c(
+        "marine: large-scale capture",
+        "marine: small-scale capture",
+        "marine: fishery sector yet to be classified",
+        "freshwater or marine: large-scale capture",
+        "freshwater or marine: small-scale capture",
+        "freshwater or marine: fishery sector yet to be classified"
+      )
+    )
+  )
+
+# SANITY CHECK: How many Major_Functional_Group unassigned?
+sum(is.na(GOC_MarineFisheryLandings$Major_Functional_Group))
+# Only 18 records unassigned. Looks good!
+
+table(GOC_MarineFisheryLandings$Major_Functional_Group)
+
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings %>%
+  mutate(
+    Major_Functional_Group = factor(
+      Major_Functional_Group,
+      levels= c(
+        
+        # Crustaceans
+        "Shrimps, prawns",
+        "Crustaceans",
+        
+        # Molluscs
+        "Cephalopods",
+        "Molluscs excl. Cephalopods",
+        
+        # Other invertebrates
+        "Echinoderms",
+        "Jellies",
+        "Other marine invertebrates",
+        
+        # Fishes
+        "Anchovy & Sardine (small pelagics)",
+        "Pelagic marine fish (excl. anchovy & sardine)",
+        "Demersal marine fishes",
+        "Marine fishes NEI",
+        "Marine or freshwater fishes NEI",
+        "Diadromous fishes",
+        
+        # Elasmobranchs
+        "Sharks",
+        
+        # Miscellaneous / unresolved
+        "Marine algae",
+        "Marine species NEI",
+        "unknown",
+        NA_character_
+      )
+    )
+  )
+
+# SANITY CHECK:
+sum(is.na(GOC_MarineFisheryLandings$Major_Functional_Group))
+# Only 18 records unassigned. Looks good!
+```
+
