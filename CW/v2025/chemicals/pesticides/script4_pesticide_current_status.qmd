@@ -46,25 +46,93 @@ total_ag_pesticides_kg <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep
   rename(ag_pesticide_kg = total_pesticide_kg)
 ```
 
+## Standardize by coastline length
 
-### Read in shrimp farming estimates
-
-```{r}
-total_aq_lime_kg <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/int/shrimp_lime_kg_by_rgnid_lyle_fritch.csv")) %>% 
-  select(rgn_id, year, aqua_lime_kg = lime_kg)
-```
-
-^ estimate as a risk factor (score each source first)
-
-
-### Agriculture + aquaculture estimates per region and year
+To allow for comparison of pesticide pressure across regions of different sizes, total estimated kg of pesticides were standardized by the length of each region's coastline in kilometers. Coastline data were obtained from Natural Earth (version 4.1.0, 1:10m scale; naturalearthdata.com), which derives primarily from World Data Bank 2. The global coastline shapefile was clipped to the Gulf of California study area and reprojected to match the Mexico ITRF2008 Lambert Conformal Conic coordinate reference system. Island coastlines were removed by erasing a 1,500 m buffer around the Islas del Golfo de California protected area polygon prior to calculating lengths, so that only mainland coastline contributed to each region's total. Coastline segments were then intersected with each OHI region boundary and summed using st_length in the sf package in R, which returned lengths in meters that were subsequently converted to kilometers. Total estimated kg of pesticides per region and year were then divided by the corresponding coastline length to produce a standardized pressure metric of kg of pesticides per kilometer of coastline, which will subsequently be made into a current status score.
 
 ```{r}
-total_pesticide_and_chem_kg <- full_join(total_ag_pesticides_kg, total_aq_lime_kg) %>% 
-  mutate(aqua_lime_kg = ifelse(is.na(aqua_lime_kg), 0, aqua_lime_kg),
-         ag_pesticide_kg = ifelse(is.na(ag_pesticide_kg), 0, ag_pesticide_kg)) %>% 
-  mutate(total_chem_kg = ag_pesticide_kg + aqua_lime_kg)
+world_coastline <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/ne_10m_coastline/ne_10m_coastline.shp"))
+
+st_crs(marine_and_inland10) == st_crs(world_coastline) # FALSE
+
+goc_coastline <- st_intersection(st_transform(world_coastline, st_crs(marine_and_inland10)), marine_and_inland10)
+mapview(goc_coastline)
+
+## I want to get rid of the island coastlines!!
+
+islands_polygons <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/from_hem_POEM_ANP/232_ANP-ITRF08_16062025/232_ANP-ITRF08_16062025.shp")) %>% 
+  janitor::clean_names() %>% 
+  filter(nombre %in% "Islas del Golfo de California") %>% 
+  st_transform(st_crs(goc_coastline))
+mapview(islands_polygons)
+
+# erase the island polygons from the municipality polygons, using st_difference, which removes the island area from any municipality that overlaps it
+goc_coastline_no_islands <- goc_coastline %>%
+  st_difference(st_union(st_buffer(islands_polygons, dist = 1500))) %>% # crop out island areas
+  st_make_valid()
+mapview(goc_coastline_no_islands)
 ```
+
+
+```{r}
+## find length of the coastline for each region using `st_length`
+st_crs(goc_coastline_no_islands) # meters, Mexico ITRF2008 / LCC 
+
+## calculate coastline length per region
+coastline_by_rgn <- goc_coastline_no_islands %>%
+  st_intersection(marine_and_inland10 %>% select(rgn_id)) %>%  # assign rgn_id to each coastline segment
+  mutate(segment_length_m = as.numeric(st_length(.))) %>%  # length of each segment in meters
+  st_drop_geometry() %>%
+  group_by(rgn_id) %>%
+  summarize(coastline_length_m = sum(segment_length_m, na.rm = TRUE), .groups = "drop") %>%
+  mutate(coastline_length_km = coastline_length_m / 1000)
+```
+
+```{r}
+## join coastline length to total kg estimates and divide
+total_pesticides_standardized <- total_ag_pesticides_kg %>%
+  left_join(coastline_by_rgn %>% select(rgn_id, coastline_length_km), by = "rgn_id") %>%
+  mutate(kg_per_km_coastline = ag_pesticide_kg / coastline_length_km)
+
+summary(total_pesticides_standardized)
+```
+
+```{r}
+## quick plot to see standardized values over time
+ggplot(total_pesticides_standardized, aes(x = year, y = kg_per_km_coastline, color = rgn_id)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_color_manual(values = rgn_colors) +
+  scale_x_continuous(breaks = seq(2001, 2024, 2)) +
+  labs(
+    title = "Total pesticides (kg) standardized by coastline length",
+    x = "year",
+    y = "kg pesticides per km of coastline"
+    #color = "region"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+## versus un-standardized:
+ggplot(total_ag_pesticides_kg, aes(x = year, y = ag_pesticide_kg, color = rgn_id)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_color_manual(values = rgn_colors) +
+  scale_x_continuous(breaks = seq(2001, 2024, 2)) +
+  labs(
+    title = "Total pesticides (kg) by region",
+    x = "year",
+    y = "kg pesticides"
+    #color = "region"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+## save to mazu
+write_csv(total_pesticides_standardized, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/output","total_kg_pesticides_standardized_coastline.csv"))
+```
+
+
 
 
 ## Current status
@@ -74,21 +142,22 @@ $$current\ status\ _{pesticides} = 1 - \frac{pesticides\ _{current} - pesticides
 Where the ideal is zero, and the maximum is the global maximum of kg estimated across all years and regions.
 
 ```{r}
-current_status_pesticides <- total_pesticide_and_chem_kg %>% 
+### using the maximum, not one value but 5
+top5_avg_kg <- total_pesticides_standardized %>%
+  slice_max(kg_per_km_coastline, n = 5) %>%
+  pull(kg_per_km_coastline) %>%
+  mean()
+
+current_status_pesticides <- total_pesticides_standardized %>% 
   mutate(
     ideal = 0,
-    maximum = max(total_chem_kg),
-    current_status = 1 - ((total_chem_kg - ideal)/(maximum - ideal)),
-    current_status_final = current_status * 100
+    maximum = top5_avg_kg,
+    current_status = (1 - ((kg_per_km_coastline - ideal) / (maximum - ideal)))* 100,
+    current_status_final = ifelse(current_status < 0, 0, current_status)
   )
 
-current_status_pesticides_ag <- total_ag_pesticides_kg %>% 
-  mutate(
-    ideal = 0,
-    maximum = max(ag_pesticide_kg),
-    current_status = 1 - ((ag_pesticide_kg - ideal)/(maximum - ideal)),
-    current_status_final = current_status * 100
-  )
+## save to mazu
+write_csv(current_status_pesticides, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pesticides/output","cw_chemical_pesticide_current_status.csv"))
 ```
 
 
@@ -132,29 +201,5 @@ pesticide_plotly <- plotly::plot_ly(
     inherit = FALSE
   )
 pesticide_plotly
-
-## plot the pesticide cs over time
-ag_pesticide_plotly <- plotly::plot_ly(
-  current_status_pesticides_ag, 
-  x = ~year, 
-  y = ~current_status_final, 
-  color = ~rgn_id, 
-  colors = rgn_colors,
-  type = "scatter", 
-  mode = "lines+markers"
-) %>% 
-  layout(
-    title = "Clean Waters: AG Pesticide Current Status",
-    xaxis = list(title = "ano // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines( 
-    x = range(current_status_pesticides_ag$year), 
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal (100/100)",
-    inherit = FALSE
-  )
-ag_pesticide_plotly
 ```
 
