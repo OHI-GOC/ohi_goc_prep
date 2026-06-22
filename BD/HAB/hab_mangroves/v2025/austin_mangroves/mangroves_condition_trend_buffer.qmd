@@ -1,0 +1,246 @@
+---
+title: "Mangrove Habitat Condition and Trend with a buffer - Gulf of California OHI"
+author: "Austin Martinez"
+date: 03/26/2026
+format: 
+  html:
+    code-fold: show
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+
+
+```{r}
+# Load in Libraries
+library(sf)
+library(dplyr)
+library(here)
+library(terra)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tmap)
+```
+
+```{r}
+# Read in OHI region boundaries
+ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |> st_make_valid()
+```
+
+## Create buffer
+
+```{r}
+# Create 5km buffer (run once)
+sf::sf_use_s2(FALSE)
+
+ohi_regions_marine <- ohi_regions |>
+  filter(location == "marine") |>
+  st_union()
+
+# Make a buffer ring
+buffer_outer <- st_buffer(ohi_regions_marine, dist = 20000)
+buffer_ring  <- st_difference(buffer_outer, ohi_regions_marine) |> st_make_valid()
+
+# Union it to the marine OHI layer
+ohi_marine_plus_20km <- st_union(ohi_regions_marine, buffer_ring)
+```
+
+
+## CONDITION — GMW 1996 vs 2020
+
+```{r}
+gmw_1996 <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/zenodo_mangrove/gmw_v3_1996_vec/gmw_v3_1996_vec.shp")) |> 
+  st_make_valid()
+gmw_2010 <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/zenodo_mangrove/gmw_v3_2010_vec/gmw_v3_2010_vec.shp")) |> 
+  st_make_valid()
+gmw_2020 <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/zenodo_mangrove/gmw_v3_2020_vec/gmw_v3_2020_vec.shp")) |> 
+  st_make_valid()
+
+gmw_1996 <- st_transform(gmw_1996, st_crs(ohi_regions))
+gmw_2010 <- st_transform(gmw_2010, st_crs(ohi_regions))
+gmw_2020 <- st_transform(gmw_2020, st_crs(ohi_regions))
+
+```
+
+```{r}
+gmw_2020_plot <- st_intersection(gmw_2020, ohi_regions)
+
+tmap_mode("view")
+
+tm_shape(gmw_2020_plot) +
+  tm_polygons(col = "red", border.col = "red", lwd = 0.5) +
+tm_shape(ohi_marine_plus_20km) +
+  tm_polygons(col = "lightblue", border.col = "lightblue", lwd = 0.5, alpha = 0.2)
+```
+
+```{r}
+# 1996
+gmw_1996 <- st_intersection(gmw_1996, ohi_marine_plus_20km)
+
+rgns_gmw_1996 <- st_intersection(gmw_1996, ohi_regions) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 1996
+  ) |>
+  st_drop_geometry()
+```
+
+```{r}
+# 2010
+gmw_2010 <- st_intersection(gmw_2010, ohi_marine_plus_20km)
+
+rgns_gmw_2010 <- st_intersection(gmw_2010, ohi_regions) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 2010
+  ) |>
+  st_drop_geometry()
+```
+
+```{r}
+# 2020
+
+gmw_2020 <- st_intersection(gmw_2020, ohi_marine_plus_20km)
+
+rgns_gmw_2020 <- st_intersection(gmw_2020, ohi_regions) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 2020
+  ) |>
+  st_drop_geometry()
+```
+
+
+```{r}
+gmw_area <- bind_rows(rgns_gmw_1996, rgns_gmw_2010, rgns_gmw_2020) |>
+  st_drop_geometry() |>
+  group_by(rgn_id, year) |>
+  summarise(area_km2 = sum(area_km2), .groups = "drop")
+
+mangrove_condition <- gmw_area |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  mutate(condition = `2020` / `1996`,
+         condition = pmin(condition, 1),   # cap values > 1 at 1
+         year = 2020) |>
+  select(rgn_id, year, condition)
+```
+
+```{r}
+# Make a nice Ktable
+mangrove_condition |>
+  kable(digits = 4, col.names = c("Region", "Year", "Condition (2020/1996)")) |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  add_header_above(
+    c('Mangrove Condition' = 3))
+```
+
+
+## EXTENT — Hem MANGLAR (2025)
+
+```{r}
+hem_mangroves <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/mangrove_Hem/USV_AGRUPADO/USV_AGRUPADO.shp")) |> 
+  st_make_valid()
+
+hem_mangroves <- st_transform(hem_mangroves, st_crs(ohi_regions))
+```
+
+```{r}
+hem_mangroves_only <- hem_mangroves |>
+  filter(DESCRIP_AG %in% c("MANGLAR", 
+                           "VEGETACIÓN SECUNDARIA ARBÓREA DE MANGLAR", 
+                           "VEGETACIÓN SECUNDARIA ARBUSTIVA DE MANGLAR",
+                           "VEGETACIÓN SECUNDARIA HERBÁCEA DE MANGLAR")) |>
+  st_union() |>
+  st_as_sf() |>
+  st_make_valid()
+```
+
+```{r}
+tmap_mode("view")
+
+tm_shape(hem_mangroves_only) +
+  tm_polygons(col = "red", border.col = "red", lwd = 0.5) +
+tm_shape(ohi_marine_plus_20km) +
+  tm_polygons(col = "lightblue", border.col = "lightblue", lwd = 0.5, alpha = 0.2)
+```
+```{r}
+# Do any polygons overlap each other?
+overlaps <- st_overlaps(hem_mangroves_only)
+any(lengths(overlaps) > 0)
+```
+
+```{r}
+hem_mangroves_only <- st_intersection(hem_mangroves_only, ohi_marine_plus_20km)
+
+
+rgns_hem <- st_intersection(hem_mangroves_only, ohi_regions) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(x), .groups = "drop") |>
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 2025
+  ) |>
+  st_drop_geometry()
+
+# Make a nice Ktable
+rgns_hem |>
+  kable(digits = 4, col.names = c("Region", "Extent (km²)", "Year")) |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  add_header_above(
+    c('Mangrove Extent' = 3))
+```
+
+
+
+
+## TREND — GMW 2010 → 2020
+
+```{r}
+gmw_area <- bind_rows(rgns_gmw_1996, rgns_gmw_2010, rgns_gmw_2020) |>
+  st_drop_geometry() |>
+  group_by(rgn_id, year) |>
+  summarise(area_km2 = sum(area_km2), .groups = "drop")
+
+mangrove_trend <- gmw_area |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  mutate(trend = (`2020` / `2010`)^(1/10) - 1,
+         year = 2020) |>
+  select(rgn_id, year, trend)
+```
+
+```{r}
+# Make a nice Ktable
+mangrove_trend |>
+  kable(digits = 4, col.names = c("Region", "Year", "Trend")) |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  add_header_above(
+    c('Mangrove Trend' = 3))
+```
+
+
+
+```{r}
+# Write CSVs to output_data directory
+write.csv(rgns_hem,
+          "habitat_services_output/mangrove_extent.csv",
+          row.names = FALSE)
+
+write.csv(mangrove_trend,
+          "habitat_services_output/mangrove_trend.csv",
+          row.names = FALSE)
+
+write.csv(mangrove_condition,
+          "habitat_services_output/mangrove_condition.csv",
+          row.names = FALSE)
+```
+
+
