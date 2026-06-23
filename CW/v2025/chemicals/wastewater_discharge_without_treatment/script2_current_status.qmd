@@ -69,18 +69,101 @@ count_goc_aguaresd_ocean_and_river <- goc_aguaresd_all_years %>%
   count(census_year, name = "n_goc_discharge_points") %>%
   arrange(census_year) %>% 
   ungroup()
+```
 
-ocean_river_current_status <- count_goc_aguaresd_ocean_and_river %>% 
-  mutate(
-    ideal = 0,
-    maximum = mean(sort(n_goc_discharge_points, decreasing = TRUE)[1:5]),
-    current_status = (1 - ((n_goc_discharge_points - ideal)/(maximum - ideal))) * 100,
-    current_status_final = ifelse(current_status < 0, 0, current_status)
-  )
+### Site density by region:
+
+```{r}
+# read municipalities in
+municipio_codigo_sf <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/land_admin_boundaries", "mex_admin2_joined_w_municipio_codigos.shp")) %>% 
+  mutate(cvempio = as.numeric(clv_mnc),
+         cveestado = as.numeric(clv_std))
+
+unique(municipio_codigo_sf$clv_mnc)
+unique(municipio_codigo_sf$cveestado)
+
+mapview(municipio_codigo_sf)
+
+islands_polygons <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/from_hem_POEM_ANP/232_ANP-ITRF08_16062025/232_ANP-ITRF08_16062025.shp")) %>% 
+  janitor::clean_names() %>% 
+  filter(nombre %in% "Islas del Golfo de California")
+mapview(islands_polygons)
+
+# erase the island polygons from the municipality polygons, using st_difference, which removes the island area from any municipality that overlaps it
+municipio_codigo_sf_no_islands <- municipio_codigo_sf %>%
+  st_transform(st_crs(islands_polygons)) %>%
+  st_difference(st_union(st_buffer(islands_polygons, dist = 110))) %>% # crop out island areas
+  st_make_valid()
+
+# isolate to municipios that ww was measured in: 
+municipio_codigo_sf_no_islands_ww <- municipio_codigo_sf_no_islands %>% 
+  mutate(mnpio = as.numeric(paste0(clv_std, clv_mnc))) 
+
+# join:
+municipio_polygons_ww <- left_join(goc_codes, municipio_codigo_sf_no_islands_ww) %>% 
+  st_as_sf()
 ```
 
 
-## Comparative visualizations
+```{r}
+#--- 1. calculate region area (km^2) ---
+rgn_area_50km <- inland_50 %>%
+  #group_by(rgn_id) %>% 
+  mutate(area_km2 = as.numeric(st_area(.) / 1e6)) %>%
+  group_by(rgn_id) %>% 
+  st_drop_geometry() %>%
+  summarize(rgn_area_km2 = sum(area_km2)) %>% 
+  ungroup() 
+
+rgn_area_municipios <- municipio_polygons_ww %>%
+  #group_by(rgn_id) %>% 
+  mutate(area_km2 = as.numeric(st_area(.) / 1e6)) %>%
+  group_by(rgn_id) %>% 
+  st_drop_geometry() %>%
+  summarize(rgn_area_km2 = sum(area_km2)) %>% 
+  ungroup() %>% 
+  mutate(rgn_area_km2 = ifelse(rgn_id %in% "Region_2", 21662.012, rgn_area_km2)) # taken from rgn_area_50km, though there are not any untreated ww in region 2 so it does not matter
+```
+
+```{r}
+#--- 2. expand to full year sequence per region, at least as much as possible ---
+sites_expanded <- count_goc_aguaresd_ocean_and_river %>%
+  group_by(rgn_id) %>%
+  complete(census_year = c(2013, 2015, 2017, 2019, 2021, 2023)) %>% # note that since this is grouped by region that you might see certain regions only having one year of data, because their min and max are that year.  even after using complete()
+  left_join(rgn_area_municipios, by = "rgn_id") %>% 
+  replace_na(list(n_goc_discharge_points = 0)) %>%  # because the census was done for that year, and those regions did not report any untreated ww point sources with receptors into the ocean, beach, estuary, etc.
+  ungroup() 
+  
+#--- 3. find number of sites per km2 ---
+ww_density_per_rgn <- sites_expanded %>% 
+  mutate(
+    sites_per_km2 = n_goc_discharge_points / rgn_area_km2
+  ) 
+```
+
+### Current status
+
+```{r}
+ocean_river_current_status <- ww_density_per_rgn %>% 
+  mutate(
+    ideal = 0,
+    maximum = mean(sort(sites_per_km2, decreasing = TRUE)[1:5]),
+    pressure_score = ((sites_per_km2 - ideal)/(maximum - ideal)),
+    current_status = 1 - ((sites_per_km2 - ideal)/(maximum - ideal)),
+    current_status_final = ifelse(current_status < 0, 0, current_status * 100)
+  )
+```
+
+## Write to Mazu
+
+```{r}
+write_csv(ww_density_per_rgn, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/agua_sin_tratamiento/output","density_goc_discharge_points_per_km2.csv"))
+
+write_csv(ocean_river_current_status, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/agua_sin_tratamiento/output","untreated_ww_current_status.csv"))
+```
+
+
+## Visualizations
 
 ### plotly
 
@@ -112,8 +195,8 @@ goc_ww_ocean_river_plotly <- plotly::plot_ly(
   mode = "lines+markers"
 ) %>% 
   layout(
-    title = "Current Status: CW Untreated wastewater point sources, ocean + beaches + estuaries + rivers + ravines + canals (global historical maximum)",
-    xaxis = list(title = "ano // Year"),
+    title = "Current Status: CW Untreated wastewater point source density, ocean + beaches + estuaries + rivers + ravines + canals (top 5 maximum)",
+    xaxis = list(title = "ano // year"),
     yaxis = list(title = "Puntaje // Percent (out of 100)")
   ) %>%
   add_lines( 

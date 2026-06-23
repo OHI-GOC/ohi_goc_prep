@@ -334,6 +334,7 @@ colnames(remediated_sites_sf)
 # does not have account_remediation_program_approved
 
 mapview(remediated_sites_sf, zcol = "anio_conclusion_remediacion")
+mapview(remediated_sites_sf, zcol = "tipo_evento")
 
 ```
 
@@ -426,6 +427,8 @@ sites_all_sf <- sites_all %>%
            crs = 4326, # WGS84
            remove = FALSE)
 
+mapview(sites_all_sf, zcol = "status_code")
+
 inland_50 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer","inland_50km_goc.shp"))
 
 sites_all_sf_trans <- st_transform(sites_all_sf, st_crs(inland_50))
@@ -459,6 +462,14 @@ rgn_area <- inland_50 %>%
   mutate(area_km2 = as.numeric(st_area(.) / 1e6)) %>%
   st_drop_geometry() %>%
   select(rgn_id, area_km2)
+
+# rgn_area_50km <- inland_50 %>%
+#   #group_by(rgn_id) %>% 
+#   mutate(area_km2 = as.numeric(st_area(.) / 1e6)) %>%
+#   group_by(rgn_id) %>% 
+#   st_drop_geometry() %>%
+#   summarize(rgn_area_km2 = sum(area_km2)) %>% 
+#   ungroup() 
 ```
 
 
@@ -469,7 +480,10 @@ sites_per_region <- all_sites_50km %>%
   mutate(anio = as.numeric(anio)) %>%
   group_by(rgn_id, anio) %>%
   summarise(n_sites = n(), .groups = "drop") %>%
-  left_join(rgn_area, by = "rgn_id")
+  group_by(rgn_id) %>% 
+  complete(anio = c(2008:2023)) %>% 
+  mutate(n_sites = ifelse(is.na(n_sites), 0, n_sites)) %>% 
+  left_join(rgn_area, by = "rgn_id") 
 ```
 
 
@@ -477,10 +491,10 @@ sites_per_region <- all_sites_50km %>%
 #--- 3. expand to full year sequence per region, at least as much as possible ---
 sites_expanded <- sites_per_region %>%
   group_by(rgn_id) %>%
-  complete(anio = seq(min(anio, na.rm = TRUE), max(anio, na.rm = TRUE))) %>% # note that since this is grouped by region that you might see certain regions only having one year of data, because their min and max are that year.  even after using complete()
-  replace_na(list(n_sites = 0)) %>%
-  fill(area_km2, .direction = "downup") %>% # filling in the area for that region for all years
-  arrange(anio) %>% # arrange so that the year is ascending per region id.
+  #complete(anio = seq(min(anio, na.rm = TRUE), max(anio, na.rm = TRUE))) %>% # note that since this is grouped by region that you might see certain regions only having one year of data, because their min and max are that year.  even after using complete()
+  #replace_na(list(n_sites = 0)) %>%
+  #fill(area_km2, .direction = "downup") %>% # filling in the area for that region for all years
+ # arrange(anio) %>% # arrange so that the year is ascending per region id.
   
   #--- 4. cumulative sum of sites per region ---
   mutate(
@@ -586,15 +600,20 @@ score2_cumulative <- all_sites_50km %>%
       group_by(anio) %>%
       summarise(mean_status = mean(status_code, na.rm = TRUE), .groups = "drop")
     
-    df_expanded <- tidyr::expand_grid(anio = all_years) %>%
+    # df_expanded <- tidyr::expand_grid(anio = all_years) %>%
+    #   left_join(df_year, by = "anio") %>%
+    #   arrange(anio)
+    
+    df_expanded <- tidyr::expand_grid(anio = 2008:2023) %>%
       left_join(df_year, by = "anio") %>%
       arrange(anio)
+    
     
     df_expanded %>%
       mutate(
         n_sites_total = cumsum(!is.na(mean_status)),
         sum_status = cumsum(replace_na(mean_status, 0)),
-        mean_status = if_else(n_sites_total > 0, sum_status / n_sites_total, NA_real_),
+        mean_status = if_else(n_sites_total > 0, sum_status / n_sites_total, 1),
         score2_100 = mean_status * 100
       )
   }) %>%
@@ -658,99 +677,99 @@ sites_plotly
 ```
 
 
-#### Gapfilled options
+<!-- #### Gapfilled options -->
 
-```{r}
-#### cumulative version of score2 gapfilled between years
+<!-- ```{r} -->
+<!-- #### cumulative version of score2 gapfilled between years -->
 
-status_all_cumulative_gf <- all_sites_50km %>%
-  st_drop_geometry() %>%
-  mutate(anio = as.numeric(anio)) %>%
-  group_by(rgn_id) %>%
-  arrange(anio, .by_group = TRUE) %>%
-  group_modify(~ {
-    df <- .
-    
-    # collapse to one record per year (if multiple sites in same year)
-    df_year <- df %>%
-      group_by(anio) %>%
-      summarise(
-        mean_status = mean(status_code, na.rm = TRUE),
-        .groups = "drop"
-      )
-    
-    # ensure all years between min and max exist
-    all_years <- seq(min(df_year$anio, na.rm = TRUE), max(df_year$anio, na.rm = TRUE))
-    df_expanded <- tidyr::expand_grid(anio = all_years) %>%
-      left_join(df_year, by = "anio") %>%
-      arrange(anio)
-    
-    # cumulative + gapfilled calculation
-    df_expanded %>%
-      mutate(
-        n_sites_total = cumsum(!is.na(mean_status)),
-        sum_status = cumsum(replace_na(mean_status, 0)),
-        mean_status = if_else(n_sites_total > 0, sum_status / n_sites_total, NA_real_),
-        score = mean_status * 100
-      ) %>%
-      tidyr::fill(mean_status, score, .direction = "down") # gapfill!
-  }) %>%
-  ungroup() %>%
-  select(rgn_id, anio, n_sites_total, mean_status, score)
-```
+<!-- status_all_cumulative_gf <- all_sites_50km %>% -->
+<!--   st_drop_geometry() %>% -->
+<!--   mutate(anio = as.numeric(anio)) %>% -->
+<!--   group_by(rgn_id) %>% -->
+<!--   arrange(anio, .by_group = TRUE) %>% -->
+<!--   group_modify(~ { -->
+<!--     df <- . -->
+
+<!--     # collapse to one record per year (if multiple sites in same year) -->
+<!--     df_year <- df %>% -->
+<!--       group_by(anio) %>% -->
+<!--       summarise( -->
+<!--         mean_status = mean(status_code, na.rm = TRUE), -->
+<!--         .groups = "drop" -->
+<!--       ) -->
+
+<!--     # ensure all years between min and max exist -->
+<!--     all_years <- seq(min(df_year$anio, na.rm = TRUE), max(df_year$anio, na.rm = TRUE)) -->
+<!--     df_expanded <- tidyr::expand_grid(anio = all_years) %>% -->
+<!--       left_join(df_year, by = "anio") %>% -->
+<!--       arrange(anio) -->
+
+<!--     # cumulative + gapfilled calculation -->
+<!--     df_expanded %>% -->
+<!--       mutate( -->
+<!--         n_sites_total = cumsum(!is.na(mean_status)), -->
+<!--         sum_status = cumsum(replace_na(mean_status, 0)), -->
+<!--         mean_status = if_else(n_sites_total > 0, sum_status / n_sites_total, NA_real_), -->
+<!--         score = mean_status * 100 -->
+<!--       ) %>% -->
+<!--       tidyr::fill(mean_status, score, .direction = "down") # gapfill! -->
+<!--   }) %>% -->
+<!--   ungroup() %>% -->
+<!--   select(rgn_id, anio, n_sites_total, mean_status, score) -->
+<!-- ``` -->
 
 
-```{r}
-### updates cumulative with full gapfilling
-# to find the full range of years across all regions
-all_years <- seq(min(all_sites_50km$anio, na.rm = TRUE),
-                 max(all_sites_50km$anio, na.rm = TRUE))
+<!-- ```{r} -->
+<!-- ### updates cumulative with full gapfilling -->
+<!-- # to find the full range of years across all regions -->
+<!-- all_years <- seq(min(all_sites_50km$anio, na.rm = TRUE), -->
+<!--                  max(all_sites_50km$anio, na.rm = TRUE)) -->
 
-status_all_cumulative_gf_max <- all_sites_50km %>%
-  st_drop_geometry() %>%
-  mutate(anio = as.numeric(anio)) %>%
-  group_by(rgn_id) %>%
-  arrange(anio, .by_group = TRUE) %>%
-  group_modify(~ {
-    df <- .
-    
-    # collapse to one record per year
-    df_year <- df %>%
-      group_by(anio) %>%
-      summarise(mean_status = mean(status_code, na.rm = TRUE), .groups = "drop")
-    
-    # expand to full year range
-    df_expanded <- tibble(anio = all_years) %>%
-      left_join(df_year, by = "anio") %>%
-      arrange(anio)
-    
-    # fill initial missing years with 100
-    first_year_with_data <- min(df_year$anio, na.rm = TRUE)
-    df_expanded <- df_expanded %>%
-      mutate(
-        mean_status = case_when(
-          anio < first_year_with_data ~ 1, # 100% for years before region starts
-          TRUE ~ mean_status
-        ),
-        score = mean_status * 100
-      )
-    
-    # cumulative/gapfill for following years
-    df_expanded <- df_expanded %>%
-      tidyr::fill(mean_status, score, .direction = "down") %>%
-      mutate(
-        n_sites_total = cumsum(!is.na(mean_status)),
-        sum_status = cumsum(replace_na(mean_status, 0)),
-        mean_status = if_else(n_sites_total > 0, sum_status / n_sites_total, NA_real_),
-        score = mean_status * 100
-      )
-    
-    df_expanded
-  }) %>%
-  ungroup() %>%
-  select(rgn_id, anio, n_sites_total, mean_status, score)
+<!-- status_all_cumulative_gf_max <- all_sites_50km %>% -->
+<!--   st_drop_geometry() %>% -->
+<!--   mutate(anio = as.numeric(anio)) %>% -->
+<!--   group_by(rgn_id) %>% -->
+<!--   arrange(anio, .by_group = TRUE) %>% -->
+<!--   group_modify(~ { -->
+<!--     df <- . -->
 
-```
+<!--     # collapse to one record per year -->
+<!--     df_year <- df %>% -->
+<!--       group_by(anio) %>% -->
+<!--       summarise(mean_status = mean(status_code, na.rm = TRUE), .groups = "drop") -->
+
+<!--     # expand to full year range -->
+<!--     df_expanded <- tibble(anio = all_years) %>% -->
+<!--       left_join(df_year, by = "anio") %>% -->
+<!--       arrange(anio) -->
+
+<!--     # fill initial missing years with 100 -->
+<!--     first_year_with_data <- min(df_year$anio, na.rm = TRUE) -->
+<!--     df_expanded <- df_expanded %>% -->
+<!--       mutate( -->
+<!--         mean_status = case_when( -->
+<!--           anio < first_year_with_data ~ 1, # 100% for years before region starts -->
+<!--           TRUE ~ mean_status -->
+<!--         ), -->
+<!--         score = mean_status * 100 -->
+<!--       ) -->
+
+<!--     # cumulative/gapfill for following years -->
+<!--     df_expanded <- df_expanded %>% -->
+<!--       tidyr::fill(mean_status, score, .direction = "down") %>% -->
+<!--       mutate( -->
+<!--         n_sites_total = cumsum(!is.na(mean_status)), -->
+<!--         sum_status = cumsum(replace_na(mean_status, 0)), -->
+<!--         mean_status = if_else(n_sites_total > 0, sum_status / n_sites_total, NA_real_), -->
+<!--         score = mean_status * 100 -->
+<!--       ) -->
+
+<!--     df_expanded -->
+<!--   }) %>% -->
+<!--   ungroup() %>% -->
+<!--   select(rgn_id, anio, n_sites_total, mean_status, score) -->
+
+<!-- ``` -->
 
 #### Volume weighted? 
 
@@ -797,7 +816,10 @@ final_hazardous_indicator <- score1_cumulative %>%
             by = c("rgn_id", "anio")) %>%
   mutate(
     final_score = rowMeans(select(., score1, score2), na.rm = TRUE)
-  )
+  ) 
+
+# save to mazu
+write_csv(final_hazardous_indicator, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/hazardous_waste/output","current_status_hazardous_waste.csv"))
 ```
 
 ```{r}
@@ -825,6 +847,31 @@ final_hazardous_indicator_plotly <- plotly::plot_ly(
     inherit = FALSE
   )
 final_hazardous_indicator_plotly
+
+
+## plot
+status_all_cumulative_gf_max_plotly <- plotly::plot_ly(
+  status_all_cumulative_gf, 
+  x = ~anio, 
+  y = ~score, 
+  color = ~rgn_id, 
+  colors = ~rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: Coastal Hazardous Waste Sites as Point Sources",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(status_all_cumulative_gf$anio), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+status_all_cumulative_gf_max_plotly
 
 htmlwidgets::saveWidget(final_hazardous_indicator_plotly, here::here("CW/v2025/int","hazardous_sites_current_status_110325.html"), selfcontained = TRUE)
 ```
