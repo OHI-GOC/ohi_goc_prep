@@ -24,6 +24,7 @@ library(janitor)
 library(stringi)
 library(stringr)
 library(data.table)
+library(broom)
 # Visualization
 library(ggplot2)
 library(ggforce)
@@ -1087,6 +1088,252 @@ AlgaeProduction_summary %>%
   ) +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+# SALT ------------------------------
+
+# Notes from Sophia on Salt production: 
+See .qmd file sal_epxloration.qmd (October, 2025)
+
+Unfortunately, none of the open data/massive download INEGI data are at the same scale (volume produced by municipios per year) as the annual statistical yearbooks for minerals.
+
+So, I started the process of manually making a clean dataset for us to use. I can continue to an earlier year as we go along, but in future years it should be easy to just add the observations for each municipio that is within the Gulf (as historical numbers do not seem to change retrospectively).
+
+Here is my manual inputs from the yearbooks, 2018 - 2023, though I could go further back than 2018:
+https://docs.google.com/spreadsheets/d/1kjUVqnsytcDZuImL5iyhxQsgdNujG4Y6A4uWS1KTTK8/edit?gid=0#gid=0
+
+And this is where I downloaded the yearbooks: https://www.sgm.gob.mx/Gobmx/productos/Anuarios-historicos.html
+
+Easier to manually input it into a google sheet.  
+
+```{r Load in the data}
+# Raw data
+Salt_Data0 <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/Anuario_Estadistico_de_la_Mineria_Mexicana","NP_Sal_Anuario_Estadistico_tidy_sal.csv"))
+# 54 obs., 5 vars.
+
+# Municipio key:
+MunicipioRegionKey<- read_csv("/home/ferrer/ohi_goc_prep/NP/v2025/NP_Keys/MunicipioRegionKey_Jun262026.csv")
+# 11 obs., 3 vars.
+```
+
+```{r Merge MunicipioRegionKey to Salt_Data0}
+colnames(Salt_Data0)
+
+Salt_Data_2018.2023<- Salt_Data0 %>%
+  left_join(MunicipioRegionKey,
+    by= c("estado", "municipio")
+    )
+# 54 obs., 6 vars.
+
+Salt_Data_2018.2023<- Salt_Data_2018.2023 %>%
+  select(year, state= estado, OHI_region= OHI_Region, municipality= municipio, 
+         reported_volume_mt= volume_tons, 
+         near_coast_= near_coast)
+```
+
+Extropolate salt data (at the site level) from 2018-2023 to 2024 and 2025
+```{r Extropolate Salt_Data_2018.2023 from 2018-2023 to 2024 and 2025}
+# First, take annual totals by region:
+Salt_Regional_totals <- Salt_Data_2018.2023 %>%
+  select(OHI_region, year, state, municipality, reported_volume_mt) %>%
+  group_by(state, municipality, year) %>%
+  summarise(
+    total_volume_mt = sum(reported_volume_mt, na.rm = TRUE),
+    OHI_region = first(OHI_region),
+    .groups = "drop"
+  )
+
+# Then, fit a linear trend for each region and predict 2024-2025:
+# Use the broom library for forecast.
+Salt_Regional_forecasts <- Salt_Regional_totals %>%
+  group_by(OHI_region, state, municipality) %>%
+  mutate(
+    valid_year_flag = !is.na(total_volume_mt) & total_volume_mt > 0
+  ) %>%
+  nest() %>%
+  mutate(
+    n_years_forecast_ = map_int(data, ~ sum(!is.na(.x$total_volume_mt) & .x$total_volume_mt > 0)),
+    
+    model = map(data, ~ lm(total_volume_mt ~ year, data = .x)),
+    
+    forecast = map(model, ~{
+      newdata <- tibble(year = c(2024, 2025))
+      newdata$predicted_volume_mt <- predict(.x, newdata = newdata)
+      newdata
+    })
+  ) %>%
+  select(OHI_region, state, municipality, forecast, n_years_forecast_) %>%
+  unnest(forecast)
+
+# Add a forecasted column:
+Salt_Regional_forecasts$forecasted_<- c("TRUE")
+```
+
+```{r Merge Salt_Regional_forecasts to Salt_Data_2018.2023}
+colnames(Salt_Data_2018.2023)
+colnames(Salt_Regional_forecasts)
+
+Salt_Data_2018.2023$forecasted_<- c("FALSE")
+
+Salt_Data_2018.2025 <- bind_rows(
+  Salt_Data_2018.2023,
+  Salt_Regional_forecasts
+)
+# 76 obs., 9 vars.
+```
+
+```{r Create cleaned Salt_Data_finalized}
+colnames(Salt_Data_2018.2025)
+
+Salt_Data_finalized <- Salt_Data_2018.2025 %>%
+  select(year, state, OHI_region, municipality, near_coast_,
+         reported_volume_mt, predicted_volume_mt,
+         forecasted_, n_years_forecast_) %>%
+  mutate(
+    volume_mt = coalesce(reported_volume_mt, predicted_volume_mt)
+  ) %>%
+  relocate(volume_mt, .after= predicted_volume_mt)
+```
+
+
+Salt reference period: 2018-2022
+Salt reference point: "Salt production from all mines roughly equals production from Hermosillio (a great example of a good, sustainable mine)"
+
+```{r Calculate salt reference point}
+table(Salt_Data_finalized$municipality)
+colnames(Salt_Data_finalized)
+
+# Sum this year (by region) and compare to the mean annual regional volume over 2018–2023:
+Salt_ref_point <- Salt_Data_finalized %>%
+  filter(municipality == "hermosillo",
+         year >= 2018 & year <= 2022) %>%
+  summarise(mean_volume_2018_2022 = mean(volume_mt, na.rm = TRUE)) %>%
+  pull(mean_volume_2018_2022)
+```
+
+```{r Calculate Salt_Scores}
+colnames(Salt_Data_finalized)
+
+# First, calculate the scores PER SALT MINE relative to the reference point:
+Salt_Scores_per_mine<- Salt_Data_finalized
+
+Salt_Scores_per_mine$ref_point_mt<- c(Salt_ref.point)
+
+Salt_Scores_per_mine <- Salt_Scores_per_mine %>%
+  mutate(
+    mine_SAL_score = (volume_mt / ref_point_mt)* 100,
+    mine_SAL_score_capped = pmin(mine_SAL_score, 100)
+  )
+
+# Next take mean across all mines in that region (weighted by total production):
+colnames(Salt_Scores_per_mine)
+
+Salt_Scores_per_region <- Salt_Scores_per_mine %>%
+  group_by(OHI_region, year) %>%
+  summarise(
+    region_SAL_score_capped = weighted.mean(
+      mine_SAL_score_capped,
+      w = volume_mt,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+```
+
+```{r Plot salt scores!}
+
+```
+
+
+```{r Plot salt scores!}
+SAL_Scores_OverTime<- Salt_Scores_per_region %>%
+  ggplot(aes(
+    x = year,
+    y = region_SAL_score_capped,
+    color = OHI_region
+  )) +
+  
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ OHI_region, scales = "fixed") +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  labs(
+    title = "SAL Scores by Region [FINAL - June 26 2026]",
+    y = "SAL Score (from 0 to 100)",
+    x = "Year"
+  ) +
+  
+  ylim(0, 101) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold")
+    # plot.title = element_text(size = 18, face = "bold")
+  )
+
+SAL_Scores_OverTime
+```
+
+```{r Save as PNG}
+  ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/SAL_Scores_plot_Jun226026.png"),
+    plot = SAL_Scores_OverTime,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+```
+
+```{r}
+## heatmap
+p3 <- Salt_Data_2018.2023 %>%
+  drop_na(volume_tons) %>% 
+  filter(volume_tons != "0") %>% 
+  mutate(municipio_estado = paste(municipio, estado, sep = " - "),
+         log_volume = log10(volume_tons + 1)) %>% # log transform for better visualization
+  ggplot(aes(x = factor(year), y = reorder(municipio_estado, volume_tons), fill = log_volume)) +
+  geom_tile(color = "white", size = 0.1) +
+  scale_fill_viridis_c(name = "log10(volume + 1)", 
+                      guide = guide_colorbar(title.position = "top")) +
+  labs(title = "Production heatmap by municipality and year // Mapa de calor de la producción por municipio y año",
+       subtitle = "Color intensity represents log-transformed volume // La intensidad del color representa el volumen transformado logarítmicamente",
+       x = " ", y = " ") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8),
+        legend.position = "right")
+
+print(p3)
+ggsave(here("NP","v2025","sal_anuario_estadistico","heatmap_municipio_log.png"), plot = p3, dpi = 400, width = 14, height = 8, units = "in")
+
+
+cat("\n=== DATA SUMMARY ===\n")
+cat("Years covered:", min(Salt_Data_2018.2023$year), "to", max(Salt_Data_2018.2023$year), "\n")
+cat("Number of municipalities:", length(unique(paste(Salt_Data_2018.2023$municipio, Salt_Data_2018.2023$estado))), "\n")
+cat("States:", paste(unique(Salt_Data_2018.2023$estado), collapse = ", "), "\n")
+
+
+library(kableExtra)
+total_by_year <- Salt_Data_2018.2023 %>%
+  group_by(year) %>%
+  summarise(total = sum(volume_tons, na.rm = TRUE))
+
+total_by_year %>%
+  kbl(caption = "Total Volume by Year") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+## plotly
+library(plotly)
+# preliminary plot of the index score with target reference line
+line_plot_score <- plotly::plot_ly(Salt_Data_2018.2023, x = ~year, y = ~volume_tons, color = ~municipio, type = "scatter", mode = "lines") %>% 
+  layout(title = "Salt production by municipality and year // Mapa de la producción de sal por municipio y año", 
+         xaxis = list(title = "Year"),
+         yaxis = list(title = "Volume (tons)")) 
+line_plot_score
 ```
 
 
