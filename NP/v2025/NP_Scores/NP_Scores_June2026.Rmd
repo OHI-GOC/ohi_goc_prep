@@ -10,6 +10,10 @@ For questions contact: Erica Ferrer, Ph.D. at emferrer@ucsd.edu - OR - ferrer@nc
 rm(list=ls(all=T))
 ```
 
+```{r Set working directory}
+setwd("/home/ferrer/ohi_goc_prep/NP/v2025/")
+```
+
 ```{r Load Libraries & Set WD}
 # Read In
 library(here)
@@ -31,34 +35,58 @@ library(ggforce)
 library(plotly)
 library(htmlwidgets)
 library(htmltools)
-
-
-setwd("/home/ferrer/ohi_goc_prep/NP/v2025/")
 ```
 
-```{r Outdated natural products key}
-NPKey_pending<- read.csv('/home/ferrer/ohi_goc_prep/NP/v2025/NP_Keys/NP_MasterList_UNDER CONSTRUCTION_Nov132025.csv')
-```
 
-```{r Load GOC_MarineLandings if needed}
-GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_2000.present_May042026.rds"))
-# 3303634 obs., 61 vars.
+# CONAPESCA data:
 
-# This file was generated using the CONAPESCA_CleaningWorkflow_May2026.rmd file.
+```{r Load in GOC_MarineLandings0 as necessary}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+# NOTE TO SELF: This source file may change in later Summer / Fall run. - EMF, June 4 2026
 ```
 
 ```{r Trim GOC_MarineLandings so it's easier to work with}
 colnames(GOC_MarineLandings0)
 
 GOC_MarineLandings<- GOC_MarineLandings0 %>% 
-  select(-c(keywords_5, IHH_functional_major_groups_sm,
+  select(-c(keywords_5,
             Assignment_for_Major_Functional_Group,
             NOTaquacultureFLAG_specific.groups, aquacultureFLAG_site.details,
             aquacultureFLAG_keywords, aquacultureFLAG_specific.taxa, 
-            state_clean, office_clean, landing_site_na, state_patch, office_name_patch
+            office_name, landing_site
             ))
-# 3303634 obs., 49 vars.
+# 3246583 obs., 50 var.
 ```
+
+# **DECISION POINT: Selecting which sectors to include**
+```{r Select Sectors_of_Interest}
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
+                          "marine: small-scale capture",
+                          "marine: large-scale capture")
+  
+PossibleMarineFishery_Sectors<- c("freshwater or marine: large-scale capture",
+                          "freshwater or marine: small-scale capture",
+                          "freshwater or marine: fishery sector yet to be classified")
+
+GOC_MarineFisheryLandings0<- GOC_MarineLandings %>%
+  filter(sector_estimate_draft %in% c(MarineFishery_Sectors, PossibleMarineFishery_Sectors))
+
+# 3137044 obs., 50 var.
+```
+
+```{r Clean up names of GOC_MarineFisheryLandings}
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings0 %>%
+  mutate(
+    OHI_region_est = clean_names_lowercase(OHI_region_est),
+    estimated_genus_name = clean_names_lowercase(estimated_genus_name),
+    Major_Functional_Group = clean_names_lowercase(Major_Functional_Group)
+  )
+
+# 3137044 obs., 50 var.
+```
+
 
 # FLAG RESIDUES: fish heads, stomachs, bladder, shells, etc. ------------------------------
 Use FAO percentages to calculate whole body mass versus part mass.
@@ -1049,13 +1077,234 @@ table(GOC_SharkFinProduction$keywords_2)
 # FISH OIL, FISH MEAL ------------------------------
 Assume that ~70% forage fish is used for fish oil fish meal
 
-```{r Pull out forage fish}
-
+```{r Load in GenusFamilyGroup_lookup}
+GenusFamilyGroup_lookup<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Taxonomic_Keys/GenusFamilyGroupKey_COMPLETE_Apr042026.csv")
 ```
 
-```{r Apply 70% conversion}
+```{r GenusGroup_lookup}
+colnames(GenusFamilyGroup_lookup)
 
+GenusGroup_lookup<- GenusFamilyGroup_lookup %>%
+  select(Major_Functional_Group, estimated_genus_name) %>%
+  distinct() %>%
+  mutate(
+    Major_Functional_Group= clean_names_lowercase(Major_Functional_Group),
+    estimated_genus_name= clean_names_lowercase(estimated_genus_name)
+  )
 ```
+
+
+## Pull matching FIS scores
+
+```{r Load in FIS_StockStatus scores as necessary}
+StockStatus_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Stock_Status_SubScores/Stock_Statuses_Compiled_df_Jun072026.csv")
+
+# Species x year x region; Stock_Status is used as-is.
+```
+
+```{r Prep FIS scores}
+colnames(StockStatus_Scores)
+
+StockStatus_Scores <- StockStatus_Scores0 %>%
+  filter(year >= 2018, year <= 2024) %>%
+  mutate(
+    OHI_region_est = clean_names_lowercase(OHI_region_est),
+    estimated_genus_name = clean_names_lowercase(estimated_genus_name)
+  )
+# 4130 obs.
+
+StockStatus_Scores<- StockStatus_Scores %>%
+  select(-c(Major_Functional_Group))
+
+StockStatus_Scores<- StockStatus_Scores %>%
+  left_join(
+    GenusGroup_lookup, 
+    by= c("estimated_genus_name")
+  )
+```
+
+PATCH: Patch sardinops, penaeus, and litopenaeus 
+Patch no longer needed - Jun 28 2026
+
+## Stock_Status: Fish Oil Fish Meal Taxa (FOFM)
+
+```{r Create FOFM_StockStatus}
+unique(StockStatus_Scores$Major_Functional_Group)
+
+FOFM_Taxa<- c("anchovy & sardine (small pelagics)")
+
+colnames(StockStatus_Scores)
+
+FOFM_StockStatus<- StockStatus_Scores %>%
+  filter(Major_Functional_Group %in% FOFM_Taxa) %>%
+    select(year, Major_Functional_Group,
+           estimated_genus_name, estimated_family_name,
+           OHI_region_est,
+           total_weight_mt,
+           StockStatus_final,
+           StockStatus_source
+         )
+
+# 25 obs.
+```
+
+<!-- ```{r Summarize landings} -->
+<!-- colnames(FOFM_StockStatus) -->
+
+<!-- FOFM_Status_summary<- FOFM_StockStatus %>% -->
+<!--   group_by(year, OHI_region_est, Major_Functional_Group) %>% -->
+<!--   summarize( -->
+<!--     mean_StockStatus = mean(StockStatus_final, na.rm = TRUE), -->
+<!--     total_weight_mt = sum(total_weight_mt, na.rm = TRUE), -->
+<!--     .groups = "drop" -->
+<!--   ) %>% -->
+<!--   mutate( -->
+<!--     Major_Functional_Group= clean_names_lowercase(Major_Functional_Group), -->
+<!--     OHI_region_est= clean_names_lowercase(OHI_region_est) -->
+<!--   ) -->
+<!-- # 31 obs. -->
+<!-- ``` -->
+
+<!-- ```{r Plot over time} -->
+<!-- colnames(FOFM_Status_summary) -->
+
+<!-- FOFM_Status_summary %>% -->
+<!--   filter(year >= 2014, year <= 2024) %>% -->
+<!--   ggplot( -->
+<!--     aes( -->
+<!--       x = year, -->
+<!--       y = mean_StockStatus, -->
+<!--       color = Major_Functional_Group, -->
+<!--       group = Major_Functional_Group -->
+<!--     ) -->
+<!--   ) + -->
+<!--   geom_line() + -->
+<!--   theme_bw() + -->
+<!--   facet_wrap(~ OHI_region_est) -->
+<!-- ``` -->
+
+# STEP 1: Generate GOC_Stocks_summary ------------------------------
+# Not convinced this step is necessary?
+```{r Generate GOC_Stocks_summary}
+colnames(GOC_MarineFisheryLandings)
+
+GOC_Stocks_summary<- GOC_MarineFisheryLandings %>%
+  select(year, 
+         state, office_name_clean, landing_site_clean,
+         GOC_est, GOC_Include_Exclude, OHI_region_est, OHI_region_name,
+         eu_rnpa, eu_name, sector_estimate_draft, 
+         Major_Functional_Group, recorded_taxa_group, estimated_taxa_group,
+         recorded_taxa_name, recorded_taxa_name_clean,
+         estimated_species_name, estimated_genus_name,
+         landed_weight, live_weight, weight_kg_corrected, value
+         )
+
+GOC_Stocks_summary<- GOC_Stocks_summary %>%
+  group_by(year, OHI_region_est, estimated_genus_name) %>%
+  summarize(
+    total_weight_mt= sum(weight_kg_corrected, na.rm = TRUE) / 1000,
+    total_value_peso= sum(value, na.rm = TRUE)
+  )
+# 12696 obs., 5 vars.
+
+FOFM_Stocks_summary<- GOC_Stocks_summary %>%
+  filter(Major_Functional_Group %in% FOFM_Taxa)
+```
+
+# Calculate GEOMETRIC MEAN of stock landings * Stock_Status ------------------------------
+
+```{r Weights and geometric mean}
+# Calculate the proportion of catch each "Stock" (i.e. genus) contributed to its regional total during the study period:
+colnames(FOFM_StockStatus)
+
+StudyPeriod_low= 2018
+StudyPeriod_high= 2024
+
+FOFM_weights <- FOFM_StockStatus %>%
+  filter(year >= StudyPeriod_low & year <= StudyPeriod_high) %>%
+  group_by(estimated_genus_name, OHI_region_est) %>%
+  mutate(stock_catch_mt = sum(total_weight_mt)) %>% # total tonnes across all years for each stock and region during the study period
+  ungroup() %>%
+  group_by(OHI_region_est) %>%
+  mutate(total_catch_mt = sum(total_weight_mt, na.rm = TRUE)) %>% # total tonnes catch across all years and stocks for each region
+  ungroup() %>%
+  mutate(wprop_2018.24 = stock_catch_mt / total_catch_mt) %>% # proportion of catch each stock contributed to the total catch
+  distinct(estimated_genus_name, OHI_region_est, wprop_2018.24)
+
+
+# SANITY CHECK: Do the weights add up to 1?
+TEST<- FOFM_weights %>%
+  group_by(OHI_region_est) %>%
+  summarize(sum_w = sum(wprop_2018.24, na.rm= TRUE))
+# Yup, looks good!
+```
+
+```{r Add weights data to Stock Status df:}
+colnames(FOFM_weights)
+
+FOFM_SubScores0 <- FOFM_StockStatus %>%
+  left_join(FOFM_weights,
+            by = c("OHI_region_est", "estimated_genus_name"))
+
+
+# This is the geometric mean part:
+FOFM_SubScores <- FOFM_SubScores0 %>%
+  group_by(OHI_region_est, year) %>%
+  summarize(
+    StockStatus_geo.mean = prod(StockStatus_final ^ wprop_2018.24, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(FOFM_score= StockStatus_geo.mean * 100)
+```
+
+```{r Save the FOFM_SubScores dataframe as needed}
+write.csv(FOFM_SubScores, 
+          "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/FOFM_SubScores/FOFM_SubScores_Jun282026.csv", 
+          row.names = FALSE)
+```
+
+```{r Plot FOFM scores}
+FOFM_SubScores_plot<- FOFM_SubScores %>%
+  ggplot(aes(
+    x = year,
+    y = FOFM_score,
+    color = OHI_region_est
+  )) +
+  
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ OHI_region_est, scales = "fixed") +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  labs(
+    title = "FOFM Scores by Region [DRAFT - June 26 2026]",
+    y = "FOFM Score (from 0 to 100)",
+    x = "Year"
+  ) +
+  
+  ylim(0, 101) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold")
+    # plot.title = element_text(size = 18, face = "bold")
+  )
+
+FOFM_SubScores_plot
+```
+
+```{r Save FOFM_SubScores_plot as a PNG}
+ggsave(filename = sprintf("/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/FOFM_SubScores/FOFM_SubScores_plot_Jun282026.png"),
+       plot = FOFM_SubScores_plot,
+       width = 12,
+       height = 12,
+       dpi = 300
+       )
+```
+
 
 # ALGAE ------------------------------
 ```{r Algae landings}
@@ -1229,7 +1478,7 @@ Salt_Scores_per_mine <- Salt_Scores_per_mine %>%
 # Next take mean across all mines in that region (weighted by total production):
 colnames(Salt_Scores_per_mine)
 
-Salt_Scores_per_region <- Salt_Scores_per_mine %>%
+SALT_SubScores <- Salt_Scores_per_mine %>%
   group_by(OHI_region, year) %>%
   summarise(
     region_SAL_score_capped = weighted.mean(
@@ -1242,7 +1491,7 @@ Salt_Scores_per_region <- Salt_Scores_per_mine %>%
 ```
 
 ```{r Plot salt scores!}
-SAL_Scores_OverTime<- Salt_Scores_per_region %>%
+SALT_SubScores_plot<- SALT_SubScores %>%
   ggplot(aes(
     x = year,
     y = region_SAL_score_capped,
@@ -1257,8 +1506,8 @@ SAL_Scores_OverTime<- Salt_Scores_per_region %>%
   geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
   
   labs(
-    title = "SAL Scores by Region [DRAFT - June 26 2026]",
-    y = "SAL Score (from 0 to 100)",
+    title = "SALT Scores by Region [DRAFT - June 26 2026]",
+    y = "SALT Score (from 0 to 100)",
     x = "Year"
   ) +
   
@@ -1271,20 +1520,20 @@ SAL_Scores_OverTime<- Salt_Scores_per_region %>%
     # plot.title = element_text(size = 18, face = "bold")
   )
 
-SAL_Scores_OverTime
+SALT_SubScores_plot
 ```
 
 ```{r Save as PNG}
   ggsave(
-    filename = sprintf("/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/SAL_Scores/SAL_Scores_plot_Jun262026.png"),
-    plot = SAL_Scores_OverTime,
+    filename = sprintf("/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/SALT_SubScores/SALT_SubScores_plot_Jun262026.png"),
+    plot = SALT_SubScores_plot,
     width = 12,
     height = 12,
     dpi = 300
   )
 ```
 
-```{r}
+```{r Other plots}
 ## heatmap
 p3 <- Salt_Data_2018.2023 %>%
   drop_na(volume_tons) %>% 
