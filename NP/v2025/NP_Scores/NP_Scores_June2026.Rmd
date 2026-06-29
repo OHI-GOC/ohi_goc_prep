@@ -463,7 +463,7 @@ ggsave(filename = sprintf("/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/FOFM_Sub
 ```
 
 
-# Load in CONAPESCA data for AQRM, SHEL, FINS, and RESD ------------------------------
+# Load in CONAPESCA data for AQRM, SHEL, FINS, and RESD sub-scores ------------------------------
 
 ```{r Load in GOC_MarineLandings0 as necessary}
 GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
@@ -1371,8 +1371,13 @@ Reference period: 2018-2024
 
 - I estimate that shell account for 40% of total mass, meat accounts for 50%, and fluids / other accounts for 10% of total mass. 
 - This means that mass of shells sold should equal 0.80 * (filletted mass).
+- This is called 'SHELL_REF_COEFF' here and can be easily changed.
 
 ```{r SHEL reference point}
+SHELL_PROP_SNAIL_MASS = 0.40
+FILLET_PROP_SNAIL_MASS = 0.50
+SHELL_REF_COEFF = SHELL_PROP_SNAIL_MASS / FILLET_PROP_SNAIL_MASS
+
 colnames(Shelled_summary_2018.2024)
 
 Shelled_summary_2018.2024 <- Shelled_summary_2018.2024 %>%
@@ -1385,7 +1390,7 @@ Shelled_summary_2018.2024 <- Shelled_summary_2018.2024 %>%
     },
     ref_point_mt = if_else(
       record_type == "shell",
-      fillet_mt * 0.8,
+      fillet_mt * SHELL_REF_COEFF,
       NA_real_
     )
   ) %>%
@@ -1410,7 +1415,7 @@ colnames(Shelled_summary_wide)
 
 Shelled_summary_wide<- Shelled_summary_wide %>%
   mutate(
-    ref_point_mt= (fillet_mt)*0.8
+    ref_point_mt= (fillet_mt) * SHELL_REF_COEFF
   ) %>%
   select(year, OHI_region_est, fillet_mt, ref_point_mt, shell_mt, other_residue_mt, preparation_unknown_mt)
 ```
@@ -1463,22 +1468,194 @@ ggsave(SHEL_SubScores_plot,
        )
 ```
 
+
 # >> SHARK FINS ------------------------------
-```{r Shark fins}
+
+```{r First estimate the mass of all shark catches}
+SharkFin_Production <- NP_Landings_finalized %>%
+  filter(Major_Functional_Group == "sharks")
+# 167855 obs.
+
+table(SharkFin_Production$record_type)
+       # fillet other residue    sold whole 
+       # 107174          5871         54809 
+
 Sharkfin_keywords <- c(
 # Fins
   "ALETA", "ALETA DE", "ALETA ECA DE", "ALETA FCA DE")
 
-GOC_SharkFinProduction <- NP_Landings %>%
-  filter(if_any(keywords_1:keywords_4, ~ . %in% Sharkfin_keywords))
-# No shark fin?
+SharkFin_Production <- SharkFin_Production %>%
+  mutate(
+    fin_ = case_when(
+      if_any(keywords_1:keywords_4, ~ . %in% Sharkfin_keywords) ~ TRUE,
+      TRUE ~ FALSE
+    )
+  )
 
-GOC_SharkFinProduction <- NP_Landings %>%
-  filter(Major_Functional_Group == "Sharks")
+# If shell is true, replace the record type
+SharkFin_Production <- SharkFin_Production %>%
+  mutate(
+    record_type = case_when(
+      fin_ ~ "fin",
+      TRUE ~ record_type
+    )
+  )
 
-table(GOC_SharkFinProduction$keywords_2)
+# If record_type is NA make it "preparation_unknown"
+SharkFin_Production <- SharkFin_Production %>%
+  mutate(
+    record_type = coalesce(record_type, "preparation unknown")
+  )
 
-# Shark fin, "ALETA" didn't get pulled out correctly. Pull out ALETA in CONAPESCA_CleaningWorkflow.
+table(SharkFin_Production$record_type)
+             # fillet                 fin       other residue preparation unknown          sold whole 
+             # 107117                6029                   9                   1               54699 
+```
+
+```{r Check sums of shells versus fillet weight}
+colnames(SharkFin_Production)
+
+record_types <- c("sold whole", "fillet", "fin", "other residue", "preparation unknown")
+
+# NOTE TO SELF: We can ignore shark species for now, although some sharks have more body mass than fin mass - Jun 29 2026
+
+Fins_summary<- SharkFin_Production %>%
+  group_by(year, 
+           OHI_region_est, 
+           record_type) %>%
+  summarize(
+    total_weight_mt= sum(landed_weight, na.rm= TRUE)/1000
+  )
+# 607 obs.
+
+Fins_summary <- Fins_summary %>%
+  ungroup() %>%
+  complete(
+    nesting(year, 
+            OHI_region_est
+            ),
+    record_type = record_types
+  )
+# 1195 obs.
+```
+
+```{r Look at the sums from 2018 to 2024}
+Fins_summary_2018.2024<- Fins_summary %>%
+  filter(!record_type== "sold whole") %>%
+  filter(year >= 2018 & year <= 2024)
+# 260 obs.
+```
+
+# Calculate FINS reference point:
+Reference point: "Full utilization of harvest amount." For now, I interpret this to mean that fin mass should equal approximately 0.05 * fillet mass in a given year x region. If fin mass is more than 5% of fillet mass, then it's likely that fishers are harvesting too much fin relative to meat - or - underreporting fillet mass. - Jun 29 2026
+Reference period: 2018-2024
+
+- I estimate that a shark's fin accounts for 3% of total mass (MAX) while their usable (fillet) meat accounts for 60% of total mass.
+- This means that fin mass should be equal to about 0.05 * (fillet mass).
+- This is called 'SHARK_REF_COEFF' here and can be easily changed.
+
+```{r FINS reference point}
+FIN_PROP_SHARK_MASS = 0.03
+FILLET_PROP_SHARK_MASS = 0.60
+SHARK_REF_COEFF = FIN_PROP_SHARK_MASS / FILLET_PROP_SHARK_MASS
+
+colnames(Fins_summary_2018.2024)
+
+Fins_summary_2018.2024 <- Fins_summary_2018.2024 %>%
+  group_by(year, OHI_region_est) %>%
+  mutate(
+    fillet_mt = if (any(record_type == "fillet")) {
+      first(total_weight_mt[record_type == "fillet"])
+    } else {
+      NA_real_
+    },
+    ref_point_mt = if_else(
+      record_type == "fin",
+      fillet_mt * SHARK_REF_COEFF,
+      NA_real_
+    )
+  ) %>%
+  ungroup()
+
+# Reshape the dataframe:
+
+Fins_summary_wide <- Fins_summary_2018.2024 %>%
+  select(year, OHI_region_est, record_type, total_weight_mt) %>%
+  pivot_wider(
+    names_from = record_type,
+    values_from = total_weight_mt
+  ) %>%
+  rename(
+    fillet_mt = fillet,
+    fins_mt = fin,
+    other_residue_mt = `other residue`,
+    preparation_unknown_mt = `preparation unknown`
+  )
+
+colnames(Fins_summary_wide)
+
+Fins_summary_wide<- Fins_summary_wide %>%
+  mutate(
+    ref_point_mt= (fillet_mt) * SHARK_REF_COEFF
+  ) %>%
+  select(year, OHI_region_est, fillet_mt, ref_point_mt, fins_mt)
+```
+
+# Calculate FINS_SubScores:
+```{r Calculate FINS_SubScores}
+FINS_SubScores <- Fins_summary_wide %>%
+  mutate(
+    FINS_score_prop = case_when(
+      # if fin production is lower than reference point, that's good, score = 100
+      fins_mt <= ref_point_mt ~ 100,
+
+      # if fin production is higher than reference point then score goes down inversely
+      fins_mt > ref_point_mt ~ (ref_point_mt / fins_mt) * 100,
+
+      TRUE ~ NA_real_
+    ),
+
+    FINS_SubScore = pmin(FINS_score_prop, 100)
+  )
+```
+
+```{r Save the FINS_SubScores dataframe as needed}
+write.csv(FINS_SubScores, 
+          "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/FINS_SubScores/FINS_SubScores_df_Jun292026.csv", 
+          row.names = FALSE)
+```
+
+```{r Plot FINS_SubScores}
+# Plot over time:
+FINS_SubScores_plot<- FINS_SubScores %>%
+  filter(year >= 2018 & year < 2025) %>%
+  
+  ggplot(aes(x = year, y = FINS_SubScore, color= OHI_region_est)) +
+  geom_line() +
+  
+  facet_wrap(~ OHI_region_est, scales = "free_y") +
+  
+  labs(
+    title = "NP: FINS Sub-Scores by Region [DRAFT - June 29 2026]",
+    y = "FINS Score (from 0 to 100)",
+    x = "Year"
+  ) +
+  
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+FINS_SubScores_plot
+```
+
+```{r Save FINS_SubScores_plot as a PNG}
+ggsave(FINS_SubScores_plot,
+       filename = "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/FINS_SubScores/FINS_SubScores_plot_Jun292026.png",
+       width = 12,
+       height = 12,
+       dpi = 300
+       )
 ```
 
 
