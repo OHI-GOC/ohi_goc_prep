@@ -22,6 +22,7 @@ library(readr)
 # Data Processing
 library(tidyverse)
 library(dplyr)
+library(purrr)
 library(tidytext)  # for reorder_within and scale_x_reordered
 library(lubridate)
 library(janitor)
@@ -37,10 +38,33 @@ library(htmlwidgets)
 library(htmltools)
 ```
 
+# NP Final Scores ------------------------------
 
+```{r Load in Sub-Scores}
+# Salt production (SALT)
+SALT_SubScores<- read.csv()
+SALT_SubScores0<- SALT_SubScores
 
-# NP SUB-SCORES AND REGIONAL NP_SCORE ------------------------------
-Reference points from Natural Products Reference Points (Jun 2026).xlsx.
+# Fish oil fish meal (FOFM)
+FOFM_SubScores<- read.csv()
+FOFM_SubScores0<- FOFM_SubScores
+
+# Aquarium trade (AQRM)
+AQRM_SubScores<- read.csv()
+AQRM_SubScores0<- AQRM_SubScores
+
+# Sea shells (SHEL)
+SHEL_SubScores<- read.csv()
+SHEL_SubScores0<- SHEL_SubScores
+
+# Shark fins (FINS)
+FINS_SubScores<- read.csv()
+FINS_SubScores0<- FINS_SubScores
+
+# Other residues (RESD)
+RESD_SubScores<- read.csv()
+RESD_SubScores0<- RESD_SubScores
+```
 
 ```{r Load clean_names_lowercase function}
 clean_names_lowercase <- function(x) {
@@ -52,161 +76,82 @@ clean_names_lowercase <- function(x) {
 }
 ```
 
-```{r Load NP reference points}
-NP_reference_points <- read_excel(
-  here("Natural Products Reference Points (Jun 2026).xlsx")
+# Merge ---
+
+```{r Prep dataframes for merging}
+# Salt production (SALT)
+colnames(SALT_SubScores0)
+SALT_SubScores_simple<- SALT_SubScores0 %>%
+  select(year, OHI_region, SALT_SubScore= region_SAL_score_capped)
+
+SALT_SubScores_simple<- SALT_SubScores_simple %>%
+  mutate(
+    OHI_region = clean_names_lowercase(OHI_region)
+  )
+
+# Aquarium trade (AQRM)
+colnames(AQRM_SubScores0)
+AQRM_SubScores_simple<- AQRM_SubScores0 %>%
+  select(year, OHI_region= OHI_region_est, AQRM_SubScore)
+
+# Sea shells (SHEL)
+colnames(SHEL_SubScores0)
+SHEL_SubScores_simple<- SHEL_SubScores0 %>%
+  select(year, OHI_region= OHI_region_est, SHEL_SubScore)
+
+# Shark fins (FINS)
+colnames(FINS_SubScores0)
+FINS_SubScores_simple<- FINS_SubScores0 %>%
+  select(year, OHI_region= OHI_region_est, FINS_SubScore)
+
+# Other residues (RESD)
+colnames(RESD_SubScores0)
+RESD_SubScores_simple<- RESD_SubScores0 %>%
+  select(year, OHI_region= OHI_region_est, RESD_SubScore)
+```
+
+```{r Merge Component Scores}
+NP_Scores0 <- list(
+  SALT_SubScores_simple,
+  AQRM_SubScores_simple,
+  SHEL_SubScores_simple,
+  FINS_SubScores_simple,
+  RESD_SubScores_simple
 ) %>%
-  clean_names() %>%
-  rename(reference_point = technical_reference_point) %>%
-  select(product, reference_point)
+  reduce(full_join, by = c("year", "OHI_region"))
 
-NP_reference_points
+NP_Scores<- NP_Scores0 %>%
+  filter(!is.na(OHI_region)) %>%
+  filter(year <= 2024)
 ```
 
-```{r NP scoring helpers}
-# Stay steady: symmetric around 2018–2022 mean (5% tolerance = score 1).
-score_stay_steady <- function(catch_current, catch_ref, tolerance = NP_CATCH_TOLERANCE) {
-  if (is.na(catch_ref) || catch_ref <= 0) {
-    return(ifelse(!is.na(catch_current) && catch_current == 0, 1, NA_real_))
-  }
-  if (is.na(catch_current)) return(NA_real_)
-  if (abs(catch_current - catch_ref) <= tolerance * catch_ref) return(1)
-  min(catch_current / catch_ref, catch_ref / catch_current)
-}
+```{r Calculate NP_Scores}
+colnames(NP_Scores)
 
-# Full utilization: current utilization rate vs 2018–2022 mean (cap at 1).
-score_full_utilization <- function(util_current, util_ref, tolerance = NP_CATCH_TOLERANCE) {
-  if (is.na(util_ref) || util_ref <= 0) return(NA_real_)
-  if (is.na(util_current)) return(NA_real_)
-  if (abs(util_current - util_ref) <= tolerance * util_ref) return(1)
-  min(util_current / util_ref, 1)
-}
-```
-
-```{r Annual catch by NP product and region}
-Pearls_keywords_scoring <- c("PERLAS", "MEDIAS PERLAS", "CONCHA NACAR")
-
-Sharkfin_keywords_scoring <- c(
-  "ALETA", "ALETA DE", "ALETA ECA DE", "ALETA FCA DE"
-)
-
-NP_annual_catch <- NP_Landings %>%
+NP_Scores <- NP_Scores %>%
   mutate(
-    OHI_region_est = clean_names_lowercase(OHI_region_est),
-    pearl_kg = if_else(
-      if_any(keywords_1:keywords_4, ~ .x %in% Pearls_keywords_scoring),
-      weight_kg_corrected,
-      0
-    ),
-    sharkfin_kg = if_else(
-      Major_Functional_Group == "Sharks" &
-        if_any(keywords_1:keywords_4, ~ .x %in% Sharkfin_keywords_scoring) &
-        !str_detect(recorded_taxa_name_clean, "ATUN"),
-      weight_kg_corrected,
-      0
-    ),
-    shark_total_kg = if_else(
-      Major_Functional_Group == "Sharks",
-      weight_kg_corrected,
-      0
-    ),
-    algae_kg = if_else(
-      recorded_taxa_group == "ALGAS" |
-        Major_Functional_Group == "Marine algae",
-      weight_kg_corrected,
-      0
-    )
-  ) %>%
-  group_by(year, OHI_region_est) %>%
-  summarize(
-    pearl_catch_kg = sum(pearl_kg, na.rm = TRUE),
-    sharkfin_catch_kg = sum(sharkfin_kg, na.rm = TRUE),
-    shark_total_catch_kg = sum(shark_total_kg, na.rm = TRUE),
-    algae_catch_kg = sum(algae_kg, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    sharkfin_utilization = if_else(
-      shark_total_catch_kg > 0,
-      sharkfin_catch_kg / shark_total_catch_kg,
-      NA_real_
-    )
-  )
-
-NP_annual_catch
-```
-
-```{r Reference period means (2018–2022)}
-NP_reference_catch <- NP_annual_catch %>%
-  filter(year %in% NP_REF_YEARS) %>%
-  group_by(OHI_region_est) %>%
-  summarize(
-    mean_pearl_catch_2018.22_kg = mean(pearl_catch_kg, na.rm = TRUE),
-    mean_algae_catch_2018.22_kg = mean(algae_catch_kg, na.rm = TRUE),
-    mean_sharkfin_util_2018.22 = mean(sharkfin_utilization, na.rm = TRUE),
-    n_ref_years_pearl = sum(!is.na(pearl_catch_kg)),
-    n_ref_years_algae = sum(!is.na(algae_catch_kg)),
-    n_ref_years_sharkfin = sum(!is.na(sharkfin_utilization)),
-    .groups = "drop"
-  )
-
-NP_reference_catch
-```
-
-```{r Calculate NP sub-scores and regional NP_Score}
-NP_Regional_Scores <- NP_annual_catch %>%
-  filter(year %in% NP_SCORE_YEARS) %>%
-  left_join(NP_reference_catch, by = "OHI_region_est") %>%
-  mutate(
-    Pearl_score = pmap_dbl(
-      list(pearl_catch_kg, mean_pearl_catch_2018.22_kg),
-      score_stay_steady
-    ),
-    Algae_score = pmap_dbl(
-      list(algae_catch_kg, mean_algae_catch_2018.22_kg),
-      score_stay_steady
-    ),
-    Sharkfin_score = pmap_dbl(
-      list(sharkfin_utilization, mean_sharkfin_util_2018.22),
-      score_full_utilization
-    ),
-    n_products_scored = rowSums(!is.na(cbind(Pearl_score, Sharkfin_score, Algae_score))),
     NP_Score = rowMeans(
-      cbind(Pearl_score, Sharkfin_score, Algae_score),
+      select(., SALT_SubScore, AQRM_SubScore, SHEL_SubScore,
+             FINS_SubScore, RESD_SubScore),
       na.rm = TRUE
+    ),
+    NP_Score_n_components = rowSums(
+      !is.na(select(., SALT_SubScore, AQRM_SubScore, SHEL_SubScore,
+                    FINS_SubScore, RESD_SubScore))
     )
-  ) %>%
-  select(
-    year,
-    OHI_region_est,
-    pearl_catch_kg,
-    mean_pearl_catch_2018.22_kg,
-    Pearl_score,
-    sharkfin_catch_kg,
-    shark_total_catch_kg,
-    sharkfin_utilization,
-    mean_sharkfin_util_2018.22,
-    Sharkfin_score,
-    algae_catch_kg,
-    mean_algae_catch_2018.22_kg,
-    Algae_score,
-    n_products_scored,
-    NP_Score
-  ) %>%
-  arrange(OHI_region_est, year)
-
-NP_Regional_Scores
+  )
 ```
 
-```{r Sanity check NP scores}
-summary(NP_Regional_Scores$NP_Score)
-
-NP_Regional_Scores %>%
-  filter(!is.na(NP_Score)) %>%
-  arrange(OHI_region_est, year)
+```{r SAVE NP regional scores}
+write.csv(
+  NP_Scores,
+  file= "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/NP_Scores_DRAFT2_df_Jun302026.csv",
+  row.names = FALSE
+)
 ```
 
-```{r Plot NP_Score over time by region}
+# Plot final NP_Scores
+```{r Plot NP_Scores over time by region}
 region_colors <- c(
   "region_1" = "royalblue",
   "region_2" = "skyblue",
@@ -219,44 +164,42 @@ region_colors <- c(
   "region_9" = "tomato"
 )
 
-NP_Regional_Scores_overTime <- NP_Regional_Scores %>%
+NP_Regional_Scores_overTime <- NP_Scores %>%
   filter(!is.na(NP_Score)) %>%
-  ggplot(aes(x = year, y = NP_Score, color = OHI_region_est)) +
+  
+  ggplot(aes(x = year, y = NP_Score, color = OHI_region)) +
+  
   geom_line(linewidth = 1) +
   geom_point(size = 2) +
-  facet_wrap(~ OHI_region_est, scales = "fixed") +
+  
+  facet_wrap(~ OHI_region, scales = "fixed") +
+  
   geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  
   scale_color_manual(values = region_colors) +
   labs(
     title = "GOC Natural Products: Regional NP_Score",
-    subtitle = "Mean of Pearl, Sharkfin, and Algae sub-scores vs 2018–2022 reference",
-    y = "NP_Score (0 to 1)",
+    subtitle = "Equal mean of of SALT, FOFM, AQRM, SHEL FINS, and RESD component scores",
+    y = "NP Score (0 to 100)",
     x = "Year"
   ) +
   
-  ylim(0, 1.05) +
+  ylim(0, 101) +
   
   theme_bw(base_size = 14) +
-  theme(legend.position = "none", strip.text = element_text(size = 12, face = "bold"))
+  
+  theme(legend.position = "none", 
+        strip.text = element_text(size = 12, face = "bold"))
 
 NP_Regional_Scores_overTime
 ```
 
 
 # FINAL STEP: SAVE NP SCORES ------------------------------
-
-```{r SAVE NP regional scores}
-write.csv(
-  NP_Regional_Scores,
-  file = file.path(NP_WORK_DIR, "GOC_NP_Regional_Scores_Jun022026.csv"),
-  row.names = FALSE
-)
-```
-
 ```{r SAVE NP score plot}
 ggsave(
-  filename = file.path(NP_WORK_DIR, "GOC_NP_Regional_Scores_Jun022026.png"),
   plot = NP_Regional_Scores_overTime,
+  filename = "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/NP_Scores_DRAFT2_plot_Jun302026.png",
   width = 12,
   height = 8,
   dpi = 300
