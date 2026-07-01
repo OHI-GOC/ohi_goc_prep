@@ -1,0 +1,351 @@
+---
+title: 'OHI GoC 2025: TR Current Status Visualizations'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# TR visualizations
+
+I run this script after `tr_current_status.qmd`. It reads the saved current status outputs and builds charts with consistent region colors and labels across quantity, quality, sustainability, and the overall TR score.
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(plotly)
+library(sf)
+library(mapview)
+library(here)
+```
+
+```{r}
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+region_levels <- paste0("Region_", 1:9)
+rgn_label_colors <- setNames(unname(rgn_colors[region_levels]), unname(rgn_labels[region_levels]))
+component_levels <- c("Quantity", "Quality", "Sustainability", "Overall TR")
+
+add_rgn_labels <- function(df) {
+  df %>%
+    mutate(
+      rgn_id = factor(as.character(rgn_id), levels = region_levels),
+      rgn_label = factor(
+        rgn_labels[as.character(rgn_id)],
+        levels = unname(rgn_labels[region_levels])
+      )
+    )
+}
+
+tr_plotly_lines <- function(df, y_var, title, y_range = NULL) {
+  yr <- range(df$year, na.rm = TRUE)
+
+  plot_ly(
+    df,
+    x = ~year,
+    y = as.formula(paste0("~", y_var)),
+    color = ~rgn_label,
+    colors = rgn_label_colors,
+    type = "scatter",
+    mode = "lines+markers"
+  ) %>%
+    layout(
+      title = title,
+      xaxis = list(title = "Año // Year"),
+      yaxis = list(title = "Puntaje // Percent (out of 100)", range = y_range),
+      legend = list(title = list(text = "Region"))
+    ) %>%
+    add_lines(
+      x = yr,
+      y = c(100, 100),
+      line = list(color = "black", width = 2, dash = "dash"),
+      name = "Meta // Goal 2030 (100/100)",
+      inherit = FALSE
+    )
+}
+```
+
+## Read outputs
+
+```{r}
+cs_quantity_clean <- read_csv(
+  here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity", "tr_quantity_current_status_121025.csv"),
+  show_col_types = FALSE
+) %>%
+  rename(final_score = score) %>%
+  dplyr::select(rgn_id, year, final_score)
+
+cs_quality_clean <- read_csv(
+  here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality", "cs_quality_all_indicators_032326.csv"),
+  show_col_types = FALSE
+)
+
+cs_sust_clean <- read_csv(
+  here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability", "cs_sust_all_indicators_070126.csv"),
+  show_col_types = FALSE
+)
+
+all_cs_indicators <- read_csv(
+  here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output", "tr_current_status_final_070126.csv"),
+  show_col_types = FALSE
+)
+
+tr_components_long <- bind_rows(
+  add_rgn_labels(cs_quantity_clean) %>%
+    transmute(rgn_id, rgn_label, year, score = final_score, component = "Quantity"),
+  add_rgn_labels(cs_quality_clean) %>%
+    transmute(rgn_id, rgn_label, year, score = final_score, component = "Quality"),
+  add_rgn_labels(cs_sust_clean) %>%
+    transmute(rgn_id, rgn_label, year, score = final_score, component = "Sustainability"),
+  add_rgn_labels(all_cs_indicators) %>%
+    transmute(rgn_id, rgn_label, year, score = tr_current_status, component = "Overall TR")
+) %>%
+  filter(year %in% 2019:2024) %>%
+  mutate(component = factor(component, levels = component_levels))
+
+tr_2024_long <- tr_components_long %>%
+  filter(year == 2024)
+
+all_cs_indicators_2024 <- all_cs_indicators %>%
+  filter(year == 2024)
+```
+
+## Interactive line charts (plotly)
+
+```{r}
+tr_score_plotly <- tr_plotly_lines(
+  add_rgn_labels(all_cs_indicators),
+  y_var = "tr_current_status",
+  title = "CURRENT STATUS: Tourism & Recreation"
+)
+
+quantity_plotly <- tr_plotly_lines(
+  add_rgn_labels(cs_quantity_clean),
+  y_var = "final_score",
+  title = "TR Quantity"
+)
+
+quality_plotly <- tr_plotly_lines(
+  add_rgn_labels(cs_quality_clean),
+  y_var = "final_score",
+  title = "TR Quality"
+)
+
+sustainability_plotly <- tr_plotly_lines(
+  add_rgn_labels(cs_sust_clean),
+  y_var = "final_score",
+  title = "TR Sustainability"
+)
+
+tr_score_plotly
+quantity_plotly
+quality_plotly
+sustainability_plotly
+```
+
+## All components over time (ggplot)
+
+```{r}
+gg_tr_components_lines <- ggplot(
+  tr_components_long,
+  aes(x = year, y = score, color = rgn_label, group = rgn_label)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.8) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey45", linewidth = 0.4) +
+  facet_wrap(~ component, ncol = 2) +
+  scale_color_manual(values = rgn_label_colors, name = "Region") +
+  scale_x_continuous(breaks = 2019:2024) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 25)) +
+  labs(
+    title = "TR current status by component (2019 to 2024)",
+    x = "Year",
+    y = "Score (out of 100)"
+  ) +
+  theme_minimal(base_family = "Calibri") +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "right"
+  )
+
+gg_tr_components_lines
+```
+
+## 2024 snapshot by region (ggplot)
+
+```{r}
+gg_tr_2024_bars <- ggplot(
+  tr_2024_long,
+  aes(x = rgn_label, y = score, fill = rgn_label)
+) +
+  geom_col(width = 0.82, color = "white", linewidth = 0.3) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey45", linewidth = 0.4) +
+  facet_wrap(~ component, ncol = 2) +
+  scale_fill_manual(values = rgn_label_colors, guide = "none") +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 25)) +
+  labs(
+    title = "TR current status by region (2024)",
+    x = NULL,
+    y = "Score (out of 100)"
+  ) +
+  theme_minimal(base_family = "Calibri") +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    strip.text = element_text(face = "bold", size = 11),
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 8)
+  )
+
+gg_tr_2024_bars
+```
+
+## Overall TR polar chart (2024)
+
+```{r}
+gg_tr_2024_polar <- ggplot(
+  tr_2024_long %>% filter(component == "Overall TR"),
+  aes(x = rgn_label, y = score, fill = rgn_label)
+) +
+  geom_col(width = 1, color = "white", linewidth = 0.35) +
+  geom_hline(yintercept = 100, color = "grey55", linewidth = 0.5) +
+  coord_polar(start = -pi / 2, clip = "off") +
+  scale_fill_manual(values = rgn_label_colors, guide = "none") +
+  scale_y_continuous(limits = c(0, 100), breaks = c(25, 50, 75, 100)) +
+  labs(
+    title = "Overall TR current status by region (2024)",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_family = "Calibri") +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+gg_tr_2024_polar
+```
+
+## Map visualization (2024 overall TR)
+
+```{r}
+ohi <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp"), quiet = TRUE) %>%
+  filter(location == "marine") %>%
+  dplyr::select(rgn_id)
+
+all_cs_indicators_2024_ohigns <- full_join(all_cs_indicators_2024, ohi, by = "rgn_id") %>%
+  st_as_sf()
+```
+
+```{r}
+mapview(
+  all_cs_indicators_2024_ohigns,
+  zcol = "tr_current_status",
+  col.regions = colorRampPalette(c("#FEE090", "#ABD9E9", "#4575B4", "#313695")),
+  layer.name = "Tourism & Recreation Current Status Scores (2024)",
+  legend = TRUE
+)
+
+tr_at <- seq(0, 100, by = 10)
+
+tr_cols <- colorRampPalette(c(
+  "#8a0032", "#A50026", "#A50026", "#D73027", "#F46D43",
+  "#FDAE61", "#FEE090", "#FEE090", "#ABD9E9", "#4575B4", "#313695"
+))(length(tr_at) - 1)
+
+mapview(
+  all_cs_indicators_2024_ohigns,
+  zcol = "tr_current_status",
+  col.regions = tr_cols,
+  at = tr_at,
+  layer.name = "Tourism & Recreation Current Status Scores (2024)",
+  legend = TRUE
+)
+```
+
+## Choropleth map (ggplot)
+
+I drew the Gulf states background first, then the marine regions on top.
+
+```{r}
+tr_palette <- c(
+  "#8a0032", "#A50026", "#A50026", "#D73027", "#F46D43",
+  "#FDAE61", "#FEE090", "#FEE090", "#ABD9E9", "#4575B4", "#313695"
+)
+
+states <- st_read(here::here("spatial/ohi_regions/states.shp"), quiet = TRUE) %>%
+  st_transform(st_crs(all_cs_indicators_2024_ohigns))
+
+gg_tr <- ggplot() +
+  geom_sf(
+    data = states,
+    fill = "#d6cac0",
+    color = "grey10",
+    linewidth = 0.1
+  ) +
+  geom_sf(
+    data = all_cs_indicators_2024_ohigns,
+    aes(fill = tr_current_status),
+    color = "black",
+    linewidth = 0.2
+  ) +
+  scale_fill_gradientn(
+    colours = tr_palette,
+    limits = c(0, 100),
+    na.value = "grey85",
+    name = "Tourism & Recreation\nCurrent Status 2024"
+  ) +
+  coord_sf(expand = FALSE) +
+  theme_void() +
+  theme(
+    text = element_text(family = "Calibri"),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    legend.position = "right",
+    legend.key.height = unit(0.8, "cm"),
+    legend.key.width = unit(0.5, "cm"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
+gg_tr
+```
+
