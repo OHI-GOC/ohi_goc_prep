@@ -1,0 +1,305 @@
+---
+title: 'OHI GoC 2026: SS Safety Data Preparation (SESNSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options:
+  chunk_output_type: inline
+---
+
+# Overview
+
+In this script we will prepare municipal crime data from SESNSP for the OHI GoC Safety and Security goal. The workflow below reads the newest available data through 2025, summarizes crimes by municipality, isolates Gulf of California coastal municipalities using our existing lookup table, joins those records to official INEGI municipal boundaries, and exports final tables and shapefiles.
+
+1. **Load packages.** We load the tidyverse and spatial libraries used throughout the script.
+2. **Read SESNSP municipal data through 2025.** We import the combined municipal CSV and standardize column names.
+3. **Summarize annual crime counts by municipality.** Reshape monthly columns and sum to annual totals by crime type.
+4. **Filter to Gulf of California states.** Keep obs from the six states that define our study region.
+5. **Isolate coastal municipalities using the lookup table.**
+   a. We read the municipality to region lookup table.
+   b. We join SESNSP records to directly coastal municipalities.
+6. **Join with INEGI municipal boundaries and map.**
+   a. We read the INEGI municipal shapefile.
+   b. We join coastal municipios to polygons and attach crime data.
+   c. We preview the results in mapview.
+7. **Export crime types for Gulf of California municipalities.** We save a lookup table of all crime categories in our study area.
+
+Intermediate files are saved to `/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int`. Final outputs are saved to `/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output`.
+
+# Background on SESNSP
+
+The **Secretariado Ejecutivo del Sistema Nacional de Seguridad Publica** (SESNSP) is the federal agency responsible for coordinating public security policy in Mexico. Among its core functions, SESNSP compiles and publishes official statistics on crime incidence nationwide. These data are derived from **averiguaciones previas** and **carpetas de investigacion** (preliminary inquiries and case files) registered by state and federal prosecutors.
+
+For the Safety and Security (SS) pressure, specifically Safety, we use the municipal level open data series, which reports the count of registered crimes by municipality, year, month, and crime classification. The official portal is here:
+
+<https://www.gob.mx/sesnsp/acciones-y-programas/datos-abiertos-de-incidencia-delictiva>
+
+For this update we use the 2015 through 2025 methodology series. The data dictionary and full methodology are documented here:
+
+<https://sspcgob-my.sharepoint.com/:x:/g/personal/cni_sspc_gob_mx/Eft_H-La80NInrfnyRu9PCkBfyIyy-yr9hl8imxAyeLXMg?e=xvI38U>
+
+**Incidencia Delictiva Fuero Común: Nueva Metodología**
+
+| Campo | Descripción |
+|:---|:---|
+| Año | Año de registro de las averiguaciones previas y/o carpetas de investigación. |
+| Clave_Ent | Clave de la entidad, según el Marco Geoestadístico Nacional (MGN) del Instituto Nacional de Geografía y Estadística (INEGI). |
+| Entidad | Entidad federativa de registro de las averiguaciones previas y/o carpetas de investigación. |
+| Bien jurídico afectado | Primera clasificación de los delitos en las averiguaciones previas y/o carpetas de investigación. |
+| Tipo de delito | Segunda clasificación de los delitos. |
+| Subtipo de delito | Tercera clasificación de los delitos. |
+| Modalidad | Cuarta clasificación de los delitos. |
+| Enero through diciembre | Mes de registro de las averiguaciones previas y/o carpetas de investigación. |
+
+We downloaded the file `Municipal-Delitos-2015-2025_ene2026.csv` from this series and placed it in Mazu.
+
+## 1. Load packages
+
+```{r}
+#| label: step_01_load_packages
+
+library(tidyverse) # data manipulation and visualization
+library(magrittr) # pipe operators
+library(here) # project relative paths
+library(janitor) # clean column names
+library(readr) # read csv files
+library(purrr) # functional programming tools
+library(mapview) # interactive maps
+library(sf) # spatial data handling
+library(stringi) # normalize spanish place names
+
+safety_int <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int" # intermediate files
+safety_output <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output" # final outputs
+muni_lookup_path <- "/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid_update.csv" # coastal municipio lookup
+inegi_muni_path <- "/home/shares/ohi/OHI_GOC/spatial/delimitaciones_frontera_municipales_inegi/INEGI_Municipal_.shp" # inegi municipal polygons
+```
+
+## 2. Read SESNSP municipal data through 2025
+
+We read the combined municipal file once rather than loading separate yearly spreadsheets. After cleaning column names we rename two fields so they match our earlier workflow.
+
+```{r}
+#| label: step_02_read_sesnsp
+
+sesnsp_all <- readr::read_csv( # read the full municipal csv
+  here::here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/SESNSP/d2026/Municipal-Delitos-2015-2025_ene2026",
+    "Municipal-Delitos-2015-2025_ene2026.csv"
+  ),
+  locale = readr::locale(encoding = "latin1"), # spanish characters in source file
+  show_col_types = FALSE
+) %>%
+  janitor::clean_names() # convert column names to snake case
+
+unique(sesnsp_all$ano) # confirm all years are present.
+# v2026: yes! 2015 through 2025
+```
+
+## 3. Summarize annual crime counts by municipality
+
+Now we can pivot monthly columns to long format and sum across months to obtain an annual total for each crime type in each municipality.
+
+```{r}
+#| label: step_03_summarize_annual
+
+sesnsp_all_long <- sesnsp_all %>% # reshape monthly columns to long format
+  tidyr::pivot_longer(
+    cols = enero:diciembre, # one row per month
+    names_to = "mes",
+    values_to = "n_delitos"
+  )
+
+sesnsp_anual <- sesnsp_all_long %>% # sum monthly counts to annual totals
+  dplyr::group_by(
+    ano,
+    clave_ent,
+    entidad,
+    cve_municipio,
+    municipio,
+    bien_juridico_afectado,
+    tipo_de_delito,
+    subtipo_de_delito
+  ) %>%
+  dplyr::summarise(
+    annual_total = sum(n_delitos, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+unique(sesnsp_anual$entidad) # list all states in the dataset
+```
+
+## 4. Filter to Gulf of California states
+
+We keep municipalities in the six Mexican states that define the Gulf of California study region.
+
+```{r}
+#| label: step_04_filter_goc
+
+goc_states <- c( # six states that border the goc
+  "Baja California",
+  "Baja California Sur",
+  "Jalisco",
+  "Nayarit",
+  "Sinaloa",
+  "Sonora"
+)
+
+sesnsp_anual_goc_states <- sesnsp_anual %>% # keep only goc states
+  dplyr::filter(entidad %in% goc_states)
+
+readr::write_csv(sesnsp_anual_goc_states, here::here(safety_int, "sesnsp_anual_goc_states.csv")) # save filtered table
+```
+
+## 5. Isolate coastal municipalities using the lookup table
+
+Rather than geocoding municipality names, we can use the existing `municipality_to_rgnid` lookup table to identify Gulf of California coastal municipios and assign each one to an OHI region.
+
+### 5a. Read the municipality to region lookup table
+
+```{r}
+#| label: step_05a_read_lookup
+
+normalize_name <- function(x) { # helper to standardize place names for matching
+  x %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    toupper() %>%
+    stringr::str_squish()
+}
+
+muni_lookup <- readr::read_csv(muni_lookup_path) %>% # read curated goc municipio list
+  dplyr::mutate(
+    municipio = normalize_name(municipio), # clean lookup municipio names
+    estado = normalize_name(estado), # clean lookup state names
+    E03 = as.integer(E03), # inegi state code (first two digits of id)
+    E04 = as.integer(E04), # inegi municipio code (last three digits of id)
+    ID = sprintf("%02d%03d", E03, E04) # combined id to match inegi_muni$ID
+  ) %>%
+  dplyr::filter(directly_coastal == "Y") # keep only directly coastal municipios
+```
+
+### 5b. Join SESNSP records to coastal municipalities
+
+The INEGI shapefile stores a single five digit `ID` for each municipio: the first two digits are the state code (`E03`) and the last three are the municipio code (`E04`). For example, Mexicali in Baja California (`E03` = 2, `E04` = 2) has `ID` = `"02002"`. We build the same `ID` from SESNSP's `cve_municipio` field and join on that key.
+
+```{r}
+#| label: step_05b_join_coastal
+
+sesnsp_anual_goc_states_join <- sesnsp_anual_goc_states %>% # build inegi id from sesnsp municipio code
+  dplyr::mutate(
+    ID = sprintf("%05d", as.integer(cve_municipio)), # five digit id: state plus municipio
+    municipio_norm = normalize_name(municipio), # standardized municipio name
+    entidad_norm = normalize_name(entidad) # standardized state name
+  )
+
+not_in_coastal <- sesnsp_anual_goc_states_join %>% # check goc records that did not match coastal lookup
+  dplyr::anti_join(muni_lookup, by = "ID") %>%
+  dplyr::distinct(entidad, municipio, cve_municipio, ID) # non coastal municipios are expected here
+
+sesnsp_anual_coastal <- sesnsp_anual_goc_states %>% # attach region ids to sesnsp crime records
+  dplyr::inner_join(
+    muni_lookup %>%
+      dplyr::select(ID, rgn_id, E03, E04, both_pacific_gulf, directly_coastal),
+    by = "ID"
+  ) %>% 
+  filter(!is.na(rgn_id)) # if rgn_id is NA, then it is a municipality on the pacific-side (facing the open ocean, not in the GoC)
+
+unique(sesnsp_anual_coastal$municipio)
+unique(sesnsp_anual_coastal$rgn_id)
+
+readr::write_csv(sesnsp_anual_coastal, here::here(safety_int, "sesnsp_anual_coastal.csv")) # save joined crime table
+```
+
+## 6. Join with INEGI municipal boundaries and map
+
+### 6a. Read the INEGI municipal shapefile
+
+The municipal boundary file lives on mazu at `sftp://lecuona@mazu.nceas.ucsb.edu/home/shares/ohi/OHI_GOC/spatial/delimitaciones_frontera_municipales_inegi/INEGI_Municipal_.shp`. When working on mazu we read it from the shared path below.
+
+```{r}
+#| label: step_06a_read_inegi
+
+inegi_muni <- sf::st_read(inegi_muni_path) # all official inegi municipal polygons sf
+
+mapview(inegi_muni)
+colnames(inegi_muni) # [1] "ID"       "NOMBRE"   "geometry"
+```
+
+### 6b. Join coastal municipios to polygons and attach crime data
+
+To be able to see the municipalities spatially, we can join the lookup table to INEGI polygons on the shared five digit `ID`, then attach the summarized SESNSP records.
+
+```{r}
+#| label: step_06b_join_polygons
+
+coastal_muni_sf <- inegi_muni %>% # isolate coastal municipio polygons by id
+  dplyr::inner_join(
+    muni_lookup %>%
+      dplyr::select(ID, municipio, estado, rgn_id, E03, E04, both_pacific_gulf, directly_coastal),
+    by = "ID"
+  ) # NOTE THAT 25019, Sinaloa, Eldorado is a new municipality as of 2024...
+
+sesnsp_coastal_sf <- coastal_muni_sf %>% # attach annual crime data to each coastal polygon
+  dplyr::left_join(
+    sesnsp_anual_coastal %>%
+      dplyr::select(
+        ID, ano, entidad, municipio, cve_municipio,
+        bien_juridico_afectado, tipo_de_delito, subtipo_de_delito, annual_total
+      ),
+    by = "ID"
+  )
+```
+
+### 6c. Preview coastal municipios in mapview
+
+```{r}
+#| label: step_06c_mapview
+
+mapview::mapview(coastal_muni_sf, zcol = "rgn_id") # map coastal municipios colored by ohi region
+
+mapview::mapview(sesnsp_coastal_sf, zcol = "rgn_id") # map municipios with attached crime attributes
+```
+
+## 7. Export crime types for Gulf of California municipalities
+
+Now that we have isolated coastal municipalities in the Gulf of California, we make a lookup table of all crime types recorded by SESNSP in our study area. We also save the full spatial dataset for the next stage of goal preparation.
+
+```{r}
+#| label: step_07_export_crime_types
+
+sesnsp_goc_crimes <- sesnsp_anual_coastal %>% # list unique crime classifications in study area
+  dplyr::select(
+    bien_juridico_afectado,
+    tipo_de_delito,
+    subtipo_de_delito
+  ) %>%
+  dplyr::distinct() %>% 
+  mutate(crime_id = seq(1:55))
+
+readr::write_csv( # save final crime type lookup table
+  sesnsp_goc_crimes,
+  here::here(safety_output, "types_of_crimes_goc_sesnsp_w2025.csv")
+)
+
+sf::st_write( # save final coastal municipio shapefile with crime data
+  sesnsp_coastal_sf,
+  here::here(safety_output, "sesnsp_coastal_municipios_w2025.gpkg")
+)
+```
+
+## Next steps for Safety (SAF) within the Safety & Security (SS) pressure 
+
+We will use the exported shapefile and crime type table in the next stage of goal preparation, where we select relevant crime categories and calculate regional scores.
+

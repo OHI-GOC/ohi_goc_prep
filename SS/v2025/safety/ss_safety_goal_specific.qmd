@@ -1,0 +1,371 @@
+---
+title: 'OHI GoC 2026: SS Safety Data Preparation (SESNSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Overview
+
+THINGS TO ADD: (1) Update the INEGI population data from the newest census when it is released in 2025; (2) Incorporate weights based on the type of crime?
+
+In this script, we will take the annual crime incidents for each coastal municipality that we cleaned in `SS/v2025/safety/ss_safety_dataprep.qmd` and create individual subsets for each goal. This will be based on expert judgement, which identified which types of crimes impact specific OHI GoC goals. 
+
+1. **Load packages.** We load the tidyverse and spatial libraries used throughout the script.
+2. **Read cleaned SESNSP municipal data through 2025.** 
+
+Intermediate files are saved to `/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int`. Final outputs are saved to `/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output`.
+
+# Background on SESNSP
+
+The **Secretariado Ejecutivo del Sistema Nacional de Seguridad Publica** (SESNSP) is the federal agency responsible for coordinating public security policy in México. Among its core functions, SESNSP compiles and publishes official statistics on crime incidence nationwide. These data are derived from **averiguaciones previas** and **carpetas de investigacion** (preliminary inquiries and case files) registered by state and federal prosecutors.
+
+For the Safety and Security (SS) pressure, specifically Safety, we use the municipal level open data series, which reports the count of registered crimes by municipality, year, month, and crime classification. The official portal is here:
+
+<https://www.gob.mx/sesnsp/acciones-y-programas/datos-abiertos-de-incidencia-delictiva>
+
+For this update we use the 2015 through 2025 methodology series. The data dictionary and full methodology are documented here:
+
+<https://sspcgob-my.sharepoint.com/:x:/g/personal/cni_sspc_gob_mx/Eft_H-La80NInrfnyRu9PCkBfyIyy-yr9hl8imxAyeLXMg?e=xvI38U>
+
+**Incidencia Delictiva Fuero Común: Nueva Metodología**
+
+| Campo | Descripción |
+|:---|:---|
+| Año | Año de registro de las averiguaciones previas y/o carpetas de investigación. |
+| Clave_Ent | Clave de la entidad, según el Marco Geoestadístico Nacional (MGN) del Instituto Nacional de Geografía y Estadística (INEGI). |
+| Entidad | Entidad federativa de registro de las averiguaciones previas y/o carpetas de investigación. |
+| Bien jurídico afectado | Primera clasificación de los delitos en las averiguaciones previas y/o carpetas de investigación. |
+| Tipo de delito | Segunda clasificación de los delitos. |
+| Subtipo de delito | Tercera clasificación de los delitos. |
+| Modalidad | Cuarta clasificación de los delitos. |
+| Enero through diciembre | Mes de registro de las averiguaciones previas y/o carpetas de investigación. |
+
+## 1. Load packages
+
+```{r}
+#| label: step_01_load_packages
+
+library(tidyverse) # data manipulation and visualization
+library(magrittr) # pipe operators
+library(here) # project relative paths
+library(janitor) # clean column names
+library(readr) # read csv files
+library(purrr) # functional programming tools
+library(mapview) # interactive maps
+library(sf) # spatial data handling
+library(stringi) # normalize spanish place names
+
+safety_int <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int" # intermediate files
+safety_output <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output" # final outputs
+annual_sesnsp_path <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int/sesnsp_anual_coastal.csv" # cleaned SESNSP data
+annual_sesnsp_sf_path <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output/sesnsp_coastal_municipios_w2025.gpkg"
+matrix_path <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int/Safety_Security_Methodology_Hem_Crime_x_OHI_Goal.csv" # expert matrix
+type_of_crimes_path <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output/types_of_crimes_goc_sesnsp_w2025.csv" # has crimeID
+inegi_population_path <- "/home/shares/ohi/OHI_GOC/spatial/population_municipal/interpolated_population_per_rgn_coastalmunicipios_2000_2025.csv" # update in September 2026!!
+```
+
+## 2. Read cleaned municipal data through 2025
+
+```{r}
+#| label: step_02_read_sesnsp
+
+sesnsp_goc <- read_csv(here::here(annual_sesnsp_path))
+sesnsp_goc_sf <- st_read(here::here(annual_sesnsp_sf_path))
+```
+
+
+```{r}
+# read in the type of crimes and join with the data to give each crime an identifier
+types_of_crime <- read_csv(here(type_of_crimes_path))
+
+sesnsp_goc_wid <- left_join(sesnsp_goc, types_of_crime) %>% 
+  dplyr::select(c(ano, rgn_id, clave_ent, entidad, cve_municipio, cve_municipio, municipio, crime_id, annual_total)) %>% 
+  filter(!municipio %in% "Mexicali")
+```
+
+
+## 3. Clean Expert Matrix
+
+```{r}
+#| label: step_03_expert_matrix
+
+hem_matrix <- read_csv(here::here(matrix_path)) 
+
+hem_matrix_clean <- hem_matrix %>% 
+  janitor::clean_names() %>% 
+  dplyr::select(-x0_no_afecta_1_si_afecta) %>% 
+  left_join(.,types_of_crime) %>% 
+  tidyr::pivot_longer(
+    cols = food_provisioning_fisheries:research_ocean_literacy, # one row per goal/subgoal
+    names_to = "ohi_goal",
+    values_to = "is_affecting"
+  )
+
+crimes_affecting_ohi <- hem_matrix_clean %>% 
+  filter(is_affecting %in% "1")
+unique(crimes_affecting_ohi$crime_id)
+
+write_csv(hem_matrix_clean, here::here(safety_int, "hem_expert_matrix_clean_070626.csv"))
+write_csv(crimes_affecting_ohi, here::here(safety_int, "crimes_affecting_ohi_070626.csv"))
+```
+
+## 4. Annual crimes per goal
+
+```{r}
+annual_incidences_per_crime_and_yr <- left_join(crimes_affecting_ohi, sesnsp_goc_wid)
+
+unique(annual_incidences_per_crime_and_yr$crime_id) # same as crimes_affecting_ohi, good.
+unique(annual_incidences_per_crime_and_yr$is_affecting) # good, only 1.  This means that all the crimes in this datasheet affect the goals.
+```
+
+
+```{r}
+incidences_per_goal <- annual_incidences_per_crime_and_yr %>% 
+  group_by(rgn_id, ano, ohi_goal) %>% 
+  summarize(
+    total_crimes_reported = sum(annual_total)
+  ) %>% 
+  ungroup()
+
+unique(incidences_per_goal$ano)
+unique(incidences_per_goal$rgn_id)
+unique(incidences_per_goal$rgn_id)
+```
+
+## 5. Standardize by population
+
+This will need to be updated when we have new INEGI population data from the census, released in September of 2026.
+
+```{r}
+# note that INEGI's population census will be updated through 2025 (done every 5 years) in September 2026.  We will need to update this then!!
+interpolated_population_inegi_2000_2025 <- read_csv(here::here(inegi_population_path)) %>% 
+  mutate(ano = year_interpolated) %>% 
+  dplyr::select(rgn_id, ano, population_interpolated)
+```
+
+
+```{r}
+# divide the number of crimes by the population for every region, year, and ohi goal
+rate_of_incidence_per_goal <- incidences_per_goal %>% 
+  left_join(interpolated_population_inegi_2000_2025) %>% 
+  mutate(crime_rate = total_crimes_reported / population_interpolated)
+
+write_csv(rate_of_incidence_per_goal, here::here(safety_output, "rate_of_incidence_per_goal_2015_2025.csv"))
+```
+
+### 5a. Viz
+
+```{r}
+library(tidyverse)
+library(here)
+library(scales)
+library(systemfonts)   # for checking/registering fonts
+library(showtext)      # renders text with the requested font
+
+# ---- 0. font setup: calibri -----------------------------------------
+font_family_to_use <- "Calibri"
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 300)  # match the dpi used in the commented ggsave() calls below
+
+# ---- region labels & colors ------------------------------------------
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+# ---- 1. load data --------------------------------------------------
+rate_of_incidence_per_goal <- read_csv(
+  here::here(safety_output, "rate_of_incidence_per_goal_2015_2025.csv")
+)
+
+# make sure types are right (adjust column names if yours differ)
+rate_of_incidence_per_goal <- rate_of_incidence_per_goal %>%
+  mutate(
+    ano      = as.integer(ano),
+    rgn_id   = as.factor(rgn_id),
+    ohi_goal = as.factor(ohi_goal)
+  )
+
+# a consistent theme for everything below
+theme_set(
+  theme_minimal(base_size = 4, base_family = font_family_to_use) +
+    theme(
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face = "bold", family = font_family_to_use),
+      plot.title = element_text(face = "bold", family = font_family_to_use),
+      plot.subtitle = element_text(family = font_family_to_use),
+      text = element_text(family = font_family_to_use)
+    )
+)
+
+# ---- 2. overall crime rate trend (all regions/goals pooled) -------
+overall_trend <- rate_of_incidence_per_goal %>%
+  group_by(ano) %>%
+  summarise(
+    total_crimes = sum(total_crimes_reported, na.rm = TRUE),
+    total_pop    = sum(population_interpolated, na.rm = TRUE),
+    mean_rate    = mean(crime_rate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_overall <- ggplot(overall_trend, aes(x = ano, y = mean_rate)) +
+  geom_line(linewidth = 1, color = "#2C6E9E") +
+  geom_point(size = 2, color = "#2C6E9E") +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  labs(
+    title = "Overall Crime Rate Over Time",
+    subtitle = "Mean crime rate across all regions and OHI goals",
+    x = "Year", y = "Mean crime rate"
+  )
+p_overall
+
+# ggsave(here::here(safety_output, "plot_overall_trend.png"),
+#        p_overall, width = 8, height = 5, dpi = 300)
+
+# ---- 3. trend by ohi goal (small multiples) ------------------------
+by_goal <- rate_of_incidence_per_goal %>%
+  group_by(ano, ohi_goal) %>%
+  summarise(mean_rate = mean(crime_rate, na.rm = TRUE), .groups = "drop")
+
+p_by_goal <- ggplot(by_goal, aes(x = ano, y = mean_rate)) +
+  geom_line(color = "#2C6E9E", linewidth = 1) +
+  geom_point(color = "#2C6E9E", size = 1.5) +
+  facet_wrap(~ ohi_goal, scales = "free_y", ncol = 4) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Crime Rate Over Time by OHI Goal",
+    x = "Year", y = "Mean crime rate"
+  )
+p_by_goal
+
+# ggsave(here::here(safety_output, "plot_by_goal.png"),
+#        p_by_goal, width = 12, height = 8, dpi = 300)
+
+# ---- 4. trend by region (small multiples) --------------------------
+by_region <- rate_of_incidence_per_goal %>%
+  group_by(ano, rgn_id) %>%
+  summarise(mean_rate = mean(crime_rate, na.rm = TRUE), .groups = "drop")
+
+p_by_region <- ggplot(by_region, aes(x = ano, y = mean_rate, color = rgn_id)) +
+  geom_line(linewidth = 1, show.legend = FALSE) +
+  geom_point(size = 1.5, show.legend = FALSE) +
+  facet_wrap(~ rgn_id, scales = "free_y", labeller = labeller(rgn_id = rgn_labels)) +
+  scale_color_manual(values = rgn_colors) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Crime Rate Over Time by Region",
+    x = "Year", y = "Mean crime rate"
+  )
+p_by_region
+
+# ggsave(here::here(safety_output, "plot_by_region.png"),
+#        p_by_region, width = 12, height = 8, dpi = 300)
+
+# ---- 5. all regions on one plot, colored, faceted by goal ----------
+p_region_lines_by_goal <- ggplot(
+  rate_of_incidence_per_goal,
+  aes(x = ano, y = crime_rate, color = rgn_id, group = rgn_id)
+) +
+  geom_line(alpha = 0.8) +
+  facet_wrap(~ ohi_goal, scales = "free_y", ncol = 4) +
+  scale_color_manual(values = rgn_colors, labels = rgn_labels) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Crime Rate Trajectories by Region, Faceted by OHI Goal",
+    x = "Year", y = "Crime rate", color = "Region"
+  ) +
+  theme(legend.position = "bottom")
+p_region_lines_by_goal
+
+# ggsave(here::here(safety_output, "plot_region_lines_by_goal.png"),
+#        p_region_lines_by_goal, width = 14, height = 9, dpi = 300)
+
+# ---- 6. heatmap: region x year, faceted by goal --------------------
+p_heatmap <- ggplot(
+  rate_of_incidence_per_goal,
+  aes(x = ano, y = rgn_id, fill = crime_rate)
+) +
+  geom_tile(color = "white", linewidth = 0.2) +
+  facet_wrap(~ ohi_goal, ncol = 4) +
+  scale_fill_viridis_c(option = "magma", name = "Crime rate") +
+  scale_y_discrete(labels = rgn_labels) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Crime Rate Heatmap: Region x Year, by OHI Goal",
+    x = "Year", y = "Region"
+  )
+p_heatmap
+
+# ggsave(here::here(safety_output, "plot_heatmap.png"),
+#        p_heatmap, width = 14, height = 9, dpi = 300)
+
+# ---- 7. single-goal / single-region deep dive (example) ------------
+# swap "food_provisioning_fisheries" for whatever goal you want
+p_single_goal <- rate_of_incidence_per_goal %>%
+  filter(ohi_goal == "food_provisioning_fisheries") %>%
+  ggplot(aes(x = ano, y = crime_rate, color = rgn_id, group = rgn_id)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  scale_color_manual(values = rgn_colors, labels = rgn_labels) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  labs(
+    title = "Crime Rate Over Time: Food Provisioning - Fisheries",
+    subtitle = "By region",
+    x = "Year", y = "Crime rate", color = "Region"
+  )
+p_single_goal
+
+# ggsave(here::here(safety_output, "plot_single_goal_example.png"),
+#        p_single_goal, width = 9, height = 6, dpi = 300)
+```
+
+
+## 6. Current status of crime per goal
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
