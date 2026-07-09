@@ -1,0 +1,685 @@
+---
+title: "Clean Waters — Nearshore Chl-a and ratio excess"
+author: "OHI GoC 2025"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cerulean
+---
+
+```{r setup, include = FALSE}
+nearshore_km  <- 15L
+nearshore_tag <- sprintf("%dkm", nearshore_km)
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 10,
+  fig.height = 5
+)
+```
+
+# Overview
+
+## Goal
+
+Use satellite **chlorophyll-a (Chl-a)** to identify **nearshore** areas where
+coastal productivity is elevated relative to what we expect from **regional
+offshore** waters — a possible signal of nutrient enrichment from land.
+
+## Data
+
+- **Source:** Copernicus GlobColour, 4 km, monthly (prepped in `step1_cw_chla.qmd`)
+- **Path:** `/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int/monthly_rasters/`
+- **Years:** 2000–2024 (skip 1997 and partial 2025)
+- **Units:** mg/m³
+
+## Chosen method: ratio-adjusted excess
+
+Raw nearshore Chl-a and offshore Chl-a **rise and fall together** (shared
+upwelling and climate). Simple subtraction (`near − off`) does not remove those
+shared spikes because coastal Chl-a usually increases **more in mg/m³** than
+offshore.
+
+Instead we assume the usual oceanographic link within each OHI region is
+**multiplicative**:
+
+\[
+\text{near}_{r,t} \approx R_r \times \text{off}_{r,t}
+\]
+
+We estimate a reference ratio \(R_{\text{ref},r}\) from the **full analysis
+period (2000–2024)**, then define **ratio excess**:
+
+\[
+\textbf{ratio\_excess}_{r,t} = \text{near}_{r,t} - R_{\text{ref},r} \times \text{off}_{r,t}
+\]
+
+- **≈ 0:** nearshore is at its usual level relative to offshore that year  
+- **> 0:** coastal–offshore gap is **wider than normal** (candidate enrichment signal)  
+- **Increasing over time:** widening coastal gradient (our primary trend metric)
+
+**Spatial scope:** `r nearshore_km` km nearshore band vs offshore (> `r nearshore_km` km) within each of
+9 marine OHI regions.
+
+---
+
+# Setup
+
+```{r parameters}
+library(terra)
+library(sf)
+library(here)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+
+# Paths
+chla_int_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chla_int"
+chl_dir      <- file.path(chla_int_dir, "monthly_rasters")
+
+ohi_rgns_shp   <- here("spatial/ohi_regions/goc_ohi_rgns.shp")
+coastline_shp  <- "/home/shares/ohi/OHI_GOC/spatial/ne_10m_coastline/ne_10m_coastline.shp"
+rgn_core       <- read.csv(here("spatial/ohi_regions/ohi_rgns_core.csv")) %>%
+  filter(location == "marine")
+
+# Analysis settings
+year_start     <- 2000L
+year_end       <- 2024L
+years          <- seq(year_start, year_end)
+ref_year_start <- year_start
+ref_year_end   <- year_end
+ref_period_lbl <- sprintf("%d–%d", ref_year_start, ref_year_end)
+buffer_crs     <- 6372L
+
+# Paths scoped to nearshore band width (keeps 15 km outputs separate)
+dir_masks     <- file.path(chla_int_dir, "masks", nearshore_tag)
+dir_ratio     <- file.path(chla_int_dir, paste0("ratio_excess_", nearshore_tag), "annual")
+dir_ratio_ref <- file.path(chla_int_dir, paste0("ratio_excess_", nearshore_tag), "reference")
+
+purrr::walk(c(dir_masks, dir_ratio, dir_ratio_ref), dir.create,
+            showWarnings = FALSE, recursive = TRUE)
+
+# Plot labels (depend on nearshore_km)
+near_lbl <- sprintf("Nearshore Chl-a (%d km)", nearshore_km)
+off_lbl  <- sprintf("Offshore Chl-a (>%d km)", nearshore_km)
+
+# Years flagged as "early period" for trend sensitivity checks
+early_period_end <- 2004L
+trend_sensitivity_starts <- c(2000L, 2005L, 2011L)
+
+# Colors shared by gulf-wide and per-region comparison plots
+metric_colors <- c(
+  near_lbl = "#1a9850",
+  off_lbl = "#41b6c4",
+  "Raw contrast (near − off)" = "#756bb1",
+  "Ratio excess (near − R_ref × off)" = "#e66101"
+)
+names(metric_colors)[1:2] <- c(near_lbl, off_lbl)
+
+# Gulf-wide plot (5.1) uses three metrics only — no raw contrast
+gulf_metric_colors <- metric_colors[c(near_lbl, off_lbl, "Ratio excess (near − R_ref × off)")]
+
+# Major ENSO years for vertical markers (informal; not formal ONI classification)
+enso_events <- tibble::tribble(
+  ~year, ~label,    ~phase,
+  1998,  "El Niño", "el_nino",
+  1999,  "La Niña", "la_nina",
+  2010,  "El Niño", "el_nino",
+  2011,  "La Niña", "la_nina",
+  2015,  "El Niño", "el_nino",
+  2016,  "El Niño", "el_nino",
+  2020,  "La Niña", "la_nina",
+  2022,  "La Niña", "la_nina",
+  2023,  "El Niño", "el_nino",
+  2024,  "El Niño", "el_nino"
+) %>%
+  filter(year >= year_start, year <= year_end)
+```
+
+```{r helpers}
+# Annual mean Chl-a raster for one calendar year
+annual_mean_chl <- function(yr, files) {
+  mean(rast(files[grepl(sprintf("/%s-", yr), files)]))
+}
+
+# Apply a zonal summary table back onto the region-id grid
+expand_zonal_to_raster <- function(zonal_df, zone_rast, value_col = 2) {
+  zonal_df <- zonal_df[!is.na(zonal_df[[value_col]]), , drop = FALSE]
+  subst(zone_rast, zonal_df[[1]], zonal_df[[value_col]])
+}
+
+# Ratio excess raster: each nearshore cell minus R_ref * regional offshore mean
+compute_ratio_excess_raster <- function(yr_mean, nearshore_bin, offshore_mask,
+                                        rgn_id_num, r_ref_df) {
+  off_z <- zonal(yr_mean * offshore_mask, rgn_id_num, fun = mean, na.rm = TRUE)
+  colnames(off_z) <- c("rgn_num", "off_mean")
+  off_r <- expand_zonal_to_raster(off_z, rgn_id_num)
+  r_ref_r <- expand_zonal_to_raster(
+    r_ref_df %>% select(rgn_num, R_ref) %>% as.data.frame(), rgn_id_num
+  )
+  ifel(nearshore_bin == 1, yr_mean - r_ref_r * off_r, NA)
+}
+
+# Long format for four-line per-region comparison plots (5.2)
+prep_comparison_long <- function(df) {
+  df %>%
+    pivot_longer(c(near, off, raw_contrast, ratio_excess),
+                 names_to = "metric", values_to = "value") %>%
+    mutate(metric = recode(metric,
+      near = near_lbl,
+      off = off_lbl,
+      raw_contrast = "Raw contrast (near − off)",
+      ratio_excess = "Ratio excess (near − R_ref × off)"
+    ))
+}
+
+# Long format for gulf-wide plot (5.1): nearshore, offshore, ratio excess only
+prep_gulf_comparison_long <- function(df) {
+  df %>%
+    pivot_longer(c(near, off, ratio_excess),
+                 names_to = "metric", values_to = "value") %>%
+    mutate(metric = recode(metric,
+      near = near_lbl,
+      off = off_lbl,
+      ratio_excess = "Ratio excess (near − R_ref × off)"
+    ))
+}
+```
+
+---
+
+# Step 1 — Load Chl-a data
+
+```{r step1-data}
+chl_files <- list.files(chl_dir, pattern = "\\.tif$", full.names = TRUE)
+chl_files <- chl_files[!grepl("/1997-|/2025-", chl_files)]
+
+cat("Monthly rasters:", length(chl_files), "\n")
+cat("From", basename(chl_files[1]), "to", basename(chl_files[length(chl_files)]), "\n")
+
+chl_template <- rast(chl_files[grepl("/2020-06", chl_files)])
+```
+
+```{r step1-map, fig.height = 4}
+plot(
+  log10(chl_template + 0.01),
+  main = "Example: log10 Chl-a, June 2020 (mg/m³)",
+  col = hcl.colors(50, "YlGnBu", rev = TRUE)
+)
+```
+
+---
+
+# Step 2 — Nearshore and offshore zones
+
+Within each marine OHI region we define:
+
+1. **Nearshore** — marine pixels within **`r nearshore_km` km** of the coast  
+2. **Offshore** — marine pixels **farther than `r nearshore_km` km** from the coast  
+
+Offshore mean Chl-a in each region is the **oceanographic reference** for that
+region and year.
+
+```{r step2-masks}
+marine_sf <- st_read(ohi_rgns_shp, quiet = TRUE) %>% filter(location == "marine")
+marine_vect <- vect(st_transform(marine_sf, crs(chl_template)))
+marine_raw  <- rasterize(marine_vect, chl_template, field = 1)
+rgn_id_num  <- rasterize(marine_vect, chl_template, field = "id")
+
+coast_goc <- st_read(coastline_shp, quiet = TRUE) %>%
+  st_make_valid() %>%
+  st_intersection(st_as_sfc(st_bbox(chl_template)) %>% st_set_crs(crs(chl_template)))
+
+nearshore_poly <- coast_goc %>%
+  st_transform(buffer_crs) %>% st_union() %>%
+  st_buffer(nearshore_km * 1000) %>%
+  st_intersection(st_make_valid(st_union(st_transform(marine_sf, buffer_crs))))
+
+nearshore_raw <- rasterize(vect(st_transform(nearshore_poly, crs(chl_template))),
+                           chl_template, field = 1)
+
+# Binary 0/1 masks (required — terra uses NaN outside polygons)
+marine_bin    <- subst(marine_raw, 1, 1, others = 0)
+nearshore_bin <- subst(nearshore_raw, 1, 1, others = 0)
+nearshore_mask <- ifel(nearshore_bin == 1, 1, NA)
+offshore_mask  <- ifel(marine_bin == 1, ifel(nearshore_bin == 1, NA, 1), NA)
+
+stopifnot(
+  sum(values(nearshore_bin) == 1) + sum(values(offshore_mask) == 1, na.rm = TRUE) ==
+    sum(values(marine_bin) == 1)
+)
+
+writeRaster(nearshore_mask, file.path(dir_masks, sprintf("nearshore_%s.tif", nearshore_tag)), overwrite = TRUE)
+writeRaster(offshore_mask,  file.path(dir_masks, sprintf("offshore_%s.tif", nearshore_tag)), overwrite = TRUE)
+writeRaster(rgn_id_num,     file.path(dir_masks, "rgn_id_num.tif"), overwrite = TRUE)
+
+cat("Nearshore cells:", sum(values(nearshore_bin) == 1), "\n")
+cat("Offshore cells: ", sum(values(offshore_mask) == 1, na.rm = TRUE), "\n")
+```
+
+```{r step2-zone-map, fig.height = 4}
+plot(log10(chl_template + 0.01), main = "Nearshore (red) vs offshore (blue tint)",
+     col = hcl.colors(50, "YlGnBu", rev = TRUE))
+plot(st_geometry(st_transform(nearshore_poly, crs(chl_template))), add = TRUE, border = "red", lwd = 1.5)
+plot(ifel(offshore_mask == 1, 1, NA), add = TRUE, col = rgb(0, 0, 1, 0.12), legend = FALSE)
+```
+
+---
+
+# Step 3 — Regional annual nearshore and offshore Chl-a
+
+For each **year** and **OHI region**, compute mean Chl-a in the nearshore and
+offshore bands.
+
+```{r step3-regional-annual}
+regional_annual <- map_dfr(years, function(yr) {
+  yr_mean <- annual_mean_chl(yr, chl_files)
+  near_z <- zonal(yr_mean * nearshore_mask, rgn_id_num, fun = mean, na.rm = TRUE)
+  off_z  <- zonal(yr_mean * offshore_mask,  rgn_id_num, fun = mean, na.rm = TRUE)
+  near_z %>%
+    rename(rgn_num = 1, near = 2) %>%
+    left_join(off_z %>% rename(rgn_num = 1, off = 2), by = "rgn_num") %>%
+    left_join(rgn_core, by = c("rgn_num" = "id")) %>%
+    mutate(year = yr, raw_contrast = near - off)
+})
+
+regional_annual %>% select(rgn_id, year, near, off, raw_contrast) %>% head(12)
+```
+
+## Why raw contrast is not enough
+
+Nearshore and offshore Chl-a **track each other** year to year. Raw contrast
+(`near − off`) still spikes in high-productivity years because nearshore rises
+**more in mg/m³** than offshore.
+
+```{r step3-motivation-plot, fig.height = 5}
+gulf_raw <- regional_annual %>%
+  group_by(year) %>%
+  summarize(near = mean(near), off = mean(off), contrast = mean(raw_contrast),
+            .groups = "drop")
+
+ggplot(gulf_raw, aes(year)) +
+  geom_line(aes(y = near, color = "Nearshore Chl-a"), linewidth = 1) +
+  geom_line(aes(y = off, color = "Offshore Chl-a"), linewidth = 1) +
+  geom_line(aes(y = contrast, color = "Raw contrast (near − off)"), linewidth = 1) +
+  geom_point(aes(y = near), size = 1.5) +
+  scale_color_manual(name = NULL, values = c("#1a9850", "#41b6c4", "#756bb1")) +
+  labs(
+    title = "Problem: raw nearshore and contrast still spike together",
+    subtitle = "Shared oceanographic years (e.g. 2011–2012) affect both bands",
+    x = NULL, y = "mg/m³"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+---
+
+# Step 4 — Ratio excess (method)
+
+## 4.1 Reference ratio by region
+
+Over the **full analysis period (`r ref_period_lbl`)**, for each region:
+
+\[
+R_{\text{ref},r} = \text{mean}\left(\frac{\text{near}_{r,t}}{\text{off}_{r,t}}\right)
+\]
+
+```{r step4-r-ref}
+r_ref <- regional_annual %>%
+  filter(year >= ref_year_start, year <= ref_year_end) %>%
+  group_by(rgn_num, rgn_id) %>%
+  summarize(R_ref = mean(near / off, na.rm = TRUE), .groups = "drop")
+
+r_ref_file <- sprintf("R_ref_near_off_ratio_%d_%d.csv", ref_year_start, ref_year_end)
+write.csv(r_ref, file.path(dir_ratio_ref, r_ref_file), row.names = FALSE)
+
+knitr::kable(
+  r_ref, digits = 2,
+  caption = sprintf("Reference nearshore:offshore Chl-a ratio (%s)", ref_period_lbl)
+)
+```
+
+## 4.2 Compute ratio excess each year
+
+```{r step4-ratio-excess}
+regional_ratio <- regional_annual %>%
+  left_join(r_ref, by = c("rgn_num", "rgn_id")) %>%
+  mutate(ratio_excess = near - R_ref * off)
+
+regional_ratio %>%
+  select(rgn_id, year, near, off, R_ref, ratio_excess) %>%
+  head(12)
+```
+
+## 4.3 Save cell-level ratio excess rasters
+
+At each nearshore pixel in region \(r\):
+
+\[
+\text{excess}_{i,t} = \text{Chl}_{i,t} - R_{\text{ref},r} \times \bar{O}_{r,t}
+\]
+
+```{r step4-rasters}
+for (yr in years) {
+  re <- compute_ratio_excess_raster(
+    annual_mean_chl(yr, chl_files), nearshore_bin, offshore_mask,
+    rgn_id_num, r_ref
+  )
+  writeRaster(re, file.path(dir_ratio, sprintf("ratio_excess_%s.tif", yr)),
+              overwrite = TRUE)
+}
+cat("Saved", length(years), "ratio excess rasters to:", dir_ratio, "\n")
+```
+
+---
+
+# Step 5 — Results
+
+## 5.1 Gulf-wide time series
+
+Average across regions each year. **Ratio excess** (orange) stays much flatter
+than raw contrast on shared spike years. Vertical lines mark major ENSO years
+(informal markers — see `enso_events` in Parameters).
+
+```{r step5-gulf-plot, fig.height = 5}
+gulf_summary <- regional_ratio %>%
+  group_by(year) %>%
+  summarize(
+    near = mean(near),
+    off = mean(off),
+    ratio_excess = mean(ratio_excess),
+    .groups = "drop"
+  )
+
+enso_lines <- enso_events %>%
+  mutate(
+    enso_phase = if_else(phase == "el_nino", "El Niño", "La Niña"),
+    xintercept = year + 0.5
+  )
+
+gulf_plot_colors <- c(
+  gulf_metric_colors,
+  "El Niño" = "#B2182B",
+  "La Niña" = "#4393C3"
+)
+
+ggplot(prep_gulf_comparison_long(gulf_summary), aes(year, value, color = metric, linetype = metric)) +
+  geom_vline(
+    data = enso_lines,
+    aes(xintercept = xintercept, color = enso_phase),
+    linewidth = 0.4,
+    alpha = 0.7,
+    linetype = "dotted",
+    inherit.aes = FALSE
+  ) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  geom_hline(yintercept = 0, linetype = "dotted", color = "gray50") +
+  scale_color_manual(values = gulf_plot_colors) +
+  scale_linetype_manual(
+    values = stats::setNames(
+      rep("solid", length(gulf_metric_colors)),
+      names(gulf_metric_colors)
+    )
+  ) +
+  labs(
+    title = sprintf("Gulf-wide annual means (%s nearshore): Chl-a and ratio excess", nearshore_tag),
+    subtitle = "Dotted vertical lines = major ENSO years (El Niño red, La Niña blue)",
+    x = NULL, y = "mg/m³", color = NULL, linetype = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+## 5.2 Per-region comparison plots (same format as gulf-wide)
+
+Each panel shows **nearshore**, **offshore**, **raw contrast**, and **ratio
+excess** for one OHI region. Shaded band = early years (2000–2004) when ratio
+excess was often **negative** in several regions.
+
+```{r step5-regional-comparison-facet, fig.height = 14}
+regional_long <- prep_comparison_long(regional_ratio)
+
+ggplot(regional_long, aes(year, value, color = metric, linetype = metric)) +
+  annotate(
+    "rect",
+    xmin = year_start - 0.5, xmax = early_period_end + 0.5,
+    ymin = -Inf, ymax = Inf,
+    fill = "gray85", alpha = 0.35
+  ) +
+  geom_line(linewidth = 0.85) +
+  geom_point(size = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dotted", color = "gray50") +
+  facet_wrap(~ rgn_id, ncol = 3, scales = "free_y") +
+  scale_color_manual(values = metric_colors) +
+  scale_x_continuous(breaks = seq(2000, 2024, 8)) +
+  labs(
+    title = sprintf("Annual means by OHI region (%s nearshore): raw Chl-a vs ratio excess", nearshore_tag),
+    subtitle = "Gray shading = early period (2000–2004); ratio excess (orange) often lowest here",
+    x = NULL, y = "mg/m³", color = NULL, linetype = NULL
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom")
+```
+
+## 5.3 Ratio excess only — early vs recent
+
+Focus on ratio excess alone to see whether regions started **below zero** and
+rose toward or above zero in recent years.
+
+```{r step5-ratio-excess-early, fig.height = 8}
+ggplot(regional_ratio, aes(year, ratio_excess, color = rgn_id, group = rgn_id)) +
+  annotate(
+    "rect",
+    xmin = year_start - 0.5, xmax = early_period_end + 0.5,
+    ymin = -Inf, ymax = Inf,
+    fill = "gray85", alpha = 0.35
+  ) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  scale_x_continuous(breaks = seq(2000, 2024, 5)) +
+  labs(
+    title = sprintf("Ratio excess by OHI region (%s nearshore)", nearshore_tag),
+    subtitle = "Gray = 2000–2004. A positive trend can partly reflect rising from low early values.",
+    x = NULL, y = "Ratio excess (mg/m³)", color = "Region"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+```
+
+## 5.4 Are trends driven by low early years?
+
+A significant positive slope over 2000–2024 could mean (a) steady increase,
+or (b) **low values in the first few years** pulling the regression line up
+even if later years are relatively flat.
+
+We test this three ways:
+
+1. **Re-fit trends** starting from 2005 and 2011 (skip early years).  
+2. Compare **mean ratio excess** in 2000–2004 vs 2019–2024.  
+3. Compare **\(R_{\text{ref}}\) from 2000–2010** (earlier method) vs the full-period
+   reference used here (sensitivity — not the primary method).
+
+```{r step5-trend-sensitivity}
+fit_trend <- function(df) {
+  fit <- lm(ratio_excess ~ year, data = df)
+  tibble(
+    slope = unname(coef(fit)[2]),
+    p_value = summary(fit)$coefficients[2, 4]
+  )
+}
+
+trend_sensitivity <- map_dfr(trend_sensitivity_starts, function(yr0) {
+  regional_ratio %>%
+    filter(year >= yr0) %>%
+    group_by(rgn_id) %>%
+    group_modify(~ fit_trend(.x) %>% mutate(start_year = yr0, n_years = nrow(.x))) %>%
+    ungroup()
+}) %>%
+  mutate(
+    significant = p_value < 0.05,
+    direction = case_when(
+      significant & slope > 0 ~ "Increasing *",
+      significant & slope < 0 ~ "Decreasing *",
+      TRUE ~ "Not significant"
+    )
+  ) %>%
+  rename(slope_mg_yr = slope)
+
+knitr::kable(
+  trend_sensitivity %>%
+    select(rgn_id, start_year, slope_mg_yr, p_value, direction) %>%
+    arrange(rgn_id, start_year),
+  digits = 4,
+  caption = "Ratio excess trend sensitivity: does significance hold if early years are excluded?"
+)
+
+knitr::kable(
+  regional_ratio %>%
+    group_by(rgn_id) %>%
+    summarize(
+      mean_2000_2004 = mean(ratio_excess[year <= early_period_end], na.rm = TRUE),
+      mean_2011_2015 = mean(ratio_excess[year >= 2011 & year <= 2015], na.rm = TRUE),
+      mean_2019_2024 = mean(ratio_excess[year >= 2019], na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(recent_minus_early = mean_2019_2024 - mean_2000_2004),
+  digits = 3,
+  caption = "Mean ratio excess by period — shows shift from negative/low early to higher recent"
+)
+
+# Sensitivity: R_ref from 2000–2010 only (earlier reference window)
+r_ref_2000_2010 <- regional_annual %>%
+  filter(year >= 2000L, year <= 2010L) %>%
+  group_by(rgn_num, rgn_id) %>%
+  summarize(R_ref_2000_2010 = mean(near / off, na.rm = TRUE), .groups = "drop")
+
+regional_ratio_2000_2010_ref <- regional_annual %>%
+  left_join(r_ref_2000_2010, by = c("rgn_num", "rgn_id")) %>%
+  mutate(ratio_excess_2000_2010_ref = near - R_ref_2000_2010 * off)
+
+trend_r_ref_compare <- bind_rows(
+  regional_ratio %>%
+    group_by(rgn_id) %>%
+    group_modify(~ fit_trend(.x)) %>%
+    ungroup() %>%
+    mutate(R_ref_period = ref_period_lbl),
+  regional_ratio_2000_2010_ref %>%
+    group_by(rgn_id) %>%
+    group_modify(~ fit_trend(rename(.x, ratio_excess = ratio_excess_2000_2010_ref))) %>%
+    ungroup() %>%
+    mutate(R_ref_period = "2000–2010")
+) %>%
+  rename(slope_mg_yr = slope) %>%
+  mutate(significant = p_value < 0.05)
+
+knitr::kable(
+  trend_r_ref_compare %>%
+    select(rgn_id, R_ref_period, slope_mg_yr, p_value, significant) %>%
+    arrange(rgn_id, R_ref_period),
+  digits = 4,
+  caption = "Trend sensitivity: full-period R_ref vs 2000–2010 R_ref"
+)
+```
+
+```{r step5-trend-sensitivity-plot, fig.height = 5}
+ggplot(trend_sensitivity, aes(start_year, slope_mg_yr, color = rgn_id, group = rgn_id)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(aes(shape = significant), size = 3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  scale_x_continuous(breaks = trend_sensitivity_starts) +
+  labs(
+    title = "Trend slope vs start year",
+    subtitle = "Filled points = p < 0.05. If slopes drop toward zero when starting later, early years influence the full-period trend.",
+    x = "First year included in trend",
+    y = "Slope (mg/m³ per year)",
+    color = "Region", shape = "p < 0.05"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+```
+
+**How to read this:** If a region stays **significantly positive** when trends
+start in **2005** or **2011**, the increase is not only an artifact of very low
+early values. If significance **disappears** when early years are dropped, treat
+the full-period trend with caution.
+
+## 5.5 Full-period trend table (2000–2024)
+
+```{r step5-trends}
+trend_table <- regional_ratio %>%
+  group_by(rgn_id, rgn_num) %>%
+  summarize(
+    slope_mg_yr = coef(lm(ratio_excess ~ year))[2],
+    p_value = summary(lm(ratio_excess ~ year))$coefficients[2, 4],
+    mean_2000_2004 = mean(ratio_excess[year <= early_period_end], na.rm = TRUE),
+    mean_2019_2024 = mean(ratio_excess[year >= 2019], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    change_early_to_recent = mean_2019_2024 - mean_2000_2004,
+    trend = if_else(p_value < 0.05 & slope_mg_yr > 0, "Increasing (p < 0.05)",
+             if_else(p_value < 0.05 & slope_mg_yr < 0, "Decreasing (p < 0.05)",
+                      "Not significant"))
+  ) %>%
+  arrange(desc(slope_mg_yr))
+
+knitr::kable(trend_table %>% select(rgn_id, slope_mg_yr, p_value,
+                                    mean_2000_2004, mean_2019_2024,
+                                    change_early_to_recent, trend),
+             digits = 3,
+             caption = "Full-period ratio excess trends with early vs recent means")
+```
+
+## 5.6 Example map — ratio excess, 2020
+
+```{r step5-map, fig.height = 4}
+ratio_2020 <- rast(file.path(dir_ratio, "ratio_excess_2020.tif"))
+plot(
+  ratio_2020,
+  main = sprintf("Ratio excess, 2020 (%s nearshore cells)", nearshore_tag),
+  col = hcl.colors(50, "RdYlBu"),
+  range = global(ratio_2020, range, na.rm = TRUE)$range
+)
+```
+
+---
+
+# Summary
+
+| Step | What we did |
+|------|-------------|
+| 1 | Loaded Copernicus 4 km monthly Chl-a (2000–2024) |
+| 2 | Defined **`r nearshore_km` km nearshore** and **offshore** zones per OHI region |
+| 3 | Showed raw nearshore/offshore **co-vary** — simple contrast is not enough |
+| 4 | Computed **ratio excess** = `near − R_ref × off` with \(R_{\text{ref}}\) from **`r ref_period_lbl`** |
+| 5 | Gulf-wide and **per-region** comparison plots; trend sensitivity for early years |
+
+**Trend interpretation:** Several regions had **negative** ratio excess in
+2000–2004. Full-period positive trends partly reflect a shift from that low
+early period to higher recent values — check **Section 5.4** before using
+trend slope alone as pressure.
+
+**Outputs on Mazu** (`r nearshore_tag` nearshore band):
+
+- `chla_int/masks/`r nearshore_tag`/`
+- `chla_int/ratio_excess_`r nearshore_tag`/annual/ratio_excess_YYYY.tif`
+- `chla_int/ratio_excess_`r nearshore_tag`/reference/R_ref_near_off_ratio_`r ref_year_start`_`r ref_year_end`.csv`
+
+**Next steps (not in this notebook):**
+
+- Rescale ratio excess or its trend to 0–1 **pressure** for OHI Clean Waters  
+- Validate against nitrogen loading (`cw_eutrophication.qmd`) and known input coasts  
+- Compare alternative reference windows for \(R_{\text{ref}}\)
+
+---
+
+*Input rasters: `step1_cw_chla.qmd`. Earlier exploratory work: `check_cw_chla.qmd`, `chla_restart.Rmd`.*
