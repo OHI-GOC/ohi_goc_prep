@@ -1,0 +1,960 @@
+---
+title: 'OHI GoC 2025: LE ggplot PDF exports'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+editor_options:
+  chunk_output_type: console
+---
+
+# LE visualizations (ggplot → PDF)
+
+Companion to `LE/script6_le_visualizations.qmd` and the EWG 3.1 LE website page. Rebuilds current-status line charts as **ggplot** objects and writes **vector PDFs** (best quality for Google Slides).
+
+For metrics that use two reference options, each chart is saved twice: **Historical reference** and **2019 reference**. Job quality uses one shared Gulf-wide 90th-quantile reference.
+
+**Extra raw plots:** Gulf-wide marine sector trends (jobs, job quality per job, revenue) matching the website section, saved as a three-panel figure plus separate panels and a sector color key.
+
+```{r setup}
+library(tidyverse)
+library(ggplot2)
+library(scales)
+library(here)
+library(priceR)
+
+# Vector PDF via cairo when available (sharper text for slides)
+pdf_device <- if (isTRUE(capabilities("cairo"))) cairo_pdf else pdf
+
+out_dir <- here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/output_viz/ggplots_for_slides_071326")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+png_dir <- file.path(out_dir, "png")
+dir.create(png_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Slide-friendly landscape (approx. 16:9 content area)
+FIG_W <- 9
+FIG_H <- 5
+SECTOR_H <- 8
+LEGEND_H <- 1
+```
+
+```{r helpers}
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+region_levels <- paste0("Region_", 1:9)
+rgn_label_colors <- setNames(
+  unname(rgn_colors[region_levels]),
+  unname(rgn_labels[region_levels])
+)
+census_years <- c(2003, 2008, 2013, 2018, 2023)
+component_levels <- c(
+  "LE:LIV: Number of Jobs",
+  "LE:LIV: Quality of Jobs",
+  "LE:LIV",
+  "LE:ECO",
+  "Overall LE"
+)
+
+add_rgn_labels <- function(df) {
+  df %>%
+    mutate(
+      rgn_id = factor(as.character(rgn_id), levels = region_levels),
+      rgn_label = factor(
+        rgn_labels[as.character(rgn_id)],
+        levels = unname(rgn_labels[region_levels])
+      )
+    )
+}
+
+first_existing <- function(...) {
+  paths <- c(...)
+  hit <- paths[file.exists(paths)]
+  if (length(hit) == 0) {
+    stop("None of these paths exist:\n", paste(" -", paths, collapse = "\n"))
+  }
+  hit[[1]]
+}
+
+gg_theme_le <- function() {
+  theme_minimal(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold", size = 16, hjust = 0),
+      plot.subtitle = element_text(size = 11, color = "grey30"),
+      axis.title = element_text(size = 12),
+      axis.text = element_text(size = 11),
+      legend.title = element_text(face = "bold", size = 11),
+      legend.text = element_text(size = 10),
+      legend.position = "right",
+      panel.grid.minor = element_blank(),
+      plot.margin = margin(8, 12, 8, 8)
+    )
+}
+
+le_gg_score <- function(df, y_var, title, y_lab = "Puntaje // Percent (out of 100)",
+                        y_range = c(0, 110), add_goal = TRUE) {
+  df <- df %>%
+    mutate(year = as.numeric(year)) %>%
+    arrange(rgn_label, year)
+
+  y_col <- rlang::sym(y_var)
+
+  p <- ggplot(df, aes(x = year, y = !!y_col, color = rgn_label, group = rgn_label)) +
+    geom_line(linewidth = 0.9, lineend = "round") +
+    geom_point(size = 2.2) +
+    scale_color_manual(values = rgn_label_colors, name = "Region", drop = FALSE) +
+    scale_x_continuous(breaks = census_years) +
+    labs(title = title, x = "Año censal // Census Year", y = y_lab) +
+    gg_theme_le()
+
+  if (add_goal) {
+    p <- p +
+      geom_hline(
+        yintercept = 100,
+        linetype = "dashed",
+        color = "black",
+        linewidth = 0.55
+      )
+  }
+
+  if (!is.null(y_range)) {
+    p <- p + coord_cartesian(ylim = y_range)
+  }
+
+  p
+}
+
+le_gg_goc <- function(df, y_var, title, y_lab = "Puntaje // Percent (out of 100)",
+                      y_range = c(0, 110)) {
+  df <- df %>%
+    mutate(year = as.numeric(year)) %>%
+    arrange(year)
+
+  y_col <- rlang::sym(y_var)
+
+  p <- ggplot(df, aes(x = year, y = !!y_col)) +
+    geom_line(linewidth = 1.05, color = "#333333", lineend = "round") +
+    geom_point(size = 2.6, color = "#333333") +
+    geom_hline(
+      yintercept = 100,
+      linetype = "dashed",
+      color = "black",
+      linewidth = 0.55
+    ) +
+    scale_x_continuous(breaks = census_years) +
+    labs(title = title, x = "Año censal // Census Year", y = y_lab) +
+    gg_theme_le() +
+    theme(legend.position = "none")
+
+  if (!is.null(y_range)) {
+    p <- p + coord_cartesian(ylim = y_range)
+  }
+
+  p
+}
+
+# Raw / scaled regional line chart (no 100 goal line)
+le_gg_raw <- function(df, y_var, title, y_lab, y_scale = "comma") {
+  df <- df %>%
+    mutate(year = as.numeric(year)) %>%
+    arrange(rgn_label, year)
+
+  y_col <- rlang::sym(y_var)
+
+  p <- ggplot(df, aes(x = year, y = !!y_col, color = rgn_label, group = rgn_label)) +
+    geom_line(linewidth = 0.9, lineend = "round") +
+    geom_point(size = 2.2) +
+    scale_color_manual(values = rgn_label_colors, name = "Region", drop = FALSE) +
+    scale_x_continuous(breaks = census_years) +
+    labs(title = title, x = "Año censal // Census Year", y = y_lab) +
+    gg_theme_le()
+
+  if (identical(y_scale, "comma")) {
+    p <- p + scale_y_continuous(labels = label_comma())
+  } else if (identical(y_scale, "sci")) {
+    p <- p + scale_y_continuous(labels = label_number(accuracy = 0.0001))
+  }
+
+  p
+}
+
+save_le_pdf <- function(plot, filename, width = FIG_W, height = FIG_H) {
+  path <- file.path(out_dir, filename)
+  ggsave(
+    filename = path,
+    plot = plot,
+    device = pdf_device,
+    width = width,
+    height = height,
+    units = "in",
+    dpi = 300,
+    bg = "white"
+  )
+  message("Wrote: ", path)
+  invisible
+}
+
+save_le_png <- function(plot, filename, width = FIG_W, height = FIG_H) {
+  ggsave(
+    filename = file.path(png_dir, filename),
+    plot = plot,
+    width = width,
+    height = height,
+    units = "in",
+    dpi = 300,
+    bg = "white"
+  )
+}
+
+build_le_bundle <- function(jobs_path, rev_path, qual_raw, final_path) {
+  cs_jobs_raw <- read_csv(jobs_path, show_col_types = FALSE) %>%
+    rename(year = ce_ano_censal) %>%
+    mutate(year = as.numeric(year))
+
+  cs_rev_raw <- read_csv(rev_path, show_col_types = FALSE) %>%
+    rename(year = ano_censal) %>%
+    mutate(year = as.numeric(year))
+
+  all_cs_indicators <- read_csv(final_path, show_col_types = FALSE) %>%
+    rename(year = ano_censal, le_current_status = final_le_current_status_rgn) %>%
+    mutate(year = as.numeric(year))
+
+  cs_jobs_clean <- cs_jobs_raw %>%
+    rename(score = current_status) %>%
+    mutate(score = ifelse(rgn_id == "Region_2", NA_real_, score)) %>%
+    dplyr::select(rgn_id, year, score)
+
+  cs_eco_clean <- cs_rev_raw %>%
+    rename(score = current_status) %>%
+    mutate(score = ifelse(rgn_id == "Region_2", NA_real_, score)) %>%
+    dplyr::select(rgn_id, year, score)
+
+  cs_liv_clean <- full_join(
+    cs_jobs_raw %>%
+      dplyr::select(rgn_id, year, job_current_status = current_status),
+    qual_raw %>%
+      dplyr::select(rgn_id, year, qual_current_status = current_status)
+  ) %>%
+    mutate(
+      score = (job_current_status + qual_current_status) / 2,
+      score = ifelse(rgn_id == "Region_2", NA_real_, score)
+    ) %>%
+    dplyr::select(rgn_id, year, score)
+
+  le_goc_avg <- all_cs_indicators %>%
+    dplyr::select(year, le_goc_current_status = final_le_current_status_goc) %>%
+    distinct()
+
+  list(
+    jobs = cs_jobs_clean,
+    eco = cs_eco_clean,
+    liv = cs_liv_clean,
+    le = all_cs_indicators,
+    le_goc = le_goc_avg
+  )
+}
+```
+
+## Read current-status outputs (both references)
+
+```{r read-cs}
+path_qual <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/le/liv/ce_qual_current_status.csv"
+)
+path_jobs_hist <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/le/liv/ce_jobs_current_status.csv"
+)
+path_jobs_2019 <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/le/liv/ce_jobs_current_status_2019ref.csv"
+)
+path_rev_hist <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/le/eco/ce_rev_current_status.csv"
+)
+path_rev_2019 <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/le/eco/ce_rev_current_status_2019ref.csv"
+)
+path_final_hist <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/le/final_le_current_status.csv"
+)
+path_final_2019 <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/le/final_le_current_status_2019ref.csv"
+)
+path_coastal_adj <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/le/coastal_adjustment_multiplier_2020.csv"
+)
+path_ce_cleaned <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int/ce_cleaned_totals_per_yr_municipio_activity.csv"
+)
+
+cs_qual_raw <- read_csv(path_qual, show_col_types = FALSE) %>%
+  rename(year = ano_censal) %>%
+  mutate(year = as.numeric(year))
+
+cs_qual_clean <- cs_qual_raw %>%
+  rename(score = current_status) %>%
+  mutate(score = ifelse(rgn_id == "Region_2", NA_real_, score)) %>%
+  dplyr::select(rgn_id, year, score)
+
+le_hist <- build_le_bundle(
+  jobs_path = path_jobs_hist,
+  rev_path = path_rev_hist,
+  qual_raw = cs_qual_raw,
+  final_path = path_final_hist
+)
+
+le_2019 <- build_le_bundle(
+  jobs_path = path_jobs_2019,
+  rev_path = path_rev_2019,
+  qual_raw = cs_qual_raw,
+  final_path = path_final_2019
+)
+
+coastal_adj <- read_csv(path_coastal_adj, show_col_types = FALSE)
+
+coastal_sectors <- c(
+  "coastal_recreation",
+  "travel_planners",
+  "accommodations_food_drink",
+  "environmental_research_consulting"
+)
+
+# Scaled jobs (jobs per coastal resident) from jobs current-status file
+jobs_scaled_df <- read_csv(path_jobs_hist, show_col_types = FALSE) %>%
+  rename(year = ce_ano_censal) %>%
+  mutate(
+    year = as.numeric(year),
+    marine_jobs_per_local_pop = as.numeric(marine_jobs_per_local_pop)
+  ) %>%
+  filter(!rgn_id %in% "Region_2") %>% 
+  dplyr::select(rgn_id, year, marine_jobs_per_local_pop)
+
+# Unscaled coastal-adjusted job counts by region (before dividing by population)
+jobs_unscaled_df <- read_csv(path_ce_cleaned, show_col_types = FALSE) %>%
+  filter(!(municipio == "MEXICALI" & ano_censal == "2023")) %>%
+  group_by(ano_censal, rgn_id, specific_sector) %>%
+  summarize(jobs_per_act = sum(h000a, na.rm = TRUE), .groups = "drop") %>%
+  full_join(coastal_adj, by = "rgn_id") %>%
+  mutate(
+    coastal_pop_adjustment = ifelse(
+      rgn_id == "Region_1" & ano_censal == "2023",
+      1,
+      coastal_pop_adjustment
+    ),
+    first_adj = ifelse(
+      rgn_id %in% c("Region_3", "Region_4"),
+      jobs_per_act * coastal_pop_adjustment,
+      jobs_per_act
+    ),
+    coastal_jobs_per_act = ifelse(
+      specific_sector %in% coastal_sectors,
+      jobs_per_act * coastal_pop_adjustment,
+      first_adj
+    )
+  ) %>%
+  group_by(ano_censal, rgn_id) %>%
+  summarize(total_jobs = round(sum(coastal_jobs_per_act, na.rm = TRUE)), .groups = "drop") %>%
+  mutate(year = as.numeric(ano_censal)) %>%
+  dplyr::select(rgn_id, year, total_jobs)
+```
+
+## Build ggplot score objects
+
+```{r build-score-plots}
+# Overall LE
+gg_le_overall_hist <- le_gg_score(
+  add_rgn_labels(le_hist$le),
+  y_var = "le_current_status",
+  title = "CURRENT STATUS: Livelihoods & Economies (Historical Reference)"
+)
+gg_le_overall_2019 <- le_gg_score(
+  add_rgn_labels(le_2019$le),
+  y_var = "le_current_status",
+  title = "CURRENT STATUS: Livelihoods & Economies (2019 Reference)"
+)
+
+gg_le_rgn_hist <- le_gg_score(
+  add_rgn_labels(le_hist$le),
+  y_var = "le_current_status",
+  title = "Overall LE current status by region (Historical Reference)"
+)
+gg_le_rgn_2019 <- le_gg_score(
+  add_rgn_labels(le_2019$le),
+  y_var = "le_current_status",
+  title = "Overall LE current status by region (2019 Reference)"
+)
+
+gg_le_goc_hist <- le_gg_goc(
+  le_hist$le_goc,
+  y_var = "le_goc_current_status",
+  title = "Overall LE current status for the Gulf of California (Historical Reference)"
+)
+gg_le_goc_2019 <- le_gg_goc(
+  le_2019$le_goc,
+  y_var = "le_goc_current_status",
+  title = "Overall LE current status for the Gulf of California (2019 Reference)"
+)
+
+# LIV
+gg_liv_hist <- le_gg_score(
+  add_rgn_labels(le_hist$liv),
+  y_var = "score",
+  title = "LE:LIV (Number of Jobs & Quality of Jobs merged) (Historical Reference)"
+)
+gg_liv_2019 <- le_gg_score(
+  add_rgn_labels(le_2019$liv),
+  y_var = "score",
+  title = "LE:LIV (Number of Jobs & Quality of Jobs merged) (2019 Reference)"
+)
+
+gg_jobs_hist <- le_gg_score(
+  add_rgn_labels(le_hist$jobs),
+  y_var = "score",
+  title = "LE:LIV: Number of Jobs (Historical Reference)"
+)
+gg_jobs_2019 <- le_gg_score(
+  add_rgn_labels(le_2019$jobs),
+  y_var = "score",
+  title = "LE:LIV: Number of Jobs (2019 Reference)"
+)
+
+gg_quality <- le_gg_score(
+  add_rgn_labels(cs_qual_clean),
+  y_var = "score",
+  title = "LE:LIV: Quality of Jobs (same reference in both scenarios)"
+)
+
+# ECO
+gg_eco_hist <- le_gg_score(
+  add_rgn_labels(le_hist$eco),
+  y_var = "score",
+  title = "LE:ECO (Historical Reference)"
+)
+gg_eco_2019 <- le_gg_score(
+  add_rgn_labels(le_2019$eco),
+  y_var = "score",
+  title = "LE:ECO (2019 Reference)"
+)
+
+# Faceted components (both refs)
+make_components_long <- function(bundle, qual_df) {
+  bind_rows(
+    add_rgn_labels(bundle$jobs) %>%
+      transmute(rgn_id, rgn_label, year, score, component = "LE:LIV: Number of Jobs"),
+    add_rgn_labels(qual_df) %>%
+      transmute(rgn_id, rgn_label, year, score, component = "LE:LIV: Quality of Jobs"),
+    add_rgn_labels(bundle$liv) %>%
+      transmute(rgn_id, rgn_label, year, score, component = "LE:LIV"),
+    add_rgn_labels(bundle$eco) %>%
+      transmute(rgn_id, rgn_label, year, score, component = "LE:ECO"),
+    add_rgn_labels(bundle$le) %>%
+      transmute(
+        rgn_id, rgn_label, year,
+        score = le_current_status,
+        component = "Overall LE"
+      )
+  ) %>%
+    filter(year %in% census_years) %>%
+    mutate(component = factor(component, levels = component_levels))
+}
+
+le_components_hist <- make_components_long(le_hist, cs_qual_clean)
+le_components_2019 <- make_components_long(le_2019, cs_qual_clean)
+
+gg_components_hist <- ggplot(
+  le_components_hist,
+  aes(x = year, y = score, color = rgn_label, group = rgn_label)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.8) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey45", linewidth = 0.4) +
+  facet_wrap(~ component, ncol = 2) +
+  scale_color_manual(values = rgn_label_colors, name = "Region", drop = FALSE) +
+  scale_x_continuous(breaks = census_years) +
+  coord_cartesian(ylim = c(0, 110)) +
+  labs(
+    title = "LE current status by component (Historical Reference)",
+    x = "Census Year",
+    y = "Score (out of 100)"
+  ) +
+  gg_theme_le() +
+  theme(strip.text = element_text(face = "bold", size = 11))
+
+gg_components_2019 <- ggplot(
+  le_components_2019,
+  aes(x = year, y = score, color = rgn_label, group = rgn_label)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.8) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey45", linewidth = 0.4) +
+  facet_wrap(~ component, ncol = 2) +
+  scale_color_manual(values = rgn_label_colors, name = "Region", drop = FALSE) +
+  scale_x_continuous(breaks = census_years) +
+  coord_cartesian(ylim = c(0, 110)) +
+  labs(
+    title = "LE current status by component (2019 Reference)",
+    x = "Census Year",
+    y = "Score (out of 100)"
+  ) +
+  gg_theme_le() +
+  theme(strip.text = element_text(face = "bold", size = 11))
+
+# Raw job counts (coastal-adjusted, unscaled) and scaled jobs per coastal resident
+gg_jobs_unscaled <- le_gg_raw(
+  add_rgn_labels(jobs_unscaled_df),
+  y_var = "total_jobs",
+  title = "Marine-related jobs by region (coastal-adjusted, unscaled counts)",
+  y_lab = "Number of jobs (H000A, coastal-adjusted)"
+)
+
+gg_jobs_scaled <- le_gg_raw(
+  add_rgn_labels(jobs_scaled_df),
+  y_var = "marine_jobs_per_local_pop",
+  title = "Marine-related jobs by region (scaled to coastal population)",
+  y_lab = "Jobs per coastal resident",
+  y_scale = "sci"
+)
+```
+
+## Gulf-wide marine sector trends (extra raw plots)
+
+Matches the website **Gulf-wide marine sector trends** section: coastal-adjusted H000A jobs, (J300A + J400A) per job in constant 2023 MXN, and coastal-adjusted M000A revenue, aggregated across all OHI regions and colored by marine sector.
+
+```{r sector-trends}
+sector_labels <- c(
+  "fishing" = "Fishing",
+  "mariculture" = "Mariculture",
+  "seafood_processing_trade" = "Seafood processing & trade",
+  "port_dock_construction_management" = "Port & dock construction",
+  "boat_building" = "Boat building",
+  "tidal_energy" = "Tidal energy",
+  "oil_gas_maritime_transport" = "Oil & gas maritime transport",
+  "cargo_goods_maritime_transport" = "Cargo maritime transport",
+  "marine_tourist_transport" = "Marine tourist transport",
+  "coastal_recreation" = "Coastal recreation",
+  "travel_planners" = "Travel planners",
+  "accommodations_food_drink" = "Accommodations & food/drink",
+  "environmental_research_consulting" = "Environmental research"
+)
+
+sector_levels <- unname(sector_labels)
+
+# Custom palette for slides (keyed by display label)
+sector_colors <- c(
+  "Fishing"                        = "#0091FF",  # vivid bright blue (prominent)
+  "Mariculture"                    = "#FF9E1B",  # bright orange
+  "Seafood processing & trade"     = "#00C781",  # bright emerald green
+  "Port & dock construction"       = "#B98B4E",  # warm light tan
+  "Boat building"                  = "#FF4FA0",  # bright pink
+  "Tidal energy"                   = "#5FD4E3",  # bright aqua
+  "Oil & gas maritime transport"   = "#E8590C",  # bright burnt orange/vermillion
+  "Cargo maritime transport"       = "#FFD500",  # bright gold/yellow
+  "Marine tourist transport"       = "#7C6FF0",  # bright periwinkle
+  "Coastal recreation"             = "#9ED60B",  # bright lime green
+  "Travel planners"                = "#C061E8",  # bright orchid purple
+  "Accommodations & food/drink"    = "#FF2255",  # vivid crimson (prominent)
+  "Environmental research"         = "#A8A8A8"   # light neutral gray
+)
+
+sector_linetypes <- setNames(
+  rep("solid", length(sector_levels)),
+  sector_levels
+)
+
+quiet_inflation_factor_2023 <- function(year) {
+  result <- NA_real_
+  suppressMessages(
+    suppressWarnings({
+      capture.output(
+        result <- as.numeric(
+          adjust_for_inflation(
+            price = 1,
+            from_date = year,
+            country = "Mexico",
+            to_date = 2023
+          )
+        ),
+        type = "output"
+      )
+    })
+  )
+  result
+}
+
+inflation_factors <- tibble(
+  year = census_years,
+  infl_factor = vapply(census_years, quiet_inflation_factor_2023, numeric(1))
+)
+
+apply_coastal_sector_metrics <- function(df) {
+  df %>%
+    full_join(coastal_adj, by = "rgn_id") %>%
+    mutate(
+      coastal_pop_adjustment = ifelse(
+        rgn_id == "Region_1" & ano_censal == "2023",
+        1,
+        coastal_pop_adjustment
+      ),
+      coastal_jobs = ifelse(
+        rgn_id %in% c("Region_3", "Region_4"),
+        jobs * coastal_pop_adjustment,
+        jobs
+      ),
+      coastal_jobs = ifelse(
+        specific_sector %in% coastal_sectors,
+        jobs * coastal_pop_adjustment,
+        coastal_jobs
+      ),
+      coastal_benefits = ifelse(
+        rgn_id %in% c("Region_3", "Region_4"),
+        benefits_real_2023 * coastal_pop_adjustment,
+        benefits_real_2023
+      ),
+      coastal_benefits = ifelse(
+        specific_sector %in% coastal_sectors,
+        benefits_real_2023 * coastal_pop_adjustment,
+        coastal_benefits
+      ),
+      coastal_revenue = ifelse(
+        rgn_id %in% c("Region_3", "Region_4"),
+        revenue_real_2023 * coastal_pop_adjustment,
+        revenue_real_2023
+      ),
+      coastal_revenue = ifelse(
+        specific_sector %in% coastal_sectors,
+        revenue_real_2023 * coastal_pop_adjustment,
+        coastal_revenue
+      )
+    ) %>%
+    dplyr::select(-coastal_pop_adjustment)
+}
+
+ce_sector_raw <- read_csv(path_ce_cleaned, show_col_types = FALSE) %>%
+  filter(!(municipio == "MEXICALI" & ano_censal == "2023")) %>%
+  mutate(
+    year = as.numeric(ano_censal),
+    benefits_mxn = (coalesce(j300a, 0) + coalesce(j400a, 0)) * 1e6,
+    revenue_mxn = coalesce(m000a, 0) * 1e6,
+    jobs = coalesce(h000a, 0)
+  ) %>%
+  left_join(inflation_factors, by = "year") %>%
+  mutate(
+    benefits_real_2023 = benefits_mxn * infl_factor,
+    revenue_real_2023 = revenue_mxn * infl_factor
+  )
+
+ce_sector_coastal <- ce_sector_raw %>%
+  apply_coastal_sector_metrics() %>%
+  mutate(
+    sector_label = factor(
+      sector_labels[specific_sector],
+      levels = sector_levels
+    )
+  ) %>%
+  filter(!is.na(sector_label), year %in% census_years)
+
+sector_goc <- ce_sector_coastal %>%
+  group_by(year, specific_sector, sector_label) %>%
+  summarize(
+    total_jobs = sum(coastal_jobs, na.rm = TRUE),
+    total_benefits = sum(coastal_benefits, na.rm = TRUE),
+    total_revenue = sum(coastal_revenue, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    quality_per_job = ifelse(total_jobs > 0, total_benefits / total_jobs, NA_real_)
+  )
+
+sector_goc_long <- sector_goc %>%
+  pivot_longer(
+    c(total_jobs, quality_per_job, total_revenue),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  mutate(
+    metric = factor(
+      metric,
+      levels = c("total_jobs", "quality_per_job", "total_revenue"),
+      labels = c(
+        "Total jobs (coastal-adjusted, formal and informal)",
+        "Job quality (pesos of social benefits per job, 2023 MXN)",
+        "Total revenue (2023 MXN)"
+      )
+    )
+  )
+
+gg_sector_theme <- function(show_legend = FALSE) {
+  theme_minimal(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold", size = 16),
+      plot.subtitle = element_text(size = 11, color = "grey30"),
+      strip.text = element_text(face = "bold", size = 11),
+      legend.position = if (show_legend) "right" else "none",
+      panel.grid.minor = element_blank()
+    )
+}
+
+add_sector_scales <- function(p) {
+  p +
+    scale_color_manual(
+      values = sector_colors,
+      name = "Sector",
+      breaks = sector_levels,
+      drop = FALSE
+    ) +
+    scale_linetype_manual(
+      values = sector_linetypes,
+      name = "Sector",
+      breaks = sector_levels,
+      drop = FALSE
+    ) +
+    guides(
+      color = guide_legend(override.aes = list(linewidth = 1.6)),
+      linetype = guide_legend(override.aes = list(linewidth = 1.6))
+    )
+}
+
+gg_sector_goc_three_metrics <- ggplot(
+  sector_goc_long,
+  aes(
+    x = year,
+    y = value,
+    color = sector_label,
+    linetype = sector_label,
+    group = sector_label
+  )
+) +
+  geom_line(linewidth = 0.9, lineend = "round") +
+  geom_point(size = 1.8) +
+  facet_wrap(~ metric, ncol = 1, scales = "free_y") +
+  scale_x_continuous(breaks = census_years) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(
+    title = "Gulf-wide marine sector trends by census year",
+    subtitle = "Totals aggregated across all OHI regions; coastal adjustments applied.",
+    x = "Census year",
+    y = NULL
+  ) +
+  gg_sector_theme(show_legend = FALSE)
+
+gg_sector_goc_three_metrics <- add_sector_scales(gg_sector_goc_three_metrics)
+
+make_sector_panel <- function(df, y_var, title, y_lab) {
+  y_col <- rlang::sym(y_var)
+  p <- ggplot(
+    df,
+    aes(
+      x = year,
+      y = !!y_col,
+      color = sector_label,
+      linetype = sector_label,
+      group = sector_label
+    )
+  ) +
+    geom_line(linewidth = 0.95, lineend = "round") +
+    geom_point(size = 2) +
+    scale_x_continuous(breaks = census_years) +
+    scale_y_continuous(labels = label_comma()) +
+    labs(
+      title = title,
+      subtitle = "Gulf-wide totals; coastal adjustments applied.",
+      x = "Census year",
+      y = y_lab
+    ) +
+    gg_sector_theme(show_legend = TRUE)
+
+  add_sector_scales(p)
+}
+
+gg_sector_jobs <- make_sector_panel(
+  sector_goc,
+  "total_jobs",
+  "Gulf-wide marine sector trends: Total jobs",
+  "Coastal-adjusted jobs (formal and informal)"
+)
+
+gg_sector_quality <- make_sector_panel(
+  sector_goc,
+  "quality_per_job",
+  "Gulf-wide marine sector trends: Job quality",
+  "contributed social benefits per job (2023 MXN)"
+)
+
+gg_sector_revenue <- make_sector_panel(
+  sector_goc,
+  "total_revenue",
+  "Gulf-wide marine sector trends: Total revenue",
+  "Coastal-adjusted revenue (2023 MXN)"
+)
+
+sector_legend_lines <- tibble(
+  sector_label = factor(rep(sector_levels, each = 2), levels = sector_levels),
+  x = rep(c(1, 2), times = length(sector_levels)),
+  y = rep(seq_along(sector_levels), each = 2)
+)
+
+gg_sector_legend <- ggplot(
+  sector_legend_lines,
+  aes(
+    x = x,
+    y = y,
+    color = sector_label,
+    linetype = sector_label,
+    group = sector_label
+  )
+) +
+  geom_line(linewidth = 2, alpha = 0) +
+  scale_color_manual(
+    values = sector_colors,
+    name = "Sector",
+    breaks = sector_levels,
+    drop = FALSE
+  ) +
+  scale_linetype_manual(
+    values = sector_linetypes,
+    name = "Sector",
+    breaks = sector_levels,
+    drop = FALSE
+  ) +
+  guides(
+    color = guide_legend(
+      nrow = 4,
+      byrow = TRUE,
+      override.aes = list(linewidth = 2.5, alpha = 1)
+    ),
+    linetype = guide_legend(
+      nrow = 4,
+      byrow = TRUE,
+      override.aes = list(linewidth = 2.5, alpha = 1)
+    )
+  ) +
+  coord_cartesian(xlim = c(0.5, 2.5), ylim = c(0, length(sector_levels) + 1)) +
+  labs(title = "Sector color key (Gulf-wide marine sector trends)") +
+  theme_void(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    legend.key = element_blank(),
+    legend.key.width = unit(1.6, "cm"),
+    legend.key.height = unit(0.5, "cm"),
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 11, face = "bold"),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.background = element_rect(fill = "white", color = NA),
+    plot.margin = margin(8, 8, 8, 8)
+  )
+```
+
+## Preview
+
+```{r preview, fig.width=9, fig.height=5}
+gg_le_overall_hist
+gg_le_goc_hist
+gg_quality
+gg_jobs_unscaled
+gg_jobs_scaled
+gg_sector_jobs
+```
+
+```{r preview-sector-panel, fig.width=9, fig.height=8}
+gg_sector_goc_three_metrics
+```
+
+## Save all PDFs (+ PNG copies)
+
+```{r save-pdfs}
+score_plots <- list(
+  "le_overall_historical.pdf" = gg_le_overall_hist,
+  "le_overall_2019ref.pdf" = gg_le_overall_2019,
+  "le_overall_by_region_historical.pdf" = gg_le_rgn_hist,
+  "le_overall_by_region_2019ref.pdf" = gg_le_rgn_2019,
+  "le_goc_average_historical.pdf" = gg_le_goc_hist,
+  "le_goc_average_2019ref.pdf" = gg_le_goc_2019,
+  "le_liv_merged_historical.pdf" = gg_liv_hist,
+  "le_liv_merged_2019ref.pdf" = gg_liv_2019,
+  "le_liv_jobs_historical.pdf" = gg_jobs_hist,
+  "le_liv_jobs_2019ref.pdf" = gg_jobs_2019,
+  "le_liv_quality.pdf" = gg_quality,
+  "le_eco_historical.pdf" = gg_eco_hist,
+  "le_eco_2019ref.pdf" = gg_eco_2019,
+  "le_jobs_unscaled_coastal_adjusted.pdf" = gg_jobs_unscaled,
+  "le_jobs_scaled_per_coastal_resident.pdf" = gg_jobs_scaled
+)
+
+facet_plots <- list(
+  "le_components_historical.pdf" = gg_components_hist,
+  "le_components_2019ref.pdf" = gg_components_2019
+)
+
+iwalk(score_plots, ~ {
+  save_le_pdf(.x, .y)
+  save_le_png(.x, sub("\\.pdf$", ".png", .y))
+})
+
+iwalk(facet_plots, ~ {
+  save_le_pdf(.x, .y, width = FIG_W, height = 7.5)
+  save_le_png(.x, sub("\\.pdf$", ".png", .y), width = FIG_W, height = 7.5)
+})
+
+# Three-panel sector figure (taller) + separate metric panels + color key
+save_le_pdf(gg_sector_goc_three_metrics, "le_sector_goc_three_metrics.pdf",
+            width = FIG_W, height = SECTOR_H)
+save_le_png(gg_sector_goc_three_metrics, "le_sector_goc_three_metrics.png",
+            width = FIG_W, height = SECTOR_H)
+
+sector_single_plots <- list(
+  "le_sector_goc_jobs.pdf" = gg_sector_jobs,
+  "le_sector_goc_job_quality.pdf" = gg_sector_quality,
+  "le_sector_goc_revenue.pdf" = gg_sector_revenue
+)
+
+iwalk(sector_single_plots, ~ {
+  save_le_pdf(.x, .y)
+  save_le_png(.x, sub("\\.pdf$", ".png", .y))
+})
+
+save_le_pdf(gg_sector_legend, "le_sector_color_key.pdf",
+            width = FIG_W, height = LEGEND_H)
+save_le_png(gg_sector_legend, "le_sector_color_key.png",
+            width = FIG_W, height = LEGEND_H)
+
+message("All LE figure PDFs written to: ", out_dir)
+message("PNG copies (300 dpi) written to: ", png_dir)
+```
+
+## Notes for Google Slides
+
+- Prefer **PDF** files (vector) when inserting into Slides so text stays sharp.
+- Dual-reference pairs are labeled `_historical` and `_2019ref`.
+- Jobs raw plots: `le_jobs_unscaled_coastal_adjusted.pdf` (counts) and `le_jobs_scaled_per_coastal_resident.pdf` (jobs per coastal resident).
+- Sector trends: use `le_sector_goc_three_metrics.pdf` for the stacked figure, or the separate jobs / job quality / revenue PDFs; pair with `le_sector_color_key.pdf`.
+- Region colors match `script6_le_visualizations.qmd` / the LE website page.
+

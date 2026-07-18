@@ -1,0 +1,813 @@
+---
+title: 'OHI GoC 2025: Safety and Security (ENSU)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+    include-in-header: '../../../src/templates/ohi_hdr.html'
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: inline
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Safety and Security Goal: ENSU city perception
+
+## Summary
+
+### Background
+
+This script explores feelings of safety using the National Survey of Urban Public Security (ENSU) for cities in the six states that border or fringe the Gulf of California: Baja California, Baja California Sur, Sonora, Sinaloa, Nayarit, and Jalisco.
+Following discussions from the OHI GoC Expert Working Group Meeting (June 2025), the aim is to inform a Safety and Security goal with perception indicators that can be assigned to designed urban domains rather than forced onto municipios that the survey never powered.
+
+The analysis focuses on March rounds across all years available in the ENSU folder.
+March is treated as a comparable seasonal snapshot so that year to year change is not mixed with within year seasonality from June, September, or December rounds.
+
+**Important data gap:** there is no March microdata package for 2021 in the INEGI release set used here (2021 folders contain June and later rounds only).
+
+*Note: This analysis maintains sensitivity to regional contexts and focuses on constructive data interpretation as it relates to the Gulf's health.*
+
+### Why ENSU for this goal
+
+ENSU is built to produce city level estimates of perceived public safety for named áreas urbanas de interés.
+That matches the OHI need more closely than either ENVIPE or the Mexico Peace Index (MPI) and Mexico Positive Peace Index (MPPI) for the following reasons:
+
+* ENVIPE is designed for national, state, and a short list of urban areas of interest.
+  Municipal means from ENVIPE microdata are exploratory only.
+* MPI fear of violence is already an ENVIPE based state score.
+  MPPI is a state level Positive Peace construct.
+  Painting those state scores onto Gulf side municipios imports border and Pacific dynamics and cannot isolate Sea of Cortez localities.
+* ENSU asks, by design, whether living in the named city feels safe or unsafe, and whether people changed habits from fear of crime.
+
+### Data source and folder layout
+
+Program page: [INEGI ENSU](https://www.inegi.org.mx/programas/ensu/)
+
+Primary table:
+
+* `ENSU_CB_*`: selected person questionnaire (perception and habit change).
+
+Raw data are read from the first existing path among:
+
+1. `/home/shares/ohi/OHI_GOC/_raw_data/inegi_crime/d2025/ENSU` (shared server)
+2. the project local folder `ENSU/` (for example `.../SS_security/ENSU`)
+
+Intermediate products go to `/home/shares/ohi/OHI_GOC/goal_prep/ss/security_int` when that tree exists, otherwise to `goal_prep/ss/security_int` under the project.
+Outputs go to `/home/shares/ohi/OHI_GOC/goal_prep/ss/security_output` or `goal_prep/ss/security_output` locally.
+
+### Year to year file and schema changes handled here
+
+| Years | Format | Notes handled by the loader |
+|---|---|---|
+| 2014 to 2020 | DBF (`.dbf` / `.DBF`) | Read with `foreign::read.dbf` |
+| 2022 to present | CSV | Read with `readr::read_csv` |
+| 2021 | (no March file) | Explicitly absent; not an error |
+| 2014 to 2015 | Legacy questionnaire names | `P1` becomes city safety; `P4_1` to `P4_5` become habit change; `FACTOR` becomes the person weight |
+| 2016 onward | Modern `BP1_*` names | `BP1_1` and `BP1_5_*` with `FAC_SEL` |
+| through 2016 | `ENT` / `MUN` | Renamed to `CVE_ENT` / `CVE_MUN` |
+| 2017 onward | `CVE_ENT`, `NOM_ENT` | State names usually present |
+| through 2020 | city code `CD` only | City names filled from a crosswalk built from the latest CSV year that has `NOM_CD` |
+| 2022 onward | `NOM_CD` present | Preferred city labels, still keyed by `CD` |
+| file names | mixed | Accepts `ENSU_CB_03YY` and `ENSU_CB03YY` |
+
+City codes (`CD`) are the stable join key across years.
+City display names can shift slightly (for example `CULIACAN` versus `CULIACAN ROSALES`), so labels are standardized from the newest catalog when possible.
+
+### Methodology notes
+
+ENSU is a probabilistic urban household survey.
+Representativeness is for each área urbana de interés in the sample, not for every municipio.
+
+Harmonized analysis items:
+
+* City safety: modern `BP1_1`, or legacy `P1` in 2014 to 2015.
+  Codes: `1` safe, `2` unsafe, `9` does not know or does not answer.
+* Habit change: modern `BP1_5_1` to `BP1_5_5`, or legacy `P4_1` to `P4_5` in 2014 to 2015.
+  Codes: `1` yes, `2` no, `3` not applicable, `9` does not know or does not answer.
+* Person weight: modern `FAC_SEL`, or legacy `FACTOR` in 2014 to 2015.
+
+Estimates are weighted shares among substantive responses.
+Cities that enter ENSU later will show missing early years; that is coverage change, not a zero rate.
+
+# Setup
+
+```{r}
+# install librarian if it is missing
+if (!require(librarian)) {
+  # install librarian from cran
+  install.packages("librarian")
+  # attach librarian after install
+  library(librarian)
+  # end of librarian install branch
+}
+
+# load project packages through librarian
+librarian::shelf(
+  tidyverse, # data wrangling and plotting utilities
+  here, # project relative path helpers
+  ggplot2, # grammar of graphics plotting
+  readr, # fast csv reading and writing
+  stringr, # string cleaning helpers
+  stringi, # accent stripping for city name joins
+  lubridate, # date helpers if needed later
+  janitor, # clean_names for ensu columns
+  scales, # axis formatting helpers
+  purrr, # map over march files by year
+  foreign # read dbf microdata for 2020 and earlier
+)
+
+# candidate raw ensu roots (server first, then local project)
+path_raw_candidates <- c(
+  "/home/shares/ohi/OHI_GOC/_raw_data/inegi_crime/d2025/ENSU", # shared ohi server path
+  here::here("ENSU") # local project ensu folder
+)
+
+# keep only candidate roots that currently exist
+path_raw_existing <- path_raw_candidates[dir.exists(path_raw_candidates)]
+
+# stop if no ensu root can be found
+if (length(path_raw_existing) == 0) {
+  # explain both expected locations
+  stop("no ensu raw folder found. expected server path or local project ENSU/ folder.")
+}
+
+# use the first existing raw root
+path_raw_ensu <- path_raw_existing[[1]]
+
+# candidate intermediate folders
+path_int_candidates <- c(
+  "/home/shares/ohi/OHI_GOC/goal_prep/ss/security_int", # shared server intermediate path
+  here::here("goal_prep", "ss", "security_int") # local intermediate fallback
+)
+
+# candidate output folders
+path_out_candidates <- c(
+  "/home/shares/ohi/OHI_GOC/goal_prep/ss/security_output", # shared server output path
+  here::here("goal_prep", "ss", "security_output") # local output fallback
+)
+
+# default to local intermediate path
+path_int <- path_int_candidates[[2]]
+
+# prefer server intermediate path when the ohi shares tree exists
+if (dir.exists("/home/shares/ohi/OHI_GOC") || dir.exists(path_int_candidates[[1]])) {
+  # use server intermediate path
+  path_int <- path_int_candidates[[1]]
+}
+
+# default to local output path
+path_out <- path_out_candidates[[2]]
+
+# prefer server output path when the ohi shares tree exists
+if (dir.exists("/home/shares/ohi/OHI_GOC") || dir.exists(path_out_candidates[[1]])) {
+  # use server output path
+  path_out <- path_out_candidates[[1]]
+}
+
+# create the intermediate folder if it does not exist
+dir.create(path_int, recursive = TRUE, showWarnings = FALSE)
+
+# create the output folder if it does not exist
+dir.create(path_out, recursive = TRUE, showWarnings = FALSE)
+
+# print which paths are in use
+message("using raw ensu path: ", path_raw_ensu)
+# print intermediate path
+message("using intermediate path: ", path_int)
+# print output path
+message("using output path: ", path_out)
+
+# state codes for the six gulf adjacent states
+goc_state_codes <- c(
+  "02", # baja california
+  "03", # baja california sur
+  "14", # jalisco
+  "18", # nayarit
+  "25", # sinaloa
+  "26" # sonora
+)
+
+# list ensu cities in those states keyed by stable city code cd
+goc_city_meta <- tibble::tribble(
+  ~cd, ~nom_cd, ~gulf_relevance, # column headers for city metadata
+  "04", "LA PAZ", "strong goc candidate", # bcs gulf side city
+  "55", "LOS CABOS", "pacific baja", # bcs pacific side city
+  "42", "LOS MOCHIS", "northern sinaloa goc adjacent", # ahome urban area
+  "94", "CIUDAD OBREGON", "southern sonora coast adjacent", # cajeme urban area
+  "43", "HERMOSILLO", "inland sonora metro", # inland sonora capital
+  "40", "CULIACAN ROSALES", "inland sinaloa metro", # inland sinaloa capital
+  "41", "MAZATLAN", "open pacific sinaloa", # pacific sinaloa city
+  "25", "PUERTO VALLARTA", "pacific bahia de banderas fringe", # jalisco pacific fringe
+  "33", "TEPIC", "inland nayarit", # nayarit capital
+  "59", "GUADALAJARA", "inland jalisco metro", # jalisco core city
+  "63", "ZAPOPAN", "inland jalisco metro", # guadalajara metro member
+  "60", "TONALA", "inland jalisco metro", # guadalajara metro member
+  "62", "SAN PEDRO TLAQUEPAQUE", "inland jalisco metro", # guadalajara metro member
+  "61", "TLAJOMULCO DE ZUNIGA", "inland jalisco metro", # guadalajara metro member
+  "03", "TIJUANA", "border pacific not goc", # border pacific city
+  "02", "MEXICALI", "border not goc", # border city
+  "44", "NOGALES", "border sonora not goc" # sonora border city
+)
+```
+
+The chunk above sets paths (server with local fallback), packages, and city metadata keyed by `CD`.
+
+# Discover March microdata (CSV and DBF)
+
+March files are discovered recursively.
+Accepted names include `ENSU_CB_0325.csv` and older spellings such as `ENSU_CB0316.dbf`.
+Year 2021 is expected to be missing.
+
+```{r}
+# find march cb files in csv or dbf form under the ensu root
+march_cb_files <- list.files(
+  path = path_raw_ensu,
+  pattern = "^ENSU_CB_?03[0-9]{2}\\.(csv|dbf)$",
+  full.names = TRUE,
+  recursive = TRUE,
+  ignore.case = TRUE
+)
+
+# stop if nothing was found
+if (length(march_cb_files) == 0) {
+  # provide a clear recovery message
+  stop("no march ensu_cb csv/dbf files found under ", path_raw_ensu)
+}
+
+# build an inventory tibble from discovered files
+march_inventory <- tibble::tibble(
+  path = march_cb_files
+) %>%
+  # parse yy from either ensu_cb_03yy or ensu_cb03yy
+  mutate(
+    yy = stringr::str_match(basename(path), "(?i)ENSU_CB_?03([0-9]{2})")[, 2],
+    year = dplyr::if_else(as.integer(yy) >= 90L, 1900L + as.integer(yy), 2000L + as.integer(yy)),
+    file = basename(path),
+    format = tolower(tools::file_ext(path))
+  ) %>%
+  # prefer csv over dbf if both somehow exist for one year
+  arrange(year, dplyr::desc(format == "csv"), path) %>%
+  # keep one file per year
+  distinct(year, .keep_all = TRUE) %>%
+  # flag known missing march year for documentation
+  mutate(note = dplyr::if_else(year == 2021L, "unexpected if present; 2021 usually has no march", NA_character_))
+
+# explicitly record that 2021 march is unavailable when absent
+missing_2021 <- !2021L %in% march_inventory$year
+
+# message about the 2021 gap when relevant
+if (missing_2021) {
+  # confirm the expected gap
+  message("note: no march 2021 file found (expected). that year will be absent from the series.")
+}
+
+# print inventory
+print(march_inventory)
+
+# save inventory
+readr::write_csv(march_inventory, file.path(path_int, "ensu_march_file_inventory.csv"))
+```
+
+# Load and harmonize March CB tables across schema generations
+
+The loader:
+
+1. Reads CSV or DBF
+2. Maps legacy 2014 to 2015 names onto modern `BP1_*` / `FAC_SEL` fields
+3. Renames `ENT` / `MUN` to `CVE_ENT` / `CVE_MUN`
+4. Zero pads codes
+5. Attaches standardized city names from a `CD` catalog built after all years are scanned
+
+```{r}
+# helper: read one ensu table from csv or dbf as character columns
+read_ensu_file <- function(path) {
+  # branch on file extension
+  ext <- tolower(tools::file_ext(path))
+  # read csv microdata
+  if (ext == "csv") {
+    # read all columns as character
+    out <- readr::read_csv(path, col_types = readr::cols(.default = "c"), show_col_types = FALSE)
+    # return csv tibble
+    return(out)
+  }
+  # read dbf microdata for 2020 and earlier
+  if (ext == "dbf") {
+    # foreign::read.dbf returns a data.frame
+    out <- foreign::read.dbf(path, as.is = TRUE)
+    # convert every column to character for binding safety
+    out[] <- lapply(out, function(col) as.character(col))
+    # return dbf table as tibble
+    return(tibble::as_tibble(out))
+  }
+  # unsupported extension
+  stop("unsupported ensu file type: ", path)
+}
+
+# helper: harmonize one march cb file into a common schema
+harmonize_ensu_march_cb <- function(path, year) {
+  # read raw file
+  raw <- read_ensu_file(path)
+  # clean names to snake case
+  raw <- janitor::clean_names(raw)
+  # map legacy 2014 to 2015 safety item p1 onto bp1_1 when needed
+  if (!("bp1_1" %in% names(raw)) && ("p1" %in% names(raw))) {
+    # copy legacy p1 into bp1_1
+    raw$bp1_1 <- raw$p1
+  }
+  # map legacy habit items p4_1 to p4_5 onto bp1_5_* when needed
+  for (i in 1:5) {
+    # build modern and legacy names for this habit item
+    modern <- paste0("bp1_5_", i)
+    # build legacy name
+    legacy <- paste0("p4_", i)
+    # copy legacy habit item when modern is missing
+    if (!(modern %in% names(raw)) && (legacy %in% names(raw))) {
+      # assign legacy responses into the modern column name
+      raw[[modern]] <- raw[[legacy]]
+    }
+  }
+  # map legacy factor weight onto fac_sel when needed
+  if (!("fac_sel" %in% names(raw)) && ("factor" %in% names(raw))) {
+    # copy factor into fac_sel
+    raw$fac_sel <- raw$factor
+  }
+  # rename legacy state code ent to cve_ent
+  if ("ent" %in% names(raw) && !("cve_ent" %in% names(raw))) {
+    # rename ent
+    raw <- dplyr::rename(raw, cve_ent = ent)
+  }
+  # rename legacy municipality code mun to cve_mun
+  if ("mun" %in% names(raw) && !("cve_mun" %in% names(raw))) {
+    # rename mun
+    raw <- dplyr::rename(raw, cve_mun = mun)
+  }
+  # ensure cve_ent exists even if empty
+  if (!("cve_ent" %in% names(raw))) {
+    # create empty state code column
+    raw$cve_ent <- NA_character_
+  }
+  # ensure cd exists
+  if (!("cd" %in% names(raw))) {
+    # create empty city code column
+    raw$cd <- NA_character_
+  }
+  # ensure nom_ent exists
+  if (!("nom_ent" %in% names(raw))) {
+    # create empty state name column
+    raw$nom_ent <- NA_character_
+  }
+  # ensure nom_cd exists
+  if (!("nom_cd" %in% names(raw))) {
+    # create empty city name column
+    raw$nom_cd <- NA_character_
+  }
+  # ensure fac_sel exists
+  if (!("fac_sel" %in% names(raw))) {
+    # create empty weight column
+    raw$fac_sel <- NA_character_
+  }
+  # ensure bp1_1 exists
+  if (!("bp1_1" %in% names(raw))) {
+    # create empty safety column
+    raw$bp1_1 <- NA_character_
+  }
+  # ensure habit columns exist
+  for (i in 1:5) {
+    # modern habit column name
+    modern <- paste0("bp1_5_", i)
+    # add empty habit column when absent
+    if (!(modern %in% names(raw))) {
+      # create empty habit column
+      raw[[modern]] <- NA_character_
+    }
+  }
+  # columns to retain for the multi year bind
+  keep_cols <- c(
+    "cve_ent", "nom_ent", "cve_mun", "nom_mun",
+    "cd", "nom_cd", "per",
+    "sexo", "edad",
+    "bp1_1",
+    "bp1_5_1", "bp1_5_2", "bp1_5_3", "bp1_5_4", "bp1_5_5",
+    "fac_sel", "fac_viv",
+    "upm", "upm_dis", "est_dis", "dominio"
+  )
+  # keep only columns that exist
+  keep_cols <- intersect(keep_cols, names(raw))
+  # select harmonized columns
+  out <- dplyr::select(raw, dplyr::all_of(keep_cols))
+  # add march year
+  out$year_march <- year
+  # add source file name
+  out$source_file <- basename(path)
+  # zero pad state codes to two digits
+  out$cve_ent <- stringr::str_pad(stringr::str_trim(out$cve_ent), width = 2, pad = "0")
+  # zero pad city codes to two digits
+  out$cd <- stringr::str_pad(stringr::str_trim(out$cd), width = 2, pad = "0")
+  # uppercase and strip accents from state names when present
+  out$nom_ent <- stringr::str_to_upper(stringr::str_squish(out$nom_ent))
+  # transliterate state names
+  out$nom_ent <- stringi::stri_trans_general(out$nom_ent, "Latin-ASCII")
+  # uppercase and strip accents from city names when present
+  out$nom_cd <- stringr::str_to_upper(stringr::str_squish(out$nom_cd))
+  # transliterate city names
+  out$nom_cd <- stringi::stri_trans_general(out$nom_cd, "Latin-ASCII")
+  # standardize a common culican label variant early when present
+  out$nom_cd <- dplyr::if_else(out$nom_cd == "CULIACAN", "CULIACAN ROSALES", out$nom_cd)
+  # return harmonized tibble
+  out
+}
+
+# read and harmonize every march year
+march_list <- purrr::pmap(
+  list(march_inventory$path, march_inventory$year),
+  function(path, year) {
+    # announce the year being read
+    message("reading march ensu cb for ", year, " (", basename(path), ")")
+    # harmonize this file
+    harmonize_ensu_march_cb(path, year)
+  }
+)
+
+# bind all years
+ensu_march_all <- dplyr::bind_rows(march_list)
+
+# build a cd to city name catalog from rows that already have nom_cd
+cd_catalog <- ensu_march_all %>%
+  # keep rows with both code and name
+  dplyr::filter(!is.na(cd), cd != "", !is.na(nom_cd), nom_cd != "") %>%
+  # count support for each label by year recency
+  dplyr::count(cd, nom_cd, year_march, name = "n") %>%
+  # prefer the newest year label for each cd
+  dplyr::group_by(cd) %>%
+  dplyr::arrange(dplyr::desc(year_march), dplyr::desc(n), .by_group = TRUE) %>%
+  dplyr::slice(1) %>%
+  dplyr::ungroup() %>%
+  # keep catalog columns
+  dplyr::select(cd, nom_cd_std = nom_cd)
+
+# also fold in the hand curated goc labels when they exist
+cd_catalog <- cd_catalog %>%
+  # join curated names
+  dplyr::left_join(goc_city_meta %>% dplyr::select(cd, nom_cd_meta = nom_cd), by = "cd") %>%
+  # prefer curated goc label when available
+  dplyr::mutate(nom_cd_std = dplyr::coalesce(nom_cd_meta, nom_cd_std)) %>%
+  # drop helper column
+  dplyr::select(cd, nom_cd_std)
+
+# attach standardized city names to all rows by cd
+ensu_march_all <- ensu_march_all %>%
+  # join catalog
+  dplyr::left_join(cd_catalog, by = "cd") %>%
+  # fill nom_cd from catalog when missing or blank
+  dplyr::mutate(nom_cd = dplyr::if_else(is.na(nom_cd) | nom_cd == "", nom_cd_std, nom_cd)) %>%
+  # drop helper
+  dplyr::select(-nom_cd_std)
+
+# build a simple state name catalog from known codes for early years without nom_ent
+state_catalog <- tibble::tribble(
+  ~cve_ent, ~nom_ent_std,
+  "02", "BAJA CALIFORNIA",
+  "03", "BAJA CALIFORNIA SUR",
+  "14", "JALISCO",
+  "18", "NAYARIT",
+  "25", "SINALOA",
+  "26", "SONORA"
+)
+
+# fill missing state names for goc states
+ensu_march_all <- ensu_march_all %>%
+  # join state catalog
+  dplyr::left_join(state_catalog, by = "cve_ent") %>%
+  # coalesce state names
+  dplyr::mutate(nom_ent = dplyr::coalesce(dplyr::na_if(nom_ent, ""), nom_ent_std)) %>%
+  # drop helper
+  dplyr::select(-nom_ent_std)
+
+# filter to the six gulf adjacent states using codes (robust when names are messy)
+ensu_march_goc <- ensu_march_all %>%
+  # keep goc state codes
+  dplyr::filter(cve_ent %in% goc_state_codes)
+
+# save person level intermediate extract
+readr::write_csv(ensu_march_goc, file.path(path_int, "ensu_march_goc_persons.csv"))
+
+# show counts by year after filter
+ensu_march_goc %>%
+  # count selected adults by march year
+  dplyr::count(year_march, name = "n_selected_adults") %>%
+  # print counts
+  print()
+```
+
+# City coverage by March year
+
+Because ENSU added cities over time, coverage is uneven.
+`CD` identifies cities; names come from the standardized catalog.
+
+```{r}
+# city by year presence for goc states
+city_year_coverage <- ensu_march_goc %>%
+  # drop rows without a city code
+  dplyr::filter(!is.na(cd), cd != "") %>%
+  # count respondents
+  dplyr::count(year_march, cve_ent, nom_ent, cd, nom_cd, name = "n") %>%
+  # join gulf relevance by cd
+  dplyr::left_join(goc_city_meta %>% dplyr::select(cd, gulf_relevance), by = "cd") %>%
+  # arrange
+  dplyr::arrange(nom_ent, cd, year_march)
+
+# save coverage intermediate
+readr::write_csv(city_year_coverage, file.path(path_int, "ensu_march_goc_city_year_coverage.csv"))
+
+# wide presence matrix
+city_year_wide <- city_year_coverage %>%
+  # keep identity fields and counts
+  dplyr::select(nom_ent, cd, nom_cd, gulf_relevance, year_march, n) %>%
+  # spread years
+  tidyr::pivot_wider(names_from = year_march, values_from = n)
+
+# save wide presence to output
+readr::write_csv(city_year_wide, file.path(path_out, "ensu_march_goc_city_year_presence.csv"))
+
+# print wide table
+print(city_year_wide)
+```
+
+# Indicator 1: share who feel living in their city is unsafe
+
+Uses harmonized `bp1_1` (including legacy `P1` for 2014 to 2015) and `fac_sel` (including legacy `FACTOR`).
+
+```{r}
+# weighted percent unsafe by city and march year
+bp1_1_city_year <- ensu_march_goc %>%
+  # parse codes and weights
+  dplyr::mutate(
+    bp1_1 = as.integer(bp1_1),
+    fac_sel = as.numeric(fac_sel)
+  ) %>%
+  # keep substantive safe or unsafe answers with positive weights
+  dplyr::filter(bp1_1 %in% c(1L, 2L), !is.na(fac_sel), fac_sel > 0) %>%
+  # group
+  dplyr::group_by(year_march, cve_ent, nom_ent, cd, nom_cd) %>%
+  # summarize
+  dplyr::summarise(
+    n_substantive = dplyr::n(),
+    wt_total = sum(fac_sel, na.rm = TRUE),
+    wt_unsafe = sum(fac_sel[bp1_1 == 2L], na.rm = TRUE),
+    pct_unsafe = 100 * wt_unsafe / wt_total,
+    .groups = "drop"
+  ) %>%
+  # join relevance
+  dplyr::left_join(goc_city_meta %>% dplyr::select(cd, gulf_relevance), by = "cd") %>%
+  # arrange
+  dplyr::arrange(nom_ent, cd, year_march)
+
+# save intermediate and output copies
+readr::write_csv(bp1_1_city_year, file.path(path_int, "ensu_march_bp1_1_city_year.csv"))
+# save output table
+readr::write_csv(bp1_1_city_year, file.path(path_out, "ensu_march_pct_unsafe_city_year.csv"))
+
+# preview
+print(bp1_1_city_year)
+```
+
+# Plot March unsafe shares over years
+
+```{r}
+# line plot of percent unsafe
+p_unsafe <- ggplot(
+  data = bp1_1_city_year,
+  mapping = aes(x = year_march, y = pct_unsafe, color = nom_cd, group = cd)
+) +
+  # lines by city code
+  geom_line(linewidth = 0.6, alpha = 0.9) +
+  # points by city year
+  geom_point(size = 1.8) +
+  # facet by state
+  facet_wrap(~ nom_ent, scales = "free_y") +
+  # labels
+  labs(
+    title = "ENSU March: share of adults who feel living in their city is unsafe",
+    subtitle = "Weighted with FAC_SEL (or legacy FACTOR). 2021 has no March round.",
+    x = "March year",
+    y = "Percent unsafe",
+    color = "City"
+  ) +
+  # theme
+  theme_minimal(base_size = 11) +
+  # rotate x labels
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+  # y limits
+  scale_y_continuous(limits = c(0, 100)) +
+  # show integer years on x
+  scale_x_continuous(breaks = sort(unique(bp1_1_city_year$year_march)))
+
+# print plot
+print(p_unsafe)
+
+# save figure
+ggsave(
+  filename = file.path(path_out, "ensu_march_pct_unsafe_by_city_year.png"),
+  plot = p_unsafe,
+  width = 12,
+  height = 8,
+  dpi = 150
+)
+```
+
+# Optional focus: stronger Gulf candidates only
+
+```{r}
+# relevance labels closer to gulf side needs
+gulf_focus_labels <- c(
+  "strong goc candidate",
+  "northern sinaloa goc adjacent",
+  "southern sonora coast adjacent",
+  "pacific bahia de banderas fringe"
+)
+
+# filter focus cities
+bp1_1_gulf_focus <- bp1_1_city_year %>%
+  # keep chosen relevance labels
+  dplyr::filter(gulf_relevance %in% gulf_focus_labels)
+
+# save focused table
+readr::write_csv(bp1_1_gulf_focus, file.path(path_out, "ensu_march_pct_unsafe_gulf_focus_city_year.csv"))
+
+# plot if rows exist
+if (nrow(bp1_1_gulf_focus) > 0) {
+  # focused plot
+  p_focus <- ggplot(
+    data = bp1_1_gulf_focus,
+    mapping = aes(x = year_march, y = pct_unsafe, color = nom_cd, group = cd)
+  ) +
+    # lines
+    geom_line(linewidth = 0.8) +
+    # points
+    geom_point(size = 2) +
+    # labels
+    labs(
+      title = "ENSU March: percent unsafe in gulf focus cities",
+      subtitle = "Subset of ENSU cities closer to GoC analysis needs",
+      x = "March year",
+      y = "Percent unsafe",
+      color = "City"
+    ) +
+    # theme
+    theme_minimal(base_size = 12) +
+    # y limits
+    scale_y_continuous(limits = c(0, 100)) +
+    # integer year breaks
+    scale_x_continuous(breaks = sort(unique(bp1_1_gulf_focus$year_march)))
+
+  # print
+  print(p_focus)
+
+  # save
+  ggsave(
+    filename = file.path(path_out, "ensu_march_pct_unsafe_gulf_focus.png"),
+    plot = p_focus,
+    width = 10,
+    height = 6,
+    dpi = 150
+  )
+}
+```
+
+# Indicator 2: changed habits from fear of crime
+
+Uses harmonized `bp1_5_*` (including legacy `P4_*` for 2014 to 2015).
+
+```{r}
+# habit item columns
+habit_cols <- c("bp1_5_1", "bp1_5_2", "bp1_5_3", "bp1_5_4", "bp1_5_5")
+
+# long habit table
+habit_long <- ensu_march_goc %>%
+  # parse weight
+  dplyr::mutate(fac_sel = as.numeric(fac_sel)) %>%
+  # keep positive weights
+  dplyr::filter(!is.na(fac_sel), fac_sel > 0) %>%
+  # reshape
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(habit_cols),
+    names_to = "habit_item",
+    values_to = "resp"
+  ) %>%
+  # parse response
+  dplyr::mutate(resp = as.integer(resp)) %>%
+  # keep substantive yes or no
+  dplyr::filter(resp %in% c(1L, 2L))
+
+# weighted percent yes by item
+habit_city_year <- habit_long %>%
+  # group
+  dplyr::group_by(year_march, cve_ent, nom_ent, cd, nom_cd, habit_item) %>%
+  # summarize
+  dplyr::summarise(
+    n_substantive = dplyr::n(),
+    wt_total = sum(fac_sel, na.rm = TRUE),
+    wt_yes = sum(fac_sel[resp == 1L], na.rm = TRUE),
+    pct_yes = 100 * wt_yes / wt_total,
+    .groups = "drop"
+  ) %>%
+  # join relevance
+  dplyr::left_join(goc_city_meta %>% dplyr::select(cd, gulf_relevance), by = "cd")
+
+# save habit item rates
+readr::write_csv(habit_city_year, file.path(path_int, "ensu_march_bp1_5_item_city_year.csv"))
+# save output copy
+readr::write_csv(habit_city_year, file.path(path_out, "ensu_march_habit_change_item_city_year.csv"))
+
+# person level any habit changed flag
+any_habit <- ensu_march_goc %>%
+  # parse
+  dplyr::mutate(
+    fac_sel = as.numeric(fac_sel),
+    dplyr::across(dplyr::all_of(habit_cols), as.integer)
+  ) %>%
+  # keep weights
+  dplyr::filter(!is.na(fac_sel), fac_sel > 0) %>%
+  # rowwise any yes among substantive answers
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    any_yes = {
+      # collect habit answers
+      vals <- c_across(dplyr::all_of(habit_cols))
+      # keep yes no only
+      vals <- vals[vals %in% c(1L, 2L)]
+      # missing if no substantive habit answers
+      if (length(vals) == 0) NA else any(vals == 1L)
+    }
+  ) %>%
+  dplyr::ungroup() %>%
+  # drop empty habit rows
+  dplyr::filter(!is.na(any_yes))
+
+# weighted percent any habit change
+any_habit_city_year <- any_habit %>%
+  # group
+  dplyr::group_by(year_march, cve_ent, nom_ent, cd, nom_cd) %>%
+  # summarize
+  dplyr::summarise(
+    n_substantive = dplyr::n(),
+    wt_total = sum(fac_sel, na.rm = TRUE),
+    wt_any_yes = sum(fac_sel[any_yes], na.rm = TRUE),
+    pct_any_habit_change = 100 * wt_any_yes / wt_total,
+    .groups = "drop"
+  ) %>%
+  # join relevance
+  dplyr::left_join(goc_city_meta %>% dplyr::select(cd, gulf_relevance), by = "cd")
+
+# save composite
+readr::write_csv(any_habit_city_year, file.path(path_out, "ensu_march_any_habit_change_city_year.csv"))
+
+# preview
+print(any_habit_city_year)
+```
+
+# Latest March snapshot
+
+```{r}
+# latest march year present in the unsafe series
+latest_year <- max(bp1_1_city_year$year_march, na.rm = TRUE)
+
+# snapshot joining unsafe and habit change
+latest_snapshot <- bp1_1_city_year %>%
+  # latest year only
+  dplyr::filter(year_march == latest_year) %>%
+  # select key fields
+  dplyr::select(year_march, nom_ent, cd, nom_cd, gulf_relevance, n_substantive, pct_unsafe) %>%
+  # join habit composite
+  dplyr::left_join(
+    any_habit_city_year %>%
+      dplyr::select(year_march, cd, pct_any_habit_change),
+    by = c("year_march", "cd")
+  ) %>%
+  # arrange
+  dplyr::arrange(nom_ent, cd)
+
+# save snapshot
+readr::write_csv(latest_snapshot, file.path(path_out, paste0("ensu_march_", latest_year, "_city_snapshot.csv")))
+
+# print snapshot
+print(latest_snapshot)
+```
+
+# Practical notes
+
+1. March 2021 is intentionally missing from the time series.
+2. Years 2014 to 2020 are read from DBF; 2022 onward from CSV.
+3. Years 2014 to 2015 use legacy `P1` / `P4_*` / `FACTOR` mappings documented above.
+4. City identity is `CD`; names are standardized from the newest available catalog.
+5. When copying this folder to the shared server, keep the same `ensu_bd_YYYY_*` layout so recursive discovery continues to work.

@@ -1,0 +1,622 @@
+---
+title: 'OHI GoC 2025: TR ggplot PDF exports'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+editor_options:
+  chunk_output_type: console
+---
+
+# TR visualizations (ggplot → PDF)
+
+Companion to `tr_visualizations.qmd`. Rebuilds the current-status line charts as **ggplot** objects and writes **vector PDFs** (best quality for Google Slides). Also adds raw-count charts for domestic/international arrivals and tourism-related crime.
+
+Run after quantity/quality/sustainability and `tr_current_status` outputs exist (Mazu paths preferred; local fallbacks where available).
+
+```{r setup}
+library(tidyverse)
+library(ggplot2)
+library(scales)
+library(here)
+
+# Vector PDF via cairo when available (sharper text for slides)
+pdf_device <- if (isTRUE(capabilities("cairo"))) cairo_pdf else pdf
+
+out_dir <- here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_viz/ggplots_for_slides_071326")
+
+# Slide-friendly landscape (approx. 16:9 content area)
+FIG_W <- 9
+FIG_H <- 5
+```
+
+```{r helpers}
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+region_levels <- paste0("Region_", 1:9)
+rgn_label_colors <- setNames(
+  unname(rgn_colors[region_levels]),
+  unname(rgn_labels[region_levels])
+)
+
+add_rgn_labels <- function(df) {
+  df %>%
+    mutate(
+      rgn_id = factor(as.character(rgn_id), levels = region_levels),
+      rgn_label = factor(
+        rgn_labels[as.character(rgn_id)],
+        levels = unname(rgn_labels[region_levels])
+      )
+    )
+}
+
+first_existing <- function(...) {
+  paths <- c(...)
+  hit <- paths[file.exists(paths)]
+  if (length(hit) == 0) {
+    stop("None of these paths exist:\n", paste(" -", paths, collapse = "\n"))
+  }
+  hit[[1]]
+}
+
+gg_theme_tr <- function() {
+  theme_minimal(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold", size = 16, hjust = 0),
+      plot.subtitle = element_text(size = 11, color = "grey30"),
+      axis.title = element_text(size = 12),
+      axis.text = element_text(size = 11),
+      legend.title = element_text(face = "bold", size = 11),
+      legend.text = element_text(size = 10),
+      legend.position = "right",
+      panel.grid.minor = element_blank(),
+      plot.margin = margin(8, 12, 8, 8)
+    )
+}
+
+# Current-status style line chart (0–100 with goal line)
+tr_gg_score <- function(df, y_var, title, y_lab = "Puntaje // Percent (out of 100)",
+                        y_range = c(0, 110), add_goal = TRUE) {
+  df <- df %>%
+    mutate(year = as.numeric(year)) %>%
+    arrange(rgn_label, year)
+
+  y_col <- rlang::sym(y_var)
+
+  p <- ggplot(df, aes(x = year, y = !!y_col, color = rgn_label, group = rgn_label)) +
+    geom_line(linewidth = 0.9, lineend = "round") +
+    geom_point(size = 2.2) +
+    scale_color_manual(values = rgn_label_colors, name = "Region", drop = FALSE) +
+    scale_x_continuous(breaks = pretty_breaks(n = 6)) +
+    labs(title = title, x = "Año // Year", y = y_lab) +
+    gg_theme_tr()
+
+  if (add_goal) {
+    p <- p +
+      geom_hline(
+        yintercept = 100,
+        linetype = "dashed",
+        color = "black",
+        linewidth = 0.55
+      )
+  }
+
+  if (!is.null(y_range)) {
+    p <- p + coord_cartesian(ylim = y_range)
+  }
+
+  p
+}
+
+# Raw count / rate line chart (no goal line; comma-formatted y)
+tr_gg_raw <- function(df, y_var, title, y_lab, y_scale = "comma") {
+  df <- df %>%
+    mutate(year = as.numeric(year)) %>%
+    arrange(rgn_label, year)
+
+  y_col <- rlang::sym(y_var)
+
+  p <- ggplot(df, aes(x = year, y = !!y_col, color = rgn_label, group = rgn_label)) +
+    geom_line(linewidth = 0.9, lineend = "round") +
+    geom_point(size = 2.2) +
+    scale_color_manual(values = rgn_label_colors, name = "Region", drop = FALSE) +
+    scale_x_continuous(breaks = pretty_breaks(n = 6)) +
+    labs(title = title, x = "Año // Year", y = y_lab) +
+    gg_theme_tr()
+
+  if (identical(y_scale, "comma")) {
+    p <- p + scale_y_continuous(labels = label_comma())
+  } else if (identical(y_scale, "per_1000")) {
+    p <- p + scale_y_continuous(labels = label_number(accuracy = 0.01))
+  }
+
+  p
+}
+
+save_tr_pdf <- function(plot, filename, width = FIG_W, height = FIG_H) {
+  path <- file.path(out_dir, filename)
+  ggsave(
+    filename = path,
+    plot = plot,
+    device = pdf_device,
+    width = width,
+    height = height,
+    units = "in",
+    dpi = 300,
+    bg = "white"
+  )
+  message("Wrote: ", path)
+  invisible
+}
+```
+
+## Read current-status outputs
+
+```{r read-cs}
+path_quantity <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity/tr_quantity_current_status_121025.csv"
+)
+
+path_int_dom <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity/int_dom_quantity_current_status_120925.csv"
+)
+
+path_quality <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality/cs_quality_all_indicators_032326.csv"
+)
+
+path_crime <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality/tr_qual_crime_score_030626.csv",
+  here::here("TR", "quality", "tr_quality_int", "tr_qual_crime_score_030626.csv")
+)
+
+path_act_avg <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality/final_activity_avg_score_030526.csv"
+)
+path_act_food <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality/tr_quality_food_bev_current_status_quantile_121125.csv"
+)
+path_act_culture <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality/tr_quality_culture_current_status_quantile_121625.csv"
+)
+path_act_other <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quality/tr_quality_other_rec_current_status_quantile_121225.csv"
+)
+
+path_sust <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability/cs_sust_all_indicators_070126.csv"
+)
+path_cert <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability/merge_sust_certifications.csv"
+)
+path_cert_hotels <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability/sust_cert_current_status_final_2019_2024_100over_070126.csv"
+)
+path_blueflag <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability/cropped_blue_flag_current_status_final_by_yr_033026.csv"
+)
+path_jobqual <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability/tr_job_quality_sustainability_current_status_merged_interpolated_033026.csv"
+)
+path_jobqual_parts <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/tr_job_quality/cs_maintainedsalary_totalpctpaidworkers_prop_eq_cs.csv"
+)
+path_invest <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability/investment_tourism_management_final_033026.csv"
+)
+path_tr_final <- first_existing(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output/tr_current_status_final_070126.csv"
+)
+
+# ----- Quantity -----
+cs_quantity_clean <- read_csv(path_quantity, show_col_types = FALSE) %>%
+  rename(final_score = score) %>%
+  dplyr::select(rgn_id, year, final_score)
+
+int_dom_raw <- read_csv(path_int_dom, show_col_types = FALSE)
+
+cs_quantity_dom_clean <- int_dom_raw %>%
+  filter(arrival_type %in% "dom") %>%
+  mutate(final_score = pmin(current_status, 100)) %>%
+  dplyr::select(rgn_id, year, final_score)
+
+cs_quantity_int_clean <- int_dom_raw %>%
+  filter(arrival_type %in% "int") %>%
+  mutate(final_score = pmin(current_status, 100)) %>%
+  dplyr::select(rgn_id, year, final_score)
+
+# Raw arrivals (before current status)
+arrivals_dom_raw <- int_dom_raw %>%
+  filter(arrival_type %in% "dom") %>%
+  dplyr::select(rgn_id, year, total_arrivals = agg_tourist_arrivals)
+
+arrivals_int_raw <- int_dom_raw %>%
+  filter(arrival_type %in% "int") %>%
+  dplyr::select(rgn_id, year, total_arrivals = agg_tourist_arrivals)
+
+# ----- Quality -----
+cs_quality_clean <- read_csv(path_quality, show_col_types = FALSE)
+
+crime_raw <- read_csv(path_crime, show_col_types = FALSE)
+
+cs_quality_crime_clean <- crime_raw %>%
+  mutate(
+    year = as.numeric(ano),
+    final_score = pmin(current_status, 100)
+  ) %>%
+  dplyr::select(rgn_id, year, final_score)
+
+# Weighted crime totals and per capita (before / for scoring)
+crimes_total_raw <- crime_raw %>%
+  transmute(
+    rgn_id,
+    year = as.numeric(ano),
+    number_crimes = as.numeric(number_crimes)
+  )
+
+crimes_percapita_raw <- crime_raw %>%
+  transmute(
+    rgn_id,
+    year = as.numeric(ano),
+    tr_crimes_percapita = as.numeric(tr_crimes_percapita),
+    crimes_per_1000 = tr_crimes_percapita * 1000
+  )
+
+cs_quality_activities_clean <- read_csv(path_act_avg, show_col_types = FALSE) %>%
+  dplyr::select(rgn_id, year, final_score)
+
+cs_quality_activities_fooddrink_clean <- read_csv(path_act_food, show_col_types = FALSE) %>%
+  dplyr::select(rgn_id, year = data_year, final_score = score)
+
+cs_quality_activities_culturegulf_clean <- read_csv(path_act_culture, show_col_types = FALSE) %>%
+  dplyr::select(rgn_id, year = data_year, final_score = score)
+
+cs_quality_activities_other_clean <- read_csv(path_act_other, show_col_types = FALSE) %>%
+  dplyr::select(rgn_id, year = data_year, final_score = score)
+
+# ----- Sustainability -----
+cs_sust_clean <- read_csv(path_sust, show_col_types = FALSE)
+
+cs_sust_cert_clean <- read_csv(path_cert, show_col_types = FALSE) %>%
+  mutate(final_score = pmin(score, 100)) %>%
+  dplyr::select(rgn_id, year, final_score)
+
+cs_sust_cert_hotels_clean <- read_csv(path_cert_hotels, show_col_types = FALSE) %>%
+  dplyr::select(rgn_id, year = cert_year, final_score = current_status)
+
+cs_sust_cert_blueflag_clean <- read_csv(path_blueflag, show_col_types = FALSE) %>%
+  dplyr::select(rgn_id, year, final_score = current_status)
+
+cs_sust_jobqual_clean <- read_csv(path_jobqual, show_col_types = FALSE) %>%
+  dplyr::select(rgn_id, year = ano_censal, final_score = score_interpolated)
+
+jobqual_parts <- read_csv(path_jobqual_parts, show_col_types = FALSE)
+
+cs_sust_jobqual_salary_clean <- jobqual_parts %>%
+  dplyr::select(rgn_id, year = ano_censal, final_score = maintained_salary_cs)
+
+cs_sust_jobqual_formal_clean <- jobqual_parts %>%
+  dplyr::select(rgn_id, year = ano_censal, final_score = total_pct_paid_workers_cs)
+
+cs_sust_jobqual_gender_clean <- jobqual_parts %>%
+  dplyr::select(rgn_id, year = ano_censal, final_score = prop_eq_cs)
+
+invest <- read_csv(path_invest, show_col_types = FALSE) %>%
+  mutate(year = as.numeric(year))
+
+cs_sust_invest_clean <- invest %>%
+  dplyr::select(rgn_id, year, final_score = current_status_all) %>%
+  distinct(rgn_id, year, .keep_all = TRUE)
+
+cs_sust_invest_v003_anp_management_clean <- invest %>%
+  filter(programas %in% "v003_anp_management") %>%
+  dplyr::select(rgn_id, year, final_score = current_status)
+
+cs_sust_invest_s046_sustainable_conservation_clean <- invest %>%
+  filter(programas %in% "s046_sustainable_conservation") %>%
+  dplyr::select(rgn_id, year, final_score = current_status)
+
+cs_sust_invest_v005_protection_restoration_clean <- invest %>%
+  filter(programas %in% "v005_protection_restoration") %>%
+  dplyr::select(rgn_id, year, final_score = current_status)
+
+cs_sust_invest_return_cobros_from_shcp_clean <- invest %>%
+  filter(programas %in% "return_cobros_from_shcp") %>%
+  dplyr::select(rgn_id, year, final_score = current_status)
+
+all_cs_indicators <- read_csv(path_tr_final, show_col_types = FALSE)
+```
+
+## Build ggplot objects (current status)
+
+```{r build-score-plots}
+gg_tr_score <- tr_gg_score(
+  add_rgn_labels(all_cs_indicators),
+  y_var = "tr_current_status",
+  title = "CURRENT STATUS: Tourism & Recreation"
+)
+
+gg_quantity <- tr_gg_score(
+  add_rgn_labels(cs_quantity_clean),
+  y_var = "final_score",
+  title = "TR Quantity"
+)
+
+gg_quantity_dom <- tr_gg_score(
+  add_rgn_labels(cs_quantity_dom_clean),
+  y_var = "final_score",
+  title = "TR Quantity: Domestic Arrivals"
+)
+
+gg_quantity_int <- tr_gg_score(
+  add_rgn_labels(cs_quantity_int_clean),
+  y_var = "final_score",
+  title = "TR Quantity: International Arrivals"
+)
+
+gg_quality <- tr_gg_score(
+  add_rgn_labels(cs_quality_clean),
+  y_var = "final_score",
+  title = "TR Quality"
+)
+
+gg_quality_crime <- tr_gg_score(
+  add_rgn_labels(cs_quality_crime_clean),
+  y_var = "final_score",
+  title = "TR Quality: Safety of tourists"
+)
+
+gg_quality_activities <- tr_gg_score(
+  add_rgn_labels(cs_quality_activities_clean),
+  y_var = "final_score",
+  title = "TR Quality: Availability of activities"
+)
+
+gg_quality_fooddrink <- tr_gg_score(
+  add_rgn_labels(cs_quality_activities_fooddrink_clean),
+  y_var = "final_score",
+  title = "TR Quality: Food & Beverage Activities"
+)
+
+gg_quality_culturegulf <- tr_gg_score(
+  add_rgn_labels(cs_quality_activities_culturegulf_clean),
+  y_var = "final_score",
+  title = "TR Quality: Culture & Gulf Activities"
+)
+
+gg_quality_other <- tr_gg_score(
+  add_rgn_labels(cs_quality_activities_other_clean),
+  y_var = "final_score",
+  title = "TR Quality: Other Recreation Activities"
+)
+
+gg_sustainability <- tr_gg_score(
+  add_rgn_labels(cs_sust_clean),
+  y_var = "final_score",
+  title = "TR Sustainability"
+)
+
+gg_sust_cert <- tr_gg_score(
+  add_rgn_labels(cs_sust_cert_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Certifications (All)"
+)
+
+gg_sust_cert_hotels <- tr_gg_score(
+  add_rgn_labels(cs_sust_cert_hotels_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Hotel Certifications"
+)
+
+gg_sust_cert_blueflag <- tr_gg_score(
+  add_rgn_labels(cs_sust_cert_blueflag_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Blue Flag Certifications"
+)
+
+gg_sust_jobqual <- tr_gg_score(
+  add_rgn_labels(cs_sust_jobqual_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Job Quality"
+)
+
+gg_sust_jobqual_salary <- tr_gg_score(
+  add_rgn_labels(cs_sust_jobqual_salary_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Job Quality (Maintained Salary)"
+)
+
+gg_sust_jobqual_formal <- tr_gg_score(
+  add_rgn_labels(cs_sust_jobqual_formal_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Job Quality (Formal/Paid Workers)"
+)
+
+gg_sust_jobqual_gender <- tr_gg_score(
+  add_rgn_labels(cs_sust_jobqual_gender_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Job Quality (Gender Pay Equity)"
+)
+
+gg_sust_invest <- tr_gg_score(
+  add_rgn_labels(cs_sust_invest_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Tourism Management Investment (All Programs)"
+)
+
+gg_sust_invest_v003 <- tr_gg_score(
+  add_rgn_labels(cs_sust_invest_v003_anp_management_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Investment - ANP Management"
+)
+
+gg_sust_invest_s046 <- tr_gg_score(
+  add_rgn_labels(cs_sust_invest_s046_sustainable_conservation_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Investment - Sustainable Conservation"
+)
+
+gg_sust_invest_v005 <- tr_gg_score(
+  add_rgn_labels(cs_sust_invest_v005_protection_restoration_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Investment - Protection & Restoration"
+)
+
+gg_sust_invest_shcp <- tr_gg_score(
+  add_rgn_labels(cs_sust_invest_return_cobros_from_shcp_clean),
+  y_var = "final_score",
+  title = "TR Sustainability: Investment - Returned Fees from SHCP"
+)
+```
+
+## Raw count / rate plots
+
+Domestic and international arrivals use `agg_tourist_arrivals` from the int/dom quantity file (before capping into current status). Crime totals use weighted `number_crimes`; rates use `tr_crimes_percapita` (also shown as crimes per 1,000 residents for readability).
+
+```{r build-raw-plots}
+gg_arrivals_dom_raw <- tr_gg_raw(
+  add_rgn_labels(arrivals_dom_raw),
+  y_var = "total_arrivals",
+  title = "Total domestic tourist arrivals (raw counts)",
+  y_lab = "Domestic arrivals"
+)
+
+gg_arrivals_int_raw <- tr_gg_raw(
+  add_rgn_labels(arrivals_int_raw),
+  y_var = "total_arrivals",
+  title = "Total international tourist arrivals (raw counts)",
+  y_lab = "International arrivals"
+)
+
+gg_crimes_total_raw <- tr_gg_raw(
+  add_rgn_labels(crimes_total_raw),
+  y_var = "number_crimes",
+  title = "Tourism-related crimes (weighted totals, before per capita)",
+  y_lab = "Weighted crime count"
+)
+
+gg_crimes_percapita <- tr_gg_raw(
+  add_rgn_labels(crimes_percapita_raw),
+  y_var = "tr_crimes_percapita",
+  title = "Tourism-related crimes per capita (by region and year)",
+  y_lab = "Weighted crimes per resident",
+  y_scale = "per_1000"
+)
+
+gg_crimes_per_1000 <- tr_gg_raw(
+  add_rgn_labels(crimes_percapita_raw),
+  y_var = "crimes_per_1000",
+  title = "Tourism-related crimes per 1,000 residents",
+  y_lab = "Weighted crimes per 1,000 residents",
+  y_scale = "per_1000"
+)
+```
+
+## Preview
+
+```{r preview, fig.width=12, fig.height=6.75}
+gg_tr_score
+gg_arrivals_dom_raw
+gg_arrivals_int_raw
+gg_crimes_total_raw
+gg_crimes_percapita
+gg_crimes_per_1000
+```
+
+## Save all PDFs
+
+```{r save-pdfs}
+score_plots <- list(
+  "tr_overall_current_status.pdf" = gg_tr_score,
+  "tr_quantity.pdf" = gg_quantity,
+  "tr_quantity_domestic.pdf" = gg_quantity_dom,
+  "tr_quantity_international.pdf" = gg_quantity_int,
+  "tr_quality.pdf" = gg_quality,
+  "tr_quality_safety.pdf" = gg_quality_crime,
+  "tr_quality_activities.pdf" = gg_quality_activities,
+  "tr_quality_activities_fooddrink.pdf" = gg_quality_fooddrink,
+  "tr_quality_activities_culturegulf.pdf" = gg_quality_culturegulf,
+  "tr_quality_activities_other.pdf" = gg_quality_other,
+  "tr_sustainability.pdf" = gg_sustainability,
+  "tr_sust_certifications_all.pdf" = gg_sust_cert,
+  "tr_sust_cert_hotels.pdf" = gg_sust_cert_hotels,
+  "tr_sust_cert_blueflag.pdf" = gg_sust_cert_blueflag,
+  "tr_sust_job_quality.pdf" = gg_sust_jobqual,
+  "tr_sust_job_quality_salary.pdf" = gg_sust_jobqual_salary,
+  "tr_sust_job_quality_formal.pdf" = gg_sust_jobqual_formal,
+  "tr_sust_job_quality_gender.pdf" = gg_sust_jobqual_gender,
+  "tr_sust_investment_all.pdf" = gg_sust_invest,
+  "tr_sust_investment_v003_anp.pdf" = gg_sust_invest_v003,
+  "tr_sust_investment_s046_conservation.pdf" = gg_sust_invest_s046,
+  "tr_sust_investment_v005_protection.pdf" = gg_sust_invest_v005,
+  "tr_sust_investment_shcp_fee_return.pdf" = gg_sust_invest_shcp
+)
+
+raw_plots <- list(
+  "raw_arrivals_domestic.pdf" = gg_arrivals_dom_raw,
+  "raw_arrivals_international.pdf" = gg_arrivals_int_raw,
+  "raw_crimes_weighted_total.pdf" = gg_crimes_total_raw,
+  "raw_crimes_per_capita.pdf" = gg_crimes_percapita,
+  "raw_crimes_per_1000.pdf" = gg_crimes_per_1000
+)
+
+walk2(score_plots, names(score_plots), ~ save_tr_pdf(.x, .y))
+walk2(raw_plots, names(raw_plots), ~ save_tr_pdf(.x, .y))
+
+# Also write PNG siblings at 300 dpi if you need raster paste into Slides
+png_dir <- file.path(out_dir, "png")
+dir.create(png_dir, recursive = TRUE, showWarnings = FALSE)
+
+save_tr_png <- function(plot, filename) {
+  ggsave(
+    filename = file.path(png_dir, filename),
+    plot = plot,
+    width = FIG_W,
+    height = FIG_H,
+    units = "in",
+    dpi = 300,
+    bg = "white"
+  )
+}
+
+walk2(c(score_plots, raw_plots), names(c(score_plots, raw_plots)), function(p, nm) {
+  save_tr_png(p, sub("\\.pdf$", ".png", nm))
+})
+
+message("All figure PDFs written to: ", out_dir)
+message("PNG copies (300 dpi) written to: ", png_dir)
+```
+
+## Notes for Google Slides
+
+- Prefer the **PDF** files (vector): Insert → Image → Upload, or open in Preview and copy. Text stays sharp when scaled.
+- If Slides prefers raster, use the `figs_pdf/png/` copies (300 dpi, 12 × 6.75 in ≈ 3600 × 2025 px).
+- Region colors/labels match `tr_visualizations.qmd` / website TR pages.
