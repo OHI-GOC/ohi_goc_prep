@@ -1,0 +1,486 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(colorspace)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/BD/")
+```
+
+```{r Load clean_names_lowercase function}
+clean_names_lowercase <- function(x) {
+
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+
+  x %>%
+    tolower() %>%
+    trimws()
+}
+```
+
+
+# STEP 1: Load in and summarize GOC_MarineLandings0
+
+```{r Load in GOC_MarineLandings0 as necessary}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+# NOTE TO SELF: This source file may change in later Summer / Fall run. - EMF, June 4 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+```
+
+
+# PATCH 1 - Assign groups that are unassigned to a Major_Functional_Group:
+NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+```{r Load in GenusFamilyGroup_Key as needed}
+GenusFamilyGroup_Key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Taxonomic_Keys/GenusFamilyGroupKey_COMPLETE_Apr042026.csv")
+
+# NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+MajorFunctionalGroup_Key<- GenusFamilyGroup_Key %>%
+  select(estimated_genus_name, Major_Functional_Group)
+```
+
+```{r Major_Functional_Group patch for GOC_MarineLandings}
+# Fill in missing values based on MajorFunctionalGroup_Key:
+GOC_MarineLandings <- GOC_MarineLandings0 %>%
+  left_join(
+    MajorFunctionalGroup_Key %>%
+      select(estimated_genus_name, Major_Functional_Group),
+    by = "estimated_genus_name",
+    suffix = c("", ".lookup")
+  )
+
+GOC_MarineLandings <- GOC_MarineLandings %>%
+  mutate(
+    Major_Functional_Group = coalesce(
+      Major_Functional_Group,
+      Major_Functional_Group.lookup
+    )
+  ) %>%
+  select(-Major_Functional_Group.lookup)
+
+# 3246583 obs., 58 var.
+
+# SANITY CHECK:
+sum(is.na(GOC_MarineLandings$Major_Functional_Group))
+# Only 26 records unassigned. Looks good!
+```
+
+# PATCH 2 - Re-assign paneus as litopenaeus:
+NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+```{r Re-assign paneus as litopenaeus}
+GOC_MarineLandings <- GOC_MarineLandings %>%
+  mutate(
+    estimated_genus_name = case_when(
+      estimated_genus_name == "Penaeus" ~ "Litopenaeus",
+      TRUE ~ estimated_genus_name
+    )
+  )
+
+unique(GOC_MarineLandings$estimated_genus_name)
+```
+
+
+# **DECISION POINT: Selecting which sectors to include**
+```{r Select Sectors_of_Interest}
+table(GOC_MarineLandings$sector_estimate_draft)
+
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
+                          "marine: small-scale capture",
+                          "marine: large-scale capture")
+  
+PossibleMarineFishery_Sectors<- c("freshwater or marine: large-scale capture",
+                          "freshwater or marine: small-scale capture",
+                          "freshwater or marine: fishery sector yet to be classified")
+
+GOC_MarineFisheryLandings0<- GOC_MarineLandings %>%
+  filter(sector_estimate_draft %in% c(MarineFishery_Sectors, PossibleMarineFishery_Sectors))
+
+# 3137044 obs., 58 var.
+```
+
+```{r Re-level sector_estimate_draft and Major_Functional_Group}
+# Re-level sectors (mainly for plotting purposes):
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings0 %>%
+  filter(
+    sector_estimate_draft %in% c(
+      MarineFishery_Sectors,
+      PossibleMarineFishery_Sectors
+    )
+  ) %>%
+  mutate(
+    sector_estimate_draft = factor(
+      sector_estimate_draft,
+      levels = c(
+        "marine: large-scale capture",
+        "marine: small-scale capture",
+        "marine: fishery sector yet to be classified",
+        "freshwater or marine: large-scale capture",
+        "freshwater or marine: small-scale capture",
+        "freshwater or marine: fishery sector yet to be classified"
+      )
+    )
+  )
+
+# SANITY CHECK: How many Major_Functional_Group unassigned?
+sum(is.na(GOC_MarineFisheryLandings$Major_Functional_Group))
+# Only 18 records unassigned. Looks good!
+
+table(GOC_MarineFisheryLandings$Major_Functional_Group)
+
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings %>%
+  mutate(
+    Major_Functional_Group = factor(
+      Major_Functional_Group,
+      levels= c(
+        
+        # Crustaceans
+        "Shrimps, prawns",
+        "Crustaceans",
+        
+        # Molluscs
+        "Cephalopods",
+        "Molluscs excl. Cephalopods",
+        
+        # Other invertebrates
+        "Echinoderms",
+        "Jellies",
+        "Other marine invertebrates",
+        
+        # Fishes
+        "Anchovy & Sardine (small pelagics)",
+        "Pelagic marine fish (excl. anchovy & sardine)",
+        "Demersal marine fishes",
+        "Marine fishes NEI",
+        "Marine or freshwater fishes NEI",
+        "Diadromous fishes",
+        
+        # Elasmobranchs
+        "Sharks",
+        
+        # Miscellaneous / unresolved
+        "Marine algae",
+        "Marine species NEI",
+        "unknown",
+        NA_character_
+      )
+    )
+  )
+
+# SANITY CHECK:
+sum(is.na(GOC_MarineFisheryLandings$Major_Functional_Group))
+# Only 18 records unassigned. Looks good!
+```
+
+# Strategy 1 - Track changes in major functional groups relative to mean  ------------------------------
+
+## Rocky Reef Communities
+
+```{r Isolate Rocky Reef taxa and create RockyReef_Landings0}
+Rocky_Reef_Taxa<- c("Crustaceans", "Shrimps, prawns", "Echinoderms", "Demersal marine fishes", "Marine algae")
+
+colnames(GOC_MarineFisheryLandings)
+
+RockyReef_Landings0<- GOC_MarineFisheryLandings %>%
+  filter(Major_Functional_Group %in% Rocky_Reef_Taxa) %>%
+    select(state, OHI_region_est,
+         office_name_clean, landing_site_clean, 
+         year,
+         est_aquaculture_production, reported_fleet, 
+         sector_estimate_reported, sector_estimate_draft,
+         recorded_taxa_name, recorded_taxa_name_clean, common_name_clean, 
+         recorded_taxa_group, estimated_taxa_group, Major_Functional_Group,
+         estimated_species_name, estimated_genus_name, estimated_family_name,
+         landed_weight, live_weight, weight_kg_corrected, value
+         )
+
+# 2189051 obs., 22 vars.
+```
+
+```{r Summarize landings}
+RockyReef_Landings_summary<- RockyReef_Landings0 %>%
+  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+  summarize(
+    total_landings_mt = sum(weight_kg_corrected, na.rm = TRUE)/1000,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Major_Functional_Group= clean_names_lowercase(Major_Functional_Group),
+    OHI_region_est= clean_names_lowercase(OHI_region_est)
+  )
+# 868 obs.
+```
+
+```{r Plot over time}
+colnames(RockyReef_Landings_summary)
+
+RockyReef_Landings_summary %>%
+  ggplot(
+    aes(
+      x = year,
+      y = log10(total_landings_mt),
+      color = Major_Functional_Group,
+      group = Major_Functional_Group
+    )
+  ) +
+  geom_line() +
+  theme_bw() +
+  facet_wrap(~ OHI_region_est)
+```
+
+## Open Ocean Communities
+
+```{r Isolate Rocky Reef taxa and create RockyReef_Landings0}
+unique(GOC_MarineFisheryLandings$Major_Functional_Group)
+
+Open_Ocean_Taxa<- c("Pelagic marine fish (excl. anchovy & sardine)",
+"Anchovy & Sardine (small pelagics)",
+"Sharks",
+"Cephalopods"
+)
+
+colnames(GOC_MarineFisheryLandings)
+
+OpenOcean_Landings0<- GOC_MarineFisheryLandings %>%
+  filter(Major_Functional_Group %in% Open_Ocean_Taxa) %>%
+    select(state, OHI_region_est,
+         office_name_clean, landing_site_clean, 
+         year,
+         est_aquaculture_production, reported_fleet, 
+         sector_estimate_reported, sector_estimate_draft,
+         recorded_taxa_name, recorded_taxa_name_clean, common_name_clean, 
+         recorded_taxa_group, estimated_taxa_group, Major_Functional_Group,
+         estimated_species_name, estimated_genus_name, estimated_family_name,
+         landed_weight, live_weight, weight_kg_corrected, value
+         )
+
+# 653887 obs., 22 vars.
+```
+
+```{r Summarize landings}
+OpenOcean_Landings_summary<- OpenOcean_Landings0 %>%
+  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+  summarize(
+    total_landings_mt = sum(weight_kg_corrected, na.rm = TRUE)/1000,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Major_Functional_Group= clean_names_lowercase(Major_Functional_Group),
+    OHI_region_est= clean_names_lowercase(OHI_region_est)
+  )
+# 853 obs.
+```
+
+```{r Plot over time}
+colnames(OpenOcean_Landings_summary)
+
+OpenOcean_Landings_summary %>%
+  filter(year >= 2014, year <= 2024) %>%
+  ggplot(
+    aes(
+      x = year,
+      y = log10(total_landings_mt),
+      color = Major_Functional_Group,
+      group = Major_Functional_Group
+    )
+  ) +
+  geom_line() +
+  theme_bw() +
+  facet_wrap(~ OHI_region_est)
+```
+
+
+# STEP 3: Strategy 2 - Pull matching FIS scores ------------------------------
+
+```{r Load in FIS_StockStatus scores as necessary}
+StockStatus_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Stock_Status_SubScores/Stock_Statuses_Compiled_df_Jun072026.csv")
+
+# Species x year x region; Stock_Status is used as-is.
+
+# CSV was previously titled: StockStatus_Estimates_Jun072026.csv
+```
+
+```{r Prep FIS scores}
+StockStatus_Scores <- StockStatus_Scores0 %>%
+  filter(year >= 2018, year <= 2024) %>%
+  mutate(
+    OHI_region_est = clean_names_lowercase(OHI_region_est),
+    estimated_genus_name = clean_names_lowercase(estimated_genus_name)
+  )
+# 4130 obs.
+```
+
+# PATCH: Patch sardinops, penaeus, and litopenaeus 
+```{r Patch penaeus major functional group}
+StockStatus_Scores <- StockStatus_Scores %>%
+  mutate(
+    estimated_genus_name = case_when(
+      estimated_genus_name == "penaeus" ~ "litopenaeus",
+      TRUE ~ estimated_genus_name
+    ),
+    Major_Functional_Group = case_when(
+      estimated_genus_name %in% c("penaeus", "litopenaeus") ~ "Shrimps, prawns",
+      estimated_genus_name %in% c("sardinops") ~ "Anchovy & Sardine (small pelagics)",
+      TRUE ~ Major_Functional_Group
+    )
+  )
+```
+
+## Stock_Status: Open Ocean Communities
+
+```{r Create OpenOcean_StockStatus}
+unique(StockStatus_Scores$Major_Functional_Group)
+
+Open_Ocean_Taxa<- c("Pelagic marine fish (excl. anchovy & sardine)",
+"Anchovy & Sardine (small pelagics)",
+"Sharks",
+"Cephalopods"
+)
+
+colnames(StockStatus_Scores)
+
+OpenOcean_StockStatus<- StockStatus_Scores %>%
+  filter(Major_Functional_Group %in% Open_Ocean_Taxa) %>%
+    select(year, Major_Functional_Group,
+           estimated_genus_name, estimated_family_name,
+           OHI_region_est,
+           total_weight_mt,
+           StockStatus_final,
+           StockStatus_source
+         )
+
+# 791 obs.
+```
+
+```{r Summarize landings}
+colnames(OpenOcean_StockStatus)
+
+OpenOcean_Status_summary<- OpenOcean_StockStatus %>%
+  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+  summarize(
+    mean_StockStatus = mean(StockStatus_final, na.rm = TRUE),
+    total_weight_mt = sum(total_weight_mt, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Major_Functional_Group= clean_names_lowercase(Major_Functional_Group),
+    OHI_region_est= clean_names_lowercase(OHI_region_est)
+  )
+# 150 obs.
+```
+
+```{r Plot over time}
+colnames(OpenOcean_Status_summary)
+
+OpenOcean_Status_summary %>%
+  filter(year >= 2014, year <= 2024) %>%
+  ggplot(
+    aes(
+      x = year,
+      y = mean_StockStatus,
+      color = Major_Functional_Group,
+      group = Major_Functional_Group
+    )
+  ) +
+  geom_line() +
+  theme_bw() +
+  facet_wrap(~ OHI_region_est)
+```
+
+## Stock_Status: Open Ocean Communities
+
+```{r Create OpenOcean_StockStatus}
+unique(StockStatus_Scores$Major_Functional_Group)
+
+Open_Ocean_Taxa<- c("Pelagic marine fish (excl. anchovy & sardine)",
+"Anchovy & Sardine (small pelagics)",
+"Sharks",
+"Cephalopods"
+)
+
+colnames(StockStatus_Scores)
+
+OpenOcean_StockStatus<- StockStatus_Scores %>%
+  filter(Major_Functional_Group %in% Open_Ocean_Taxa) %>%
+    select(year, Major_Functional_Group,
+           estimated_genus_name, estimated_family_name,
+           OHI_region_est,
+           total_weight_mt,
+           StockStatus_final,
+           StockStatus_source
+         )
+
+# 791 obs.
+```
+
+```{r Summarize landings}
+colnames(OpenOcean_StockStatus)
+
+OpenOcean_Status_summary<- OpenOcean_StockStatus %>%
+  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+  summarize(
+    mean_StockStatus = mean(StockStatus_final, na.rm = TRUE),
+    total_weight_mt = sum(total_weight_mt, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Major_Functional_Group= clean_names_lowercase(Major_Functional_Group),
+    OHI_region_est= clean_names_lowercase(OHI_region_est)
+  )
+# 150 obs.
+```
+
+```{r Plot over time}
+colnames(OpenOcean_Status_summary)
+
+OpenOcean_Status_summary %>%
+  filter(year >= 2014, year <= 2024) %>%
+  ggplot(
+    aes(
+      x = year,
+      y = mean_StockStatus,
+      color = Major_Functional_Group,
+      group = Major_Functional_Group
+    )
+  ) +
+  geom_line() +
+  theme_bw() +
+  facet_wrap(~ OHI_region_est)
+```
