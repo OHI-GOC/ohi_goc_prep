@@ -1,0 +1,280 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(colorspace)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/BD/")
+```
+
+```{r Load clean_names_lowercase function}
+clean_names_lowercase <- function(x) {
+
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+
+  x %>%
+    tolower() %>%
+    trimws()
+}
+```
+
+
+# STEP 1: Load input data ------------------------------
+
+```{r Load in BD_HAB_Conditions0 for DUN WET MAN SEA and CRL}
+BD_HAB_Conditions0 <- read.csv("/home/ferrer/ohi_goc_prep/BD/HAB/hab_OHI_scores/habitat_services_output_pushed/habitat_services_full.csv")
+# 28 obs., 9 vars.
+```
+
+```{r Clean up the BD_HAB_Conditions dataframe}
+colnames(BD_HAB_Conditions0)
+
+BD_HAB_Conditions<- BD_HAB_Conditions0 %>%
+  select(year, OHI_region= rgn_id, 
+         biome_type= habitat, habitat_condition= condition, 
+         extent, extent_trend= trend) %>%
+  mutate(
+    extent_trend = if_else(biome_type == "seagrass", 0, extent_trend),
+    extent_trend_prct= extent_trend * 100,
+    OHI_region= clean_names_lowercase(OHI_region)
+  )
+
+BD_HAB_Conditions <- BD_HAB_Conditions %>%
+  group_by(year, biome_type) %>%
+  complete(
+    OHI_region = paste0("region_", 1:9),
+    fill = list(condition = NA_real_)
+  ) %>%
+  ungroup()
+# 36 obs., 7 vars.
+```
+
+# Add in the OHI region names:
+```{r Region key}
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
+
+colnames(Region_Key0)
+
+Region_Key<- Region_Key0 %>%
+  select(OHI_region= OHI_region_est, OHI_region_name) %>%
+  distinct()
+```
+
+```{r Merge Region_Key to BD_HAB_Conditions}
+BD_HAB_Conditions<- BD_HAB_Conditions %>%
+  left_join(Region_Key, 
+            by = "OHI_region")
+
+# Make sure to order the regions:
+Region_order <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
+BD_HAB_Conditions <- BD_HAB_Conditions %>%
+  mutate(
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = Region_order
+    )
+  )
+# 36 obs., 8 vars.
+```
+
+# Extrapolate 5 years back and 5 years forward
+```{r Extrapolate 5 years back and 5 years forward}
+# NOTE TO SELF: Run this method by Ben and Mel. This may change. - Jul 20 2026
+
+BD_HAB_Condition_extrap <- BD_HAB_Conditions %>%
+  rowwise() %>%
+  reframe(
+    year_offset = -6:6,
+    year = year + year_offset,
+    OHI_region,
+    OHI_region_name,
+    biome_type,
+    extent,
+    extent_trend,
+    extent_trend_prct,
+    habitat_condition = case_when(
+      is.na(habitat_condition) ~ NA_real_,
+      habitat_condition >= 1 ~ 1,
+      TRUE ~ pmin(
+        habitat_condition * (1 + extent_trend_prct / 100)^year_offset,
+        1
+      )
+    ),
+    condition_provenance = case_when(
+      year_offset == 0 ~ "observed",
+      is.na(habitat_condition) ~ NA_character_,
+      TRUE ~ "extrapolated"
+    )
+  ) %>%
+  ungroup()
+# 468 obs., 10 vars.
+
+BD_HAB_Condition_extrap<- BD_HAB_Condition_extrap %>%
+  mutate(
+    HAB_score= habitat_condition * 100,
+    OHI_region= clean_names_lowercase(OHI_region)
+  )
+# 468 obs., 11 vars.
+
+BD_HAB_Condition_extrap<- BD_HAB_Condition_extrap %>%
+  filter(year <= 2026)
+# 405 obs., 11 vars.
+```
+
+# SAVE BD_HAB_Scores ------------------------------
+
+```{r Save BD_HAB_Scores}
+write.csv(BD_HAB_Condition_extrap, 
+          "/home/ferrer/ohi_goc_prep/BD/BD_Scores/BD_HAB_Scores/BD_HAB_Scores_df_Jul202026.csv", 
+          row.names = FALSE)
+# 405 obs., 11 vars.
+```
+
+# Plot for OHI Core Team - July 20 2026
+
+```{r Plot extrapolated Biome scores}
+# NOTE TO SELF: Run this method by Ben and Mel. This may change. - Jul 20 2026
+
+unique(BD_HAB_Condition_extrap$OHI_region)
+
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
+# For plotting purposes:
+BD_HAB_Condition_extrap <- BD_HAB_Condition_extrap %>%
+  mutate(
+    point_fill = ifelse(
+      condition_provenance == "observed",
+      as.character(OHI_region_name),
+      "extrapolated"
+    )
+  )
+
+BD_HAB_Scores_OverTime <- BD_HAB_Condition_extrap %>%
+  ggplot(aes(
+    x = year,
+    y = HAB_score,
+    color = OHI_region_name,
+    fill = point_fill
+  )) +
+  
+  geom_line(
+    aes(group = OHI_region_name),
+    linewidth = 1
+  ) +
+  
+  geom_point(
+    aes(shape = condition_provenance),
+    size = 3,
+    position = position_jitter(width = 0.08, height = 0)
+  ) +
+  
+  facet_wrap(~ biome_type, scales = "fixed") +
+  
+  labs(
+    title = "BD Biome Scores by Region",
+    subtitle = "updated: Jul 20 2026",
+    y = "BD Biome Score (from 0 to 100)",
+    x = "Year"
+  ) +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  ylim(0, 101) +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  scale_fill_manual(
+    values = c(
+      Region_colors,
+      extrapolated = "white"
+    ), 
+    guide= "none"
+  ) +
+  
+  scale_shape_manual(
+    values = c(
+      observed = 21,
+      extrapolated = 21
+    )
+  ) +
+  
+  scale_x_continuous(
+    breaks = scales::pretty_breaks(),
+    labels = scales::label_number(accuracy = 1)
+  ) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      size = 12
+    )
+  )
+
+BD_HAB_Scores_OverTime
+```
+
+```{r Save as PNG}
+  ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/BD/BD_Scores/BD_HAB_Scores/BD_HAB_Scores_plot_Jul202026.png"),
+    plot = BD_HAB_Scores_OverTime,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+```
