@@ -1,0 +1,583 @@
+---
+title: "Gilman gear crosswalk — Mexican permits to ghost-gear risk scores"
+output: html_document
+date: "`r format(Sys.Date())`"
+---
+
+## Purpose
+
+Map each Gulf of California vessel permit combination (`gear_type` × `target_species`) to
+[Gilman et al. (2021)](https://www.nature.com/articles/s41598-021-86123-3) FAO gear categories
+and attach ghost-gear risk scores used in **Pressure 3** (ghost gear) in
+`step2_vessel_pressure.Rmd`.
+
+**Prerequisite:** run the gear × target classification in step2 first, which writes
+`data/gear_target_benthic_destructive.csv`.
+
+**Outputs:**
+
+| File | Description |
+|------|-------------|
+| `data/gear_gilman_crosswalk.csv` | Main lookup: permit combo → Gilman scores |
+| `data/gilman_table2_reference_updated.csv` | Table 2 + composite categories |
+| `data/gilman_table_s2_ghost_fishing_updated.csv` | Supplement S2 + composite ghost scores |
+
+## Mapping logic (three paths)
+
+Every permit combo is assigned a Gilman gear category using one of three methods:
+
+1. **`table2_single`** — one unambiguous gear token (`ARRASTRE`, `CERCO`, `PALANGRE`, `VARA`).
+   Look up Table 2 directly. High confidence.
+
+2. **`dominant_guess`** — ambiguous or missing gear (`OTRO`, `PESCA MULTIPLE`, `NA`, or
+   multi-token permits without two distinct gears). Infer the Gilman category from
+   **target species**. Lower confidence; notes flag uncertain cases.
+
+3. **`composite_mean`** — permit lists **2+ distinct gears** separated by `|`
+   (e.g. `ARRASTRE | PALANGRE`). Take the **arithmetic mean** of Table 2 scores (R, C, A, O)
+   across mapped component categories. `OTRO` and `PESCA MULTIPLE` tokens are **ignored**
+   for compositing (e.g. `ARRASTRE | PALANGRE | PESCA MULTIPLE` → mean of trawl + longline).
+
+**Ghost gear index used in pressure rasters:**
+
+- `H_gear` = R × O (general gear hazard; not used for ghost pressure)
+- **`H_gear_ghost`** = R × `ghost_fishing_mean` (Supplement Table S2) — this is what gets
+  multiplied by capped VMS hours in the ghost-gear layer
+
+```{r setup}
+library(tidyverse)
+library(here)
+
+DISTINCT_GEARS <- c("ARRASTRE", "CERCO", "PALANGRE", "VARA")
+AMBIGUOUS_GEARS <- c("OTRO", "PESCA MULTIPLE")
+```
+
+## Load inputs
+
+```{r load_inputs}
+combos <- read_csv(
+  here("_pressures/vessels/data/gear_target_benthic_destructive.csv"),
+  show_col_types = FALSE
+)
+
+gilman_ref <- read_csv(
+  here("_pressures/vessels/data/gilman_table2_reference.csv"),
+  show_col_types = FALSE
+)
+
+ghost_s2_ref <- read_csv(
+  here("_pressures/vessels/data/gilman_table_s2_ghost_fishing.csv"),
+  show_col_types = FALSE
+)
+
+tibble(
+  dataset = c("Permit combos", "Gilman Table 2", "Gilman S2 ghost fishing"),
+  n_rows = c(nrow(combos), nrow(gilman_ref), nrow(ghost_s2_ref))
+)
+```
+
+Gilman Table 2 categories in our reference extract:
+
+```{r preview_gilman_ref}
+gilman_ref %>%
+  select(gilman_gear_category, R, C, A, O) %>%
+  arrange(gilman_gear_category)
+```
+
+## Helper: parse permit gear strings
+
+Mexican permits can list multiple gears separated by `|`. We split tokens and identify which
+are distinct gears vs ambiguous placeholders.
+
+```{r parse_gear_tokens}
+parse_gear_tokens <- function(gear_type) {
+  gear_chr <- coalesce(gear_type, "")
+  if (gear_chr == "") {
+    return(tibble(
+      gear_tokens = list(character(0)),
+      distinct_gears = list(character(0)),
+      has_ambiguous_token = TRUE,
+      is_multi_gear = FALSE
+    ))
+  }
+  tokens <- str_split(gear_chr, "\\s*\\|\\s*")[[1]] %>%
+    str_trim() %>%
+    unique()
+  distinct <- tokens[tokens %in% DISTINCT_GEARS] %>% unique()
+  ignored_ambiguous <- tokens[tokens %in% AMBIGUOUS_GEARS] %>% unique()
+  has_ambiguous <- length(ignored_ambiguous) > 0L ||
+    any(tokens == "") ||
+    is.na(gear_type)
+  tibble(
+    gear_tokens = list(tokens),
+    distinct_gears = list(distinct),
+    ignored_ambiguous_gears = list(ignored_ambiguous),
+    has_ambiguous_token = has_ambiguous,
+    is_multi_gear = length(tokens) > 1L
+  )
+}
+```
+
+Example parses:
+
+```{r parse_examples}
+tibble(gear_type = c(
+  "ARRASTRE",
+  "ARRASTRE | PALANGRE",
+  "ARRASTRE | PALANGRE | PESCA MULTIPLE",
+  "OTRO",
+  NA_character_
+)) %>%
+  rowwise() %>%
+  mutate(parsed = list(parse_gear_tokens(gear_type))) %>%
+  unnest_wider(parsed)
+```
+
+## Helper: map a single Mexican gear token
+
+When a permit has one clear gear token, map it to a Gilman category using gear + target rules.
+
+```{r map_single_mexican_gear}
+map_single_mexican_gear <- function(mex_gear, target_species) {
+  target_chr <- coalesce(target_species, "")
+  has_shrimp <- str_detect(target_chr, "CAMARÓN")
+  has_finfish <- str_detect(target_chr, "ESCAMA")
+  has_sardine <- str_detect(target_chr, "SARDINA")
+  has_tuna <- str_detect(target_chr, "ATÚN")
+  has_shark <- str_detect(target_chr, "TIBURÓN")
+  has_tuna_only <- has_tuna & !has_shrimp & !has_finfish & !has_shark & !has_sardine
+
+  case_when(
+    mex_gear == "ARRASTRE" & has_sardine ~ "Trawl, midwater",
+    mex_gear == "ARRASTRE" & has_tuna_only ~ "Trawl, midwater",
+    mex_gear == "ARRASTRE" ~ "Trawl, bottom",
+    mex_gear == "CERCO" & has_tuna & !has_sardine ~
+      "Purse seine, tuna, including drifting and anchored FADs",
+    mex_gear == "CERCO" & has_tuna & has_sardine ~ "Purse seine, non-tuna",
+    mex_gear == "CERCO" & has_tuna ~
+      "Purse seine, tuna, including drifting and anchored FADs",
+    mex_gear == "CERCO" ~ "Purse seine, non-tuna",
+    mex_gear == "PALANGRE" & has_tuna ~ "Longline, pelagic",
+    mex_gear == "PALANGRE" & has_shark ~ "Longline, demersal",
+    mex_gear == "PALANGRE" ~ "Longline, demersal",
+    mex_gear == "VARA" ~ "Pole-and-line, including anchored FADs",
+    TRUE ~ NA_character_
+  )
+}
+```
+
+## Helper: composite and score averaging
+
+For multi-gear permits, average Table 2 and S2 scores across component Gilman categories.
+
+```{r composite_helpers}
+use_composite_mean <- function(gear_type) {
+  parsed <- parse_gear_tokens(gear_type)
+  length(parsed$distinct_gears[[1]]) >= 2L
+}
+
+build_composite_category <- function(component_categories) {
+  sorted <- sort(unique(component_categories))
+  paste0("Composite: ", paste(sorted, collapse = " + "))
+}
+
+mean_gilman_scores <- function(categories, gilman_ref) {
+  gilman_ref %>%
+    filter(gilman_gear_category %in% categories) %>%
+    summarise(
+      across(c(R, C, A, O), ~ mean(.x, na.rm = TRUE)),
+      .groups = "drop"
+    )
+}
+
+mean_ghost_scores <- function(categories, ghost_ref) {
+  ghost_ref %>%
+    filter(gilman_gear_category %in% categories) %>%
+    summarise(
+      across(
+        c(ghost_initial_mortality, ghost_duration_efficiency, ghost_vulnerability_species),
+        ~ mean(.x, na.rm = TRUE)
+      ),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      ghost_fishing_mean = mean(
+        c(ghost_initial_mortality, ghost_duration_efficiency, ghost_vulnerability_species),
+        na.rm = TRUE
+      )
+    ) %>%
+    mutate(across(everything(), ~ round(.x, 4)))
+}
+```
+
+## Helper: dominant-category guess (ambiguous permits)
+
+When compositing does not apply, infer the best Gilman category from target species and any
+gear hints on the permit.
+
+```{r map_gilman_dominant}
+map_gilman_dominant <- function(gear_type, target_species) {
+  gear_chr <- coalesce(gear_type, "")
+  target_chr <- coalesce(target_species, "")
+
+  has_trawl <- str_detect(gear_chr, "ARRASTRE")
+  has_purse <- str_detect(gear_chr, "CERCO")
+  has_longline <- str_detect(gear_chr, "PALANGRE")
+  has_vara <- str_detect(gear_chr, "VARA")
+  has_shrimp <- str_detect(target_chr, "CAMARÓN")
+  has_finfish <- str_detect(target_chr, "ESCAMA")
+  has_sardine <- str_detect(target_chr, "SARDINA")
+  has_tuna <- str_detect(target_chr, "ATÚN")
+  has_shark <- str_detect(target_chr, "TIBURÓN")
+  has_otras <- str_detect(target_chr, "OTRAS")
+  has_tuna_only <- has_tuna & !has_shrimp & !has_finfish & !has_shark & !has_sardine
+  gear_missing <- is.na(gear_type) | gear_chr == ""
+  target_missing <- is.na(target_species) | target_chr == ""
+  ambiguous_gear <- gear_missing | gear_chr == "OTRO" | gear_chr == "PESCA MULTIPLE"
+
+  category <- case_when(
+    gear_missing & target_missing ~ NA_character_,
+    has_sardine & has_purse & !has_trawl ~ "Purse seine, non-tuna",
+    has_sardine & !has_trawl & !has_purse & !has_longline ~ "Purse seine, non-tuna",
+    has_tuna & has_purse & !has_trawl ~
+      "Purse seine, tuna, including drifting and anchored FADs",
+    has_vara & !str_detect(gear_chr, "\\|") ~ "Pole-and-line, including anchored FADs",
+    has_shrimp & (has_trawl | ambiguous_gear) ~ "Trawl, bottom",
+    has_trawl & has_sardine ~ "Trawl, midwater",
+    has_trawl & has_tuna_only ~ "Trawl, midwater",
+    has_trawl ~ "Trawl, bottom",
+    has_longline & has_tuna ~ "Longline, pelagic",
+    has_longline & has_shark ~ "Longline, demersal",
+    has_longline ~ "Longline, demersal",
+    has_purse & has_tuna ~ "Purse seine, tuna, including drifting and anchored FADs",
+    has_purse ~ "Purse seine, non-tuna",
+    gear_chr == "OTRO" & has_shrimp ~ "Trawl, bottom",
+    gear_chr == "OTRO" & has_sardine ~ "Purse seine, non-tuna",
+    gear_chr == "OTRO" & has_tuna ~ "Longline, pelagic",
+    gear_chr == "OTRO" & has_shark ~ "Longline, demersal",
+    gear_chr == "OTRO" & has_finfish ~ "Longline, demersal",
+    gear_chr == "OTRO" & has_otras ~
+      "Hand dredge, harpoon, spear, lance, tongs, rakes, hand-collected, including diving—shore- and boat-based",
+    gear_chr == "PESCA MULTIPLE" & has_shrimp ~ "Trawl, bottom",
+    gear_chr == "PESCA MULTIPLE" & has_sardine ~ "Purse seine, non-tuna",
+    gear_chr == "PESCA MULTIPLE" & has_tuna ~ "Longline, pelagic",
+    gear_chr == "PESCA MULTIPLE" & has_shark ~ "Longline, demersal",
+    gear_chr == "PESCA MULTIPLE" & has_finfish ~ "Longline, demersal",
+    gear_missing & has_shrimp ~ "Trawl, bottom",
+    gear_missing & has_sardine ~ "Purse seine, non-tuna",
+    gear_missing & has_tuna ~ "Longline, pelagic",
+    gear_missing & has_shark ~ "Longline, demersal",
+    gear_missing & has_finfish ~ "Longline, demersal",
+    str_detect(gear_chr, "\\|") & has_tuna & has_purse ~
+      "Purse seine, tuna, including drifting and anchored FADs",
+    str_detect(gear_chr, "\\|") & has_tuna & has_longline ~ "Longline, pelagic",
+    str_detect(gear_chr, "\\|") & has_shark & has_longline ~ "Longline, demersal",
+    str_detect(gear_chr, "\\|") & has_shrimp & has_longline ~ "Trawl, bottom",
+    str_detect(gear_chr, "\\|") & has_vara ~ "Pole-and-line, including anchored FADs",
+    str_detect(gear_chr, "\\|") & has_trawl ~ "Trawl, bottom",
+    str_detect(gear_chr, "\\|") & has_longline ~ "Longline, demersal",
+    str_detect(gear_chr, "\\|") & has_purse ~ "Purse seine, non-tuna",
+    TRUE ~ "Hand dredge, harpoon, spear, lance, tongs, rakes, hand-collected, including diving—shore- and boat-based"
+  )
+
+  method <- case_when(
+    is.na(category) ~ NA_character_,
+    ambiguous_gear | gear_missing ~ "dominant_guess",
+    gear_chr %in% c("OTRO", "PESCA MULTIPLE") ~ "dominant_guess",
+    str_detect(gear_chr, "\\|") ~ "dominant_guess",
+    TRUE ~ "table2_single"
+  )
+
+  confidence <- case_when(
+    is.na(category) ~ NA_character_,
+    method == "dominant_guess" & (ambiguous_gear | gear_chr == "OTRO") ~ "low",
+    method == "dominant_guess" & str_detect(gear_chr, "\\|") ~ "medium",
+    method == "dominant_guess" ~ "medium",
+    TRUE ~ "high"
+  )
+
+  notes <- case_when(
+    is.na(category) ~ "Unclassified permit (gear and target both missing).",
+    method == "dominant_guess" &
+      str_detect(gear_chr, "OTRO|PESCA MULTIPLE") ~
+      "Ambiguous permit gear; dominant Gilman category inferred from target. Gillnets not in registry.",
+    method == "dominant_guess" & str_detect(gear_chr, "\\|") ~
+      "No pair of distinct gears (ARRASTRE/CERCO/PALANGRE/VARA) for composite; dominant category used.",
+    gear_chr == "OTRO" ~
+      "Permit gear ambiguous; mapped from target. Artisanal gillnets not in registry.",
+    has_tuna & has_purse ~
+      "Tuna purse seine mapped with FAD category; FAD use not recorded in registry.",
+    has_shrimp & has_longline & !has_trawl ~
+      "Shrimp on longline permit uncommon; verify against fishery.",
+    has_shrimp & has_purse & !has_trawl ~
+      "Shrimp + purse seine; may understate risk if trawl also used.",
+    TRUE ~ NA_character_
+  )
+
+  tibble(
+    gilman_gear_category = category,
+    gilman_mapping_method = method,
+    gilman_mapping_confidence = confidence,
+    gilman_component_categories = NA_character_,
+    mapping_notes = notes
+  )
+}
+```
+
+## Helper: one row of the crosswalk
+
+Chooses composite mean vs dominant guess, then attaches Table 2 scores.
+
+```{r map_gilman_row}
+map_gilman_row <- function(gear_type, target_species, gilman_ref) {
+  parsed <- parse_gear_tokens(gear_type)
+  if (use_composite_mean(gear_type)) {
+    distinct <- parsed$distinct_gears[[1]]
+    ignored <- parsed$ignored_ambiguous_gears[[1]]
+    components <- map_chr(distinct, ~ map_single_mexican_gear(.x, target_species))
+    composite_name <- build_composite_category(components)
+    scores <- mean_gilman_scores(components, gilman_ref) %>%
+      mutate(across(c(R, C, A, O), ~ round(.x, 4)))
+
+    ignored_note <- if (length(ignored) > 0) {
+      paste0(
+        " Ignored on permit: ",
+        paste(ignored, collapse = ", "),
+        "."
+      )
+    } else {
+      ""
+    }
+
+    tibble(
+      gilman_gear_category = composite_name,
+      gilman_mapping_method = "composite_mean",
+      gilman_mapping_confidence = if (length(ignored) > 0) "medium" else "medium",
+      gilman_component_categories = paste(sort(components), collapse = "; "),
+      mapping_notes = paste0(
+        "Composite mean of Gilman Table 2 for permit gears (",
+        paste(distinct, collapse = ", "),
+        "). R/C/A/O are arithmetic means of component categories.",
+        ignored_note
+      ),
+      R = scores$R,
+      C = scores$C,
+      A = scores$A,
+      O = scores$O
+    )
+  } else {
+    dominant <- map_gilman_dominant(gear_type, target_species)
+    scores <- gilman_ref %>%
+      filter(gilman_gear_category == dominant$gilman_gear_category) %>%
+      select(R, C, A, O) %>%
+      mutate(across(everything(), ~ round(.x, 4)))
+    if (nrow(scores) == 0) {
+      scores <- tibble(R = NA_real_, C = NA_real_, A = NA_real_, O = NA_real_)
+    }
+    bind_cols(dominant, scores)
+  }
+}
+```
+
+## Build the permit crosswalk
+
+```{r build_crosswalk}
+crosswalk <- combos %>%
+  mutate(row_id = row_number()) %>%
+  rowwise() %>%
+  mutate(mapping = list(map_gilman_row(gear_type, target_species, gilman_ref))) %>%
+  ungroup() %>%
+  unnest_wider(mapping) %>%
+  select(-row_id) %>%
+  mutate(
+    H_gear = round(R * O, 4),
+    gilman_reference = "Gilman et al. 2021 Sci Rep s41598-021-86123-3 Table 2"
+  ) %>%
+  relocate(
+    gear_type, target_species, n_vessels,
+    gilman_gear_category, gilman_mapping_method, gilman_mapping_confidence,
+    gilman_component_categories,
+    R, C, A, O, H_gear,
+    bottom_destructive, confidence,
+    mapping_notes, gilman_reference
+  )
+```
+
+### Mapping method summary
+
+```{r mapping_summary}
+count(crosswalk, gilman_mapping_method, gilman_mapping_confidence, sort = TRUE)
+```
+
+### Composite categories
+
+```{r composite_summary}
+crosswalk %>%
+  filter(gilman_mapping_method == "composite_mean") %>%
+  count(gilman_gear_category, gilman_component_categories, sort = TRUE)
+```
+
+### Low-confidence mappings (review list)
+
+```{r low_confidence}
+crosswalk %>%
+  filter(gilman_mapping_confidence == "low" | !is.na(mapping_notes)) %>%
+  select(
+    gear_type, target_species, n_vessels,
+    gilman_gear_category, gilman_mapping_method, gilman_mapping_confidence,
+    mapping_notes
+  ) %>%
+  arrange(desc(n_vessels))
+```
+
+## Attach Supplement Table S2 ghost-fishing scores
+
+Build updated reference tables that include composite categories, then join ghost scores
+onto the crosswalk and compute **`H_gear_ghost`**.
+
+```{r ghost_scores}
+gilman_ref_updated <- gilman_ref %>%
+  mutate(
+    is_composite = FALSE,
+    component_categories = NA_character_,
+    source = "Gilman et al. 2021 Table 2"
+  )
+
+composite_ref <- crosswalk %>%
+  filter(gilman_mapping_method == "composite_mean") %>%
+  distinct(gilman_gear_category, R, C, A, O, gilman_component_categories) %>%
+  mutate(
+    is_composite = TRUE,
+    component_categories = gilman_component_categories,
+    source = "Composite mean of Table 2 components"
+  ) %>%
+  select(-gilman_component_categories)
+
+gilman_ref_updated <- bind_rows(gilman_ref_updated, composite_ref) %>%
+  arrange(is_composite, gilman_gear_category)
+
+ghost_s2_updated <- ghost_s2_ref %>%
+  mutate(
+    is_composite = FALSE,
+    component_categories = NA_character_
+  )
+
+composite_ghost <- crosswalk %>%
+  filter(gilman_mapping_method == "composite_mean") %>%
+  distinct(gilman_gear_category, gilman_component_categories) %>%
+  rowwise() %>%
+  mutate(
+    components = list(str_split(gilman_component_categories, "; ")[[1]]),
+    ghost_scores = list(mean_ghost_scores(components, ghost_s2_ref))
+  ) %>%
+  ungroup() %>%
+  unnest_wider(ghost_scores) %>%
+  mutate(
+    is_composite = TRUE,
+    component_categories = gilman_component_categories,
+    source = "Composite mean of Supplement Table S2 (S3.1) components",
+    notes = paste(
+      "Arithmetic mean of ghost_initial_mortality, ghost_duration_efficiency,",
+      "and ghost_vulnerability_species across component categories;",
+      "ghost_fishing_mean is mean of those three."
+    )
+  ) %>%
+  select(
+    gilman_gear_category,
+    ghost_initial_mortality,
+    ghost_duration_efficiency,
+    ghost_vulnerability_species,
+    ghost_fishing_mean,
+    source,
+    notes,
+    is_composite,
+    component_categories
+  )
+
+ghost_s2_updated <- bind_rows(ghost_s2_updated, composite_ghost) %>%
+  arrange(is_composite, gilman_gear_category)
+
+ghost_lookup <- ghost_s2_updated %>%
+  select(
+    gilman_gear_category,
+    ghost_initial_mortality,
+    ghost_duration_efficiency,
+    ghost_vulnerability_species,
+    ghost_fishing_mean,
+    gilman_ghost_reference = source
+  )
+
+crosswalk <- crosswalk %>%
+  left_join(ghost_lookup, by = "gilman_gear_category") %>%
+  mutate(
+    H_gear_ghost = round(R * ghost_fishing_mean, 4),
+    gilman_ghost_reference = coalesce(
+      gilman_ghost_reference,
+      "Gilman et al. 2021 Supplement Table S2 (S3.1)"
+    )
+  ) %>%
+  relocate(
+    gear_type, target_species, n_vessels,
+    gilman_gear_category, gilman_mapping_method, gilman_mapping_confidence,
+    gilman_component_categories,
+    R, C, A, O, H_gear,
+    ghost_initial_mortality, ghost_duration_efficiency,
+    ghost_vulnerability_species, ghost_fishing_mean, H_gear_ghost,
+    bottom_destructive, confidence,
+    mapping_notes, gilman_reference, gilman_ghost_reference
+  )
+```
+
+Distribution of ghost risk by mapping method:
+
+```{r ghost_risk_summary}
+crosswalk %>%
+  filter(!is.na(H_gear_ghost)) %>%
+  group_by(gilman_mapping_method) %>%
+  summarise(
+    n = n(),
+    median_H_gear_ghost = median(H_gear_ghost),
+    .groups = "drop"
+  )
+```
+
+Preview of final crosswalk (highest vessel counts first):
+
+```{r crosswalk_preview}
+crosswalk %>%
+  arrange(desc(n_vessels)) %>%
+  select(
+    gear_type, target_species, n_vessels,
+    gilman_gear_category, H_gear_ghost,
+    gilman_mapping_method, gilman_mapping_confidence
+  ) %>%
+  head(20)
+```
+
+## Write outputs
+
+```{r write_outputs}
+write_csv(
+  gilman_ref_updated,
+  here("_pressures/vessels/data/gilman_table2_reference_updated.csv")
+)
+
+write_csv(
+  ghost_s2_updated,
+  here("_pressures/vessels/data/gilman_table_s2_ghost_fishing_updated.csv")
+)
+
+write_csv(
+  crosswalk,
+  here("_pressures/vessels/data/gear_gilman_crosswalk.csv")
+)
+
+message("Wrote ", nrow(gilman_ref_updated), " rows to gilman_table2_reference_updated.csv")
+message("  (", sum(gilman_ref_updated$is_composite), " composite categories)")
+message("Wrote ", nrow(ghost_s2_updated), " rows to gilman_table_s2_ghost_fishing_updated.csv")
+message("  (", sum(ghost_s2_updated$is_composite), " composite ghost-fishing categories)")
+message("Wrote ", nrow(crosswalk), " rows to gear_gilman_crosswalk.csv")
+```
+
+**Next step:** use `gear_gilman_crosswalk.csv` in `step2_vessel_pressure.Rmd` (Pressure 3:
+ghost gear filters and rasters).

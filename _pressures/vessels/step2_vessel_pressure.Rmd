@@ -6,12 +6,9 @@ date: "2026-06-01"
 
 Getting pressure layers for vessel traffic.
 
-**Yearly GeoTIFF outputs** (uncapped + capped) are built by
-[`scripts/build_vessel_pressure_rasters.R`](scripts/build_vessel_pressure_rasters.R):
-
-```bash
-Rscript _pressures/vessels/scripts/build_vessel_pressure_rasters.R
-```
+**Yearly GeoTIFF outputs** (uncapped + capped) for each pressure are built in the
+chunks below. A standalone batch script also exists at
+[`scripts/build_vessel_pressure_rasters.R`](scripts/build_vessel_pressure_rasters.R).
 
 ```{r}
 library(tidyverse)
@@ -24,6 +21,51 @@ ohi_marine <- rast(here("spatial/ohi_regions/ohi_marine_raster_1km.tif"))
 ohi_marine <- ifel(ohi_marine>=1, 1, NA)
 
 PRESSURE_ROOT <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/vessels"
+
+```
+
+Some raster functions
+```{r}
+
+VMS_ROOT <- "/home/shares/ohi/OHI_GOC/_raw_data/vms_juan_carlos"
+CAP_YEAR <- 2024L
+YEAR_MIN <- 2007L
+YEAR_MAX <- 2025L
+HOURS_CAP <- 3
+
+load_vms_year <- function(year) {
+  vms_path <- file.path(VMS_ROOT, "vms", sprintf("vms_%s.csv", year))
+  if (!file.exists(vms_path)) stop("Missing VMS file: ", vms_path)
+
+  read_csv(vms_path, show_col_types = FALSE) %>%
+    select(-name, -port, -economic_unit) %>%
+    left_join(vessels, by = "vessel_rnpa")  # uses GoC-filtered registry from chunk above
+}
+
+filter_vessel_traffic <- function(vms_year) {
+  vms_year %>%
+    filter(!is.na(hours), hours > 0) %>%
+    mutate(hours = pmin(hours, HOURS_CAP)) %>%
+    filter(!is.na(lat), !is.na(lon))
+}
+
+rasterize_to_marine <- function(pings, field, layer_name) {
+  pings_sf <- pings %>%
+    st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE) %>%
+    st_transform(crs(ohi_marine))
+
+  out <- rasterize(
+    vect(pings_sf),
+    y = ohi_marine,
+    field = field,
+    fun = "sum",
+    background = 0
+  )
+  out <- ifel(is.na(ohi_marine), NA, out)
+  names(out) <- layer_name
+  out
+}
+
 
 ```
 
@@ -50,12 +92,45 @@ ggplot(vessel_pressure, aes(x = lon, y = lat)) +
     y = "Latitude"
   ) +
   theme_minimal()
+
 ```
 
-## Vessel traffic raster (2024, from GeoTIFF)
+## Build yearly vessel-traffic GeoTIFFs (Pressure 1 only).
+## Sum of VMS hours per 1 km cell; hours capped at 3 h per ping.
+## Capped rasters use the 2024 99th-percentile value (fixed across years).
+
+```{r build_vessel_traffic_rasters}
+
+write_pressure_pair <- function(r, uncapped_path, capped_path, cap_value) {
+  dir.create(dirname(uncapped_path), recursive = TRUE, showWarnings = FALSE)
+  writeRaster(r, uncapped_path, overwrite = TRUE)
+  writeRaster(ifel(r > cap_value, cap_value, r), capped_path, overwrite = TRUE)
+}
+
+## Cap from 2024
+message("Computing 99th-percentile cap from ", CAP_YEAR, " (vessel traffic)")
+pings_cap <- load_vms_year(CAP_YEAR) %>% filter_vessel_traffic()
+r_cap <- rasterize_to_marine(pings_cap, "hours", "hours_count")
+q99_vessel <- as.numeric(quantile(values(r_cap), 0.99, na.rm = TRUE))
+message("Vessel traffic 99th-percentile cap: ", signif(q99_vessel, 4))
+
+## All years
+years <- YEAR_MIN:YEAR_MAX
+walk(years, function(year) {
+  message("\n=== Vessel traffic year ", year, " ===")
+  pings <- load_vms_year(year) %>% filter_vessel_traffic()
+  r <- rasterize_to_marine(pings, "hours", "hours_count")
+  uncapped <- file.path(PRESSURE_ROOT, "vessel_traffic", sprintf("vms_hours_%s_1km.tif", year))
+  capped <- file.path(PRESSURE_ROOT, "vessel_traffic", sprintf("vms_hours_%s_1km_capped.tif", year))
+  write_pressure_pair(r, uncapped, capped, q99_vessel)
+  message("Wrote ", basename(uncapped), " and ", basename(capped))
+})
+
+message("\nDone. Wrote ", length(years), " years of vessel traffic rasters (uncapped + capped).")
+```
 
 Sum of VMS hours per 1 km cell, aligned to `ohi_marine_raster_1km.tif` (EPSG:6372).
-Written by `scripts/build_vessel_pressure_rasters.R`.
+Written by the chunk above (also available via `scripts/build_vessel_pressure_rasters.R`).
 
 ```{r vessel_traffic_raster_preview}
 hours_count <- rast(file.path(
@@ -67,6 +142,7 @@ hours_count <- rast(file.path(
 colors <- paletteer_c("ggthemes::Classic Orange-Blue", 100)[1:55]
 plot(log1p(hours_count), main = "VMS hours per 1 km cell (2024, capped)", col = rev(colors))
 ```
+
 
 # Pressure 2: demersal destructive fishing pressure
 
@@ -185,6 +261,7 @@ filter_step <- function(label, n_in, n_out) {
 ```
 
 ```{r filter_bottom_destructive_pings}
+
 ## Lookup: one row per gear + target combination (from registry, not from VMS pings).
 destructive_lookup <- gear_target_combos %>%
   select(gear_type, target_species, bottom_destructive)
@@ -205,10 +282,11 @@ pings_destructive <- pings_assessed %>%
   filter(bottom_destructive == TRUE)
 filter_step("2. Bottom-destructive permit combo", nrow(pings_assessed), nrow(pings_destructive))
 
-## 3) Shelf only: depth_m is negative below sea level → water depth = -depth_m.
-pings_shelf <- pings_destructive %>%
-  mutate(water_depth_m = -depth_m) %>%
-  filter(!is.na(water_depth_m), water_depth_m <= 200)
+## 3) Shelf only: depth_m is negative below sea level → water depth = -depth_m. Not doing this at this time. Seems that hake might be bottom fished deeper than 200 m.
+pings_shelf <- pings_destructive 
+#%>%
+#  mutate(water_depth_m = -depth_m) %>%
+#  filter(!is.na(water_depth_m), water_depth_m <= 200)
 filter_step("3. Water depth ≤ 200 m", nrow(pings_destructive), nrow(pings_shelf))
 
 ## 4) Drop fast transit legs (speed between consecutive pings, in knots).
@@ -224,6 +302,7 @@ filter_step("5. Valid lat/lon and hours > 0", nrow(pings_trawling_speed), nrow(p
 
 ## 6) Cap hours at 3 h so one long gap between pings cannot add >3 vessel-hours to a cell.
 n_capped <- sum(pings_valid$hours > 3, na.rm = TRUE)
+
 vessel_pressure_bottom <- pings_valid %>%
   mutate(hours = pmin(hours, 3))
 
@@ -267,12 +346,65 @@ tibble(
 )
 
 vessel_pressure_bottom
+
+### Want to get median speeds of bottom trawling for pressure
+quantile(vessel_pressure_bottom$reported_speed, c(0.1, 0.5, 0.9), na.rm=TRUE)
+
+```
+
+## Build yearly bottom-destructive GeoTIFFs (Pressure 2 only).
+## Same filters as above: permit TRUE, depth ≤ 200 m, implied speed ≤ 6 kn,
+## hours capped at 3 h. Capped rasters use the 2024 99th-percentile value.
+
+```{r build_bottom_destructive_rasters}
+destructive_lookup <- gear_target_combos %>%
+  select(gear_type, target_species, bottom_destructive)
+
+filter_bottom_destructive <- function(vms_year) {
+  vms_year %>%
+    left_join(destructive_lookup, by = c("gear_type", "target_species")) %>%
+    filter(!is.na(bottom_destructive), bottom_destructive == TRUE) %>%
+    mutate(water_depth_m = -depth_m) %>%
+ #   filter(!is.na(water_depth_m), water_depth_m <= 200) %>%
+    filter(!is.na(implied_speed_knots), implied_speed_knots <= 6) %>%
+    filter(!is.na(lat), !is.na(lon), !is.na(hours), hours > 0) %>%
+    mutate(hours = pmin(hours, HOURS_CAP))
+}
+
+message("Computing 99th-percentile cap from ", CAP_YEAR, " (bottom-destructive fishing)")
+pings_cap <- load_vms_year(CAP_YEAR) %>% filter_bottom_destructive()
+r_cap <- rasterize_to_marine(pings_cap, "hours", "bottom_trawl_hours")
+q99_bottom <- as.numeric(quantile(values(r_cap), 0.99, na.rm = TRUE))
+message("Bottom-destructive 99th-percentile cap: ", signif(q99_bottom, 4))
+
+years <- YEAR_MIN:YEAR_MAX
+walk(years, function(year) {
+  message("\n=== Bottom-destructive year ", year, " ===")
+  pings <- load_vms_year(year) %>% filter_bottom_destructive()
+  r <- rasterize_to_marine(pings, "hours", "bottom_trawl_hours")
+  uncapped <- file.path(
+    PRESSURE_ROOT,
+    "benthic_destructive_fishing",
+    sprintf("destructive_fishing_hours_%s_1km.tif", year)
+  )
+  capped <- file.path(
+    PRESSURE_ROOT,
+    "benthic_destructive_fishing",
+    sprintf("destructive_fishing_hours_%s_1km_capped.tif", year)
+  )
+  write_pressure_pair(r, uncapped, capped, q99_bottom)
+  message("Wrote ", basename(uncapped), " and ", basename(capped))
+})
+
+message("\nDone. Wrote ", length(years), " years of bottom-destructive rasters (uncapped + capped).")
+
+
 ```
 
 ## Bottom-destructive trawl effort raster (2024, from GeoTIFF)
 
 Sum of capped **`hours`** per 1 km cell for filtered pings (`vessel_pressure_bottom`).
-Written by `scripts/build_vessel_pressure_rasters.R`.
+Written by the chunk above (also available via `scripts/build_vessel_pressure_rasters.R`).
 
 ```{r bottom_trawl_hours_raster}
 bottom_trawl_hours <- rast(file.path(
@@ -304,7 +436,7 @@ plot(
 Attach Gilman et al. (2021) scores to **every VMS ping** via the vessel permit
 (`gear_type` + `target_species`). Crosswalk: `data/gear_gilman_crosswalk.csv`
 (built from `data/gear_target_benthic_destructive.csv` via
-`scripts/build_gilman_crosswalk.R`).
+[`build_gilman_crosswalk.Rmd`](build_gilman_crosswalk.Rmd)).
 
 **Per-ping score:** `ghost_gear_risk` = `H_gear_ghost` = **R × ghost_fishing_mean**
 (Table 2 ALDFG leakage rate **R** × Supplement Table S2 ghost-fishing mean). This is **not**
@@ -363,8 +495,8 @@ for that gear × target combo, mainly missing gear and target). Pings with missi
 `ghost_gear_risk × hours_capped` (risk-weighted vessel-hours).
 
 ```{r filter_ghost_pressure_pings}
-n_start <- nrow(ghost_pressure)
 
+n_start <- nrow(ghost_pressure)
 
 ## 1) Drop pings without a Gilman ghost score (NA = no assessment for permit combo).
 ghost_scored <- ghost_pressure %>%
@@ -425,10 +557,52 @@ n_pings = c(
 ghost_pressure
 ```
 
+## Build yearly ghost gear GeoTIFFs (Pressure 3 only).
+## Sum of ghost_risk_hours (Gilman H_gear_ghost × capped hours) per 1 km cell.
+## Same filters as above: ghost score present, speed ≤ 6 kn, hours capped at 3 h.
+## Capped rasters use the 2024 99th-percentile value.
+
+```{r build_ghost_gear_rasters}
+gilman_lookup <- gilman_by_permit %>%
+  select(gear_type, target_species, H_gear_ghost)
+
+filter_ghost_gear <- function(vms_year) {
+  vms_year %>%
+    left_join(gilman_lookup, by = c("gear_type", "target_species")) %>%
+    mutate(ghost_gear_risk = H_gear_ghost) %>%
+    filter(!is.na(ghost_gear_risk)) %>%
+    filter(!is.na(implied_speed_knots), implied_speed_knots <= 6) %>%
+    filter(!is.na(lat), !is.na(lon), !is.na(hours), hours > 0) %>%
+    mutate(
+      hours_capped = pmin(hours, HOURS_CAP),
+      ghost_risk_hours = ghost_gear_risk * hours_capped
+    )
+}
+
+message("Computing 99th-percentile cap from ", CAP_YEAR, " (ghost gear)")
+pings_cap <- load_vms_year(CAP_YEAR) %>% filter_ghost_gear()
+r_cap <- rasterize_to_marine(pings_cap, "ghost_risk_hours", "ghost_risk_hours")
+q99_ghost <- as.numeric(quantile(values(r_cap), 0.99, na.rm = TRUE))
+message("Ghost gear 99th-percentile cap: ", signif(q99_ghost, 4))
+
+years <- YEAR_MIN:YEAR_MAX
+walk(years, function(year) {
+  message("\n=== Ghost gear year ", year, " ===")
+  pings <- load_vms_year(year) %>% filter_ghost_gear()
+  r <- rasterize_to_marine(pings, "ghost_risk_hours", "ghost_risk_hours")
+  uncapped <- file.path(PRESSURE_ROOT, "ghost_gear", sprintf("ghost_gear_risk_%s_1km.tif", year))
+  capped <- file.path(PRESSURE_ROOT, "ghost_gear", sprintf("ghost_gear_risk_%s_1km_capped.tif", year))
+  write_pressure_pair(r, uncapped, capped, q99_ghost)
+  message("Wrote ", basename(uncapped), " and ", basename(capped))
+})
+
+message("\nDone. Wrote ", length(years), " years of ghost gear rasters (uncapped + capped).")
+```
+
 ## Ghost gear pressure raster (2024, from GeoTIFF)
 
 Sum of **`ghost_risk_hours`** per 1 km cell for filtered pings (`ghost_pressure`).
-Written by `scripts/build_vessel_pressure_rasters.R`.
+Written by the chunk above (also available via `scripts/build_vessel_pressure_rasters.R`).
 
 ```{r ghost_pressure_hours_raster}
 ghost_risk_hours <- rast(file.path(
@@ -445,4 +619,3 @@ plot(
   col = rev(colors)
 )
 ```
-

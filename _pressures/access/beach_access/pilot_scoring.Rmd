@@ -1,0 +1,150 @@
+---
+title: "Beach access — La Paz & Mazatlán pilot scoring"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+Pilot workflow for expert beach access scores in **La Paz** and **Mazatlán**:
+
+1. Merge legacy expert CSVs into locality beach worksheets
+2. Build scored-beach Leaflet maps
+3. Aggregate length-weighted scores by locality and OHI marine region
+
+Legacy sources live in `data/pilot/` (`LaPaz.csv`, `beach_access.csv`).
+
+```{r setup, message=FALSE}
+library(here)
+library(dplyr)
+library(sf)
+library(purrr)
+library(readr)
+
+access_dir <- here("_pressures/access")
+data_dir <- file.path(access_dir, "data")
+pilot_dir <- file.path(data_dir, "pilot")
+out_dir <- file.path(access_dir, "output", "pilot")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+source(file.path(access_dir, "access_utils.R"), local = TRUE)
+paths <- default_external_paths(data_dir)
+
+pilot_localities <- c("La Paz", "Mazatlán")
+```
+
+## 1. Merge legacy expert scores
+
+Re-run after regenerating beach CSVs in `access_workflow.Rmd` so pilot scores are not lost.
+
+```{r merge-legacy}
+merge_city_expert <- function(locality_nm, expert_df) {
+  out_path <- locality_beach_csv_path(locality_nm, data_dir)
+  if (!file.exists(out_path)) {
+    warning("Template not found: ", out_path)
+    return(invisible(NULL))
+  }
+  template <- read_csv(out_path, show_col_types = FALSE, locale = locale(encoding = "UTF-8"))
+  merged <- merge_expert_scores(template, expert_df)
+  write_csv(merged, out_path)
+  n_scored <- sum(!is.na(merged$equitable_access_score))
+  message(locality_nm, ": ", n_scored, "/", nrow(merged), " beaches scored")
+  invisible(merged)
+}
+
+lapaz_expert <- read_csv(
+  file.path(pilot_dir, "LaPaz.csv"),
+  show_col_types = FALSE,
+  locale = locale(encoding = "UTF-8")
+)
+merge_city_expert("La Paz", lapaz_expert)
+
+mazatlan_legacy <- read_csv(
+  file.path(pilot_dir, "beach_access.csv"),
+  show_col_types = FALSE,
+  locale = locale(encoding = "UTF-8")
+)
+merge_city_expert("Mazatlán", legacy_mazatlan_to_expert(mazatlan_legacy))
+```
+
+## 2. Scored-beach maps
+
+```{r score-maps}
+for (nm in pilot_localities) {
+  build_beach_access_map(nm, data_dir, access_dir, paths = paths)
+}
+```
+
+Output: `output/pilot/{slug}_beach_access_map.html`
+
+## 3. Aggregate scores
+
+Length-weighted `equitable_access_score` by locality and by OHI marine region.
+
+```{r aggregate}
+localities <- load_access_localities(data_dir)
+active <- sort(unique(localities$city))
+
+all_beaches <- map_dfr(active, \(nm) {
+  p <- locality_beach_csv_path(nm, data_dir)
+  if (!file.exists(p)) return(NULL)
+  read_csv(p, show_col_types = FALSE, locale = locale(encoding = "UTF-8"))
+}) |>
+  mutate(
+    ID_Beach = as.integer(ID_Beach),
+    equitable_access_score = suppressWarnings(as.numeric(equitable_access_score)),
+    length_km = as.numeric(length_km)
+  )
+
+write_csv(all_beaches, file.path(out_dir, "beach_access_all_cities.csv"))
+
+scored <- all_beaches |> filter(!is.na(equitable_access_score))
+
+by_city <- scored |>
+  group_by(city) |>
+  summarise(
+    n_beaches = n(),
+    total_length_km = sum(length_km, na.rm = TRUE),
+    mean_access_score = weighted.mean(equitable_access_score, length_km, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(city)
+
+write_csv(by_city, file.path(out_dir, "beach_access_by_city.csv"))
+by_city
+
+ohi_path <- here("spatial/ohi_regions/goc_ohi_rgns.shp")
+if (!file.exists(ohi_path)) {
+  warning("OHI regions not found; skipping regional summary.")
+} else if (nrow(scored) == 0) {
+  warning("No scored beaches yet.")
+} else {
+  beach <- st_read(paths$beach, quiet = TRUE) |> filter(ID_Beach %in% scored$ID_Beach)
+  beach_scored <- beach |>
+    left_join(scored, by = "ID_Beach", suffix = c("", ".city"))
+  for (col in intersect(expert_columns(), names(beach_scored))) {
+    city_col <- paste0(col, ".city")
+    if (city_col %in% names(beach_scored)) {
+      beach_scored[[col]] <- coalesce(beach_scored[[city_col]], beach_scored[[col]])
+      beach_scored[[city_col]] <- NULL
+    }
+  }
+  ohi_rgns <- st_read(ohi_path, quiet = TRUE) |> filter(location == "marine")
+  beach_rgn <- beach_scored |>
+    st_transform(st_crs(ohi_rgns)) |>
+    st_join(ohi_rgns |> select(rgn_id, ecorgn), join = st_intersects, left = TRUE) |>
+    st_drop_geometry()
+
+  by_region <- beach_rgn |>
+    filter(!is.na(rgn_id)) |>
+    group_by(rgn_id, ecorgn) |>
+    summarise(
+      n_beaches = n(),
+      total_length_km = sum(length_km, na.rm = TRUE),
+      mean_access_score = weighted.mean(equitable_access_score, length_km, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    arrange(rgn_id)
+
+  write_csv(by_region, file.path(out_dir, "beach_access_by_ohi_region.csv"))
+  by_region
+}
+```
