@@ -1,0 +1,481 @@
+---
+title: 'OHI GoC 2026: Sense of Place (SP) Current Status'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# Sentido de Pertenencia: Sense of Place (SP)
+
+Sense of Place (also called Sentido de Pertenencia) is the equal weight arithmetic mean of three subgoals:
+
+1. **CCE**: Coastal Community Engagement (beach adoption and non natural cultural places)
+2. **LSP**: Lasting Special Places
+3. **ICO**: Iconic Species
+
+In this script, I first finish the CCE aggregation across its two subcomponents (a simple average, or arithmetic mean), write that out, and then take the arithmetic mean of CCE, LSP, and ICO by region and year to get the final SP current status.
+
+**Contents**
+
+1. Build `cce_current_status.csv` from Ama tu Playa and cultural places.
+2. Read LSP and ICO current status.
+3. Aggregate the three subgoals with a simple average (arithmetic mean) into SP current status and write to Mazu.
+
+```{r}
+library(tidyverse)
+library(here)
+library(plotly)
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+region_levels <- paste0("Region_", 1:9)
+rgn_label_colors <- setNames(unname(rgn_colors[region_levels]), unname(rgn_labels[region_levels]))
+```
+
+# Coastal Community Engagement (CCE)
+
+## Ama tu Playa and Adopta una Playa (beach adoption layer)
+
+Ama tu Playa (also branded as **Adopta una Playa**) is the beach adoption arm of Mexico's *Estrategia Nacional de Limpieza y Conservación de Playas y Costas de México 2025-2030*.
+SEMARNAT and partners (government, civil society, and private organizations) ask groups to adopt a beach or coastal stretch and keep it clean through 2030, with the national goal of **100% of beaches and coasts free of plastic waste**.
+
+Adoption typically includes removing waste, separating and disposing of it properly, reducing single use plastics, and reporting cleanup activities.
+The live platform (<https://www.adoptaunaplaya.com/playas/>) also shows per beach coverage and tons collected. For OHI GoC I use the **percent of program inventory beaches already adopted** in each region (see `CCE/beach_adoption/ama_tu_playa.qmd`).
+
+One important gap: **Region 2 has no beaches in the SEMARNAT program inventory** after the spatial join.
+That is *not* the same as "plastic free," so I keep an explicit row with `ama_status = NA` and `reason = "no beaches in program inventory"` instead of inventing a 0 or 100.
+When taking the arithmetic mean across CCE subcomponents, that NA is ignored and Region 2's CCE is driven by the cultural places layer alone.
+
+The campaign starts with the 2025-2030 strategy, so the Ama tu Playa series is scored as 0 for 2019-2024 and uses the observed adoption rate in 2025.
+
+Let's start by bringing in the two CCE layers.
+
+The cultural places layer has years 2019-2024 with a capped `score` (0 to 100), using employees per coastal population scaled to the **75th quantile**.
+DENUE for 2025 is not available yet, so for the SP merge I use a **temporary gapfilled** file where 2025 is copied from 2024:
+`cultural_places_employees_per_pop_current_status_75th_quantile_gapfill2025.csv`.
+The observed 2019-2024 series stays in the non gapfilled csv. Once 2025 DENUE is ready, switch this read back to that file (or rebuild with true 2025 values).
+
+```{r}
+# beach adoption progress (ama tu playa), already expanded to 2019-2025
+ama_tu_playa_progress <- read_csv(here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/output",
+  "current_status_ama_tu_playa_progress_072326.csv"
+))
+
+# support older single year csvs that lack a year column
+if (!"year" %in% names(ama_tu_playa_progress)) {
+  ama_tu_playa_progress <- ama_tu_playa_progress %>%
+    mutate(year = 2025L)
+}
+
+ama_tu_playa_progress <- ama_tu_playa_progress %>%
+  dplyr::select(
+    rgn_id,
+    year,
+    ama_status = current_status,
+    any_of("reason")
+  )
+
+# if an older csv lacks region_2 or reason, add the explicit missing inventory row here
+if (!"reason" %in% names(ama_tu_playa_progress)) {
+  ama_tu_playa_progress <- ama_tu_playa_progress %>%
+    mutate(reason = NA_character_)
+}
+
+if (!"Region_2" %in% ama_tu_playa_progress$rgn_id) {
+  ama_tu_playa_progress <- bind_rows(
+    ama_tu_playa_progress,
+    tidyr::crossing(
+      rgn_id = "Region_2",
+      year = 2019:2025
+    ) %>%
+      mutate(
+        ama_status = NA_real_,
+        reason = "no beaches in program inventory"
+      )
+  )
+} else {
+  ama_tu_playa_progress <- ama_tu_playa_progress %>%
+    mutate(
+      reason = if_else(
+        rgn_id == "Region_2" & is.na(ama_status),
+        "no beaches in program inventory",
+        reason
+      )
+    )
+}
+
+ama_tu_playa_progress <- ama_tu_playa_progress %>% arrange(rgn_id, year)
+ama_tu_playa_progress
+colnames(ama_tu_playa_progress)
+
+# non natural cultural places: 75th quantile, with temporary 2025 = 2024 gapfill
+# to reverse later, point this read at:
+# "cultural_places_employees_per_pop_current_status_75th_quantile.csv"
+cultural_places_scaled_to_population_cs <- read_csv(here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/output",
+  "cultural_places_employees_per_pop_current_status_75th_quantile_gapfill2025.csv"
+)) %>%
+  dplyr::select(rgn_id, year = data_year, cult_status = score)
+
+colnames(cultural_places_scaled_to_population_cs)
+```
+
+## Aggregate the two CCE subcomponents (simple average)
+
+Ama tu Playa now has a 2019-2025 series (0 before 2025, observed adoption in 2025).
+I join it to cultural places by region and year (2025 cultural values already gapfilled from 2024 in the separate csv), then take the arithmetic mean of the two subcomponents (ignoring NAs). Region 2's `ama_status` stays NA on purpose.
+
+```{r}
+# years covered by cultural places and ama tu playa
+# region 2's ama_status stays na on purpose when averaging
+cce_years <- sort(unique(c(
+  cultural_places_scaled_to_population_cs$year,
+  ama_tu_playa_progress$year
+)))
+cce_regions <- sort(unique(c(
+  cultural_places_scaled_to_population_cs$rgn_id,
+  ama_tu_playa_progress$rgn_id
+)))
+
+cce_current_status <- tidyr::crossing(
+  rgn_id = cce_regions,
+  year = cce_years
+) %>%
+  left_join(cultural_places_scaled_to_population_cs, by = c("rgn_id", "year")) %>%
+  left_join(ama_tu_playa_progress, by = c("rgn_id", "year")) %>%
+  arrange(rgn_id, year) %>%
+  mutate(
+    current_status = rowMeans(
+      cbind(cult_status, ama_status),
+      na.rm = TRUE
+    )
+  ) %>%
+  dplyr::select(rgn_id, year, current_status, cult_status, ama_status, reason)
+
+cce_current_status
+
+# confirm region_2 keeps an explicit na ama_status with the inventory note
+cce_current_status %>%
+  filter(rgn_id == "Region_2") %>%
+  distinct(rgn_id, ama_status, reason)
+```
+
+### Write CCE to Mazu
+
+```{r}
+write_csv(
+  cce_current_status %>% dplyr::select(rgn_id, year, current_status, ama_status, reason),
+  here::here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/output",
+    "cce_current_status.csv"
+  )
+)
+```
+
+# Lasting Special Places (LSP) and Iconic Species (ICO)
+
+Now let's bring in the other two subgoals from their finished outputs.
+
+```{r}
+# lasting special places
+lsp_current_status <- read_csv(here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output",
+  "lsp_current_status.csv"
+)) %>%
+  dplyr::select(rgn_id, year, lsp_status = current_status)
+
+colnames(lsp_current_status)
+
+# iconic species
+ico_current_status <- read_csv(here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/output",
+  "ico_mean_risk_status_per_region_041326.csv"
+)) %>%
+  dplyr::select(rgn_id, year, ico_status = current_status)
+
+colnames(ico_current_status)
+```
+
+# Sense of Place (SP) aggregation across subgoals
+
+LSP is also a single assessment year snapshot (2025).
+To get a region by year SP series where all three subgoals can contribute, I expand that LSP value across the CCE years, join ICO, and take a simple average (equal weight arithmetic mean) across the three subcomponents.
+
+```{r}
+# expand lsp snapshot across the cce year range
+lsp_expanded <- tidyr::crossing(
+  rgn_id = unique(lsp_current_status$rgn_id),
+  year = cce_years
+) %>%
+  left_join(
+    lsp_current_status %>% dplyr::select(rgn_id, lsp_status),
+    by = "rgn_id"
+  )
+
+# join all three subgoals
+sp_joined <- cce_current_status %>%
+  dplyr::select(rgn_id, year, cce_status = current_status) %>%
+  full_join(lsp_expanded, by = c("rgn_id", "year")) %>%
+  full_join(ico_current_status, by = c("rgn_id", "year")) %>%
+  arrange(rgn_id, year)
+
+# keep years where cce exists so sp is not just ico alone in earlier years
+sp_current_status <- sp_joined %>%
+  filter(year %in% cce_years) %>%
+  mutate(
+    current_status = rowMeans(
+      cbind(cce_status, lsp_status, ico_status),
+      na.rm = TRUE
+    )
+  ) %>%
+  dplyr::select(rgn_id, year, current_status, cce_status, lsp_status, ico_status)
+
+sp_current_status
+```
+
+### Write SP to Mazu
+
+```{r}
+write_csv(
+  sp_current_status %>% dplyr::select(rgn_id, year, current_status),
+  here::here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp",
+    "sp_current_status.csv"
+  )
+)
+```
+
+# Quick look
+
+Let's plot each CCE subcomponent, each SP subgoal, and the final SP current status by region over time.
+I map `rgn_id` to the readable region labels and use the matching color palette in the legend.
+
+```{r}
+# add readable region labels for plotting
+ama_plot <- cce_current_status %>%
+  mutate(region_label = rgn_labels[rgn_id])
+
+cult_plot <- cce_current_status %>%
+  mutate(region_label = rgn_labels[rgn_id])
+
+cce_plot <- cce_current_status %>%
+  mutate(region_label = rgn_labels[rgn_id])
+
+lsp_plot <- lsp_expanded %>%
+  mutate(region_label = rgn_labels[rgn_id])
+
+ico_plot <- ico_current_status %>%
+  filter(year %in% cce_years) %>%
+  mutate(region_label = rgn_labels[rgn_id])
+
+sp_plot <- sp_current_status %>%
+  mutate(region_label = rgn_labels[rgn_id])
+```
+
+## Ama tu Playa
+
+```{r}
+ama_plotly <- plotly::plot_ly(
+  ama_plot,
+  x = ~year,
+  y = ~ama_status,
+  color = ~region_label,
+  colors = rgn_label_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS: Ama tu Playa / Adopta una Playa (beach adoption)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(ama_plot$year, na.rm = TRUE),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+
+ama_plotly
+```
+
+## Non natural cultural places
+
+```{r}
+cult_plotly <- plotly::plot_ly(
+  cult_plot,
+  x = ~year,
+  y = ~cult_status,
+  color = ~region_label,
+  colors = rgn_label_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS: Non natural cultural places (employees per capita, 75th quantile; 2025 gapfilled from 2024)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(cult_plot$year, na.rm = TRUE),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+
+cult_plotly
+```
+
+## CCE
+
+```{r}
+cce_plotly <- plotly::plot_ly(
+  cce_plot,
+  x = ~year,
+  y = ~current_status,
+  color = ~region_label,
+  colors = rgn_label_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS: Coastal Community Engagement (CCE)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(cce_plot$year, na.rm = TRUE),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+
+cce_plotly
+```
+
+## LSP
+
+```{r}
+lsp_plotly <- plotly::plot_ly(
+  lsp_plot,
+  x = ~year,
+  y = ~lsp_status,
+  color = ~region_label,
+  colors = rgn_label_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS: Lasting Special Places (LSP)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(lsp_plot$year, na.rm = TRUE),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+
+lsp_plotly
+```
+
+## ICO
+
+```{r}
+ico_plotly <- plotly::plot_ly(
+  ico_plot,
+  x = ~year,
+  y = ~ico_status,
+  color = ~region_label,
+  colors = rgn_label_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS: Iconic Species (ICO)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(ico_plot$year, na.rm = TRUE),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+
+ico_plotly
+```
+
+## SP
+
+```{r}
+sp_plotly <- plotly::plot_ly(
+  sp_plot,
+  x = ~year,
+  y = ~current_status,
+  color = ~region_label,
+  colors = rgn_label_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS: Sense of Place (arithmetic mean of CCE, LSP, and ICO)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(sp_plot$year, na.rm = TRUE),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+
+sp_plotly
+```
+
+
