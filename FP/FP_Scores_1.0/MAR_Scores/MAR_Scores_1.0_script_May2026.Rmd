@@ -1,0 +1,1186 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# GENERAL PLAN (May 26 2026)
+
+1. Load in MAR tonnage from CONAPESCA
+2. Prepare CONAPESCA tonnage as needed
+
+3. Filter data down to the GOC region
+
+4. Load in MAR seafood watch scores
+5. Prepare seafood watch scores as needed
+
+6. Multiply MAR seafood watch scores by tonnage per region to get a "weighted tonnage".
+
+
+# PENDING PATCHES (May 26 2026)
+- Patch for OSTION DE ROCA
+- Patch for OHI regions (mariculture currently reported by state) - COMPLETED.
+- Some taxa (see MaricultureHarvest_state) cannot be identified to the species, genus, or even family level, leaving several metric tons of catch unaccounted for. As much as possible, try to fix this in the CONAPESCA clean up file for final aquaculture estimates.
+
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggnewscale)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+
+## clean_names_lowercase function
+```{r Load clean_names_lowercase function}
+# Takes text and standardizes it, which we will need for merging later on:
+
+clean_names_lowercase <- function(x) {
+
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+
+  x %>%
+    tolower() %>%
+    trimws()
+}
+```
+
+
+# STEP 1: Load in NW.Mex_Landings_georeferenced and LatLong_Master.Key ------------------------------
+```{r Load NW.Mex_Landings_georeferenced}
+NW.Mex_Landings_georeferenced0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/NW.Mex_Landings_SectorSorted.Georef_2000.present_May262026.rds"))
+# 4713144 obs., 57 var.
+```
+
+
+# STEP 2: Assume MOST oyster production is wild catch ------------------------------
+```{r Assume MOST oyster production is wild catch}
+# What if we assume these oysters are wild unless flagged as aquaculture?
+# “ostión roca” (rock oyster)
+# Likely wild, reef-attached species such as Crassostrea corteziensis or possibly Saccostrea palmula.
+# “ostión placer”
+# “Placer” usually refers to natural beds (sediment or sandbar areas), so again most likely Crassostrea corteziensis.
+# “ostión mangle” (mangrove oyster)
+# Typically associated with mangrove roots—best match is Saccostrea palmula.
+
+# Within the OSTION group, I want to assign sector_estimate_draft == "marine: aquaculture" in all cases where 
+# common_name_clean %in% c(ostion, ostion americano, ostion europeo, ostion japones, ostion kumamoto).
+# But, when common_name_clean %in% c(ostion mangle, ostion placer, ostion roca), do not reassign the sector_estimate_draft
+
+# TESTING AN IDEA
+NW.Mex_Landings_georeferenced <- NW.Mex_Landings_georeferenced0 %>%
+  mutate(sector_estimate_draft = if_else(
+    estimated_taxa_group == "OSTION" &
+    common_name_clean %in% c(
+      "ostion", "ostion americano", "ostion europeo",
+      "ostion japones", "ostion kumamoto"
+    ),
+    "marine: aquaculture",
+    sector_estimate_draft
+  ))
+
+# NOTE TO SELF: Come back to this. I'll need to work in the CONAPESCA clean up file to patch this and a couple of other things I've noted offline. But I don't need the catch landings to be exactly right to set up the MAR workflow. - May 06 2026.
+
+# Patch for OSTION DE ROCA:
+# NW.Mex_Landings_georeferenced <- NW.Mex_Landings_georeferenced %>%
+#   mutate(sector_estimate_draft = if_else(
+#     estimated_taxa_group == "OSTION" & 
+#       if_any(keywords_1:keywords_5, ~ . == "ROCA"),
+#     "marine: aquaculture",
+#     sector_estimate_draft
+#   ))
+```
+
+```{r Plot Oysters}
+Oyster_summary<- NW.Mex_Landings_georeferenced %>%
+  filter(estimated_family_name=="Ostreidae") %>%
+  dplyr::select(year, weight_kg_corrected, value) %>%
+  group_by(year) %>%
+  summarise(
+    annual_production_mt = sum(weight_kg_corrected, na.rm = TRUE) / 1000,
+    annual_value_pesos   = sum(value, na.rm = TRUE),
+    .groups = "drop"
+  )
+# 26 obs., 3 vars.
+  
+
+# Plot:
+Oyster_summary %>%
+  
+  ggplot(aes(x = year, y = annual_production_mt)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  labs(
+    x = "Year",
+    y = "Production (mt)",
+    color = "Source"
+  ) +
+  theme_bw()
+```
+
+# STEP 3: Filter out MARICULTURE sector ------------------------------
+
+```{r Filter out MARICULTURE sector}
+# Let's assume that the records are most accurate since 2018.
+table(NW.Mex_Landings_georeferenced$sector_estimate_draft)
+
+Mariculture_Sectors<- c("marine: aquaculture")
+
+NW.Mex_MaricultureHarvest<- NW.Mex_Landings_georeferenced %>% 
+  filter(sector_estimate_draft %in% Mariculture_Sectors)
+# 150367 obs., 57 vars.
+
+# With all oysters (Apr 28 2026): 192933 (+42k) obs., 62 vars.
+# With MOST oysters (Apr 30 2026): 171629 obs., 62 vars.
+# With MOST oysters (May 26 2026): 150367 obs., 58 vars.
+
+range(NW.Mex_MaricultureHarvest$year)
+```
+
+```{r Look into this first-draft mariculture list before proceeding}
+# Taking the information I've gleaned here to refine my sector estimates above.
+table(NW.Mex_MaricultureHarvest$estimated_genus_name)
+table(NW.Mex_MaricultureHarvest$estimated_family_name)
+table(NW.Mex_MaricultureHarvest$Major_Functional_Group)
+```
+
+# STEP 4: Identify most common mariculture taxa in NW Mexico ------------------------------
+
+```{r Generate a table of most common mariculture species since 2018}
+NW.Mex_MajorMariculture_summary <- NW.Mex_MaricultureHarvest %>%
+  filter(year > 2018) %>%
+  filter(!is.na(estimated_genus_name) & estimated_genus_name != "NEI" & estimated_genus_name != "unknown") %>%
+  dplyr::select(estimated_genus_name, Major_Functional_Group) %>%
+  group_by(Major_Functional_Group, estimated_genus_name) %>%
+  summarise(
+    n_records_since2018 = n(),
+    .groups = "drop"
+  )
+
+# Filter out the most common genera:
+NW.Mex_MajorMariculture_summary<- NW.Mex_MajorMariculture_summary %>%
+  filter(n_records_since2018 > 10)
+# 12 obs.
+
+MaricultureGenera_of_Interest<- unique(NW.Mex_MajorMariculture_summary$estimated_genus_name)
+```
+
+NOTE TO SELF: This isn't quite picking up the species I would have expected it to. For example, I would expect to see some Abalone mariculture, but I don't...
+
+FOLLOW UP: Haliotis (abalone) is in there, but not after 2018. This would also explain the big wobble on aquaculture landings through time...
+
+
+```{r Summarize MaricultureGenera_of_Interest over time}
+colnames(NW.Mex_MaricultureHarvest)
+
+NW.Mex_MaricultureHarvest_summary <- NW.Mex_MaricultureHarvest %>%
+  filter(estimated_genus_name %in% MaricultureGenera_of_Interest) %>%
+  dplyr::select(year, estimated_genus_name, weight_kg_corrected, value) %>%
+  group_by(estimated_genus_name, year) %>%
+  summarise(
+    annual_production_mt = sum(weight_kg_corrected, na.rm = TRUE) / 1000,
+    annual_value_pesos   = sum(value, na.rm = TRUE),
+    .groups = "drop"
+  )
+# 112 obs., 4 vars.
+```
+
+```{r MaricultureFamilies_of_Interest based on most common landings}
+colnames(NW.Mex_MaricultureHarvest)
+
+AquacultureFamilies_of_Interest <- NW.Mex_MaricultureHarvest %>%
+  filter(estimated_genus_name %in% MaricultureGenera_of_Interest) %>%
+  distinct(estimated_family_name) %>%
+  pull(estimated_family_name)
+
+print(AquacultureFamilies_of_Interest)
+```
+Looks good!
+
+- [Analysis removed. If curious, see MAR_Exploration_Apr2026]
+
+- Let's look into the Aquaculture PRODUCCION AVISOS (co-author: Leonardo Vazquez) 
+
+- Let's see if THESE avisos are = Juan Carlos' avisos for the year 2018, state of Sonora
+- Comparing AVISOS shared by Leo versus JC
+
+- Excellent! AVISOS shared by Leo or JC are effectively equivalent. The seem to come from the same raw data, same ideas, same number.
+- Now let's look in to the aquaculture avisos specifically.
+
+These AVISOS PRODUCCION could include seed and larvae that may or may not make it to cosecha.
+
+- Okay, so what I'm getting from this exercise is that my flags are actually working pretty well. 
+- My sector estimates probably aren't too far off.
+- BUT ALSO, there could be important aquaculture entries excluded from the CONAPESCA AVISOS_MAYORES_MENORES_COSECHA file because the production wasn't actually officially "harvested".
+
+- To this point, Leonardo writes: "To clarify what these "Produccion "data includes, I am attaching the template which is mandatory for aquaculturists, aquaculture laboratories, and fishers to report the quantity and type of organisms they have cultivated or collected from nature. You'll see number of organisms and life stage of this "production" but how much of this was harvested? that you'll find it in the integrated databases as "cosecha" (harvest). As mentioned, one thing is to produce in the lab or sometimes collect from the field, and another thing is to grow, harvest and sell the products. There are several species that are "produced" in laboratories for research goals and looking to develop the cultivation but just a few are harvested and reported."
+
+- Based on all this, I think it makes the most sense to compare the FAO aquaculture data to the data listed in the COSECHA AVISOS as oppossed to the PRODUCCION AVISOS (Aquauculture Avisos)  which is confounded with other types of aquaculture data...
+
+
+- Investigate FAO Aquaculture Data for Eastern Pacific
+- [Analysis removed. If curious, see MAR_Exploration_Apr2026]
+
+# STEP 5: Filter down to the GOC ------------------------------
+
+```{r Filter down to the GOC}
+colnames(NW.Mex_MaricultureHarvest)
+
+table(NW.Mex_MaricultureHarvest$GOC_Include_Exclude)
+# exclude include 
+#  29845  120522 
+    
+GOC_Mariculture0<- NW.Mex_MaricultureHarvest %>%
+  filter(GOC_Include_Exclude== "include")
+# 120522 obs., 58 vars.
+```
+
+
+# STEP 6: Generate a list of most common aquaculture species in the GOC since 2018 ------------------------------
+```{r Generate a table / list of common n > 10 records aquaculture species since 2018}
+GOC_MajorMariculture_summary0 <- GOC_Mariculture0 %>%
+  filter(year > 2017) %>%
+  filter(!is.na(estimated_genus_name) & estimated_genus_name != "NEI" & estimated_genus_name != "unknown") %>%
+  dplyr::select(estimated_family_name, estimated_genus_name, Major_Functional_Group) %>%
+  group_by(Major_Functional_Group, estimated_family_name, estimated_genus_name) %>%
+  summarise(
+    n_records_since2018 = n(),
+    .groups = "drop"
+  )
+
+# Filter out the most common genera:
+GOC_MajorMariculture_summary<- GOC_MajorMariculture_summary0 %>%
+  filter(n_records_since2018 >= 10)
+# 10 obs. (genera)
+
+MaricultureGenera_of_Interest<- unique(GOC_MajorMariculture_summary$estimated_genus_name)
+MaricultureFamilies_of_Interest<- unique(GOC_MajorMariculture_summary$estimated_family_name)
+```
+
+```{r How much mariculture production is accounted for my the genera we've selected?}
+GOC_Mariculture <- GOC_Mariculture0 %>%
+  mutate(
+    MAR_include_flag = case_when(
+      estimated_genus_name %in% MaricultureGenera_of_Interest ~ TRUE,
+      TRUE ~ FALSE
+    )
+  )
+
+table(GOC_Mariculture$MAR_include_flag)
+# FALSE  TRUE 
+# 25994 94528 
+
+colnames(GOC_Mariculture)
+
+Mariculture_summary<- GOC_Mariculture %>%
+  filter(year > 2017 & year < 2025) %>%
+  group_by(MAR_include_flag) %>%
+  summarise(
+    total_production_mt = sum(weight_kg_corrected/1000, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_of_total =
+      total_production_mt / sum(total_production_mt) * 100
+  )
+# 98.4% of total mariculture biomass (from 2018-2024) is accounted for by these 10 genera.
+```
+
+# STEP 7: Summarize CONAPESCA data in all years all states at the family level  ------------------------------
+
+NOTE: I am estimating mariculture at the family level is because shrimp is reported unreliably at the genus level. Sometimes reported as Paneaus, Litopeanus and it messes up the weighting scheme.
+
+```{r Summarize CONAPESCA mariculture data in all years all states in the GOC}
+colnames(GOC_Mariculture)
+table(GOC_Mariculture$OHI_region_est)
+
+# Summarized Production for CONAPESCA cosecha production in all years.
+GOC_Mariculture_byRegion <- GOC_Mariculture %>%
+  group_by(estimated_family_name, year, OHI_region_est) %>%
+  summarise(total_est_production_mt = (sum(weight_kg_corrected, na.rm = TRUE)/1000),
+            .groups = "drop")
+
+# NOTE TO SELF: Some taxa (see MaricultureHarvest_state) cannot be identified to the species, genus, or even family level, leaving several metric tons of catch unaccounted for. As much as possible, try to fix this in the CONAPESCA clean up file for final aquaculture estimates.
+```
+
+
+# STEP 8: Load in MAR sustainability coefficients ------------------------------
+
+```{r Load in MAR weights}
+MAR_Weights0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/MAR_Scores/MAR_SustainabilityCoefficients/MAR_WeightingScores_FINAL_May062026.csv",
+                        skip = 1,
+                        header= TRUE)
+
+colnames(MAR_Weights0)
+
+MAR_Weights<- MAR_Weights0 %>%
+  filter(Abridged == "keep")
+
+
+MAR_Weights <- MAR_Weights %>%
+  dplyr::select(
+    Major_Functional_Group,
+    estimated_family_name = Family,
+    estimated_genus_name = Genus,
+    Est_Sustainability_Score
+  ) %>%
+  distinct()
+```
+
+```{r Estimate weights by major functional groups}
+MAR_GroupWeights<- MAR_Weights %>%
+  dplyr::select(Major_Functional_Group,
+         Est_Sustainability_Score) %>%
+  group_by(Major_Functional_Group) %>%
+  summarise(mean_Sustainability_Score = mean(Est_Sustainability_Score, na.rm = TRUE)) %>%
+  distinct()
+```
+
+```{r Estimate harvest groups and merge to MAR_GroupWeights}
+options(pillar.sigfig = 3)
+
+# Summarize harvest amounts per Major_Functional_Group from 2018-2025 among MaricultureFamilies_of_Interest:  
+MAR_byGroup <- GOC_Mariculture %>%
+  filter(estimated_family_name %in% MaricultureFamilies_of_Interest) %>%
+  filter(year > 2017 & year < 2025) %>%
+  group_by(Major_Functional_Group, year, OHI_region_est) %>%
+  summarise(total_est_production_mt = (sum(weight_kg_corrected, na.rm = TRUE)/1000),
+            .groups = "drop")
+# 111 obs.
+
+# Merge the harvest amounts with the sustainability scores:
+MAR_byGroup <- MAR_byGroup %>%
+  left_join(
+    MAR_GroupWeights,
+    by = c("Major_Functional_Group")
+  )
+# 111 obs., 5 vars.
+
+# Calculate WEIGHTED production for that Major_Functional_Group in that year:
+MAR_byGroup<- MAR_byGroup %>%
+  mutate(
+    weighted_est_production = total_est_production_mt * mean_Sustainability_Score
+  )
+
+# Calculate mean production for that Major_Functional_Group from 2018 to 2024:
+MAR_byGroup <- MAR_byGroup %>%
+  group_by(Major_Functional_Group, OHI_region_est) %>%
+  mutate(
+    mean_production_2018.2024 = mean(
+      total_est_production_mt[year >= 2018 & year <= 2024],
+      na.rm = TRUE
+    ),
+    mean_production_2020.2024 = mean(
+      total_est_production_mt[year >= 2020 & year <= 2024],
+      na.rm = TRUE
+    ),
+    mean_production_2019.2020 = mean(
+      total_est_production_mt[year >= 2019 & year <= 2020],
+      na.rm = TRUE
+    )
+  ) %>%
+  ungroup()
+
+# Limit number of decimal places, easier viewing:
+MAR_byGroup<- MAR_byGroup %>%
+  mutate(across(where(is.numeric) & !all_of("year"), ~ round(.x, 2)))
+```
+
+```{r What was the mean production of shrimp in the GOC from 2019-2020?}
+colnames(MAR_byGroup)
+table(MAR_byGroup$Major_Functional_Group)
+
+# What was the mean production of shrimp in 2019-2020?
+MAR_byGroup %>%
+  filter(Major_Functional_Group == "Shrimps, prawns") %>%
+  pull(mean_production_2019.2020) %>%
+  mean(na.rm = TRUE)
+# 27455.51 mt (all of Mex Pacific)
+# 24941.15 mt (all of GOC)
+
+# And how does this mean compare to the max of shrimp lately?
+MAR_byGroup %>%
+  filter(Major_Functional_Group == "Shrimps, prawns") %>%
+  pull(mean_production_2019.2020) %>%
+  max(na.rm = TRUE)
+# 74919.4 mt (all of Mex Pacific)
+# 72073.1 mt (all of GOC)
+```
+
+```{r Further look into shrimp production}
+TEST <- MAR_byGroup %>%
+  filter(Major_Functional_Group == "Shrimps, prawns") %>%
+  group_by(OHI_region_est) %>%
+  summarize(
+    
+    mean_capture_2019.2020 = mean(
+      total_est_production_mt[year %in% 2019:2020],
+      na.rm = TRUE
+    ),
+    
+    mean_capture_2020.2024 = mean(
+      total_est_production_mt[year %in% 2020:2024],
+      na.rm = TRUE
+    ),
+    
+    .groups = "drop"
+  ) %>%
+  
+  mutate(
+    mean_2019.2020capture_w_growth = 1.2 * mean_capture_2019.2020
+  ) %>%
+  select(c(OHI_region_est, mean_capture_2019.2020, 
+           mean_2019.2020capture_w_growth, mean_capture_2020.2024))
+```
+
+
+# STEP 9: Exploratory plots ------------------------------
+```{r Exploratory plots}
+Group_colors <- c("#0072B2", "#D55E00", "#009E73")
+
+# Plot MAR production per group over time in each region:
+MAR_byGroup %>%
+  
+  ggplot(aes(x = year, y = total_est_production_mt, color = Major_Functional_Group)) +
+  geom_line() +
+  geom_point(size= 1) +
+  
+  facet_wrap(~ OHI_region_est, scales = "free_y") +
+  
+  labs(
+    title = "Breakdown of Mariculture Production",
+    x = "Year",
+    y = "Total Production (mt)",
+    color = "Type"
+  ) +
+  scale_color_manual(values= Group_colors)+
+  theme_bw()
+
+# ggsave(
+#   "/home/ferrer/ohi_goc_prep/FP/Exploratory_Research/MAR_ExploratoryResearch/Mariculture_plot_May122026.png",
+#   width = 10,
+#   height = 6,
+#   dpi = 300
+# )
+```
+
+# STEP 10: Calculate MAR scores! ------------------------------
+
+NEWEST Scores MAY 14 2026
+
+```{r NEWEST Shrimp Scores}
+# May 26 2026
+head(MAR_byGroup)
+table(MAR_byGroup$Major_Functional_Group)
+
+# SHRIMP scores dataframe:
+MAR_shrimp.scores <- MAR_byGroup %>%
+  filter(Major_Functional_Group == "Shrimps, prawns") %>%
+  mutate(
+    today_v_reference = total_est_production_mt/(1.2*mean_production_2020.2024),
+    shrimp_score = case_when(
+      is.na(today_v_reference) ~ NA_real_,
+      today_v_reference > 1 ~ 100,
+      today_v_reference < 1 ~ today_v_reference*100
+    )
+  ) %>%
+  dplyr::select(Major_Functional_Group, OHI_region_est, year, mean_Sustainability_Score, 
+          weighted_est_production, total_est_production_mt,
+          mean_production_2018.2024, today_v_reference, shrimp_score)
+
+# Plot the shrimp_scores:
+
+MAR_shrimp.scores %>%
+  
+  ggplot(aes(x = year, y = shrimp_score, color = Major_Functional_Group)) +
+  geom_line() +
+  geom_point(size=1) +
+  
+  facet_wrap(~ OHI_region_est, scales = "free_y") +
+  
+  labs(
+    title = "Shrimp Scores [prelim]",
+    x = "Year",
+    y = "Score (0-100)"
+  ) +
+  scale_color_manual(values= Group_colors[3])+
+  ylim(c(0, 100))+
+  theme_bw()
+```
+
+```{r Save plot}
+ggsave(
+  "/home/ferrer/ohi_goc_prep/FP/Exploratory_Research/MAR_ExploratoryResearch/ShrimpScore_prelim_May262026.png",
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+```
+
+```{r NEWEST Bivalve Scores}
+# May 26 2026
+head(MAR_byGroup)
+table(MAR_byGroup$Major_Functional_Group)
+
+# BIVALVE scores dataframe:
+MAR_bivalve.scores <- MAR_byGroup %>%
+  filter(Major_Functional_Group == "Molluscs excl. Cephalopods") %>%
+  mutate(
+    today_v_reference = total_est_production_mt/(1.2*mean_production_2020.2024),
+    bivalve_score = case_when(
+      is.na(today_v_reference) ~ NA_real_,
+      today_v_reference > 1 ~ 100,
+      today_v_reference < 1 ~ today_v_reference*100
+    )
+  ) %>%
+  dplyr::select(Major_Functional_Group, OHI_region_est, year, mean_Sustainability_Score, 
+          weighted_est_production, total_est_production_mt,
+          mean_production_2018.2024, today_v_reference, bivalve_score)
+
+# Plot the bivalve_score:
+
+MAR_bivalve.scores %>%
+  
+  ggplot(aes(x = year, y = bivalve_score, color = Major_Functional_Group)) +
+  geom_line() +
+  geom_point(size=1) +
+  
+  facet_wrap(~ OHI_region_est, scales = "free_y") +
+  
+  labs(
+    title = "Bivalve Scores [prelim]",
+    x = "Year",
+    y = "Score (0-100)"
+  ) +
+  scale_color_manual(values= Group_colors[2])+
+  ylim(c(0, 100))+
+  theme_bw()
+```
+
+```{r Save plot}
+ggsave(
+  "/home/ferrer/ohi_goc_prep/FP/Exploratory_Research/MAR_ExploratoryResearch/BivalveScore_prelim_May262026.png",
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+```
+
+```{r NEWEST Finfish Scores}
+# May 26 2026
+head(MAR_byGroup)
+table(MAR_byGroup$Major_Functional_Group)
+
+# FINFISH scores dataframe:
+MAR_finfish.scores <- MAR_byGroup %>%
+  filter(Major_Functional_Group == "Demersal marine fishes") %>%
+  mutate(
+    today_v_reference = total_est_production_mt/(1.2*mean_production_2020.2024),
+    finfish_score = case_when(
+      is.na(today_v_reference) ~ 0,
+      today_v_reference > 1 ~ 100,
+      today_v_reference < 1 ~ today_v_reference*100
+    )
+  ) %>%
+  dplyr::select(Major_Functional_Group, OHI_region_est, year, mean_Sustainability_Score, 
+          weighted_est_production, total_est_production_mt,
+          mean_production_2018.2024, today_v_reference, finfish_score)
+
+# Plot the finfish_score:
+
+MAR_finfish.scores %>%
+  
+  ggplot(aes(x = year, y = finfish_score, color = Major_Functional_Group)) +
+  geom_line() +
+  geom_point(size=1) +
+  
+  facet_wrap(~ OHI_region_est, scales = "free_y") +
+  
+  labs(
+    title = "Bivalve Scores [prelim]",
+    x = "Year",
+    y = "Score (0-100)"
+  ) +
+  scale_color_manual(values= Group_colors[3])+
+  ylim(c(0, 100))+
+  theme_bw()
+```
+
+```{r Save plot}
+ggsave(
+  "/home/ferrer/ohi_goc_prep/FP/Exploratory_Research/MAR_ExploratoryResearch/FinfishScore_prelim_May262026.png",
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+```
+
+```{r Merge scores}
+shrimp_df <- MAR_shrimp.scores %>%
+  dplyr::select(
+    OHI_region_est,
+    year,
+    shrimp_score,
+    shrimp_production_mt = total_est_production_mt
+  )
+
+finfish_df <- MAR_finfish.scores %>%
+  dplyr::select(
+    OHI_region_est,
+    year,
+    finfish_score,
+    finfish_production_mt = total_est_production_mt
+  )
+
+bivalves_df <- MAR_bivalve.scores %>%
+  dplyr::select(
+    OHI_region_est,
+    year,
+    bivalve_score,
+    bivalve_production_mt = total_est_production_mt
+  )
+
+MAR_scores <- full_join(
+  shrimp_df,
+  finfish_df,
+  by = c("OHI_region_est", "year")
+)
+
+MAR_scores <- full_join(
+  MAR_scores,
+  bivalves_df,
+  by = c("OHI_region_est", "year")
+)
+
+colnames(MAR_scores)
+
+# Create total production column: 
+MAR_scores<- MAR_scores %>%
+  mutate(
+      total_production_mt = rowSums(
+      across(c(shrimp_production_mt, finfish_production_mt, bivalve_production_mt)),
+      na.rm = TRUE)
+  )
+
+MAR_scores<- MAR_scores %>%
+  mutate(
+    shrimp_catch_contribution = shrimp_production_mt / total_production_mt,
+    finfish_catch_contribution = finfish_production_mt / total_production_mt,
+    bivalve_catch_contribution = bivalve_production_mt / total_production_mt
+  )
+
+shrimp_sustainability_coeff = 0.260
+finfish_sustainability_coeff = 0.573
+bivalve_sustainability_coeff = 0.696
+
+colnames(MAR_scores)
+
+MAR_scores<- MAR_scores %>%
+  mutate(
+    shrimp_score_contribution = shrimp_score * shrimp_sustainability_coeff * shrimp_catch_contribution,
+    finfish_score_contribution = finfish_score * finfish_sustainability_coeff * finfish_catch_contribution,
+    bivalve_score_contribution = bivalve_score * bivalve_sustainability_coeff * bivalve_catch_contribution,
+    total_score = rowSums(across(c(shrimp_score_contribution, finfish_score_contribution, bivalve_score_contribution)), na.rm = TRUE)
+  )
+```
+
+```{r Add in missing Region_1}
+# Add in missing Region_1:
+dummy_region_1 <- data.frame(
+  OHI_region_est = "Region_1",
+  year = 2018,
+  shrimp_score = NA,
+  shrimp_production_mt = NA,
+  finfish_score = NA,
+  finfish_production_mt = NA,
+  bivalve_score = NA,
+  bivalve_production_mt = NA,
+  total_production_mt = NA,
+  shrimp_catch_contribution = NA,
+  finfish_catch_contribution = NA,
+  bivalve_catch_contribution = NA,
+  shrimp_score_contribution = NA,
+  finfish_score_contribution = NA,
+  bivalve_score_contribution = NA,
+  total_score = NA
+)
+
+MAR_scores <- bind_rows(MAR_scores, dummy_region_1)
+
+MAR_scores$OHI_region_est <- factor(
+  MAR_scores$OHI_region_est,
+  levels = c(NA, "Region_1", "Region_2", "Region_3",
+             "Region_4", "Region_5", "Region_6",
+             "Region_7", "Region_8", "Region_9")
+)
+```
+
+```{r Sanity check MAR_scores}
+colnames(MAR_scores)
+
+summary(MAR_scores$total_score)
+mean(MAR_scores$total_score, na.rm= TRUE)
+   # Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+   # 0.00   19.18   23.60   26.09   27.78   69.53       1 
+
+# Year 2024 mean for FP scores:
+mean(MAR_scores$total_score[MAR_scores$year == 2024], na.rm = TRUE)
+```
+
+## SAVE the MAR_scores dataframe:
+```{r Save MAR_scores as needed}
+write.csv(MAR_scores,
+          file= "/home/ferrer/ohi_goc_prep/FP/FP_Scores/MAR_Scores/MAR_Scores_df_Jul152026.csv",
+          row.names = FALSE)
+# 56 obs., 16 vars.
+```
+
+# PLOT MAR_scores  ------------------------------
+```{r Load in FP_Scores as needed}
+MAR_scores0 <- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/MAR_Scores/MAR_Scores_df_Jul152026.csv")
+# 56 obs., 16 vars.
+
+MAR_scores<- MAR_scores0
+```
+
+```{r Region key}
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
+
+colnames(Region_Key0)
+
+Region_Key<- Region_Key0 %>%
+  select(OHI_region_est, OHI_region_name) %>%
+  distinct()
+```
+
+```{r Merge Region_Key to FP_Scores}
+MAR_scores<- MAR_scores %>%
+  mutate(
+    OHI_region_est= clean_names_lowercase(OHI_region_est)
+  )
+
+MAR_scores<- MAR_scores %>%
+  left_join(Region_Key, 
+            by = "OHI_region_est")
+
+# Make sure to order the regions:
+region_order <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
+MAR_scores <- MAR_scores %>%
+  mutate(
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = region_order
+    )
+  )
+```
+
+```{r Different shape dataframe}
+head(MAR_scores)
+
+MAR_scores_long<- MAR_scores %>%
+  dplyr::select(OHI_region_name, year, 
+         shrimp_score, finfish_score, bivalve_score,
+         total_score) %>%
+  pivot_longer(
+    cols = c(shrimp_score, finfish_score, bivalve_score,
+         total_score),
+    names_to = "type",
+    values_to = "score"
+  )
+
+colnames(MAR_scores_long)
+max(MAR_scores_long$score[which(MAR_scores_long$type == "total_score")], na.rm = TRUE)
+# Max score is 69.5
+```
+
+```{r Plot MAR_scores}
+# Main plot:
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
+MAR_scores %>%
+  
+  filter(!is.na(OHI_region_name)) %>%
+  
+  ggplot(aes(
+    x = year,
+    y = total_score,
+    color = OHI_region_name,
+    group = OHI_region_name
+  )) +
+  geom_line() +
+  geom_point(size = 1) +
+  
+  facet_wrap(~OHI_region_name) +
+  
+  labs(
+    title = "MAR Scores [prelim]",
+    x = "Year",
+    y = "Score (0-100)"
+  ) +
+
+  ylim(0, 101) +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+```
+
+```{r Plot MAR_scores_long}
+# Component plot:
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
+Component_colors <- c(
+  "#F28E2B",  # bright orange
+  "#009E73",  # green
+  "#D94F3D"   # warm red coral
+)
+
+MAR_Scores_component_plot <-
+
+  ggplot() +
+
+  ## Component scores (shrimp, bivalves, finfish):
+  geom_line(
+    data = MAR_scores_long %>% 
+      filter(type != "total_score",
+             !is.na(OHI_region_name)),
+    aes(
+      x = year,
+      y = score,
+      color = type,
+      group = interaction(type, OHI_region_name)
+    ),
+    linewidth = 0.75,
+    alpha= 0.4
+  ) +
+
+  # geom_point(
+  #   data = MAR_scores_long %>% 
+  #     filter(type != "total_score",
+  #            !is.na(OHI_region_name)),
+  #   aes(
+  #     x = year,
+  #     y = score,
+  #     color = type
+  #   ),
+  #   size = 1,
+  #   alpha= 0.3
+  # ) +
+
+  scale_color_manual(
+    name = "Component score",
+    values = Component_colors
+  ) +
+
+  ## Start a new color scale
+  new_scale_color() +
+
+  ## Total scores (region colors)
+  geom_line(
+    data = MAR_scores_long %>% 
+      filter(type == "total_score",
+             !is.na(OHI_region_name)),
+    aes(
+      x = year,
+      y = score,
+      color = OHI_region_name,
+      group = OHI_region_name
+    ),
+    linewidth = 1.25
+  ) +
+
+  geom_point(
+    data = MAR_scores_long %>% 
+      filter(type == "total_score",
+             !is.na(OHI_region_name)),
+    aes(
+      x = year,
+      y = score,
+      color = OHI_region_name
+    ),
+    size = 2
+  ) +
+
+  facet_wrap(~OHI_region_name) +
+  
+  scale_color_manual(
+    name = "Region",
+    values = Region_colors
+  ) +
+
+  labs(
+    title = "MAR Scores by Region",
+    subtitle= "updated: Jul 15 2026",
+    y = "MAR Score (from 0 to 100)",
+    x = "Year"
+  ) +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+
+  ylim(0, 101) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+MAR_Scores_component_plot
+```
+
+```{r Save the component plot!}
+ggsave(
+    filename = "/home/ferrer/ohi_goc_prep/FP/FP_Scores/MAR_Scores/MAR_Scores_component_plot_Jul152026.png",
+    plot = MAR_Scores_component_plot,
+    width = 13.5,
+    height = 12,
+    dpi = 300
+  )
+```
+
+
+
+
+# STEP 11: UNDER CONSTRUCTION - Related Queries ------------------------------
+
+```{r Open questions May 13}
+table(NW.Mex_Landings_georeferenced$sector_estimate_draft)
+table(NW.Mex_Landings_georeferenced$freshwater_flag)
+
+Mex.Pacific_Freshwater_Landings <- NW.Mex_Landings_georeferenced %>%
+  anti_join(Mex.Pacific_Marine_Landings)
+
+dim(Mex.Pacific_Freshwater_Landings)
+# 1134279 obs. (Excellent! 6406303-5272024)
+
+sum1 <- NW.Mex_Landings_georeferenced %>%
+  filter(OHI_region_est %in% OHI_region_ests_of_Interest,
+         year == 2024) %>%
+  summarize(total_weight_mt = sum(weight_kg_corrected, na.rm = TRUE) / 1000) %>%
+  pull(total_weight_mt)
+# 1,740,378 total metric tonnes produced in this region across freshwater and marine systems.
+
+sum2 <- Mex.Pacific_MarineLandings_simple %>%
+  filter(OHI_region_est %in% OHI_region_ests_of_Interest,
+         year == 2024) %>%
+  summarize(total_weight_mt = sum(weight_kg_corrected, na.rm = TRUE) / 1000) %>%
+  pull(total_weight_mt)
+# 1,636,859 total metric tonnes produced by marine wildcatch and mariculture in this region.
+
+sum3 <- Mex.Pacific_Freshwater_Landings %>%
+  filter(OHI_region_est %in% States_of_Interest,
+         year == 2024) %>%
+  summarize(total_weight_mt = sum(weight_kg_corrected, na.rm = TRUE) / 1000) %>%
+  pull(total_weight_mt)
+# 103,518 total metric tonnes from freshwater fisheries or aquaculture in this region.
+
+sum3/sum1
+
+sum4 <- NW.Mex_MaricultureHarvest %>%
+  filter(OHI_region_est %in% States_of_Interest,
+         year == 2024,
+         Major_Functional_Group == "Molluscs excl. Cephalopods") %>%
+  summarize(total_weight_mt = sum(weight_kg_corrected, na.rm = TRUE) / 1000) %>%
+  pull(total_weight_mt)
+# 9638 total metric tonnes of mariculture bivalves in this region... Woof.
+```
+
+## How much of production is wild catch versus mariculture?
+```{r First filter down the dataset}
+
+table(NW.Mex_Landings_georeferenced$freshwater_flag)
+
+Mex.Pacific_Marine_Landings<- NW.Mex_Landings_georeferenced %>%
+  filter(freshwater_flag %in% c("NOT FLAGGED EITHER WAY", "LIKELY MARINE", 
+                             "CANNOT BE FRESHWATER; MARINE", "POSSIBLY FRESHWATER OR MARINE"))
+  
+dim(Mex.Pacific_Marine_Landings)
+# 5744610 obs.
+
+table(Mex.Pacific_Marine_Landings$keywords_1)
+
+subset<- Mex.Pacific_Marine_Landings %>%
+  filter(keywords_1 %in% c("DE AGUA DULCE"))
+
+table(subset$recorded_taxa_group)
+table(subset$estimated_species_name)
+
+# NOTE TO SELF: Balistes polylepis cannot be freshwater, but the record clearly states its from freshwater. This calls into question the species name. It says high certainty, but it can't be. Ignore for now, but try to fix bugs like this for the Fisheries Standardization Project. - May 12 2026.
+
+subset2<- Mex.Pacific_Marine_Landings %>%
+  filter(freshwater_flag %in% c("POSSIBLY FRESHWATER OR MARINE"))
+table(subset2$recorded_taxa_group)
+table(subset2$estimated_species_name)
+table(subset2$estimated_family_name)
+# Families that are mostly marine: Kyphosidae
+# Families that are marine or freshwater: Gerreidae
+# Families that are primarily freshwater: Ictaluridae
+
+Mex.Pacific_Marine_Landings <- Mex.Pacific_Marine_Landings %>%
+  filter(
+    estimated_family_name != "Ictaluridae",
+    !if_any(
+      keywords_1:keywords_5,
+     ~ .x %in% c("DE AGUA DULCE", "AGUA DULCE")
+    )
+  )
+
+dim(Mex.Pacific_Marine_Landings)
+# 5272024 obs.
+```
+
+```{r Simplify and summarize mariculture versus non mariculture}
+Mex.Pacific_MarineLandings_simple<- Mex.Pacific_Marine_Landings %>%
+  filter(year >= 2018 & year <= 2024)
+
+dim(Mex.Pacific_MarineLandings_simple)
+# 1815520 obs.
+
+table(Mex.Pacific_MarineLandings_simple$sector_estimate_draft)
+
+# Summary:
+LandingsBySector_Summary <- Mex.Pacific_MarineLandings_simple %>%
+  mutate(
+    production_type = ifelse(
+      grepl("aquaculture", sector_estimate_draft),
+      "Mariculture (estimated)",
+      "Wild Catch (estimated)"
+    )
+  ) %>%
+  group_by(year, state, production_type) %>%
+  summarise(
+    landings_mt = sum(weight_kg_corrected, na.rm = TRUE)/1000,
+    .groups = "drop"
+  ) %>%
+  group_by(year, state) %>%
+  mutate(
+    total_landings_mt = sum(landings_mt),
+    pct_of_total_catch = 100 * landings_mt / total_landings_mt
+  ) %>%
+  ungroup()
+
+States_of_Interest<- c("BAJA CALIFORNIA", "BAJA CALIFORNIA SUR", "SINALOA", "SONORA", "NAYARIT", "JALISCO")
+
+LandingsBySector_Summary<- LandingsBySector_Summary %>%
+  filter(state %in% States_of_Interest)
+
+## PLOTS:
+LandingsBySector_Summary %>%
+  ggplot(aes(x = year, y = landings_mt, color = production_type)) +
+  
+  geom_line() +
+  facet_wrap(~ state) +
+  labs(title= "Total GOC Landings",
+    y = "Marine Landings (mt)", 
+    color = "Production Type") +
+  
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30))
+  
+
+LandingsBySector_Summary %>%
+  ggplot(aes(x = year, y = pct_of_total_catch, color = production_type)) +
+  
+  geom_line() +
+  facet_wrap(~ state) +
+  labs(title= "Composition of GOC Landings",
+    y = "Percent of Marine Catch (%)", 
+    color = "Production Type") +
+  
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30))
+
+# On average, how much of production is mariculture across all states excluding Nayarit?
+LandingsBySector_Summary %>%
+  filter(state != "NAYARIT",
+         production_type == "Mariculture (estimated)") %>%
+  pull(pct_of_total_catch) %>%
+  mean(na.rm = TRUE)
+
+# Including Nayarit, how much of total production is mariculture?
+Mex.Pacific_MarSummary <- LandingsBySector_Summary %>%
+  select(year, production_type, landings_mt) %>%
+  group_by(year, production_type) %>%
+  summarize(
+    sector_landings_mt = sum(landings_mt, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(year) %>%
+  mutate(
+    all_landings_mt = sum(sector_landings_mt, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    mariculture_prop = ifelse(
+      production_type == "Mariculture (estimated)",
+      sector_landings_mt / all_landings_mt,
+      NA
+    )
+  )
+
+Mex.Pacific_MarSummary %>%
+  filter(production_type == "Mariculture (estimated)") %>%
+  pull(mariculture_prop) %>%
+  mean(na.rm = TRUE)
+```
