@@ -1,0 +1,388 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/FP/")
+```
+
+```{r Load clean_names_lowercase function}
+clean_names_lowercase <- function(x) {
+
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+
+  x %>%
+    tolower() %>%
+    trimws()
+}
+```
+
+```{r Sector helper functions}
+# Fisheries: marine and freshwater-or-marine capture and fishery sectors.
+# Mariculture: marine and freshwater-or-marine aquaculture only (excludes
+# freshwater-only aquaculture).
+
+is_fishery_sector <- function(sector) {
+  grepl("marine|freshwater or marine", sector, ignore.case = TRUE) &
+    grepl("fishery|capture", sector, ignore.case = TRUE)
+}
+
+is_mariculture_sector <- function(sector) {
+  grepl("marine|freshwater or marine", sector, ignore.case = TRUE) &
+    grepl("aquaculture", sector, ignore.case = TRUE)
+}
+```
+
+
+# STEP 1: Load input data ------------------------------
+
+```{r Load FIS scores}
+FIS_scores0 <- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Scores_df_Jun052026.csv")
+# 70 obs., 7 vars.
+```
+
+```{r Load MAR scores}
+MAR_scores0 <- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/MAR_Scores/MAR_Scores_df_Jun012026.csv")
+# 55 obs., 16 vars.
+```
+
+```{r Load in GOC_MarineLandings0 as necessary}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+# Make sure these are the sectors we would expect:
+table(GOC_MarineLandings0$sector_estimate_draft)
+# Yes! No freshwater.
+```
+
+
+# STEP 2: Prep landings for sector weights and fishery catch ------------------------------
+
+```{r Filter landings to GOC include and analysis years}
+GOC_MarineLandings <- GOC_MarineLandings0 %>%
+  filter(
+    year >= 2018,
+    year <= 2024,
+    !is.na(OHI_region_est),
+    OHI_region_est != ""
+  ) %>%
+  mutate(
+    OHI_region_est = clean_names_lowercase(OHI_region_est),
+    estimated_species_name = clean_names_lowercase(estimated_species_name),
+    estimated_genus_name = clean_names_lowercase(estimated_genus_name),
+    sector_estimate_draft = as.character(sector_estimate_draft)
+  )
+
+# 1182251 obs., 58 var.
+```
+
+```{r Summarize sector landings weights per region and year}
+# Specificy fishery versus aquaculture sectors:
+unique(GOC_MarineLandings$sector_estimate_draft)
+
+FIS_Sectors<- c("marine: large-scale capture", "marine: small-scale capture",
+                   "marine: fishery sector yet to be classified",
+                   "freshwater or marine: large-scale capture", "freshwater or marine: small-scale capture",
+                   "freshwater or marine: fishery sector yet to be classified")
+
+MAR_Sectors<- c("marine: aquaculture", "freshwater or marine: aquaculture")
+
+# Sort:
+Landings_sector.summary <- GOC_MarineLandings %>%
+  mutate(
+    FIS_landings_kg = if_else(
+      sector_estimate_draft %in% FIS_Sectors,
+      weight_kg_corrected,
+      0
+    ),
+    MAR_landings_kg = if_else(
+      sector_estimate_draft %in% MAR_Sectors,
+      weight_kg_corrected,
+      0
+    )
+  ) %>%
+  group_by(year, OHI_region_est) %>%
+  summarize(
+    FIS_landings_kg = sum(FIS_landings_kg, na.rm = TRUE),
+    MAR_landings_kg = sum(MAR_landings_kg, na.rm = TRUE),
+  .groups = "drop"
+  ) %>%
+  mutate(
+    FP_landings_kg = FIS_landings_kg + MAR_landings_kg,
+    w_fisheries = FIS_landings_kg / FP_landings_kg,
+    w_mariculture = MAR_landings_kg / FP_landings_kg
+  )
+```
+
+```{r Sanity check sector landings}
+colnames(Landings_sector.summary)
+
+Landings_sector.summary %>%
+  filter(FP_landings_kg > 0) %>%
+  summarize(
+    min_w_fisheries = min(w_fisheries, na.rm = TRUE),
+    max_w_fisheries = max(w_fisheries, na.rm = TRUE)
+  )
+```
+
+
+# STEP 3: Fisheries catch by stock (species or genus) ------------------------------
+
+```{r Filter landings to fishery sectors and define stock key}
+FIS_landings <- GOC_MarineLandings %>%
+  filter(sector_estimate_draft %in% FIS_Sectors) %>%
+  mutate(
+    taxon_key = if_else(
+      is.na(estimated_species_name) | estimated_species_name == "",
+      estimated_genus_name,
+      estimated_species_name
+    ),
+    taxon_level = if_else(
+      is.na(estimated_species_name) | estimated_species_name == "",
+      "genus",
+      "species"
+    )
+  ) %>%
+  filter(!is.na(taxon_key), taxon_key != "")
+# 1092972 obs.
+```
+
+```{r Summarize fishery catch by stock, region, and year}
+FIS_Stock_Catch <- FIS_landings %>%
+  group_by(year, OHI_region_est, taxon_key, taxon_level, estimated_genus_name) %>%
+  summarize(
+    stock_catch_kg = sum(weight_kg_corrected, na.rm = TRUE),
+    .groups = "drop"
+  )
+# Catch per stock (species when available, otherwise genus).
+```
+
+
+# STEP 4: Compute regional FP scores ------------------------------
+
+```{r Prep Landings_sector.summary FIS_scores0 and MAR_scores0 for merge}
+colnames(Landings_sector.summary)
+
+Landings_sector.summary<- Landings_sector.summary %>%
+  mutate(
+    OHI_region_est= clean_names_lowercase(OHI_region_est)
+  )
+
+FIS_scores<- FIS_scores0 %>%
+  mutate(
+    OHI_region_est= clean_names_lowercase(OHI_region_est)
+  )
+
+colnames(MAR_scores0)
+
+MAR_scores<- MAR_scores0 %>%
+  mutate(
+    OHI_region_est= clean_names_lowercase(OHI_region_est)
+  ) %>%
+  select(year, OHI_region_est, MAR_Score= total_score)
+```
+
+```{r Merge FIS scores onto fishery stock catch}
+FP_Scores0 <- Landings_sector.summary %>%
+  left_join(
+    FIS_scores,
+    by = c(
+      "year",
+      "OHI_region_est"
+    )
+  )
+
+FP_Scores00 <- FP_Scores0 %>%
+  left_join(
+    MAR_scores,
+    by = c(
+      "year",
+      "OHI_region_est"
+    )
+  )
+
+colnames(FP_Scores00)
+
+FP_Scores<- FP_Scores00 %>%
+  select(year, OHI_region_est, FP_landings_kg,
+         FIS_landings_kg, MAR_landings_kg, 
+         w_fisheries, FIS_Score,
+         w_mariculture, MAR_Score)
+```
+
+
+# STEP 6: Compute FP score ------------------------------
+
+```{r Build final food provision scores}
+colnames(FP_Scores)
+
+FP_Scores <- FP_Scores %>%
+  rowwise() %>%
+  mutate(
+    FP_score = sum(
+      FIS_Score * w_fisheries,
+      MAR_Score * w_mariculture,
+      na.rm = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+```{r Sanity check final food scores}
+colnames(FP_Scores)
+
+FP_Scores %>%
+  filter(!is.na(FP_score))
+
+summary(FP_Scores$FP_score)
+  #  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+  # 26.54   69.97   74.87   72.92   84.36   97.04 
+
+# Year 2024 mean for FP scores:
+mean(FP_Scores$FP_score[FP_Scores$year == 2024], na.rm = TRUE)
+```
+
+# SAVE FP_Scores ------------------------------
+
+```{r Save FP_Scores}
+write.csv(FP_Scores, 
+          "/home/ferrer/ohi_goc_prep/FP/FP_Scores/FP_Scores_Jun052026.csv", 
+          row.names = FALSE)
+# 63 obs., 10 vars.
+```
+
+# PLOT FP_Scores  ------------------------------
+```{r Load in FP_Scores as needed}
+FP_Scores0 <- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FP_Scores_df_Jun052026.csv")
+# 63 obs., 10 vars.
+
+FP_Scores<- FP_Scores0
+```
+
+```{r Region key}
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
+
+colnames(Region_Key0)
+
+Region_Key<- Region_Key0 %>%
+  select(OHI_region_est, OHI_region_name) %>%
+  distinct()
+```
+
+```{r Merge Region_Key to FP_Scores}
+FP_Scores<- FP_Scores %>%
+  left_join(Region_Key, 
+            by = "OHI_region_est")
+
+# Make sure to order the regions:
+region_order <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
+FP_Scores <- FP_Scores %>%
+  mutate(
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = region_order
+    )
+  )
+```
+
+
+```{r Plot FP_Scores}
+unique(FP_Scores$OHI_region_name)
+
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
+FP_Scores_OverTime<- FP_Scores %>%
+  ggplot(aes(
+    x = year,
+    y = FP_score,
+    color = OHI_region_name
+  )) +
+  
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ OHI_region_name, scales = "fixed") +
+  
+  labs(
+    title = "FP Scores by Region",
+    subtitle= "updated: Jul 15 2026",
+    y = "FP Score (from 0 to 100)",
+    x = "Year"
+  ) +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  ylim(0, 101) +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+FP_Scores_OverTime
+```
+
+```{r Save as PNG}
+  ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FP_Scores_plot_Jul152026.png"),
+    plot = FP_Scores_OverTime,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+```
