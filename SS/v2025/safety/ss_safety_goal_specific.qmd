@@ -121,8 +121,8 @@ crimes_affecting_ohi <- hem_matrix_clean %>%
   filter(is_affecting %in% "1")
 unique(crimes_affecting_ohi$crime_id)
 
-write_csv(hem_matrix_clean, here::here(safety_int, "hem_expert_matrix_clean_070626.csv"))
-write_csv(crimes_affecting_ohi, here::here(safety_int, "crimes_affecting_ohi_070626.csv"))
+# write_csv(hem_matrix_clean, here::here(safety_int, "hem_expert_matrix_clean_070626.csv"))
+# write_csv(crimes_affecting_ohi, here::here(safety_int, "crimes_affecting_ohi_070626.csv"))
 ```
 
 ## 4. Annual crimes per goal
@@ -166,7 +166,7 @@ rate_of_incidence_per_goal <- incidences_per_goal %>%
   left_join(interpolated_population_inegi_2000_2025) %>% 
   mutate(crime_rate = total_crimes_reported / population_interpolated)
 
-write_csv(rate_of_incidence_per_goal, here::here(safety_output, "rate_of_incidence_per_goal_2015_2025.csv"))
+# write_csv(rate_of_incidence_per_goal, here::here(safety_output, "rate_of_incidence_per_goal_2015_2025.csv"))
 ```
 
 ### 5a. Viz
@@ -358,15 +358,548 @@ p_single_goal
 
 ## 6. Current status of crime per goal
 
-```{r}
+We convert crime rates into a current status score for each region, year, and OHI goal. Higher crime rates produce lower scores. For each goal, we find the maximum crime rate across all regions and years, then score each observation as:
 
+`current_status = (1 - (crime_rate / max_crime_rate_for_that_goal)) * 100`
+
+A region and year with zero crime scores 100. The region and year with the highest crime rate for that goal scores 0.
+
+```{r}
+#| label: step_06_current_status
+
+rate_of_incidence_per_goal <- read_csv( # reload if running this section alone
+  here::here(safety_output, "rate_of_incidence_per_goal_2015_2025.csv")
+)
+
+summary(rate_of_incidence_per_goal$crime_rate) # overall crime rate distribution
+
+# for each ohi goal, find the maximum crime rate across all regions and years
+max_crime_rate_by_goal <- rate_of_incidence_per_goal %>%
+  group_by(ohi_goal) %>%
+  summarise(
+    max_crime_rate = max(crime_rate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+current_status_per_goal <- rate_of_incidence_per_goal %>%
+  left_join(max_crime_rate_by_goal, by = "ohi_goal") %>%
+  mutate(
+    current_status = (1 - (crime_rate / max_crime_rate)) * 100 # 100 = best, 0 = worst
+  )
+
+summary(current_status_per_goal$current_status) # overall status distribution
+unique(current_status_per_goal$ohi_goal)
+
+# summary of current status for each goal separately
+current_status_summary_by_goal <- split(
+  current_status_per_goal$current_status,
+  current_status_per_goal$ohi_goal
+) %>%
+  lapply(summary)
+
+current_status_summary_by_goal
+
+# also as a tidy table for easier comparison across goals
+current_status_summary_table <- current_status_per_goal %>%
+  group_by(ohi_goal) %>%
+  summarise(
+    n = dplyr::n(),
+    min = min(current_status, na.rm = TRUE),
+    q1 = quantile(current_status, 0.25, na.rm = TRUE),
+    median = median(current_status, na.rm = TRUE),
+    mean = mean(current_status, na.rm = TRUE),
+    q3 = quantile(current_status, 0.75, na.rm = TRUE),
+    max = max(current_status, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+current_status_summary_table
+
+write_csv(
+  current_status_per_goal,
+  here::here(safety_output, "current_status_per_goal_2015_2025.csv")
+)
+
+write_csv(
+  current_status_summary_table,
+  here::here(safety_output, "current_status_summary_by_goal_2015_2025.csv")
+)
 ```
 
+### 6a. Current status plots by goal
 
+We reuse the same region colors and labels defined in section 5a. For convenience we redefine them here so this section can also be run on its own.
 
+```{r}
+#| label: step_06a_status_plots
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
 
+library(scales)
 
+# turn off showtext if it was left on from section 5a; that dpi mismatch makes text huge in the plot pane
+if (requireNamespace("showtext", quietly = TRUE)) {
+  showtext::showtext_auto(FALSE)
+}
 
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
 
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
 
+theme_status <- theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey40"),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    legend.position = "bottom",
+    legend.key.size = unit(0.5, "cm"),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(6, 8, 4, 6)
+  )
+
+current_status_per_goal <- read_csv(
+  here::here(safety_output, "current_status_per_goal_2015_2025.csv")
+) %>%
+  mutate(
+    ano = as.integer(ano),
+    rgn_id = factor(rgn_id, levels = names(rgn_labels)),
+    ohi_goal = as.character(ohi_goal)
+  )
+
+goal_list <- sort(unique(current_status_per_goal$ohi_goal))
+
+p_status_list <- list() # named list so we can call any goal plot later
+
+for (g in goal_list) {
+  goal_title <- stringr::str_replace_all(g, "_", " ") %>%
+    stringr::str_to_title()
+
+  p_status_list[[g]] <- current_status_per_goal %>%
+    filter(ohi_goal == g) %>%
+    ggplot(aes(x = ano, y = current_status, color = rgn_id, group = rgn_id)) +
+    geom_line(linewidth = 1.1, alpha = 0.9) +
+    geom_point(size = 2) +
+    scale_color_manual(values = rgn_colors, labels = rgn_labels) +
+    scale_x_continuous(breaks = pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 25)) +
+    labs(
+      title = goal_title,
+      subtitle = "Current status (100 = best)",
+      x = NULL,
+      y = "Status",
+      color = NULL
+    ) +
+    guides(color = guide_legend(nrow = 3, byrow = TRUE)) +
+    theme_status
+
+  # ggsave(
+  #   here::here(safety_output, paste0("plot_current_status_", g, ".png")),
+  #   p_status_list[[g]], width = 7, height = 4, dpi = 300
+  # )
+}
+
+names(p_status_list) # list available goal plot names
+```
+
+#### Call individual current status plots by goal
+
+```{r}
+#| label: step_06a_print_status_by_goal
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
+
+p_status_list[["biodiversity_habitats"]]
+p_status_list[["biodiversity_species"]]
+p_status_list[["clean_waters"]]
+p_status_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
+p_status_list[["coastal_opportunities_coastal_access"]]
+p_status_list[["food_provisioning_fisheries"]]
+p_status_list[["food_provisioning_mariculture"]]
+p_status_list[["habitat_services_carbon_storage"]]
+p_status_list[["habitat_services_coastal_protection"]]
+p_status_list[["habitat_services_filtration"]]
+p_status_list[["livelihoods_economies_economies"]]
+p_status_list[["livelihoods_economies_livelihoods"]]
+p_status_list[["natural_products"]]
+p_status_list[["research_ocean_literacy"]]
+p_status_list[["sentido_de_pertenencia"]]
+p_status_list[["tourism_recreation"]]
+```
+
+### 6b. Crimes included in each goal
+
+For each OHI goal, we list the crimes that expert judgement marked as affecting that goal in `Safety_Security_Methodology_Hem_Crime_x_OHI_Goal.csv`.
+
+```{r}
+#| label: step_06b_crimes_by_goal
+
+crimes_affecting_ohi <- read_csv(
+  here::here(safety_int, "crimes_affecting_ohi_070626.csv")
+)
+
+crimes_by_goal <- crimes_affecting_ohi %>%
+  dplyr::select(
+    ohi_goal,
+    crime_id,
+    bien_juridico_afectado,
+    tipo_de_delito,
+    subtipo_de_delito,
+    dplyr::any_of(c("eng_subtipo_de_delito", "eng_subtipo_de_delito_2"))
+  ) %>%
+  distinct() %>%
+  arrange(ohi_goal, crime_id)
+
+# save the full lookup for reference
+write_csv(
+  crimes_by_goal,
+  here::here(safety_output, "crimes_included_per_goal_2015_2025.csv")
+)
+
+# print one table per goal
+for (g in goal_list) {
+  goal_title <- stringr::str_replace_all(g, "_", " ") %>%
+    stringr::str_to_title()
+
+  goal_crimes <- crimes_by_goal %>%
+    filter(ohi_goal == g) %>%
+    dplyr::select(-ohi_goal)
+
+  cat("\n\n#### ", goal_title, "\n\n", sep = "")
+  cat("Number of crimes included: ", nrow(goal_crimes), "\n\n", sep = "")
+
+  print(
+    knitr::kable(
+      goal_crimes,
+      caption = paste0("Crimes included in ", goal_title),
+      row.names = FALSE
+    )
+  )
+}
+```
+
+### 6c. Trying out different ways to calculate current status scores
+
+Yes: using the **maximum crime rate across all goals, regions, and years** will usually push almost all scores even closer to 100. Only the single worst goal-region-year observation gets a status of 0. Every other observation is divided by an equal or larger denominator than in the per-goal max method, so scores can only stay the same or increase.
+
+The **90th quantile** uses a less extreme reference than the absolute max, but is still closer to the upper tail than the 75th. Observations at or above that quantile are capped at a status of 0 (we use `pmax(0, ...)` so scores do not go negative). That should spread scores out more than the absolute max.
+
+We also try a **per-region baseline**: for each region and goal, the reference is that region's mean crime rate from 2015 through 2020. Same formula, but now the score asks "how does this year compare to this region's own recent baseline for this goal?" If the current rate equals the 2015 through 2020 average, status is 0. If the rate is lower (safer), status rises toward 100. If the rate is higher than the baseline, we cap at 0.
+
+Here we compare five methods side by side:
+
+1. **Per-goal max** (what we already use): reference = max crime rate within each goal across regions and years
+2. **Global max**: reference = max crime rate across all goals, regions, and years
+3. **Per-goal 90th quantile**: reference = 90th percentile of crime rate within each goal; values above it score 0
+4. **Global 90th quantile**: reference = 90th percentile across all goals, regions, and years; values above it score 0
+5. **Per-region 2015 through 2020 mean**: reference = mean crime rate for that region and goal during 2015 through 2020; values above it score 0
+
+```{r}
+#| label: step_06c_status_alternatives
+#| fig-width: 9
+#| fig-height: 5
+#| fig-dpi: 96
+
+if (requireNamespace("showtext", quietly = TRUE)) {
+  showtext::showtext_auto(FALSE)
+}
+
+rate_of_incidence_per_goal <- read_csv(
+  here::here(safety_output, "rate_of_incidence_per_goal_2015_2025.csv")
+)
+
+# method 1: per-goal max (baseline)
+max_by_goal <- rate_of_incidence_per_goal %>%
+  group_by(ohi_goal) %>%
+  summarise(ref_per_goal_max = max(crime_rate, na.rm = TRUE), .groups = "drop")
+
+# method 2: one global max across all goals, regions, and years
+ref_global_max <- max(rate_of_incidence_per_goal$crime_rate, na.rm = TRUE)
+ref_global_max
+
+# method 3: per-goal 90th quantile
+q90_by_goal <- rate_of_incidence_per_goal %>%
+  group_by(ohi_goal) %>%
+  summarise(ref_per_goal_q90 = quantile(crime_rate, 0.90, na.rm = TRUE), .groups = "drop")
+
+# method 4: global 90th quantile
+ref_global_q90 <- quantile(rate_of_incidence_per_goal$crime_rate, 0.90, na.rm = TRUE)
+ref_global_q90
+
+# method 5: per-region mean crime rate for that goal during 2015 through 2020
+ref_rgn_baseline <- rate_of_incidence_per_goal %>%
+  filter(ano >= 2015, ano <= 2020) %>%
+  group_by(rgn_id, ohi_goal) %>%
+  summarise(
+    ref_rgn_mean_2015_2020 = mean(crime_rate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ref_rgn_baseline
+
+status_alternatives <- rate_of_incidence_per_goal %>%
+  left_join(max_by_goal, by = "ohi_goal") %>%
+  left_join(q90_by_goal, by = "ohi_goal") %>%
+  left_join(ref_rgn_baseline, by = c("rgn_id", "ohi_goal")) %>%
+  mutate(
+    status_per_goal_max = (1 - (crime_rate / ref_per_goal_max)) * 100,
+    status_global_max = (1 - (crime_rate / ref_global_max)) * 100,
+    status_per_goal_q90 = pmax(0, (1 - (crime_rate / ref_per_goal_q90)) * 100), # cap at 0 above q90
+    status_global_q90 = pmax(0, (1 - (crime_rate / ref_global_q90)) * 100), # cap at 0 above global q90
+    # per-region baseline: handle zero baseline separately to avoid dividing by zero
+    status_rgn_mean_2015_2020 = dplyr::case_when(
+      is.na(ref_rgn_mean_2015_2020) ~ NA_real_,
+      ref_rgn_mean_2015_2020 == 0 & crime_rate == 0 ~ 100,
+      ref_rgn_mean_2015_2020 == 0 & crime_rate > 0 ~ 0,
+      TRUE ~ pmax(0, (1 - (crime_rate / ref_rgn_mean_2015_2020)) * 100)
+    )
+  )
+
+# overall summaries
+summary(status_alternatives$status_per_goal_max)
+summary(status_alternatives$status_global_max)
+summary(status_alternatives$status_per_goal_q90)
+summary(status_alternatives$status_global_q90)
+summary(status_alternatives$status_rgn_mean_2015_2020)
+
+# tidy long form for comparison tables and plots
+status_long <- status_alternatives %>%
+  dplyr::select(
+    rgn_id, ano, ohi_goal,
+    status_per_goal_max,
+    status_global_max,
+    status_per_goal_q90,
+    status_global_q90,
+    status_rgn_mean_2015_2020
+  ) %>%
+  tidyr::pivot_longer(
+    cols = starts_with("status_"),
+    names_to = "method",
+    values_to = "current_status"
+  ) %>%
+  mutate(
+    method = dplyr::recode(
+      method,
+      status_per_goal_max = "Per-goal max",
+      status_global_max = "Global max",
+      status_per_goal_q90 = "Per-goal 90th quantile",
+      status_global_q90 = "Global 90th quantile",
+      status_rgn_mean_2015_2020 = "Per-region mean 2015-2020"
+    ),
+    method = factor(
+      method,
+      levels = c(
+        "Per-goal max",
+        "Global max",
+        "Per-goal 90th quantile",
+        "Global 90th quantile",
+        "Per-region mean 2015-2020"
+      )
+    )
+  )
+
+# summary by goal and method
+status_alt_summary <- status_long %>%
+  group_by(method, ohi_goal) %>%
+  summarise(
+    n = dplyr::n(),
+    min = min(current_status, na.rm = TRUE),
+    q1 = quantile(current_status, 0.25, na.rm = TRUE),
+    median = median(current_status, na.rm = TRUE),
+    mean = mean(current_status, na.rm = TRUE),
+    q3 = quantile(current_status, 0.75, na.rm = TRUE),
+    max = max(current_status, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(method, ohi_goal)
+
+status_alt_summary
+
+# overall summary by method only
+status_alt_summary_overall <- status_long %>%
+  group_by(method) %>%
+  summarise(
+    n = dplyr::n(),
+    min = min(current_status, na.rm = TRUE),
+    q1 = quantile(current_status, 0.25, na.rm = TRUE),
+    median = median(current_status, na.rm = TRUE),
+    mean = mean(current_status, na.rm = TRUE),
+    q3 = quantile(current_status, 0.75, na.rm = TRUE),
+    max = max(current_status, na.rm = TRUE),
+    pct_above_95 = mean(current_status >= 95, na.rm = TRUE) * 100, # how piled up near 100
+    pct_at_zero = mean(current_status == 0, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+status_alt_summary_overall
+
+write_csv(
+  status_alternatives,
+  here::here(safety_output, "current_status_alternatives_2015_2025.csv")
+)
+
+write_csv(
+  status_alt_summary,
+  here::here(safety_output, "current_status_alternatives_summary_by_goal_2015_2025.csv")
+)
+
+write_csv(
+  status_alt_summary_overall,
+  here::here(safety_output, "current_status_alternatives_summary_overall_2015_2025.csv")
+)
+```
+
+#### Compare score distributions across methods
+
+```{r}
+#| label: step_06c_compare_plots
+#| fig-width: 10
+#| fig-height: 5
+#| fig-dpi: 96
+
+# redefine in case this chunk is run without 6a
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+p_box_methods <- ggplot(status_long, aes(x = method, y = current_status, fill = method)) +
+  geom_boxplot(outlier.size = 0.8, alpha = 0.8) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 25)) +
+  labs(
+    title = "Current status distributions by scoring method",
+    subtitle = "All goals, regions, and years",
+    x = NULL,
+    y = "Current status"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    plot.title = element_text(face = "bold")
+  )
+
+p_box_methods
+```
+
+#### Method comparison plots for each goal
+
+One faceted plot per OHI goal, with the four scoring methods side by side. Plots are stored in `p_compare_list` so we can call any goal individually.
+
+```{r}
+#| label: step_06c_compare_by_goal
+#| fig-width: 10
+#| fig-height: 7
+#| fig-dpi: 96
+
+goal_list_compare <- sort(unique(status_long$ohi_goal))
+
+p_compare_list <- list() # named list so we can call any goal plot later
+
+for (g in goal_list_compare) {
+  goal_title <- stringr::str_replace_all(g, "_", " ") %>%
+    stringr::str_to_title()
+
+  p_compare_list[[g]] <- status_long %>%
+    filter(ohi_goal == g) %>%
+    mutate(rgn_id = factor(rgn_id, levels = names(rgn_labels))) %>%
+    ggplot(aes(x = ano, y = current_status, color = rgn_id, group = rgn_id)) +
+    geom_line(linewidth = 0.9, alpha = 0.9) +
+    geom_point(size = 1.5) +
+    facet_wrap(~ method, ncol = 3) +
+    scale_color_manual(values = rgn_colors, labels = rgn_labels) +
+    scale_x_continuous(breaks = pretty_breaks(n = 5)) +
+    scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 25)) +
+    labs(
+      title = paste0(goal_title, ": status under each scoring method"),
+      x = NULL,
+      y = "Current status",
+      color = NULL
+    ) +
+    guides(color = guide_legend(nrow = 3, byrow = TRUE)) +
+    theme_minimal(base_size = 11) +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold", size = 9)
+    )
+
+  # ggsave(
+  #   here::here(safety_output, paste0("plot_status_methods_", g, ".png")),
+  #   p_compare_list[[g]], width = 10, height = 7, dpi = 300
+  # )
+}
+
+names(p_compare_list) # list available goal plot names
+```
+
+#### Call individual method comparison plots by goal
+
+```{r}
+#| label: step_06c_print_compare_by_goal
+#| fig-width: 10
+#| fig-height: 7
+#| fig-dpi: 96
+
+p_compare_list[["biodiversity_habitats"]]
+p_compare_list[["biodiversity_species"]]
+p_compare_list[["clean_waters"]]
+p_compare_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
+p_compare_list[["coastal_opportunities_coastal_access"]]
+p_compare_list[["food_provisioning_fisheries"]]
+p_compare_list[["food_provisioning_mariculture"]]
+p_compare_list[["habitat_services_carbon_storage"]]
+p_compare_list[["habitat_services_coastal_protection"]]
+p_compare_list[["habitat_services_filtration"]]
+p_compare_list[["livelihoods_economies_economies"]]
+p_compare_list[["livelihoods_economies_livelihoods"]]
+p_compare_list[["natural_products"]]
+p_compare_list[["research_ocean_literacy"]]
+p_compare_list[["sentido_de_pertenencia"]]
+p_compare_list[["tourism_recreation"]]
+```
 
