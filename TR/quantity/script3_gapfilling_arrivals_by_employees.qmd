@@ -1,0 +1,1290 @@
+---
+title: "Script 3: Gapfill arrivals using DENUE accommodation employees"
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# 0. Workflow for this script
+
+This is **Script 3** in the TR quantity update pipeline. Run it after Scripts 1 and 2.
+
+1. Bring in DENUE accommodations (employees) from Script 1 for 2019-2026.
+2. Bring in SECTUR total arrivals shapefiles from Script 2 (complete years through 2025).
+3. Harmonize municipio names, join employees and arrivals, and check coverage gaps.
+4. Explore the relationship and fit gapfilling models.
+5. Predict missing municipio-year arrivals (and handle 2020 carefully).
+6. Write the gapfilled output that Script 4 will read.
+
+I am checking whether DENUE accommodation employees help explain SECTUR tourist arrivals, and then using that relationship to fill gaps.
+
+**Update:** I am using DENUE accommodations for 2019-2026 (`update_alojamientos_2019_2026_goc_50km.shp`) and SECTUR annual arrivals for 2019-2025 (2026 SECTUR is incomplete / Enero only).
+
+# 1. Bring in DENUE accommodations (employees)
+We will need to clean it up, because the number of employees for each business is binned.
+
+*This is what the per_ocu variable description says in the metadata:*
+"This includes personnel directly employed by the company and external personnel supplied by another company, who worked for the economic unit, under its direction and control, and who covered at least one-third of the workday. This may include permanent staff, paid temporary staff, or unpaid temporary staff.
+Economic units are classified by employee size ranges, which allows for the identification of the size of Economic Units based on the number of personnel they employ; that is, according to their total workforce. For the purposes of the Directory, Economic Units are grouped into employee size ranges or strata, based on the total number of employees reported by each unit, as shown in the following table.
+Number of Employees
+1 = 0 to 5
+2 = 6 to 10
+3 = 11 to 30
+4 = 31 to 50
+5 = 51 to 100
+6 = 101 to 250
+7 = 251 and above" 
+
+So, we will take the midpoint of each range.
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(here)
+library(janitor)
+library(tmaptools)
+library(sf)
+library(mapview)
+
+alojamientos_2019_2026_50km <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_alojamiento_temporal_y_preparación_alimentos_y_bebidas/int","update_alojamientos_2019_2026_goc_50km.shp"))
+
+## see what the variable per_ocu looks like
+unique(alojamientos_2019_2026_50km$per_ocu)
+
+# [1] "0 a 5 personas"        "6 a 10 personas"       "11 a 30 personas"      "31 a 50 personas"      "101 a 250 personas"    "51 a 100 personas"     "251 y m<e1>s personas" "251 y más personas" 
+
+## use a case_when to reclassify the number of people employed based on the midpoint of the range.  NOTE that I am assuming that you can never have 0 employees, so the first midpoint is between 1 and 5.
+alojamientos_est_perocu <- alojamientos_2019_2026_50km %>% 
+  mutate(
+    employees_estimated = case_when(
+      per_ocu == "0 a 5 personas" ~ 3,
+      per_ocu == "6 a 10 personas" ~ 8,
+      per_ocu == "11 a 30 personas" ~ 20.5,
+      per_ocu == "31 a 50 personas" ~ 40.5,
+      per_ocu == "51 a 100 personas" ~ 75.5,
+      per_ocu == "101 a 250 personas" ~ 175.5,
+      per_ocu %in% c("251 y m<e1>s personas", "251 y más personas") ~ 300,
+      TRUE ~ NA_real_
+    )
+  )
+
+mapview(alojamientos_est_perocu, zcol = "employees_estimated")
+
+unique(alojamientos_est_perocu$municipio)
+
+# when 10km:
+#  [1] "Mexicali"                 "Ensenada"                 "Muleg<e9>"                "Los Cabos"                "La Paz"                   "Loreto"                   "Puerto Vallarta"          "Cabo Corrientes"         
+#  [9] "Bah<ed>a de Banderas"     "San Blas"                 "Compostela"               "Tecuala"                  "Puerto Pe<f1>asco"        "San Luis R<ed>o Colorado" "Hermosillo"               "Pitiquito"               
+# [17] "Guaymas"                  "Empalme"                  "Benito Ju<e1>rez"         "Huatabampo"               "Elota"                    "Mazatl<e1>n"              "Escuinapa"                "San Ignacio"             
+# [25] "Ahome"                    "Navolato"                 "Culiac<e1>n"              "Guasave"                  "Angostura"                "Rosario"                  "San Quint<ed>n"           "San Felipe"              
+# [33] "San Quintín"              "Mulegé"                   "Bahía de Banderas"        "Puerto Peñasco"           "San Luis Río Colorado"    "Benito Juárez"            "Mazatlán"                 "Culiacán"                
+# [41] "Caborca" 
+
+# when 50km:
+#  [1] "Mexicali"                   "Ensenada"                   "Muleg<e9>"                  "Comond<fa>"                
+#  [5] "Los Cabos"                  "La Paz"                     "Loreto"                     "Puerto Vallarta"           
+#  [9] "Talpa de Allende"           "Tomatl<e1>n"                "San Sebasti<e1>n del Oeste" "Cabo Corrientes"           
+# [13] "Mascota"                    "Bah<ed>a de Banderas"       "Tepic"                      "San Blas"                  
+# [17] "Compostela"                 "Acaponeta"                  "Ru<ed>z"                    "Xalisco"                   
+# [21] "Tuxpan"                     "Tecuala"                    "Santiago Ixcuintla"         "Rosamorada"                
+# [25] "Huajicori"                  "San Pedro Lagunillas"       "Puerto Pe<f1>asco"          "San Luis R<ed>o Colorado"  
+# [29] "Hermosillo"                 "Caborca"                    "Pitiquito"                  "Navojoa"                   
+# [33] "Cajeme"                     "Guaymas"                    "Huatabampo"                 "Etchojoa"                  
+# [37] "Empalme"                    "Benito Ju<e1>rez"           "Elota"                      "Mazatl<e1>n"               
+# [41] "Navolato"                   "Ahome"                      "Culiac<e1>n"                "El Fuerte"                 
+# [45] "Escuinapa"                  "San Ignacio"                "Guasave"                    "Rosario"                   
+# [49] "Mocorito"                   "Salvador Alvarado"          "Concordia"                  "Angostura"                 
+# [53] "San Quint<ed>n"             "San Felipe"                 "San Quintín"                "Mulegé"                    
+# [57] "Comondú"                    "Tomatlán"                   "San Sebastián del Oeste"    "Bahía de Banderas"         
+# [61] "Ruíz"                       "Puerto Peñasco"             "San Luis Río Colorado"      "Benito Juárez"             
+# [65] "Culiacán"                   "Mazatlán"    
+
+unique(alojamientos_est_perocu$localidad)
+
+# when 10km:
+#  [1] "San Felipe"                            "Villas de Cortez"                      "Campo Beluga"                          "Campo Daggets"                         "Campo Sacrificio"                     
+#   [6] "Punta Final (Villa Mar y Sol)"         "Campo Raquel y Larry"                  "Punta Bufeo [Campo Tur<ed>stico]"      "Bah<ed>a de los <c1>ngeles"            "La Ventana [Campo]"                   
+#  [11] "Puerto San Francisquito"               "Heroica Muleg<e9>"                     "Santa Rosal<ed>a"                      "Cabo San Lucas"                        "Buenavista"                           
+#  [16] "San Jos<e9> del Cabo"                  "La Cuadra Regina"                      "La Paz"                                "Chametla"                              "La Ribera"                            
+#  [21] "El Sargento"                           "Puerto de Pichilingue"                 "Loreto"                                "La Ventana"                            "El Cardonal"                          
+#  [26] "Nopol<f3>"                             "Buenos Aires"                          "Los Barriles"                          "Punta Pescadero"                       "Tripu<ed> [Trailer Park]"             
+#  [31] "Boca de la Vinorama"                   "Danzante Bay"                          "Punta Prieta"                          "Ninguno"                               "El Leonero"                           
+#  [36] "Puerto Vallarta"                       "Sun Resorts"                           "Mismaloya"                             "Yelapa"                                "Las Juntas y los Veranos"             
+#  [41] "Le<f3>n de la Sierra"                  "La Quebrada"                           "Ixtapa"                                "Las Juntas"                            "Playa Gemelas"                        
+#  [46] "Sayulita"                              "Nuevo Vallarta"                        "Guadalupe Victoria"                    "Rinc<f3>n de Guayabitos"               "Bucer<ed>as"                          
+#  [51] "Aticama"                               "Cruz de Huanacaxtle"                   "El Porvenir"                           "La Pe<f1>ita de Jaltemba"              "Los Ayala"                            
+#  [56] "Platanitos"                            "Lo de Marcos"                          "Chacala"                               "La Palma"                              "San Blas"                             
+#  [61] "Matanch<e9>n (La Aguada)"              "San Francisco"                         "Corral del Risco (Punta de Mita)"      "Lidia [Bungalows]"                     "Playa de los Cocos"                   
+#  [66] "La Joya"                               "P<e1>tzcuaro"                          "Monte<f3>n"                            "Punta Raza"                            "Las Varas"                            
+#  [71] "La Manzanilla"                         "Flamingos"                             "Santa Cruz de Miramar"                 "Tondoroque"                            "Desarrollo Punta Mita"                
+#  [76] "Bah<ed>a de Matanch<e9>n"              "El Crucero de Chacala"                 "Punta Negra (Careyeros)"               "San Jos<e9> del Valle"                 "Para<ed>so Sereno"                    
+#  [81] "Mezcales"                              "Playa Escondida"                       "Universo [Colonia]"                    "Playa Novillero"                       "Grand Palladium Vallarta [Hotel]"     
+#  [86] "San Vicente"                           "Las Jarretaderas"                      "San Clemente de Lima"                  "Arboledas [Bungalows]"                 "La Tranquila [Condominios]"           
+#  [91] "Imanta"                                "Los Arroyos Verdes"                    "Dos Palmeras (Casa Pel<ed>canos)"      "El Tonino [Bloquera]"                  "Punta Monterrey"                      
+#  [96] "Rancho Banderas"                       "Papelillos [Hotel]"                    "Puerto Pe<f1>asco"                     "Golfo de Santa Clara"                  "Bah<ed>a la Choya"                    
+# [101] "Playa Arenosa"                         "Bah<ed>a de Kino"                      "Puerto Libertad"                       "Mayan Palace Hotel"                    "Playa Miramar"                        
+# [106] "Las Conchas"                           "Heroica Guaymas"                       "San Carlos (San Carlos Nuevo Guaymas)" "Condominios Playa Blanca"              "Empalme"                              
+# [111] "Villa Ju<e1>rez"                       "Agua Blanca"                           "Las Bocas"                             "Costa del Mar"                         "La Cruz"                              
+# [116] "Mazatl<e1>n"                           "Color Marino"                          "Dimas (Estaci<f3>n Dimas)"             "Teacap<e1>n"                           "Topolobampo"                          
+# [121] "Altata"                                "Isla del Bosque"                       "Eldorado"                              "El Saucito"                            "Celestino Gazca Villase<f1>or"        
+# [126] "Las Glorias"                           "Fraccionamiento Isla Para<ed>so"       "La Reforma"                            "Gustavo D<ed>az Ordaz (El Carrizo)"    "La Escondida"                         
+# [131] "Agua Verde"                            "Localidad Econ<f3>mica"                "Rancho Girolando"                      "El Patio"                              "Ejido Plan Nacional Agrario"          
+# [136] "Alfonsinas"                            "Tailwind"                              "El Encuentro"                          "Los Mochis"                            "Zacualpan"                            
+# [141] "Desarrollo Puerto Bah<ed>a"            "Litib<fa>"                             "Bahía de los Ángeles"                  "Punta Bufeo [Campo Turístico]"         "Heroica Mulegé"                       
+# [146] "Santa Rosalía"                         "San José del Cabo"                     "Tripuí [Trailer Park]"                 "San Román"                             "Nopoló"                               
+# [151] "Costa Vida Vallarta"                   "Rincón de Guayabitos"                  "Bucerías"                              "Bahía de Matanchén"                    "La Peñita de Jaltemba"                
+# [156] "San José del Valle"                    "Dos Palmeras (Casa Pelícanos)"         "Pátzcuaro"                             "Desarrollo Puerto Bahía"               "Litibú"                               
+# [161] "Puerto Peñasco"                        "Bahía de Kino"                         "Villa Juárez"                          "Mazatlán"                              "Campo Santa Fe"                       
+# [166] "Teacapán"                              "Dimas (Estación Dimas)"                "Motel Popeye"                          "Gustavo Díaz Ordaz (El Carrizo)"       "Playa del Sol"                        
+# [171] "Pap<e1> Fern<e1>ndez [Campo]"          "Los Vientos"                           "Campo Lobo"                            "Cabo Golf Cars"                        "Cuesta Blanca"                        
+# [176] "Las <c1>nimas de Quimixto"             "Lienzo Charro"                         "Mezcalitos"                            "Para<ed>so Escondido [Colonia]"        "Jalcocot<e1>n"                        
+# [181] "Las Tijerillas"                        "Luis Pe<f1>a"                          "Hip<f3>lito Gonz<e1>lez L<f3>pez"      "Limoncito Hills"                       "La Playa Estates"                     
+# [186] "Haixa (Litib<fa>)"                     "Playa Encanto"                         "Puerto Lobos"                          "Mayan Lakes"                           "Playa Huatabampito"                   
+# [191] "Coch<f3>rit" 
+
+# when 50km:
+#   [1] "San Felipe"                                      "Villas de Cortez"                               
+#   [3] "Campo Beluga"                                    "Campo Daggets"                                  
+#   [5] "Campo Sacrificio"                                "Punta Final (Villa Mar y Sol)"                  
+#   [7] "Campo Raquel y Larry"                            "Punta Bufeo [Campo Tur<ed>stico]"               
+#   [9] "Bah<ed>a de los <c1>ngeles"                      "La Ventana [Campo]"                             
+#  [11] "Catavi<f1>a"                                     "Puerto San Francisquito"                        
+#  [13] "Rancho Escondido"                                "Piedra Blanca"                                  
+#  [15] "Heroica Muleg<e9>"                               "Santa Rosal<ed>a"                               
+#  [17] "San Isidro"                                      "San Lino"                                       
+#  [19] "Cabo San Lucas"                                  "Buenavista"                                     
+#  [21] "San Jos<e9> del Cabo"                            "La Cuadra Regina"                               
+#  [23] "La Paz"                                          "Chametla"                                       
+#  [25] "El Triunfo"                                      "La Acacia"                                      
+#  [27] "La Ribera"                                       "El Sargento"                                    
+#  [29] "Puerto de Pichilingue"                           "Loreto"                                         
+#  [31] "San Miguel de Comond<fa>"                        "La Ventana"                                     
+#  [33] "El Cardonal"                                     "Nopol<f3>"                                      
+#  [35] "Buenos Aires"                                    "Los Barriles"                                   
+#  [37] "Punta Pescadero"                                 "Tripu<ed> [Trailer Park]"                       
+#  [39] "Boca de la Vinorama"                             "Danzante Bay"                                   
+#  [41] "Punta Prieta"                                    "Ninguno"                                        
+#  [43] "El Leonero"                                      "Puerto Vallarta"                                
+#  [45] "Talpa de Allende"                                "La Cruz de Loreto"                              
+#  [47] "Sun Resorts"                                     "San Sebasti<e1>n del Oeste"                     
+#  [49] "Mismaloya"                                       "Yelapa"                                         
+#  [51] "Las Juntas y los Veranos"                        "Mascota"                                        
+#  [53] "El Tuito"                                        "Puerta de Enmedio"                              
+#  [55] "Le<f3>n de la Sierra"                            "La Quebrada"                                    
+#  [57] "Ixtapa"                                          "San Nicol<e1>s (La Troje)"                      
+#  [59] "La Puntilla de Maito"                            "Las Juntas"                                     
+#  [61] "Playa Gemelas"                                   "Sayulita"                                       
+#  [63] "Nuevo Vallarta"                                  "Tepic"                                          
+#  [65] "Guadalupe Victoria"                              "Rinc<f3>n de Guayabitos"                        
+#  [67] "Bucer<ed>as"                                     "Aticama"                                        
+#  [69] "Cruz de Huanacaxtle"                             "El Porvenir"                                    
+#  [71] "La Pe<f1>ita de Jaltemba"                        "Los Ayala"                                      
+#  [73] "Platanitos"                                      "Lo de Marcos"                                   
+#  [75] "Chacala"                                         "La Palma"                                       
+#  [77] "San Blas"                                        "Matanch<e9>n (La Aguada)"                       
+#  [79] "San Francisco"                                   "Corral del Risco (Punta de Mita)"               
+#  [81] "Lidia [Bungalows]"                               "Playa de los Cocos"                             
+#  [83] "La Joya"                                         "P<e1>tzcuaro"                                   
+#  [85] "Monte<f3>n"                                      "Punta Raza"                                     
+#  [87] "Las Varas"                                       "Acaponeta"                                      
+#  [89] "La Manzanilla"                                   "Flamingos"                                      
+#  [91] "Santa Cruz de Miramar"                           "Tondoroque"                                     
+#  [93] "Desarrollo Punta Mita"                           "Compostela"                                     
+#  [95] "Ru<ed>z"                                         "San Juan de Abajo"                              
+#  [97] "Xalisco"                                         "Bah<ed>a de Matanch<e9>n"                       
+#  [99] "Tuxpan"                                          "El Crucero de Chacala"                          
+# [101] "Tecuala"                                         "Punta Negra (Careyeros)"                        
+# [103] "Santiago Ixcuintla"                              "Rosamorada"                                     
+# [105] "San Jos<e9> del Valle"                           "Para<ed>so Sereno"                              
+# [107] "Huajicori"                                       "Mezcales"                                       
+# [109] "Playa Escondida"                                 "Villa Hidalgo"                                  
+# [111] "Universo [Colonia]"                              "Playa Novillero"                                
+# [113] "Grand Palladium Vallarta [Hotel]"                "San Vicente"                                    
+# [115] "Mexcaltit<e1>n de Uribe"                         "Las Jarretaderas"                               
+# [117] "L<e1>zaro C<e1>rdenas [Colonia]"                 "San Clemente de Lima"                           
+# [119] "Arboledas [Bungalows]"                           "La Tranquila [Condominios]"                     
+# [121] "Imanta"                                          "Los Arroyos Verdes"                             
+# [123] "Dos Palmeras (Casa Pel<ed>canos)"                "San Cayetano"                                   
+# [125] "El Tonino [Bloquera]"                            "San Pedro Lagunillas"                           
+# [127] "Punta Monterrey"                                 "Rancho Banderas"                                
+# [129] "Papelillos [Hotel]"                              "Puerto Pe<f1>asco"                              
+# [131] "Golfo de Santa Clara"                            "Bah<ed>a la Choya"                              
+# [133] "Playa Arenosa"                                   "Bah<ed>a de Kino"                               
+# [135] "Miguel Alem<e1>n (La Doce)"                      "Plutarco El<ed>as Calles (La Y Griega)"         
+# [137] "Puerto Libertad"                                 "Mayan Palace Hotel"                             
+# [139] "Playa Miramar"                                   "Las Conchas"                                    
+# [141] "Navojoa"                                         "Ciudad Obreg<f3>n"                              
+# [143] "Heroica Guaymas"                                 "San Carlos (San Carlos Nuevo Guaymas)"          
+# [145] "Condominios Playa Blanca"                        "Huatabampo"                                     
+# [147] "Bacobampo"                                       "Empalme"                                        
+# [149] "Esperanza"                                       "Villa Ju<e1>rez"                                
+# [151] "Agua Blanca"                                     "Pueblo Yaqui"                                   
+# [153] "Los Bahuises"                                    "V<ed>cam (Switch)"                              
+# [155] "Las Bocas"                                       "Costa del Mar"                                  
+# [157] "La Cruz"                                         "Campo el Salto"                                 
+# [159] "Mazatl<e1>n"                                     "San Marcos"                                     
+# [161] "Navolato"                                        "Los Mochis"                                     
+# [163] "Culiac<e1>n Rosales"                             "Color Marino"                                   
+# [165] "Dimas (Estaci<f3>n Dimas)"                       "Adolfo Ruiz Cortines"                           
+# [167] "Leopoldo S<e1>nchez Celis"                       "Escuinapa de Hidalgo"                           
+# [169] "San Ignacio"                                     "La Papalota"                                    
+# [171] "Teacap<e1>n"                                     "El Rosario"                                     
+# [173] "Mocorito"                                        "El Fuerte"                                      
+# [175] "Topolobampo"                                     "Villa Uni<f3>n"                                 
+# [177] "Altata"                                          "Guam<fa>chil"                                   
+# [179] "Isla del Bosque"                                 "Guasave"                                        
+# [181] "Juan Jos<e9> R<ed>os"                            "Quil<e1>"                                       
+# [183] "Eldorado"                                        "El Saucito"                                     
+# [185] "El Batall<f3>n"                                  "Pericos"                                        
+# [187] "Celestino Gazca Villase<f1>or"                   "Las Glorias"                                    
+# [189] "Costa Rica"                                      "Concordia"                                      
+# [191] "Fraccionamiento Isla Para<ed>so"                 "Sistema de Producci<f3>n Intensiva del Noroeste"
+# [193] "La Reforma"                                      "Gustavo D<ed>az Ordaz (El Carrizo)"             
+# [195] "Licenciado Benito Ju<e1>rez (Campo Gobierno)"    "La Escondida"                                   
+# [197] "Santa Eduwiges"                                  "Caimanero"                                      
+# [199] "Callejones de Guasavito"                         "Agua Verde"                                     
+# [201] "Le<f3>n Fonseca (Estaci<f3>n Verdura)"           "Nestle Culiac<e1>n"                             
+# [203] "Localidad Econ<f3>mica"                          "Rancho Girolando"                               
+# [205] "Ninguno [Motel]"                                 "El Patio"                                       
+# [207] "Gabriel Leyva Solano (Benito Ju<e1>rez)"         "Ejido Plan Nacional Agrario"                    
+# [209] "Alfonsinas"                                      "Tailwind"                                       
+# [211] "Providencia"                                     "El Encuentro"                                   
+# [213] "Zacualpan"                                       "Ruiz"                                           
+# [215] "Desarrollo Puerto Bah<ed>a"                      "Litib<fa>"                                      
+# [217] "Heroica Ciudad Concordia"                        "Productos Enlatados Madre Tierra"               
+# [219] "Ferretera y Torniller<ed>a Zapata [FETOZA]"      "Walamito"                                       
+# [221] "Bahía de los Ángeles"                            "Cataviña"                                       
+# [223] "Punta Bufeo [Campo Turístico]"                   "Heroica Mulegé"                                 
+# [225] "Santa Rosalía"                                   "San José del Cabo"                              
+# [227] "Tripuí [Trailer Park]"                           "San Román"                                      
+# [229] "Nopoló"                                          "San Sebastián del Oeste"                        
+# [231] "San Nicolás (La Troje)"                          "Costa Vida Vallarta"                            
+# [233] "Rincón de Guayabitos"                            "Bucerías"                                       
+# [235] "Bahía de Matanchén"                              "La Peñita de Jaltemba"                          
+# [237] "San José del Valle"                              "Dos Palmeras (Casa Pelícanos)"                  
+# [239] "Pátzcuaro"                                       "Potrero las Lomas"                              
+# [241] "Desarrollo Puerto Bahía"                         "Litibú"                                         
+# [243] "Mexcaltitán de Uribe"                            "Lázaro Cárdenas [Colonia]"                      
+# [245] "Los Tabachines"                                  "Puerto Peñasco"                                 
+# [247] "Bahía de Kino"                                   "Miguel Alemán (La Doce)"                        
+# [249] "Plutarco Elías Calles (La Y Griega)"             "Villa Juárez"                                   
+# [251] "Ciudad Obregón"                                  "Vícam (Switch)"                                 
+# [253] "Culiacán Rosales"                                "Mazatlán"                                       
+# [255] "Guamúchil"                                       "Sistema de Producción Intensiva del Noroeste"   
+# [257] "Campo Santa Fe"                                  "El Batallón"                                    
+# [259] "Teacapán"                                        "La Caída"                                       
+# [261] "Villa Unión"                                     "Dimas (Estación Dimas)"                         
+# [263] "Quilá"                                           "Juan José Ríos"                                 
+# [265] "Motel Popeye"                                    "Licenciado Benito Juárez (Campo Gobierno)"      
+# [267] "Gustavo Díaz Ordaz (El Carrizo)"                 "Nestle Culiacán"                                
+# [269] "León Fonseca (Estación Verdura)"                 "Motel Paradise"                                 
+# [271] "Playa del Sol"                                   "Pap<e1> Fern<e1>ndez [Campo]"                   
+# [273] "Los Vientos"                                     "Campo Lobo"                                     
+# [275] "Cabo Golf Cars"                                  "Club Campestre el Madrigal"                     
+# [277] "Cuesta Blanca"                                   "San Dionisio"                                   
+# [279] "Las <c1>nimas de Quimixto"                       "Lienzo Charro"                                  
+# [281] "Mezcalitos"                                      "Para<ed>so Escondido [Colonia]"                 
+# [283] "Jalcocot<e1>n"                                   "Las Tijerillas"                                 
+# [285] "Luis Pe<f1>a"                                    "Hip<f3>lito Gonz<e1>lez L<f3>pez"               
+# [287] "Limoncito Hills"                                 "La Playa Estates"                               
+# [289] "La Cantera"                                      "Haixa (Litib<fa>)"                              
+# [291] "Playa Encanto"                                   "Puerto Lobos"                                   
+# [293] "Mayan Lakes"                                     "Playa Huatabampito"                             
+# [295] "Coch<f3>rit"                                     "Anglers Inn [Bill Chapman Jr.]"                 
+# [297] "La Ca<ed>da"                                     "San Pedro"                                      
+# [299] "El Bordo"                                        "TUMSA [Transportes]"                            
+# [301] "El Diez"                                         "Cortijo la Piedra"  
+```
+
+```{r}
+# aggregate the accommodation employee data by municipality and year
+employees_by_muni_yr_50 <- alojamientos_est_perocu %>% 
+  mutate(municipio = case_when(
+    municipio == "Mexicali" ~ "San Felipe",
+    TRUE ~ municipio
+  )) %>% 
+  group_by(municipio, estado, data_year) %>% 
+  summarize(
+    total_employees = sum(employees_estimated, na.rm = TRUE),
+    num_businesses = n(),
+    avg_employees_per_business = mean(employees_estimated, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+
+# 2. Bring in SECTUR total visitors from Script 2
+These shapefiles were written out from `~TR/script2_arrivals_prep.qmd`.
+
+```{r}
+## from SECTUR complete annual years (through 2025); re-written from script2_arrivals_prep.qmd
+dom_goc <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int","domestic_arrivals_sectur_goc.shp"))
+
+int_goc <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int","international_arrivals_sectur_goc.shp"))
+
+## join back together to have both spatial attributes and the number of visitors
+all_arrivals <- bind_rows(dom_goc, int_goc) 
+
+total_arrivals_yr_muni <- all_arrivals %>% 
+  group_by(year, municip, estado, rgn_id) %>% 
+  summarize(
+    arrivals = {
+      x <- as.numeric(value)
+      x <- x[is.finite(x)]
+      if (length(x) == 0) NA_real_ else sum(x)
+    },
+    .groups = "drop"
+  )
+
+mapview(total_arrivals_yr_muni, zcol = "arrivals")
+```
+
+
+# 3. Harmonize municipio names and merge datasets
+First, clean them both up:
+
+```{r}
+## look for differences
+
+unique(employees_by_muni_yr_50$municipio)
+# [1] "Ahome"                    "Angostura"                "Bah<ed>a de Banderas"     "Bahía de Banderas"        "Benito Ju<e1>rez"         "Benito Juárez"            "Cabo Corrientes"          "Caborca"                 
+#  [9] "Compostela"               "Culiac<e1>n"              "Culiacán"                 "Elota"                    "Empalme"                  "Ensenada"                 "Escuinapa"                "Guasave"                 
+# [17] "Guaymas"                  "Hermosillo"               "Huatabampo"               "La Paz"                   "Loreto"                   "Los Cabos"                "Mazatl<e1>n"              "Mazatlán"                
+# [25] "Muleg<e9>"                "Mulegé"                   "Navolato"                 "Pitiquito"                "Puerto Pe<f1>asco"        "Puerto Peñasco"           "Puerto Vallarta"          "Rosario"                 
+# [33] "San Blas"                 "San Felipe"               "San Ignacio"              "San Luis R<ed>o Colorado" "San Luis Río Colorado"    "San Quint<ed>n"           "San Quintín"              "Tecuala"               
+
+
+
+unique(total_arrivals_yr_muni$municip)
+#  [1] "cabo_san_lucas"          "culiacan"                "el_fuerte"               "el_rosario"              "escuinapa"               "guaymas"                 "hermosillo"              "la_paz"                  "loreto"                 
+# [10] "los_mochis"              "mazatlan"                "puerto_vallarta"         "san_felipe"              "san_jose_del_cabo"       "zona_corredor_los_cabos"
+```
+```{r}
+## for 50km
+employees_by_muni_yr_join_50 <- employees_by_muni_yr_50 %>%
+  st_drop_geometry() %>% 
+  mutate(
+    municipio_clean = municipio %>%
+      str_replace_all("Bah<ed>a", "Bahía") %>%
+      str_replace_all("Ju<e1>rez", "Juárez") %>%
+      str_replace_all("Culiac<e1>n", "Culiacán") %>%
+      str_replace_all("Mazatl<e1>n", "Mazatlán") %>%
+      str_replace_all("Muleg<e9>", "Mulegé") %>%
+      str_replace_all("Pe<f1>asco", "Peñasco") %>%
+      str_replace_all("R<ed>o", "Río") %>%
+      str_replace_all("Ru<ed>z", "Ruíz") %>%
+      str_replace_all("Quint<ed>n", "Quintín") %>%
+      str_replace_all("Comond<fa>", "Comondú") %>%
+      str_replace_all("San Sebasti<e1>n del Oeste", "San Sebastián del Oeste") %>%
+      str_replace_all("Tomatl<e1>n", "Tomatlán") %>%
+      str_replace_all("San Luis R<ed>o Colorado", "San Luis Río Colorado") %>%
+      str_replace_all("<fa>", "ú") %>%
+      str_replace_all("<e1>", "á") %>%
+      str_replace_all("<ed>", "í") %>%
+      str_replace_all("<f1>", "ñ") %>%
+      str_replace_all("<e9>", "é") %>%
+      str_to_lower() %>%
+      str_replace_all(" ", "_"),
+    
+    estado = estado %>% 
+      str_to_lower() %>%
+      str_replace_all(" ", "_") %>% 
+      ifelse(municipio_clean == "puerto_vallarta", "jalisco", .),
+    
+    data_year = as.numeric(data_year)
+  ) %>% 
+  dplyr::select(-municipio) %>% 
+  complete(nesting(municipio_clean, estado), data_year) %>%  # for ensenada (missing 2024), san quintin (missing 2019, 2020) and san pedro laguilla (missing 2019 and 2020)
+  mutate(
+    total_employees = replace_na(total_employees, 0),
+    num_businesses = replace_na(num_businesses, 0),
+    avg_employees_per_business = replace_na(avg_employees_per_business, 0)
+  ) ## if there are no economic units in the denue directory for a year, then we can assume there are no formal businesses. Will need to note this.
+```
+
+
+```{r}
+## for 50km
+employees_by_muni_yr_join_50_sf <- employees_by_muni_yr_50 %>%
+  mutate(
+    municipio_clean = municipio %>%
+      str_replace_all("Bah<ed>a", "Bahía") %>%
+      str_replace_all("Ju<e1>rez", "Juárez") %>%
+      str_replace_all("Culiac<e1>n", "Culiacán") %>%
+      str_replace_all("Mazatl<e1>n", "Mazatlán") %>%
+      str_replace_all("Muleg<e9>", "Mulegé") %>%
+      str_replace_all("Pe<f1>asco", "Peñasco") %>%
+      str_replace_all("R<ed>o", "Río") %>%
+      str_replace_all("Ru<ed>z", "Ruíz") %>%
+      str_replace_all("Quint<ed>n", "Quintín") %>%
+      str_replace_all("Comond<fa>", "Comondú") %>%
+      str_replace_all("San Sebasti<e1>n del Oeste", "San Sebastián del Oeste") %>%
+      str_replace_all("Tomatl<e1>n", "Tomatlán") %>%
+      str_replace_all("San Luis R<ed>o Colorado", "San Luis Río Colorado") %>%
+      str_replace_all("<fa>", "ú") %>%
+      str_replace_all("<e1>", "á") %>%
+      str_replace_all("<ed>", "í") %>%
+      str_replace_all("<f1>", "ñ") %>%
+      str_replace_all("<e9>", "é") %>%
+      str_to_lower() %>%
+      str_replace_all(" ", "_"),
+    
+    estado = estado %>% 
+      str_to_lower() %>%
+      str_replace_all(" ", "_") %>% 
+      ifelse(municipio_clean == "puerto_vallarta", "jalisco", .),
+    
+    data_year = as.numeric(data_year)
+  ) %>% 
+  dplyr::select(municipio_clean, geometry) %>% 
+  distinct()
+```
+
+
+```{r}
+## Reproducible region assignment:
+## 1) one representative point per municipio (point on surface)
+## 2) must fall inside inland_50km_goc (same coastal mask as DENUE)
+## 3) assign OHI region by nearest OHI region polygon (handles boundary ties)
+## No manual case_when — re-running with the same shapefiles gives the same rgn_id.
+inland_50 <- st_read(here::here(
+  "/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer",
+  "inland_50km_goc.shp"
+))
+goc_poly <- st_read(here("spatial/ohi_regions", "goc_ohi_rgns.shp")) %>%
+  select(rgn_id) %>%
+  st_make_valid()
+
+st_crs(inland_50) == st_crs(employees_by_muni_yr_join_50_sf) ## TRUE
+
+muni_pts <- employees_by_muni_yr_join_50_sf %>%
+  st_make_valid() %>%
+  mutate(geometry = st_point_on_surface(geometry))
+
+in_50 <- lengths(st_intersects(muni_pts, inland_50)) > 0
+message(
+  "DENUE municipios outside inland_50 (dropped from region lookup): ",
+  paste(sort(muni_pts$municipio_clean[!in_50]), collapse = ", ")
+)
+muni_pts_50 <- muni_pts[in_50, ]
+
+## nearest OHI region polygon → exactly one rgn_id per municipio (reproducible)
+goc_poly_t <- st_transform(goc_poly, st_crs(muni_pts_50))
+nn <- st_nearest_feature(muni_pts_50, goc_poly_t)
+
+denue_municipios_rgn_fix <- muni_pts_50 %>%
+  st_drop_geometry() %>%
+  mutate(rgn_id = goc_poly_t$rgn_id[nn]) %>%
+  distinct(municipio_clean, rgn_id) %>%
+  arrange(municipio_clean)
+
+## sanity: one row per municipio
+denue_municipios_rgn_fix %>%
+  count(municipio_clean) %>%
+  filter(n > 1)
+
+denue_municipios_rgn_fix %>%
+  count(rgn_id)
+
+mapview(muni_pts_50 %>% mutate(rgn_id = goc_poly_t$rgn_id[nn]), zcol = "rgn_id") +
+  mapview(goc_poly_t, alpha.regions = 0.2)
+
+write_csv(
+  denue_municipios_rgn_fix,
+  here::here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int",
+    "ohi_rgn_assign_for_municipio_clean.csv"
+  )
+)
+```
+
+```{r}
+### for 10km
+## denue accommodation employees
+# employees_by_muni_yr_join <- employees_by_muni_yr %>%
+#   st_drop_geometry() %>% 
+#   mutate(
+#     municipio_clean = municipio %>%
+#       str_replace_all("Bah<ed>a", "Bahía") %>%
+#       str_replace_all("Ju<e1>rez", "Juárez") %>%
+#       str_replace_all("Culiac<e1>n", "Culiacán") %>%
+#       str_replace_all("Mazatl<e1>n", "Mazatlán") %>%
+#       str_replace_all("Muleg<e9>", "Mulegé") %>%
+#       str_replace_all("Pe<f1>asco", "Peñasco") %>%
+#       str_replace_all("R<ed>o", "Río") %>%
+#       str_replace_all("Quint<ed>n", "Quintín") %>%
+#       
+#       # make lower case and remove spaces to match the arrivals data
+#       str_to_lower() %>%
+#       str_replace_all(" ", "_"),
+#     estado = estado %>% 
+#       str_to_lower() %>%
+#       str_replace_all(" ", "_"),
+#     data_year = as.numeric(data_year)
+#   )
+# 
+# unique(employees_by_muni_yr_join$municipio_clean)
+```
+
+
+```{r}
+## arrivals data tweaks for join
+## IMPORTANT:
+## 1) Some SECTUR points land on OHI region boundaries and get *two* rgn_id values
+##    with the *same* arrivals total. Do NOT sum across rgn_id (double-count).
+## 2) Dom vs int geocodes can also leave the same center with different estado
+##    strings (e.g. "baja_california" vs ""). Grouping by estado then kept two
+##    rows/year for ensenada / san_felipe (mexicali merge) / bahía_de_banderas
+##    (nuevo_nayarit merge). Collapse to one row per municipio-year.
+## 3) max(..., na.rm = TRUE) on an all-NA group returns -Inf in R. That broke lm().
+##    Use helpers that return NA instead.
+pick_estado <- function(x) {
+  x <- x[!is.na(x) & x != "" & x != "na"]
+  if (length(x) == 0) NA_character_ else x[[1]]
+}
+
+max_or_na <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) NA_real_ else max(x)
+}
+
+sum_or_na <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0) NA_real_ else sum(x)
+}
+
+total_arrivals_aggregated_join <- total_arrivals_yr_muni %>%
+  st_drop_geometry() %>%
+  mutate(
+    estado = estado %>%
+      str_to_lower() %>%
+      str_replace_all(" ", "_"),
+    year = as.numeric(year)
+  ) %>%
+  # 1) one row per original SECTUR center-year (drop duplicate rgn / blank estado)
+  group_by(year, municip) %>%
+  summarize(
+    arrivals = max_or_na(arrivals),
+    estado = pick_estado(estado),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    municipio_clean = case_when(
+      municip %in% c("cabo_san_lucas", "san_jose_del_cabo", "zona_corredor_los_cabos") ~ "los_cabos",
+      municip == "los_mochis" ~ "ahome",
+      municip == "el_rosario" ~ "rosario",
+      municip == "culiacan" ~ "culiacán",
+      municip == "mazatlan" ~ "mazatlán",
+      municip == "san_quintin" ~ "san_quintín",
+      municip == "nuevo_nayarit" ~ "bahía_de_banderas", # Nuevo Nayarit sits in Bahía de Banderas
+      municip == "mexicali" ~ "san_felipe", # same rule as DENUE: Mexicali coastal tourism -> San Felipe
+      TRUE ~ municip
+    )
+  ) %>%
+  # 2) sum only after renaming (Los Cabos centers; mexicali+san_felipe; etc.)
+  #    key is municipio-year ONLY (not estado)
+  group_by(year, municipio_clean) %>%
+  summarize(
+    arrivals = sum_or_na(arrivals),
+    estado = pick_estado(estado),
+    .groups = "drop"
+  ) %>%
+  # drop center-years that never had a usable SECTUR total
+  filter(is.finite(arrivals)) %>%
+  # 3) attach a single OHI region from the DENUE lookup (Script 4 re-joins anyway)
+  left_join(
+    denue_municipios_rgn_fix %>% distinct(municipio_clean, .keep_all = TRUE),
+    by = "municipio_clean"
+  )
+
+# should be empty after the renames above
+setdiff(
+  unique(total_arrivals_aggregated_join$municipio_clean),
+  unique(employees_by_muni_yr_join_50$municipio_clean)
+)
+
+# must be one row per municipio-year (ensenada / san_felipe / bahía_de_banderas included)
+total_arrivals_aggregated_join %>%
+  count(municipio_clean, year) %>%
+  filter(n > 1)
+
+# no -Inf / Inf left
+summary(total_arrivals_aggregated_join$arrivals)
+
+unique(total_arrivals_aggregated_join$municipio_clean)
+```
+
+## 3.1 Check municipio coverage differences
+```{r}
+# what the arrivals data has but the employment data does not
+setdiff(unique(total_arrivals_aggregated_join$municipio_clean), unique(employees_by_muni_yr_join_50$municipio_clean))
+# expect character(0) after san_quintin / nuevo_nayarit / mexicali renames
+
+# what DENUE data has but hotel arrivals data does not
+setdiff(unique(employees_by_muni_yr_join_50$municipio_clean), unique(total_arrivals_aggregated_join$municipio_clean))
+```
+
+## 3.2 Join arrivals and accommodation employees
+```{r}
+## Join on municipio + year only (estado strings can disagree between SECTUR and DENUE).
+## Also collapse DENUE to one row per municipio-year in case complete() left
+## duplicate estado variants for the same municipio.
+employees_for_join <- employees_by_muni_yr_join_50 %>%
+  group_by(municipio_clean, data_year) %>%
+  summarize(
+    total_employees = sum(total_employees, na.rm = TRUE),
+    num_businesses = sum(num_businesses, na.rm = TRUE),
+    avg_employees_per_business = mean(avg_employees_per_business, na.rm = TRUE),
+    estado_denue = {
+      x <- estado[!is.na(estado) & estado != ""]
+      if (length(x) == 0) NA_character_ else x[[1]]
+    },
+    .groups = "drop"
+  )
+
+# safety: one employee row per municipio-year
+employees_for_join %>%
+  count(municipio_clean, data_year) %>%
+  filter(n > 1)
+
+combined_arrivals_employees_data <- total_arrivals_aggregated_join %>%
+  left_join(employees_for_join, by = c("municipio_clean", "year" = "data_year")) %>%
+  mutate(estado = coalesce(estado, estado_denue)) %>%
+  select(-estado_denue) %>%
+  filter(year %in% 2019:2025, is.finite(arrivals))
+
+## Municipios with no complete arrivals+employees rows cannot enter model3.
+## If has_arrivals is FALSE, they are not in the GOC SECTUR shapefile panel
+## (often dropped by st_intersection) and will use model1 / model1.5 instead.
+incomplete_for_model3 <- combined_arrivals_employees_data %>%
+  group_by(municipio_clean) %>%
+  summarize(
+    has_arrivals = sum(!is.na(arrivals)) > 0,
+    has_employees = sum(!is.na(total_employees)) > 0,
+    n_complete = sum(!is.na(arrivals) & !is.na(total_employees)),
+    .groups = "drop"
+  ) %>%
+  filter(n_complete == 0)
+
+incomplete_for_model3
+
+# confirm whether SECTUR brought them in at all
+total_arrivals_aggregated_join %>%
+  filter(municipio_clean %in% incomplete_for_model3$municipio_clean)
+```
+
+
+# 4. Visitor and accommodation employees relationship
+
+I re-fit these models after incorporating SECTUR 2025, renaming the newer SECTUR centers onto DENUE municipios (`mexicali`→`san_felipe`, `nuevo_nayarit`→`bahía_de_banderas`, `san_quintin`→`san_quintín`), and fixing the arrivals/employees join. The **ranking did not change**, so I am keeping the same gapfilling decision as before.
+
+**What stayed the same**
+
+1. **model3.5** (employees + municipio + 2020 year factor) is still the best among the models I compared (lowest BIC; highest adjusted R-squared).
+2. **model1.5** (employees + 2020 year factor) is still better than plain model1 for municipios with no SECTUR history.
+3. **model4** (employees + estado) is still not worth using: estado coefficients are weak / not significant, and the model is heteroscedastic.
+
+**What changed with this re-fit**
+
+1. Absolute AIC/BIC values went up again (roughly ~2300s → ~2400–2600s) because the training sample is larger after the renames/merges. That does **not** mean the models got worse; I only compare AIC/BIC **within this run**, not against the old absolute numbers.
+2. In model3 / model3.5, `total_employees` is still not significant (and slightly negative). Most of the fit is municipio fixed effects (Los Cabos, Mazatlan, Puerto Vallarta, etc.) plus the 2020 shift in 3.5. That is okay for filling missing years **within** municipios that already appear in SECTUR. For never-observed municipios, employees still matter, which is why I keep model1 / model1.5 for that case.
+3. Breusch-Pagan on model3 is still borderline (p around 0.07; do not reject homoscedasticity at 0.05). I am not switching to a log / Poisson model for the same reasons as before.
+
+**Decision I am keeping:** use **model3.5** for tourist centers that have some SECTUR years but missing years; use **model1.5** for municipalities with DENUE employees but no SECTUR arrivals history. (The older notes below sometimes say model3 / model1; the fill code that accounts for 2020 uses the .5 versions.)
+
+## 4.1 Model 1
+```{r}
+model1 <- lm(arrivals ~ total_employees, data = combined_arrivals_employees_data)
+summary(model1)
+
+library(ggplot2)
+
+ggplot(combined_arrivals_employees_data, aes(x = total_employees, y = arrivals)) +
+  geom_point() +
+  # geom_abline(slope = 160.088, intercept = 0) +
+  # geom_smooth(method = "lm") +
+  theme_minimal() +
+  labs(
+    title = "Total arrivals (domestic + international) vs Total accommodation employees",
+    x = "Total employees",
+    y = "Total arrivals"
+  )
+
+```
+
+## 4.2 Model 1.5
+```{r}
+# model1.5 <- lm(arrivals ~ total_employees + as.factor(year), data = combined_arrivals_employees_data)
+# summary(model1.5)
+
+combined_arrivals_employees_data_wo2020 <- combined_arrivals_employees_data %>% 
+  mutate(year_factor = ifelse(year %in% 2020, 1, 2))
+
+## 2020 has more employees than we would expect based on arrivals (large dip in arrivals)
+
+## we need to treat 2020 as something different
+
+model1.5 <- lm(arrivals ~ total_employees + as.factor(year_factor), data = combined_arrivals_employees_data_wo2020)
+summary(model1.5)
+```
+
+
+<!-- ### model2 -->
+
+<!-- ```{r} -->
+<!-- ## just to check -->
+<!-- model2 <- lm(log(arrivals) ~ log(total_employees), data = combined_arrivals_employees_data) -->
+<!-- summary(model2) -->
+<!-- ``` -->
+
+## 4.3 Model 3
+With municipio effects:
+```{r}
+model3 <- lm(arrivals ~ total_employees + municipio_clean, data = combined_arrivals_employees_data)
+summary(model3)
+```
+
+## 4.4 Model 3.5
+Accounting for 2020:
+```{r}
+combined_arrivals_employees_data_wo2020 <- combined_arrivals_employees_data %>% 
+  mutate(year_factor = ifelse(year %in% 2020, 1, 2))
+
+model3.5 <- lm(arrivals ~ total_employees + municipio_clean + as.factor(year_factor), data = combined_arrivals_employees_data_wo2020)
+summary(model3.5)
+
+```
+
+## 4.5 Model 4
+```{r}
+model4 <- lm(arrivals ~ total_employees + estado, data = combined_arrivals_employees_data)
+summary(model4)
+
+```
+
+## 4.6 AIC / BIC comparison
+
+Comments after `#` track older runs. Printed values are from the current re-fit (renames + join). Ranking is unchanged: model3.5 best, then model3, then model1.5 over model1; model4 still not preferred.
+
+```{r}
+AIC(model1) # old: 1983.7 ; 2019-2025: ~2383.6 ; after renames: ~2597.1
+AIC(model3) # old: 1901.3 ; 2019-2025: ~2279.3 ; after renames: ~2473.9
+AIC(model4) # old: 1981.3 ; 2019-2025: ~2380.2 ; after renames: ~2580.3
+# AIC(model5) # old note only; model5 not used in this script
+
+BIC(model1) # old: 1990.4 ; 2019-2025: ~2390.8 ; after renames: ~2604.6
+BIC(model3) # old: 1934.6 ; 2019-2025: ~2317.8 ; after renames: ~2516.2
+BIC(model4) # old: 1996.9 ; 2019-2025: ~2397.0 ; after renames: ~2600.2
+# BIC(model5) # old note only; model5 not used in this script
+
+BIC(model3) # still higher than model3.5
+BIC(model3.5) # old: 1911.9 ; 2019-2025: ~2293.6 ; after renames: ~2486.0 (still best)
+
+BIC(model1)
+BIC(model1.5) # old: 1988.6 ; 2019-2025: ~2389.0 ; after renames: ~2602.2 (still better than model1)
+
+AIC(model3.5) # 2019-2025: ~2252.7 ; after renames: ~2441.2
+```
+
+
+
+# 5. Gapfilling tourist arrivals 
+
+**Same decision as before (confirmed after adding 2025):**
+
+1. For tourist centers that have gaps in certain years, but at least have some SECTUR data, I use **model3.5** (municipio effects + 2020 year factor). Older notes said model3; the fill code below that accounts for 2020 uses model3.5.
+2. For municipalities that have DENUE hotel employee data but not any SECTUR arrivals / tourist-center history, I use **model1.5**. Older notes said model1; the 2020-aware fill uses model1.5.
+
+I am keeping that stack because the 2019-2025 re-fit still ranks model3.5 best and model1.5 over model1, and model4 still does not help.
+
+Use `predict()`.
+
+```{r}
+## prep the full municipio-year panel for predict() fills
+## same rule as 3.2: one row per municipio-year; do not join on estado
+## IMPORTANT: rgn_id must come from the DENUE inland_50 lookup for ALL municipios.
+## Taking rgn_id only from the SECTUR arrivals side left DENUE-only gapfills as NA
+## even when those municipios clearly fall in a region.
+rgn_lookup <- denue_municipios_rgn_fix %>%
+  distinct(municipio_clean, .keep_all = TRUE) %>%
+  select(municipio_clean, rgn_id)
+
+combined_arrivals_employees_data_full <- full_join(
+  employees_for_join,
+  total_arrivals_aggregated_join %>%
+    select(municipio_clean, year, arrivals, estado_sectur = estado),
+  by = c("municipio_clean", "data_year" = "year")
+) %>%
+  mutate(estado = coalesce(estado_sectur, estado_denue)) %>%
+  select(-estado_denue, -estado_sectur) %>%
+  left_join(rgn_lookup, by = "municipio_clean")
+
+# final safety check before fill/plot
+combined_arrivals_employees_data_full %>%
+  count(municipio_clean, data_year) %>%
+  filter(n > 1)
+
+## who still lacks a region?
+combined_arrivals_employees_data_full %>%
+  distinct(municipio_clean, rgn_id) %>%
+  filter(is.na(rgn_id) | rgn_id == "") %>%
+  arrange(municipio_clean)
+```
+
+```{r}
+# filled_combined_arrivals_employees_data <- combined_arrivals_employees_data_full %>%
+#   mutate(
+#     arrivals_filled = ifelse(
+#       is.na(arrivals) & !is.na(total_employees),
+#       predict(model1, newdata = combined_arrivals_employees_data),
+#       arrivals
+#     )
+#   )
+```
+
+## 5.1 Option B: prepare fills
+
+```{r}
+plot(model1, which = 1) # residuals vs fitted
+plot(model1, which = 2) # QQ plot
+plot(model1, which = 3) # scale - location
+
+library(lmtest)
+bptest(model1) # old: BP = 19.161, p = 1.2e-05 ; 2019-2025: ~23.3 ; after renames: BP = 20.4, p = 6.3e-06, still hetero
+bptest(model3) # old: BP = 21.914, p = 0.057 ; 2019-2025: ~22.2, p ~0.074 ; after renames: BP = 23.5, df = 15, p = 0.074, still borderline
+# we will not use log() because it does not make sense here it is difficult to interpret.
+# bptest(model2) # old log check only; model2 not fit in this script
+bptest(model4) # old: BP = 22.289, p = 0.00046 ; 2019-2025: ~26.0 ; after renames: BP = 27.9, p = 9.7e-05, still hetero
+```
+
+## 5.2 Prep for fill
+```{r}
+# use predict() to fill arrivals by employees
+## IMPORTANT: use the factor levels that were actually fit in model3,
+## not unique(municipio_clean) from the join. Municipios with arrivals but no
+## complete arrivals+employees training rows must go to model1 / model1.5.
+munis_model3 <- model3$xlevels$municipio_clean
+
+setdiff(unique(combined_arrivals_employees_data$municipio_clean), munis_model3)
+# municipios in the SECTUR join but not in model3 -> filled with model1 / model1.5
+
+df_model3 <- combined_arrivals_employees_data_full %>%
+  filter(municipio_clean %in% munis_model3)
+
+df_model1 <- combined_arrivals_employees_data_full %>%
+  filter(!municipio_clean %in% munis_model3)
+```
+
+
+## 5.3 Use predict() to fill
+### 5.3.1 Model 3 fills
+```{r}
+## fill using model3
+## predict on the same filtered rows we mutate (avoids length / new-level issues)
+df_model3_yr <- df_model3 %>%
+  filter(data_year %in% 2019:2026)
+
+df_model3_filled <- df_model3_yr %>%
+  mutate(
+    arrivals_filled_model3 = ifelse(
+      is.na(arrivals) & !is.na(total_employees), # if there are no arrivals data but there are employees for that municipality, predict using model3 !!
+      predict(model3, newdata = df_model3_yr),
+      arrivals
+    )
+  )
+```
+
+### 5.3.2 Model 1 fills
+```{r}
+## fill using model 1
+df_model1_yr <- df_model1 %>%
+  filter(data_year %in% 2019:2026)
+
+df_model1_filled <- df_model1_yr %>%
+  mutate(
+    arrivals_filled_model1 = ifelse(
+      is.na(arrivals) & !is.na(total_employees),  # if, of the municipalities left, there are no arrivals data but there are employees for that municipality, predict using model1 !!
+      predict(model1, newdata = df_model1_yr),
+      arrivals
+    )
+  )
+```
+
+```{r}
+## combine the two datasets
+filled_combined <- bind_rows(
+  df_model3_filled,
+  df_model1_filled
+) %>% 
+  mutate(is_filled = ifelse(is.na(arrivals), "1", "0")) # so we can see what has been gapfilled
+```
+
+
+```{r}
+## now, lets make the column of arrivals contained of all that have been filled, and the OG data.
+arrivals_employees_filled <- filled_combined %>% 
+  mutate(arrivals_merged = case_when(
+    is.na(arrivals) & !is.na(arrivals_filled_model3) ~ arrivals_filled_model3,
+    is.na(arrivals) & is.na(arrivals_filled_model3) & !is.na(arrivals_filled_model1) ~ arrivals_filled_model1,
+    TRUE ~ arrivals
+  ))
+```
+
+
+## 5.4 Account for 2020
+```{r}
+# use predict() to fill arrivals by employees
+# both need year_factor so the .5 models can use it
+# same rule as 5.2: only municipios that appear in model3's factor levels
+
+munis_model3 <- model3$xlevels$municipio_clean
+
+df_model3 <- combined_arrivals_employees_data_full %>%
+  filter(municipio_clean %in% munis_model3) %>%
+  mutate(year_factor = ifelse(data_year == 2020, 1, 2))
+
+df_model1 <- combined_arrivals_employees_data_full %>%
+  filter(!municipio_clean %in% munis_model3) %>%
+  mutate(year_factor = ifelse(data_year == 2020, 1, 2))
+```
+
+
+### 5.4.1 Model 3.5
+```{r}
+df_model3_yr <- df_model3 %>%
+  filter(data_year %in% 2019:2026)
+
+df_model3_filled <- df_model3_yr %>%
+  mutate(
+    arrivals_filled_model3 = ifelse(
+      is.na(arrivals) & !is.na(total_employees),
+      predict(model3, newdata = df_model3_yr),
+      arrivals
+    ),
+    arrivals_filled_model3.5 = ifelse(
+      is.na(arrivals) & !is.na(total_employees),
+      predict(model3.5, newdata = df_model3_yr),
+      arrivals
+    )
+  )
+```
+
+
+### 5.4.2 Model 1.5
+```{r}
+df_model1_yr <- df_model1 %>%
+  filter(data_year %in% 2019:2026)
+
+df_model1_filled <- df_model1_yr %>%
+  mutate(
+    arrivals_filled_model1 = ifelse(
+      is.na(arrivals) & !is.na(total_employees),
+      predict(model1, newdata = df_model1_yr),
+      arrivals
+    ),
+    arrivals_filled_model1.5 = ifelse(
+      is.na(arrivals) & !is.na(total_employees),
+      predict(model1.5, newdata = df_model1_yr),
+      arrivals
+    )
+  )
+```
+
+### 5.4.3 Combine and merge
+```{r}
+filled_combined <- bind_rows(df_model3_filled, df_model1_filled) %>%
+  mutate(is_filled = ifelse(is.na(arrivals), "1", "0"))
+
+arrivals_employees_filled <- filled_combined %>%
+  mutate(arrivals_merged = case_when(
+    is.na(arrivals) & !is.na(arrivals_filled_model3.5) ~ arrivals_filled_model3.5,
+    is.na(arrivals) & is.na(arrivals_filled_model3.5) & !is.na(arrivals_filled_model1.5) ~ arrivals_filled_model1.5,
+    TRUE ~ arrivals
+  ))
+```
+
+### 5.4.4 Censor negative predictions at zero
+For small municipalities, we now see that the predicted arrivals dip below zero.  However, that would obviously never happen.  
+
+So, we will make any negative arrivals equal to zero, as there cannot be any negative arrivals conceptually.
+
+Because it would not make sense to log transform this data, nor to constrain the model itself with a log link (poisson/GLM which would assume mean = variance which is not true here, see `bptest`....), we will simply restrain the values after predicting.  
+
+This is fine for gapfilling.
+
+```{r}
+arrivals_employees_filled_negfix <- arrivals_employees_filled %>% 
+  mutate(arrivals_merged_no_neg = ifelse(arrivals_merged < 0, 0, arrivals_merged))
+```
+
+
+## 5.5 Plotly checks
+```{r}
+library(plotly)
+
+plot_data <- arrivals_employees_filled %>% 
+  arrange(municipio_clean, data_year)
+
+plot_data_plotly <- plot_ly(
+  data = plot_data,
+  x = ~data_year,
+  y = ~arrivals_merged,
+  color = ~municipio_clean,
+  type = 'scatter',
+  mode = 'lines+markers'
+) %>%
+  layout(
+    title = "Total arrivals (international + domestic) by municipio after gapfilling with model3.5 and model1.5",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Arrivals")
+  )
+plot_data_plotly
+```
+
+
+```{r}
+#### after fixing negative predicted employees
+plot_data_noneg <- arrivals_employees_filled_negfix %>% 
+  arrange(municipio_clean, data_year)
+
+plot_data_noneg_plotly <- plot_ly(
+  data = plot_data_noneg,
+  x = ~data_year,
+  y = ~arrivals_merged_no_neg,
+  color = ~municipio_clean,
+  type = 'scatter',
+  mode = 'lines+markers'
+) %>%
+  layout(
+    title = "Total arrivals (international + domestic) by municipio after gapfilling with model3.5 and model1.5 + making negative arrivals zero",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Arrivals")
+  )
+plot_data_noneg_plotly
+
+```
+
+
+
+### 5.5.1 Diagnostic checks
+```{r}
+## first, check that there are no negative predictions
+arrivals_employees_filled %>%
+  filter(arrivals_merged < 0) ## none!!
+```
+
+
+```{r}
+# ggplot(df_model3_filled, aes(x = arrivals, y = arrivals_filled_model3)) +
+#   geom_point(alpha = 0.6) +
+#   geom_abline(slope = 1, intercept = 0, color = "red") +
+#   theme_minimal() +
+#   labs(
+#     title = "Model3 Diagnostic: Actual vs Predicted Arrivals",
+#     x = "Actual arrivals",
+#     y = "Predicted arrivals (model3)"
+#   )
+```
+
+### 5.5.2 Histogram: model 3.5 filled
+```{r}
+hist(arrivals_employees_filled_negfix$arrivals_filled_model3.5, breaks = 30,
+     main = "Distribution of filled arrivals",
+     xlab = "arrivals")
+```
+
+### 5.5.3 Histogram: model 1.5 filled
+```{r}
+hist(arrivals_employees_filled_negfix$arrivals_filled_model1.5, breaks = 30,
+     main = "Distribution of filled arrivals",
+     xlab = "arrivals")
+```
+
+
+```{r}
+df_compare <- arrivals_employees_filled %>%
+  mutate(source = ifelse(is.na(arrivals), "predicted", "actual"))
+
+ggplot(df_compare, aes(x = arrivals_merged, fill = source)) +
+  geom_histogram(alpha = 0.5, position = "identity") +
+  theme_minimal()
+```
+
+```{r}
+# ggplot(arrivals_employees_filled,
+#        aes(x = data_year, y = arrivals_merged, color = is_filled)) +
+#   geom_line() +
+#   facet_wrap(~ municipio_clean, scales = "free_y") +
+#   theme_minimal() +
+#   labs(title = "Per-Municipio Time Series (Actual vs Filled)")
+
+# df_model3_filled %>%
+#   filter(!is.na(arrivals)) %>%
+#   summarize(
+#     RMSE = sqrt(mean((arrivals - predict(model3, newdata = .))^2)), # a lower RMSE indicates a better fit and more accurate predictions
+#     MAE  = mean(abs(arrivals - predict(model3, newdata = .)))
+#   )
+# 
+# df_model1_filled %>%
+#   filter(!is.na(arrivals)) %>%
+#   summarize(
+#     RMSE = sqrt(mean((arrivals - predict(model1, newdata = .))^2)),
+#     MAE  = mean(abs(arrivals - predict(model1, newdata = .)))
+#   )
+```
+
+### 5.5.4 Arrivals vs employees
+```{r}
+ggplot(arrivals_employees_filled_negfix,
+       aes(x = total_employees, y = arrivals_merged, color = is_filled)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_minimal()
+```
+
+# 6. Write gapfilled arrivals for Script 4
+```{r}
+## confirm regions are populated before writing
+arrivals_employees_filled_negfix %>%
+  distinct(municipio_clean, rgn_id) %>%
+  count(missing_rgn = is.na(rgn_id) | rgn_id == "")
+
+write_csv(arrivals_employees_filled, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","arrivals_filled_by_DENUE_accommodation_employees_2019_2026.csv"))
+
+write_csv(arrivals_employees_filled_negfix, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","arrivals_filled_by_DENUE_accommodation_employees_2019_2026_UPDATED.csv"))
+
+# arrivals_employees_filled <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","arrivals_filled_by_DENUE_accommodation_employees_2019_2026.csv"))
+```
+
+
+# 7. Alternative: scale DENUE-only 2020 fills by observed SECTUR COVID ratio
+This is a **sensitivity / alternative product**, not a replacement of Section 5-6.
+
+**Problem:** model1.5’s 2020 year factor was fit on SECTUR tourist centers. On never-observed
+DENUE-only municipios it often predicts ≤ 0 in 2020 (then censored to 0), so gapfilled
+regional totals collapsed (~96% drop) while observed SECTUR only fell ~40%.
+
+**Option A:** keep model3.5 as in Section 5. For model1.5 fills only, predict as a normal
+year (`year_factor = 2`), then multiply **2020 fills** by the observed SECTUR ratio
+\(A_{2020}/A_{2019}\). Negatives still censored at zero.
+
+Output file for Script 4 Section 7:
+`arrivals_filled_by_DENUE_accommodation_employees_2019_2026_covid_scaled.csv`
+
+```{r}
+## observed COVID shock from SECTUR training panel (total arrivals)
+covid_ratio_obs <- combined_arrivals_employees_data %>%
+  filter(year %in% c(2019, 2020), is.finite(arrivals)) %>%
+  group_by(year) %>%
+  summarize(total = sum(arrivals, na.rm = TRUE), .groups = "drop") %>%
+  summarize(ratio = total[year == 2020] / total[year == 2019]) %>%
+  pull(ratio)
+
+covid_ratio_obs # expect ~0.5-0.6
+
+## reuse the already-filled model3.5 block; rebuild only model1 / model1.5 fills
+df_model1_yr_covid <- df_model1 %>%
+  filter(data_year %in% 2019:2026)
+
+df_model1_yr_normal <- df_model1_yr_covid %>%
+  mutate(year_factor = 2)
+
+pred_model1.5_normal <- predict(model1.5, newdata = df_model1_yr_normal)
+
+df_model1_filled_covid_scaled <- df_model1_yr_covid %>%
+  mutate(
+    arrivals_filled_model1 = ifelse(
+      is.na(arrivals) & !is.na(total_employees),
+      predict(model1, newdata = df_model1_yr_covid),
+      arrivals
+    ),
+    ## raw year-factor prediction kept for comparison
+    arrivals_filled_model1.5_yearfactor = ifelse(
+      is.na(arrivals) & !is.na(total_employees),
+      predict(model1.5, newdata = df_model1_yr_covid),
+      arrivals
+    ),
+    arrivals_filled_model1.5 = {
+      base <- ifelse(
+        is.na(arrivals) & !is.na(total_employees),
+        pred_model1.5_normal,
+        arrivals
+      )
+      ifelse(
+        is.na(arrivals) & !is.na(total_employees) & data_year == 2020,
+        base * covid_ratio_obs,
+        base
+      )
+    }
+  )
+
+## model3.5 block unchanged from Section 5.4.1
+filled_combined_covid_scaled <- bind_rows(df_model3_filled, df_model1_filled_covid_scaled) %>%
+  mutate(is_filled = ifelse(is.na(arrivals), "1", "0"))
+
+arrivals_employees_filled_covid_scaled <- filled_combined_covid_scaled %>%
+  mutate(arrivals_merged = case_when(
+    is.na(arrivals) & !is.na(arrivals_filled_model3.5) ~ arrivals_filled_model3.5,
+    is.na(arrivals) & is.na(arrivals_filled_model3.5) & !is.na(arrivals_filled_model1.5) ~ arrivals_filled_model1.5,
+    TRUE ~ arrivals
+  )) %>%
+  mutate(arrivals_merged_no_neg = ifelse(arrivals_merged < 0, 0, arrivals_merged))
+
+## compare baseline vs covid-scaled gapfilled totals
+bind_rows(
+  arrivals_employees_filled_negfix %>%
+    mutate(version = "baseline_yearfactor") %>%
+    filter(data_year %in% c(2019, 2020, 2024)) %>%
+    group_by(version, data_year, is_filled) %>%
+    summarize(total = sum(arrivals_merged_no_neg, na.rm = TRUE), .groups = "drop"),
+  arrivals_employees_filled_covid_scaled %>%
+    mutate(version = "covid_scaled") %>%
+    filter(data_year %in% c(2019, 2020, 2024)) %>%
+    group_by(version, data_year, is_filled) %>%
+    summarize(total = sum(arrivals_merged_no_neg, na.rm = TRUE), .groups = "drop")
+)
+
+write_csv(
+  arrivals_employees_filled_covid_scaled,
+  here::here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int",
+    "arrivals_filled_by_DENUE_accommodation_employees_2019_2026_covid_scaled.csv"
+  )
+)
+```
+
+```{r}
+## quick plot of the alternative fill
+plot_data_covid_scaled <- arrivals_employees_filled_covid_scaled %>%
+  arrange(municipio_clean, data_year)
+
+plot_ly(
+  data = plot_data_covid_scaled,
+  x = ~data_year,
+  y = ~arrivals_merged_no_neg,
+  color = ~municipio_clean,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Gapfilled arrivals (covid-scaled DENUE-only 2020 fills)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Arrivals")
+  )
+```
+

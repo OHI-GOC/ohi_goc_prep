@@ -1,0 +1,607 @@
+---
+title: "Script 2: SECTUR arrivals prep"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+date: "2026-7-30"
+editor_options:
+  chunk_output_type: console
+---
+
+# 0. Workflow for this script
+
+This is **Script 2** in the TR quantity update pipeline. Run it after Script 1.
+
+1. Download / locate SECTUR Datatur hotel occupancy CSVs on mazu.
+2. Clean each tourist-center CSV into tidy monthly and annual tables.
+3. Save yearly arrivals intermediates (2013-2026 full; 2013-2025 complete years).
+4. Build domestic and international arrivals spatial objects and write shapefiles for Script 3.
+5. Explore observed SECTUR current-status scores by municipio (before gapfilling).
+
+**Caveat for 2026 SECTUR:** the current download only goes through Enero 2026, so `Total anual 2026` is incomplete. For annual scores I use complete years 2013-2025.
+
+# 1. SECTUR Datatur download notes
+
+Data: "Ocupación en hoteles y moteles por centro turístico, corte mensual DataTur"
+Go to: <https://monitoreohotelero.sectur.gob.mx/Reportes/Menu.aspx>
+
+To download:
+
+> 1. Go to the “Generate Report” section.
+> 2. Select the “Mensual”, or monthly, time frame.
+> 3. Choose the option “Hotel and motel occupancy by tourist center, monthly DataTur snapshot.” / "Ocupación en hoteles y moteles por centro turístico, corte mensual. DataTur"
+> 4. Click “Continue” and then “Advanced criteria” (Criterios Avanzados)
+> 5. Select the municipality of interest, then all the variables of interest.  Specify "Serie" for "Cobertura Temporal corte mensual", starting from 2013 January (Enero) through the latest available month (currently Enero 2026).
+> 6. Finally, click on “Generate Report.”
+
+The report can be downloaded in various formats and contains the information available as of the date of consultation.  It is important to note that this information is presented at the tourist center level, not the municipal level. However, it can be useful for territorial approximations in the Gulf of California region, particularly in key tourist destinations.
+
+Tourist centers in GoC:  Costalegre, Puerto Vallarta, San Felipe, SAN QUINTIN, Cabo San Lucas, La Paz, Loreto, San José del Cabo, Zona Corredor los Cabos, Nuevo Nayarit, Tepic,	Culiacán, El Fuerte, El Rosario, Escuinapa, Los Mochis, Mazatlán, San Ignacio (but no data, all NAs 2013-2026), Guaymas, Hermosillo
+
+(See the 2026 SECTUR caveat in Section 0 above.)
+
+```{r}
+library(mapview)
+library(sf)
+library(tidyverse)
+library(here)
+library(terra)
+```
+
+
+Okay!! So it looks like you CANNOT save the file as a .CSV first, instead you **must** do it in this order:
+
+1.  On the SECTUR report site, after generating the report, click "Exportar a Excel".  
+
+2.  Open the ".xls" (which is really a .htm) in Excel, and then "Save As..." a UTF-8 .CSV. Rename it `DataturReportePublico_municipio_resaved.csv` where you replace municipio with the municipality you just saved. 
+
+3.  Bring into mazu in `/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/SECTUR_resaved_032426` to be read in here (or the latest resaved folder under `SECTUR_Datatur_Hoteles`).  This is the only way that you do not get any "†" in whitespaces.
+
+**These instructions will be brought to the top of the script when it is cleaned up.**
+
+# 2. Clean SECTUR hotel occupancy data
+```{r}
+clean_hotel_occupations_data <- function(municipio) {
+  
+  # where to find the file
+  file_path <- here::here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/SECTUR_Datatur_Hoteles/SECTUR_resaved_032426",
+    paste0("DataturReportePublico_", municipio, "_resaved.csv")
+  )
+
+  # read raw data
+  # raw_data <- read_csv(file_path)
+  raw_data <- read_csv(file_path, locale = readr::locale(encoding = "UTF-8")) # changed because having error: "Error in `map()`: ℹ In index: 1. Caused by error in `nchar()`: ! invalid multibyte string, element 1"
+  
+  # clean the column names, remove top rows, and tidy
+  cleaned <- raw_data %>% 
+    set_names(.[9, ]) %>%  
+    slice(-c(1:10)) %>% # NOTE: not all are the same length, so some of them will have the bottom text (ex: ND No disponible) as part of the output, and there will have to be extra cleaning done at the end.
+    janitor::clean_names()
+  
+  # clean and standardize the "concepto" column
+  cleaned_concept <- cleaned %>%
+    mutate(
+      concept = str_to_lower(concepto),
+      concept = str_trim(concept),
+      concept = str_replace_all(concept, " ", "_")
+    ) %>% 
+    relocate(concept, .after = concepto) %>% # these two lines of code are not really necessary because the func will do it all at once
+    dplyr::select(-c(concepto))
+  
+  # identify topic headers and combine them with subcategories
+  by_topic <- cleaned_concept %>% 
+    mutate(
+      is_topic = !str_detect(concept, "^[1-5]_estrella[s]?|total_categorias") & !is.na(concept)
+    ) %>%
+    mutate(header_concept = if_else(is_topic, concept, NA_character_)) %>% # use NA_character_ for this stuff just in case
+    fill(header_concept) %>% 
+    mutate(
+      concept_full = if_else(concept != header_concept, paste0(header_concept, ":", concept), concept)
+    )
+  
+  # pivot longer
+  # keep this dynamic so adding months/years (e.g. through Enero 2026) does not break the column index
+  long <- by_topic %>% 
+    pivot_longer(
+      cols = -c(concept, is_topic, header_concept, concept_full),
+      names_to = "month_year",
+      values_to = "value"
+    )
+  
+  # separate year and month, filter, and tag city
+  final <- long %>% 
+    mutate(
+      is_mo_yr = !str_detect(month_year, "acum|total"),
+      temp = if_else(is_mo_yr, month_year, NA_character_)
+    ) %>% 
+    separate(temp, into = c("month", "year"), sep = "_", remove = FALSE) %>% 
+    filter(is_topic == FALSE) %>% 
+    dplyr::select(header_concept, concept, concept_full, month_year, month, year, value) %>% 
+    mutate(municipio = str_to_lower(municipio)) %>% 
+    mutate(value = as.numeric(str_replace_all(value, ",", "")))
+  
+  return(final)
+}
+```
+
+
+## 2.1 Apply the cleaning function to all tourist centers
+```{r}
+all_tourist_centers <- c(
+  "Cabo_San_Lucas", "Culiacan", "El_Fuerte", "El_Rosario","Ensenada", "Escuinapa", "Guaymas", "Hermosillo", "La_Paz", "Loreto", "Los_Mochis", "Mazatlan","Mexicali","Nuevo_Nayarit", "Puerto_Vallarta", "San_Felipe", "San_Jose_del_Cabo", "San_Quintin","Tepic", "Zona_Corredor_Los_Cabos"
+)
+
+library(purrr)
+
+all_data <- all_tourist_centers %>%
+  imap_dfr(function(mun, nm) {
+    message("Reading: ", nm)
+    clean_hotel_occupations_data(mun)
+  })
+
+unique(all_data$municipio) # all 20 there!
+
+
+all_data_clean <- all_data %>% 
+  rename( 
+    metric = header_concept,
+    category = concept
+  ) %>%  # for better clarity, since we are done cleaning and these names make more sense now
+  mutate(
+    concept_full = str_replace_all(concept_full, "\U{0eef2f}th>|\U{0ee832}|\U{0ee82e}", "_"),
+    # metric_label = str_replace_all(metric, "_", " "),
+    # metric_label = str_to_title(metric_label), # for later viz 
+    metric = str_replace_all(metric, "\U{0eef2f}th>|\U{0ee832}|\U{0ee82e}", "_"),
+    category = str_replace_all(category, "\U{0eef2f}th>|\U{0ee832}|\U{0ee82e}", "_"),
+    value = str_replace_all(value, ",",""),
+    year = str_replace_all(year, "p",""), # preliminary marker in recent years (e.g. 2025/2026)
+    month = case_when(
+      tolower(month) == "enero" ~ "01",
+      tolower(month) == "febrero" ~ "02",
+      tolower(month) == "marzo" ~ "03",
+      tolower(month) == "abril" ~ "04",
+      tolower(month) == "mayo" ~ "05",
+      tolower(month) == "junio" ~ "06",
+      tolower(month) == "julio" ~ "07",
+      tolower(month) == "agosto" ~ "08",
+      tolower(month) == "septiembre" ~ "09",
+      tolower(month) == "octubre" ~ "10",
+      tolower(month) == "noviembre" ~ "11",
+      tolower(month) == "diciembre" ~ "12",
+      TRUE ~ NA_character_  # otherwise
+    ) # for lubridate later
+  ) %>% 
+  filter(!category %in% NA) 
+
+unique(all_data_clean$concept_full) # check that there are no weirdnesses left
+
+# data_check <- all_data_clean %>% filter(year %in% 2024) %>% filter(metric %in% "cuartos_ocupados_no_residentes") # double check with raw.  looks good!
+```
+
+## 2.2 Build yearly totals and save intermediates
+
+```{r}
+# so that we can have the yearly total, not just by month, because we will have the scores per year.
+all_data_yearly <- all_data_clean %>% 
+  filter(str_detect(month_year, "total_anual_")) %>% 
+  dplyr::select(-c(month, year)) %>% 
+  separate_wider_delim(., month_year, delim = "_anual_", names = c("type","year")) %>% 
+  mutate(year = as.numeric(year))
+
+# SECTUR currently ends in Enero 2026, so drop incomplete 2026 annual totals for scoring/analysis
+all_data_yearly_complete <- all_data_yearly %>% 
+  filter(year %in% 2013:2025)
+
+## save into int
+write_csv(all_data_yearly, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int","hotel_data_cleaned_yearly_2013_2026.csv"))
+write_csv(all_data_yearly_complete, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int","hotel_data_cleaned_yearly_2013_2025.csv"))
+```
+
+
+# 3. Observed SECTUR domestic vs international arrivals
+We are updating the reference point to be the exact number of visitors per year that are 30% more than the international visitors in 2024 and 9.8% more than domestic visitors in 2024.  That way, the score is a reflection of how close the number of arrivals are to the target (it likely would not be a linear increase until 2030).
+
+Therefore, the target/baseline would be: 
+
+**International**
+The # int arrivals for that year / 
+The # int arrivals in 2024 * 1.30
+
+**Domestic**
+The # domestic arrivals for that year / 
+The # domestic arrivals in 2024 * 1.098
+
+## 3.1 Domestic arrivals: geocode, regions, and scores
+```{r}
+# use complete annual years only (through 2025); raw 2013-2026 file kept for reference
+all_data_yearly <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int","hotel_data_cleaned_yearly_2013_2025.csv"))
+
+## "llegadas_de_turistas_residentes" = domestic visitors
+dom_arrivals <- all_data_yearly %>% 
+  filter(metric %in% "llegadas_de_turistas_residentes") %>% # domestic arrivals
+  filter(category %in% "total_categorias") # since we do not care what star designation it is
+```
+
+```{r}
+# let's make them an sf object
+dom_geocode <- dom_arrivals %>% 
+  mutate(country = "Mexico") %>% 
+  mutate(estado = case_when(
+    municipio %in% c("cabo_san_lucas", "la_paz", "loreto", "san_jose_del_cabo", "zona_corredor_los_cabos") ~ "Baja California Sur",
+    municipio %in% c("san_felipe", "ensenada","mexicali","san_quintin") ~ "Baja California",
+    municipio %in% c("guaymas", "hermosillo") ~ "Sonora",
+    municipio %in% c("culiacan", "el_fuerte", "los_mochis", "mazatlan", "escuinapa", "el_rosario") ~ "Sinaloa",
+    municipio %in% c("nuevo_nayarit","tepic") ~ "Nayarit",
+    municipio %in% c("puerto_vallarta") ~ "Jalisco",
+    TRUE ~ ""  # default case for any unmatched cities
+  )) %>% 
+  tidygeocoder::geocode(city = municipio, country = country, state = estado) # to give each city a lat, long
+  
+dom_geocode_sf <- dom_geocode %>% 
+  mutate(lat = ifelse(municipio %in% "zona_corredor_los_cabos", 23.1539, lat)) %>% # adding in the coordinates manually from <https://latitude.to/articles-by-country/mx/mexico/56998/los-cabos-corridor>
+  mutate(long = ifelse(municipio %in% "zona_corredor_los_cabos", -109.720233, long)) %>% 
+  st_as_sf(coords = c("long", "lat"),
+           crs = 4326, # WGS84
+           remove = FALSE)
+
+mapview(dom_geocode_sf)
+
+############################################################
+# Keep only centers within 50 km of the GOC coast, then assign OHI region.
+# DENUE already uses inland_50km_goc; SECTUR must use the same coastal mask.
+# (Intersecting goc_poly alone can keep Pacific / inland cities whose geocode
+# falls inside a broad OHI region polygon.)
+############################################################
+
+inland_50 <- st_read(here::here(
+  "/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer",
+  "inland_50km_goc.shp"
+))
+goc_poly <- st_read(here("spatial/ohi_regions", "goc_ohi_rgns.shp"))
+st_crs(goc_poly)
+
+dom_geocode_sf_transform <- st_transform(dom_geocode_sf, crs = st_crs(inland_50)) %>%
+  mutate(value = as.numeric(value))
+
+## one representative point per municipio for the keep/drop report
+dom_pts_unique <- dom_geocode_sf_transform %>%
+  distinct(municipio, .keep_all = TRUE)
+
+dom_in_50_flag <- lengths(st_intersects(dom_pts_unique, inland_50)) > 0
+dom_kept <- dom_pts_unique$municipio[dom_in_50_flag]
+dom_dropped <- dom_pts_unique$municipio[!dom_in_50_flag]
+message("Domestic SECTUR centers KEPT (within inland_50km): ", paste(sort(dom_kept), collapse = ", "))
+message("Domestic SECTUR centers DROPPED (outside inland_50km): ", paste(sort(dom_dropped), collapse = ", "))
+
+dom_in_50 <- dom_geocode_sf_transform %>%
+  filter(municipio %in% dom_kept)
+
+## assign OHI region (may duplicate on boundaries; Script 3 collapses that)
+dom_goc <- st_intersection(st_transform(dom_in_50, st_crs(goc_poly)), goc_poly) %>%
+  mutate(arrivals_type = "domestic")
+mapview(dom_goc, zcol = "rgn_id") + mapview(inland_50, zcol = "rgn_id")
+
+## write out for script3_gapfilling_arrivals_by_employees.qmd
+st_write(
+  dom_goc,
+  here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int", "domestic_arrivals_sectur_goc.shp"),
+  delete_layer = TRUE
+)
+```
+
+
+Like stated earlier, the reference point has been updated to use specific target values rather than annual percentage increases (<https://tourismanalytics.com/blog-posts/how-mexicos-forty-percent-tourism-growth-plan-aims-for-fifth-global-spot-by-2030-with-twenty-billion-dollar-investment-in-infrastructure-and-market-expansion>).
+
+For **domestic tourism**, the 2030 target is defined as **9.8% higher than 2024 domestic visitor arrivals**.
+
+Therefore, the current status for each year is calculated as follows:
+
+**Domestic:**
+$$
+\text{Score} = \frac{\text{Domestic arrivals (year)}}{\text{Domestic arrivals in 2024} \times 1.098} \times 100
+$$
+
+A **score of 100** indicates that the number of arrivals has **reached the 2030 target level** (i.e., 9.8% or 30% higher than 2024 levels).
+
+* A score < 100 means arrivals are **below the target trajectory**.
+* A score > 100 means arrivals have **exceeded the 2030 target**.
+
+Those two current status scores are then averaged to produce an overall score of how close each region is to making the 2030 target overall. 
+
+```{r}
+target_baseline_increase <- 1.098  # 9.8% more visitors than the amount in 2024
+baseline_year <- 2024
+
+dom_quantity_score <- dom_goc %>%
+  group_by(municipio) %>% #### I made a mistake in the old version: we want to calculate current status scores per municipio first, then average those for the entire region. FOR NOW, let's just have the scores by municipio.
+  mutate(
+    year = as.numeric(year),
+    
+    # determine the baseline value for each municipio (2024)
+    dom_baseline_arrivals = value[year == baseline_year][1],
+
+    # to know how far from 2024 we are (note: negative numbers are because of years before 2024)
+    years_since_baseline = year - baseline_year,
+
+    # target arrivals for domestic visitors
+    dom_target_arrivals = dom_baseline_arrivals * target_baseline_increase,   # for domestic tourism, the 2030 target is defined as 9.8% higher than 2024 domestic visitor arrivals.
+
+    # make it a score
+    dom_index_score = (value / dom_target_arrivals) * 100,
+    dom_gap_to_target = dom_target_arrivals - value,
+    dom_gap_percentage = ((dom_target_arrivals - value) / value) * 100 ## target arrivals - current arrivals / current arrivals... ideal is 0 or negative to reflect how much needs to be done (if you reach the target, it is negative, because nothing needs to be done!)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(municipio, rgn_id, year, dom_current_arrivals = value,
+         dom_baseline_arrivals, dom_target_arrivals, dom_index_score,
+         dom_gap_to_target, dom_gap_percentage, everything()) %>% 
+  filter(!is.na(dom_baseline_arrivals)) %>%  # remove any municipalities that do not have values for 2024 arrivals.
+  filter(year %in% 2013:2025)
+
+
+##### double-checking that it all looks good #####
+# for san felipe:
+# > 139861 * 1.098
+# [1] 153567.4
+# > 153567.4-139861
+# [1] 13706.4
+# > 13706.4/139861
+# [1] 0.09800016
+# > 66410/153567.4
+# [1] 0.4324486
+
+# and cabo san lucas: 
+# cabo_san_lucas. Region_4 2019 274384 243965 267873.6
+# it makes sense that the dom_gap_percentage is negative, because in 2019 the number of domestic arrivals is actually more than the 2024 * 1.098.
+
+```
+
+
+```{r}
+library(plotly)
+
+## plot the score over time
+updated_dom_score_plotly <- plotly::plot_ly(
+  dom_quantity_score, 
+  x = ~year, 
+  y = ~dom_index_score, 
+  color = ~municipio, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: Llegadas de turistas nacionales por municipio",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(dom_quantity_score$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal 2030 (100/100)",
+    inherit = FALSE
+  )
+updated_dom_score_plotly
+
+htmlwidgets::saveWidget(updated_dom_score_plotly, here::here("TR/sectur_quantity_exploration_int","dom_arrivals_score_2013_2025.html"), selfcontained = TRUE)
+```
+
+YAY, this makes sense!! So for 2024 rows:
+
+dom_baseline_arrivals = value *(for 2024)*
+
+Therefore, using the equation to get the current status:
+
+$$
+\text{dom_index_score}_{2024} = \frac{\text{value}}{\text{value} \times 1.098} \times 100 = \frac{100}{1.098} = 91.07468
+$$
+
+
+```{r}
+## compare to the patterns of domestic arrivals over time
+dom_arrivals_plot <- plotly::plot_ly(
+  dom_goc, 
+  x = ~year, 
+  y = ~value, 
+  color = ~municipio, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "Llegadas de turistas nacionales por municipio (domestic arrivals)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Llegadas // Arrivals")
+  ) %>% 
+  add_lines(
+    x = range(dom_goc$year),
+    y = c(100, 100),
+    line = list(color = "white", width = 2),
+    name = "",
+    inherit = FALSE
+  )
+dom_arrivals_plot
+
+htmlwidgets::saveWidget(dom_arrivals_plot, here::here("TR/sectur_quantity_exploration_int","dom_arrivals_plot_2013_2025.html"), selfcontained = TRUE)
+```
+
+## 3.2 International arrivals: geocode, regions, and scores
+```{r}
+## "llegadas_de_turistas_no_residentes" = international visitors
+int_arrivals <- all_data_yearly %>% 
+  filter(metric %in% "llegadas_de_turistas_no_residentes")%>% # int arrivals
+  filter(category %in% "total_categorias") # since we do not care what star designation it is
+```
+
+```{r}
+# let's make them an sf object
+int_geocode <- int_arrivals %>% 
+  mutate(country = "Mexico") %>% 
+  mutate(estado = case_when(
+    municipio %in% c("cabo_san_lucas", "la_paz", "loreto", "san_jose_del_cabo", "zona_corredor_los_cabos") ~ "Baja California Sur",
+    municipio %in% c("san_felipe", "ensenada", "mexicali", "san_quintin") ~ "Baja California",
+    municipio %in% c("guaymas", "hermosillo") ~ "Sonora",
+    municipio %in% c("culiacan", "el_fuerte", "los_mochis", "mazatlan", "escuinapa", "el_rosario") ~ "Sinaloa",
+    municipio %in% c("nuevo_nayarit", "tepic") ~ "Nayarit",
+    municipio %in% c("puerto_vallarta") ~ "Jalisco",
+    TRUE ~ ""  # default case for any unmatched cities
+  )) %>% 
+  tidygeocoder::geocode(city = municipio, country = country, state = estado) # to give each city a lat, long
+  
+int_geocode_sf <- int_geocode %>% 
+  mutate(lat = ifelse(municipio %in% "zona_corredor_los_cabos", 23.1539, lat)) %>% # adding in the coordinates manually from <https://latitude.to/articles-by-country/mx/mexico/56998/los-cabos-corridor>
+  mutate(long = ifelse(municipio %in% "zona_corredor_los_cabos", -109.720233, long)) %>% 
+  st_as_sf(coords = c("long", "lat"),
+           crs = 4326, # WGS84
+           remove = FALSE)
+
+mapview(int_geocode_sf)
+
+############################################################
+# Keep only centers within 50 km of the GOC coast, then assign OHI region.
+# Same coastal mask as DENUE (inland_50km_goc) and domestic SECTUR above.
+############################################################
+
+inland_50 <- st_read(here::here(
+  "/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer",
+  "inland_50km_goc.shp"
+))
+goc_poly <- st_read(here("spatial/ohi_regions", "goc_ohi_rgns.shp"))
+st_crs(goc_poly)
+
+int_geocode_sf_transform <- st_transform(int_geocode_sf, crs = st_crs(inland_50)) %>%
+  mutate(value = as.numeric(value))
+
+int_pts_unique <- int_geocode_sf_transform %>%
+  distinct(municipio, .keep_all = TRUE)
+
+int_in_50_flag <- lengths(st_intersects(int_pts_unique, inland_50)) > 0
+int_kept <- int_pts_unique$municipio[int_in_50_flag]
+int_dropped <- int_pts_unique$municipio[!int_in_50_flag]
+message("International SECTUR centers KEPT (within inland_50km): ", paste(sort(int_kept), collapse = ", "))
+message("International SECTUR centers DROPPED (outside inland_50km): ", paste(sort(int_dropped), collapse = ", "))
+
+int_in_50 <- int_geocode_sf_transform %>%
+  filter(municipio %in% int_kept)
+
+int_goc <- st_intersection(st_transform(int_in_50, st_crs(goc_poly)), goc_poly) %>%
+  mutate(arrivals_type = "international")
+mapview(int_goc, zcol = "rgn_id") + mapview(inland_50, zcol = "rgn_id")
+
+## write out for script3_gapfilling_arrivals_by_employees.qmd
+st_write(
+  int_goc,
+  here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int", "international_arrivals_sectur_goc.shp"),
+  delete_layer = TRUE
+)
+```
+
+Like stated earlier, the reference point has been updated to use specific target values rather than annual percentage increases (<https://tourismanalytics.com/blog-posts/how-mexicos-forty-percent-tourism-growth-plan-aims-for-fifth-global-spot-by-2030-with-twenty-billion-dollar-investment-in-infrastructure-and-market-expansion>).
+
+For **international tourism**, the 2030 target is defined as **30% higher than 2024 international visitor arrivals**.
+
+Therefore, the current status for each year is calculated as follows:
+
+**International:**
+$$
+\text{Score} = \frac{\text{International arrivals (year)}}{\text{International arrivals in 2024} \times 1.30} \times 100
+$$
+
+A **score of 100** indicates that the number of arrivals has **reached the 2030 target level** (i.e., 9.8% or 30% higher than 2024 levels).
+
+* A score < 100 means arrivals are **below the target trajectory**.
+* A score > 100 means arrivals have **exceeded the 2030 target**.
+
+Those two current status scores are then averaged to produce an overall score of how close each region is to making the 2030 target overall. 
+
+
+```{r}
+int_target_baseline_increase <- 1.30  # 30% more visitors than the amount in 2024
+baseline_year <- 2024
+
+int_quantity_score <- int_goc %>%
+  group_by(municipio) %>% #### I made a mistake in the old version: we want to calculate current status scores per municipio first, then average those for the entire region. FOR NOW, let's just have the scores by municipio.
+  mutate(
+    year = as.numeric(year),
+    
+    # determine the baseline value for each municipio (2024)
+    int_baseline_arrivals = value[year == baseline_year][1],
+
+    # to know how far from 2024 we are (note: negative numbers are because of years before 2024)
+    years_since_baseline = year - baseline_year,
+
+    # target arrivals for international visitors
+    int_target_arrivals = int_baseline_arrivals * int_target_baseline_increase,   # for international tourism, the 2030 target is defined as 30% higher than 2024 international visitor arrivals.
+
+    # make it a score
+    int_index_score = (value / int_target_arrivals) * 100,
+    int_gap_to_target = int_target_arrivals - value,
+    int_gap_percentage = ((int_target_arrivals - value) / value) * 100 ## target arrivals - current arrivals / current arrivals... ideal is 0 or negative to reflect how much needs to be done (if you reach the target, it is negative, because nothing needs to be done!)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(municipio, rgn_id, year, int_current_arrivals = value,
+         int_baseline_arrivals, int_target_arrivals, int_index_score,
+         int_gap_to_target, int_gap_percentage, everything()) %>% 
+  filter(!is.na(int_baseline_arrivals)) %>%  # remove any municipalities that do not have values for 2024 arrivals.
+  filter(year %in% 2013:2025)
+```
+
+
+```{r}
+library(plotly)
+
+## plot the score over time
+updated_int_score_plotly <- plotly::plot_ly(
+  int_quantity_score, 
+  x = ~year, 
+  y = ~int_index_score, 
+  color = ~municipio, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "CURRENT STATUS: Llegadas de turistas internacionales por municipio",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(int_quantity_score$year), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal 2030 (100/100)",
+    inherit = FALSE
+  )
+updated_int_score_plotly
+
+htmlwidgets::saveWidget(updated_int_score_plotly, here::here("TR/sectur_quantity_exploration_int","int_arrivals_score_2013_2025.html"), selfcontained = TRUE)
+```
+
+
+```{r}
+## compare to the patterns of international arrivals over time
+int_arrivals_plot <- plotly::plot_ly(
+  int_goc, 
+  x = ~year, 
+  y = ~value, 
+  color = ~municipio, 
+  type = "scatter", 
+  mode = "lines"
+) %>% 
+  layout(
+    title = "Llegadas de turistas internacionales por municipio (international arrivals)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Llegadas // Arrivals")
+  ) %>% 
+  add_lines(
+    x = range(int_goc$year),
+    y = c(100, 100),
+    line = list(color = "white", width = 2),
+    name = "",
+    inherit = FALSE
+  )
+int_arrivals_plot
+
+htmlwidgets::saveWidget(int_arrivals_plot, here::here("TR/sectur_quantity_exploration_int","int_arrivals_plot_2013_2025.html"), selfcontained = TRUE)
+```
