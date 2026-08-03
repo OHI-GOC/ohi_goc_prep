@@ -20,32 +20,39 @@ editor_options:
   chunk_output_type: console
 ---
 
-# Sense of Place 
+# 0. Workflow for this script
 
-## Coastal Community Engagement: Lasting non-natural cultural places
+This is the Sense of Place coastal community engagement script for lasting non natural cultural places.
 
+1. Read and clean the cultural places file from Script 1.
+2. Bring in coastal population within 10 km.
+3. Join culture with population.
+4. Scale to population and plot rates.
+5. Look at which activity types drive Region_1 and Region_3 growth from 2023 to 2026.
+6. Compare current status options.
 
-See `TR/denue_prep.qmd` for the download of `/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_esparcimiento_culturales_y_deportivos_servicios_recreativos/int/non_natural_cultural_places_2019_2024_goc_10km.shp`.
+See `tr_quantity_updated_scripts/script1_denue_prep.qmd` (section 5) for how I build the `non_natural_cultural_places_2019_2026_goc_10km.shp` file.
 
+# 1. Read and clean cultural places
 
-Read in the non-natural cultural places.
+I will read in the non natural cultural places and estimate employees from the worker size labels.
 
 ```{r}
 library(tidyverse)
 library(sf)
 library(mapview)
 library(here)
-```
+library(plotly)
 
+inland_10 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer", "inland_10km_goc.shp"))
 
-### Culture service establishments 
+culture_int_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_esparcimiento_culturales_y_deportivos_servicios_recreativos/int"
+culture_shp_new <- here::here(culture_int_dir, "non_natural_cultural_places_2019_2026_goc_10km.shp")
 
+non_natural_culture_gulf_10km <- st_read(culture_shp_new)
 
-```{r}
-non_natural_culture_gulf_10km <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/servicios_esparcimiento_culturales_y_deportivos_servicios_recreativos/int/non_natural_cultural_places_2019_2024_goc_10km.shp"))
-
-non_natural_culture_gulf_10km_clean <- non_natural_culture_gulf_10km %>% 
-  #st_drop_geometry() %>% 
+# keep one row per place for later checks, then summarize by municipio for scoring
+non_natural_culture_places <- non_natural_culture_gulf_10km %>% 
   mutate(nombre_act = nombre_act %>% 
            str_replace_all("<fa>", "ú") %>%
            str_replace_all("<e1>", "á") %>%
@@ -82,16 +89,32 @@ non_natural_culture_gulf_10km_clean <- non_natural_culture_gulf_10km %>%
       per_ocu %in% c("251 y m<e1>s personas", "251 y más personas") ~ 300,
       TRUE ~ NA_real_
     )
-  ) %>% 
+  )
+
+non_natural_culture_gulf_10km_clean <- non_natural_culture_places %>% 
   group_by(municipio_clean, data_year, rgn_id) %>% 
   summarize(
     agg_employees = sum(employees_estimated),
-    n_units = n(), # number of economic units (establishments)
+    n_units = length(unique(id)), # number of economic units (establishments)
     .groups = "drop"
   )
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
 ```
 
-Now, bring in population data by municipality. 
+# 2. Bring in coastal population
+
+Now bring in population data by municipality, limited to the 10 km coastal strip.
 
 ```{r}
 ## main cities/towns 2020 population
@@ -162,7 +185,7 @@ cities_clean <- st_intersection(st_transform(cities, st_crs(inland_10)), inland_
 mapview(cities) + mapview(inland_10)
 ```
 
-### Join with DENUE
+# 3. Join culture with population
 
 ```{r}
 non_natural_culture_gulf_10km_clean_join <- non_natural_culture_gulf_10km_clean %>% 
@@ -182,23 +205,13 @@ cities_clean_join <- cities_clean %>%
 join_culture_pop_10km <- inner_join(non_natural_culture_gulf_10km_clean_join, cities_clean_join)
 ```
 
+# 4. Scale to population and plot rates
 
-## Non natural cultural areas scaled to population
-
-Let's aggregate employees and economic units to each region and year, then scale both to coastal population.
+I will aggregate employees and places to each region and year, then scale both to coastal population.
 
 ```{r}
-rgn_colors <- c(
-  "Region_1" = "#C03729",
-  "Region_2" = "#E68C7C",
-  "Region_3" = "#FC8F24",
-  "Region_4" = "#dcaa38",
-  "Region_5" = "#cbd2a0",
-  "Region_6" = "#98a25a",
-  "Region_7" = "#747428",
-  "Region_8" = "#627391",
-  "Region_9" = "#8d61a9"
-)
+## aggregate employees and economic units to each region and year, then scale both to coastal population
+# rgn_colors defined in section 1
 
 cultural_places_scaled_to_population <- join_culture_pop_10km %>% 
   group_by(rgn_id, data_year) %>% 
@@ -218,8 +231,6 @@ cultural_places_scaled_to_population <- join_culture_pop_10km %>%
 
 
 ```{r}
-library(plotly)
-
 ## plot the culture_emp_per_local_pop over time
 culture_gulf_emp_per_pop_plotly <- plotly::plot_ly(
   cultural_places_scaled_to_population, 
@@ -257,7 +268,253 @@ culture_gulf_units_per_pop_plotly <- plotly::plot_ly(
 culture_gulf_units_per_pop_plotly
 ```
 
-# Current status alternatives
+# 5. What is driving Region_1 and Region_3 growth from 2023 to 2026?
+
+Region_1 and Region_3 jump a lot after 2023 in the current status plots. Coastal population is fixed (2020 localities), so the score change has to come from more places and / or more estimated employees in the DENUE file.
+
+Here I will check:
+
+1. raw place counts and employees by year for those regions,
+2. which activity types (`nombre_act`) grew or appeared,
+3. which municipios added the most places,
+4. whether worker size labels shifted toward bigger places.
+
+If growth is only a few activity types or one municipio, that is useful to know. If whole new activity labels appear that never existed before 2024, I will look closer for a cleaning or filter issue.
+
+## 5.1 Raw counts for Region_1 and Region_3
+
+```{r}
+rgn1_non_natural_culture_gulf_10km <- non_natural_culture_gulf_10km %>% 
+  filter(rgn_id %in% "Region_1") %>% 
+  select(id, data_year, rgn_id, nom_estab, nombre_act, per_ocu)
+unique(rgn1_non_natural_culture_gulf_10km$nom_estab)
+# [1] "ARTE Y DISEÑO"                               "CASA DE LA CULTURA SAN FELIPE"              
+# [3] "CENTRO CULTURAL Y DE PORTIVO NIÑOS DE ARENA" "MARINA SAN FELIPE"      
+
+rgn3_non_natural_culture_gulf_10km <- non_natural_culture_gulf_10km %>% 
+  filter(rgn_id %in% "Region_3") %>% 
+  select(id, data_year, rgn_id, nom_estab, nombre_act, per_ocu)
+unique(rgn3_non_natural_culture_gulf_10km$nom_estab)
+
+#  [1] "CASA DE LA CULTURA FEDERICO GALAZ RAMIREZ"     "CASA DE LA CULTURA HOMERO YEE LIZARDI"        
+#  [3] "MARINA FONATUR DE SANTA ROSALIA"               "MUSEOCOMUNITARIO DE MULEGE"                   
+#  [5] "SALA DE EXPOSICIÓN ANTIGUA DIRECCIÓN DE BOLEO" "FONATUR TREN MAYA"                            
+#  [7] "SALA DE EXPOSICION ANTIGUA DIRECCION DE BOLEO" "ARTE Y CULTURA SIN NOMBRE"                    
+#  [9] "ESTADIO ANTONIO ARCIENEGA MUÑOZ"               "MUSEO COMUNITARIO DE MULEGE"                  
+# [11] "MARINA SANTA ROSALÍA"  
+```
+
+
+```{r}
+focus_rgns <- c("Region_1", "Region_3")
+
+places_focus <- non_natural_culture_places %>% 
+  st_drop_geometry() %>% 
+  filter(rgn_id %in% focus_rgns)
+
+# region year totals (no population scaling)
+focus_year_totals <- places_focus %>% 
+  group_by(rgn_id, data_year) %>% 
+  summarize(
+    n_units = n(),
+    n_emp = sum(employees_estimated, na.rm = TRUE),
+    n_municipios = n_distinct(municipio_clean),
+    n_activity_types = n_distinct(nombre_act),
+    .groups = "drop"
+  ) %>% 
+  arrange(rgn_id, data_year)
+
+focus_year_totals
+
+focus_units_plotly <- plot_ly(
+  focus_year_totals,
+  x = ~data_year,
+  y = ~n_units,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Region_1 and Region_3: number of cultural places by year",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "n_units")
+  )
+focus_units_plotly
+
+focus_emp_plotly <- plot_ly(
+  focus_year_totals,
+  x = ~data_year,
+  y = ~n_emp,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Region_1 and Region_3: estimated employees by year",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "estimated employees")
+  )
+focus_emp_plotly
+```
+
+## 5.2 Activity types by year
+
+```{r}
+# counts by activity type and year
+focus_act_year <- places_focus %>% 
+  count(rgn_id, data_year, nombre_act, name = "n_units") %>% 
+  arrange(rgn_id, data_year, desc(n_units))
+
+focus_act_year
+
+# wide view for 2023 vs 2026: what grew, what is new
+focus_act_2023_2026 <- focus_act_year %>% 
+  filter(data_year %in% c(2023, 2026)) %>% 
+  tidyr::pivot_wider(
+    names_from = data_year,
+    values_from = n_units,
+    values_fill = 0,
+    names_prefix = "y"
+  ) %>% 
+  mutate(
+    delta_2023_to_2026 = y2026 - y2023,
+    status = case_when(
+      y2023 == 0 & y2026 > 0 ~ "new in 2026 (not in 2023)",
+      y2023 > 0 & y2026 == 0 ~ "present in 2023, gone by 2026",
+      delta_2023_to_2026 > 0 ~ "grew",
+      delta_2023_to_2026 < 0 ~ "shrank",
+      TRUE ~ "same count"
+    )
+  ) %>% 
+  arrange(rgn_id, desc(delta_2023_to_2026))
+
+focus_act_2023_2026
+
+# activity types that did not exist in that region in 2023 but do in 2026
+focus_new_act_types <- focus_act_2023_2026 %>% 
+  filter(status == "new in 2026 (not in 2023)")
+
+focus_new_act_types
+
+focus_act_r1_plotly <- plot_ly(
+  focus_act_year %>% filter(rgn_id == "Region_1", data_year >= 2023),
+  x = ~data_year,
+  y = ~n_units,
+  color = ~nombre_act,
+  type = "scatter",
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Region_1: places by activity type (2023 to 2026)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "n_units"),
+    legend = list(orientation = "h", y = -0.25)
+  )
+focus_act_r1_plotly
+
+focus_act_r3_plotly <- plot_ly(
+  focus_act_year %>% filter(rgn_id == "Region_3", data_year >= 2023),
+  x = ~data_year,
+  y = ~n_units,
+  color = ~nombre_act,
+  type = "scatter",
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Region_3: places by activity type (2023 to 2026)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "n_units"),
+    legend = list(orientation = "h", y = -0.25)
+  )
+focus_act_r3_plotly
+```
+
+## 5.3 Which municipios added places?
+
+```{r}
+focus_muni_2023_2026 <- places_focus %>% 
+  filter(data_year %in% c(2023, 2026)) %>% 
+  count(rgn_id, municipio_clean, data_year, name = "n_units") %>% 
+  tidyr::pivot_wider(
+    names_from = data_year,
+    values_from = n_units,
+    values_fill = 0,
+    names_prefix = "y"
+  ) %>% 
+  mutate(delta_2023_to_2026 = y2026 - y2023) %>% 
+  arrange(rgn_id, desc(delta_2023_to_2026))
+
+focus_muni_2023_2026
+
+# also break municipio growth by activity type for the biggest gainers
+top_muni_gains <- focus_muni_2023_2026 %>% 
+  filter(delta_2023_to_2026 > 0) %>% 
+  group_by(rgn_id) %>% 
+  slice_max(delta_2023_to_2026, n = 5) %>% 
+  ungroup()
+
+focus_muni_act_detail <- places_focus %>% 
+  filter(
+    data_year %in% c(2023, 2026),
+    municipio_clean %in% top_muni_gains$municipio_clean
+  ) %>% 
+  count(rgn_id, municipio_clean, nombre_act, data_year, name = "n_units") %>% 
+  tidyr::pivot_wider(
+    names_from = data_year,
+    values_from = n_units,
+    values_fill = 0,
+    names_prefix = "y"
+  ) %>% 
+  mutate(delta_2023_to_2026 = y2026 - y2023) %>% 
+  filter(delta_2023_to_2026 != 0) %>% 
+  arrange(rgn_id, municipio_clean, desc(delta_2023_to_2026))
+
+focus_muni_act_detail
+```
+
+## 5.4 Did worker size labels change?
+
+If estimated employees rise much faster than place counts, growth may be bigger places rather than more places.
+
+```{r}
+focus_size_year <- places_focus %>% 
+  filter(data_year >= 2023) %>% 
+  count(rgn_id, data_year, per_ocu, name = "n_units") %>% 
+  arrange(rgn_id, data_year, desc(n_units))
+
+focus_size_year
+
+focus_size_summary <- places_focus %>% 
+  filter(data_year %in% c(2023, 2026)) %>% 
+  group_by(rgn_id, data_year) %>% 
+  summarize(
+    n_units = n(),
+    n_emp = sum(employees_estimated, na.rm = TRUE),
+    emp_per_place = n_emp / n_units,
+    .groups = "drop"
+  ) %>% 
+  arrange(rgn_id, data_year)
+
+focus_size_summary
+```
+
+## 5.5 Quick sanity notes while I read the tables
+
+Things that would worry me:
+
+- brand new `nombre_act` labels that look like encoding junk,
+- one municipio suddenly gaining dozens of places of one odd type,
+- employee totals jumping while economic unit counts barely change (number of employees issue??).
+
+Things that would reassure me:
+
+- growth is mostly more of the same activity types already present in 2023,
+- several municipios contribute,
+- place/economic unit counts and employees move together.
+
+# 6. Current status alternatives
 
 I will compare several ways of turning the per capita rates into a 0 to 100 style current status.
 
@@ -271,7 +528,7 @@ For the 2019 reference versions, each region is compared to its own 2019 baselin
 
 Here 100 means matching the 2019 baseline. Values above 100 mean an increase since 2019. I leave those uncapped in `current_status` so the direction of change is visible, and also store a capped `score` (max 100) for OHI style bookkeeping.
 
-## 1. Employees per capita, 90th quantile reference
+## 6.1 Employees per person, 90th quantile
 
 ```{r}
 ## find the 90th quantile of employees per capita
@@ -317,7 +574,7 @@ culture_emp_90th_plotly <- plotly::plot_ly(
 culture_emp_90th_plotly
 ```
 
-## 2. Employees per capita, 80th quantile reference
+## 6.2 Employees per person, 80th quantile
 
 ```{r}
 ## find the 80th quantile of employees per capita
@@ -362,7 +619,7 @@ culture_emp_80th_plotly <- plotly::plot_ly(
 culture_emp_80th_plotly
 ```
 
-## 3. Employees per capita, 75th quantile reference
+## 6.3 Employees per person, 75th quantile
 
 ```{r}
 ## find the 75th quantile of employees per capita
@@ -384,22 +641,22 @@ write_csv(
 # temporary 2025 gapfill: denue 2025 is not available yet, so copy each region's 2024 score into 2025.
 # this is saved as a separate csv so we can reverse it once 2025 denue arrives
 # (switch the sp merge back to the non gapfilled csv above).
-cultural_emp_75th_gapfill2025 <- cultural_emp_75th %>%
-  filter(data_year == 2024) %>%
-  mutate(
-    data_year = 2025L,
-    gapfill_note = "copied from 2024; temporary until 2025 DENUE is available"
-  ) %>%
-  bind_rows(cultural_emp_75th) %>%
-  arrange(rgn_id, data_year)
+# cultural_emp_75th_gapfill2025 <- cultural_emp_75th %>%
+#   filter(data_year == 2024) %>%
+#   mutate(
+#     data_year = 2025L,
+#     gapfill_note = "copied from 2024; temporary until 2025 DENUE is available"
+#   ) %>%
+#   bind_rows(cultural_emp_75th) %>%
+#   arrange(rgn_id, data_year)
 
-write_csv(
-  cultural_emp_75th_gapfill2025,
-  here::here(
-    "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/output",
-    "cultural_places_employees_per_pop_current_status_75th_quantile_gapfill2025.csv"
-  )
-)
+# write_csv(
+#   cultural_emp_75th_gapfill2025,
+#   here::here(
+#     "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/output",
+#     "cultural_places_employees_per_pop_current_status_75th_quantile_gapfill2025.csv"
+#   )
+# )
 ```
 
 ```{r}
@@ -427,7 +684,7 @@ culture_emp_75th_plotly <- plotly::plot_ly(
 culture_emp_75th_plotly
 ```
 
-## 4. Employees per capita, 2019 regional reference
+## 6.4 Employees per person, 2019 regional reference
 
 ```{r}
 cultural_emp_2019ref <- cultural_places_scaled_to_population %>% 
@@ -473,7 +730,7 @@ culture_emp_2019ref_plotly <- plotly::plot_ly(
 culture_emp_2019ref_plotly
 ```
 
-## 5. Economic units per capita, 90th quantile reference
+## 6.5 Places per person, 90th quantile
 
 ```{r}
 cultural_units_90th <- cultural_places_scaled_to_population %>% 
@@ -517,7 +774,7 @@ culture_units_90th_plotly <- plotly::plot_ly(
 culture_units_90th_plotly
 ```
 
-## 6. Economic units per capita, 80th quantile reference
+## 6.6 Places per person, 80th quantile
 
 ```{r}
 cultural_units_80th <- cultural_places_scaled_to_population %>% 
@@ -561,7 +818,7 @@ culture_units_80th_plotly <- plotly::plot_ly(
 culture_units_80th_plotly
 ```
 
-## 7. Economic units per capita, 75th quantile reference
+## 6.7 Places per person, 75th quantile
 
 ```{r}
 cultural_units_75th <- cultural_places_scaled_to_population %>% 
@@ -605,7 +862,7 @@ culture_units_75th_plotly <- plotly::plot_ly(
 culture_units_75th_plotly
 ```
 
-## 8. Economic units per capita, 2019 regional reference
+## 6.8 Places per person, 2019 regional reference
 
 ```{r}
 cultural_units_2019ref <- cultural_places_scaled_to_population %>% 
@@ -650,7 +907,4 @@ culture_units_2019ref_plotly <- plotly::plot_ly(
   )
 culture_units_2019ref_plotly
 ```
-
-
-
 

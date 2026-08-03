@@ -1,5 +1,5 @@
 ---
-title: "Script 4: TR quantity scores (with gapfilled arrivals)"
+title: "Script 4 OG-model: TR quantity scores (frozen model3.5/1.5 + CSV regions)"
 output:
   html_document:
     toc: true
@@ -12,25 +12,32 @@ editor_options:
 
 # 0. Workflow for this script
 
-This is **Script 4** in the TR quantity update pipeline. Run it after Scripts 1-3.
+This is an **optional parallel** to main Script 4. Run it after Scripts 1–2 and `script3_OGmodel_gapfilling_arrivalls.qmd`. It does **not** replace `script4_tr_quantity.qmd`.
+
+Uses gapfills from the **OG frozen stack** (model3.5 + model1.5; coefficients frozen on **2019–2024**; fills through **2019–2025**).
 
 1. Read cleaned SECTUR yearly arrivals from Script 2.
-2. Join with DENUE-gapfilled totals from Script 3.
+2. Join with DENUE-gapfilled totals from Script 3 OG-model (`*_OGmodel_UPDATED.csv`).
 3. Estimate international vs domestic arrivals where SECTUR is missing.
-4. Keep only municipios whose representative point lies in `inland_50km_goc` (same coastal mask as DENUE / Script 2), assign OHI regions, and compute current status scores (2024 baseline targets).
-5. Make regional plots and write final quantity outputs.
-6. Optional Section 7: re-score using Script 3’s covid-scaled gapfill file for comparison.
+4. Assign OHI regions from the curated GoC municipio table (`municipality_to_rgnid_update_tr.csv`) — not from geocode ∩ polygons. Flag any `municipio_clean` that does not match the table but leave it in for evaluation. Then compute current status scores (2024 baseline targets).
+5. Make regional plots and write outputs with `_OGmodel` filenames (does not overwrite main Script 4 products).
 
 Baseline targets stay the same: domestic = 2024 arrivals x 1.098; international = 2024 arrivals x 1.30.
 
 # 1. Combine SECTUR arrivals with DENUE-gapfilled totals (2019-2026)
-In the script `script3_script3_gapfilling_arrivals_by_employees.qmd`, I predicted missing tourist arrival data using a model that used the number of employees in hotels/accommodations to predict the total number of arrivals.  To apply it here, we will need to determine the proportion of arrivals that are international vs domestic out of the total in each state.  That way, we can apply it to the regions that have missing data.
+In the script `script3_OGmodel_gapfilling_arrivalls.qmd`, I predicted missing tourist arrival data using a model that used the number of employees in hotels/accommodations to predict the total number of arrivals.  To apply it here, we will need to determine the proportion of arrivals that are international vs domestic out of the total in each state.  That way, we can apply it to the regions that have missing data.
 
 Essentially, we will determine for each state the proportion of domestic/total and international/total and just assume that same proportion for the regions we are estimating using the regression models.
 
 I am now aligning this with the updated DENUE series (**2019-2026**). For SECTUR annual arrivals I use **2019-2025** only, because 2026 is still incomplete (Enero-Junio only as of 07/30/26).
 
 ```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+library(plotly)
+
 ## first, we will read in the cleaned sectur data, and only select arrivals.  We want to find the total number of arrivals, int + dom, for every year and municipio.
 all_sectur_arrivals <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int","hotel_data_cleaned_yearly_2013_2025.csv")) %>% 
   filter(metric %in% c("llegadas_de_turistas_residentes", "llegadas_de_turistas_no_residentes")) %>% # domestic and international arrivals
@@ -81,7 +88,7 @@ write_csv(all_sectur_prop_by_state, here::here("/home/shares/ohi/OHI_GOC/goal_pr
 
 ## 1.1 Read gapfilled arrivals from Script 3
 ```{r}
-arrivals_filled_by_DENUE_accommodation_employees <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","arrivals_filled_by_DENUE_accommodation_employees_2019_2026_UPDATED.csv"))
+arrivals_filled_by_DENUE_accommodation_employees <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","arrivals_filled_by_DENUE_accommodation_employees_2019_2026_OGmodel_UPDATED.csv"))
 
 gapfilled_total_arrivals <- arrivals_filled_by_DENUE_accommodation_employees %>%
   mutate(country = "Mexico") %>% 
@@ -329,170 +336,215 @@ Domestic:
 ```
 
 # 4. Current status by OHI region
-Somewhere along the way we lost the lat/longs for each municipio.  Lets add them back in and join with ohi regions, so that we can attribute each municipality to an OHI Region.
+
+Assign each `municipio_clean` to an OHI region using the curated GoC municipality table
+(`/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid_update_tr.csv`
+on mazu; local copy also lives in this repo). This replaces inland_50 filters and
+`st_nearest_feature` region assignment so regions do not depend on geocode jitter.
+
+- GoC municipios in the table get their `rgn_id` from the CSV.
+- `nuevo_nayarit` to `bahía_de_banderas`; `juan_josé_ríos` to `ahome`.
+- Drop inland / Pacific / out-of-study names: comondú, mascota, san_sebastián_del_oeste, talpa_de_allende, tomatlán.
+- Keep `huajicori` (Region_9). Ensenada / san_quintín GOC DENUE fills to Region_2.
+- Any remaining unmatched `municipio_clean` is flagged for evaluation.
+- CSV column `include_tr_quantity` (Y/N) drops inland / mountainous municipios from regional scores (especially Region_9 interiors like Tepic).
+
+No municipio geocoding here: tidygeocode often misplaces Baja / Nayarit / Jalisco names, and regions come from the CSV anyway. Regional maps below join OHI polygons directly.
 
 ```{r}
-estimated_int_dom_arrivals_latlong <- estimated_int_dom_arrivals %>% 
-  tidygeocoder::geocode(city = municipio_clean, country = country, state = estado) %>%  # to give each city a lat, long
-  mutate(coordinate_na = is.na(lat))
+## Aliases / drops before region join
+drop_non_goc_munis <- c(
+  "comondú", "comondu",
+  "mascota",
+  "san_sebastián_del_oeste", "san_sebastian_del_oeste",
+  "talpa_de_allende",
+  "tomatlán", "tomatlan"
+)
 
-na_municipios_latlong <- estimated_int_dom_arrivals_latlong %>% 
-  filter(coordinate_na == "TRUE") %>%
-  distinct(municipio_clean)
-
-# ahome
-# 2
-# bahía_de_banderas
-# 3
-# rosario
-# 4
-# cabo_corrientes
-# 5
-# mascota
-# 6
-# san_sebastián_del_oeste
-# 7
-# talpa_de_allende
-# 8
-# tomatlán
-  
-  # manually found:
-  ## tomatlán = 19.938547, -105.249363
-  ## talpa_de_allende = 20.382398, -104.820536
-  ## san_sebastián_del_oeste = 20.762123, -104.854319
-  ## san_quintín = 23.709045, -110.396823
-  ## san_pedro_lagunillas = 21.218043, -104.753181
-  ## mascota = 20.527390, -104.792100
-  ## ensenada = 28.443258, -112.880537 (if you look at employees_by_muni_yr_join_50, it is interchanged with san quintín for some of the hotels, because ensenada as a municipality stretches far along baja california on the interior gulf.)
-  ## cabo_corrientes = 20.392035, -105.453138
-  ## bahía_de_banderas = 20.759572, -105.292800
-
-estimated_int_dom_arrivals_latlong_clean <- estimated_int_dom_arrivals_latlong %>%   
+estimated_int_dom_arrivals <- estimated_int_dom_arrivals %>%
   mutate(
-    lat = case_when(
-      municipio_clean == "talpa_de_allende" ~ 20.382398,
-      municipio_clean == "tomatlán" ~ 19.938547,
-      municipio_clean == "san_sebastián_del_oeste" ~ 20.762123,
-      municipio_clean == "san_quintín" ~ 23.709045,
-      municipio_clean == "san_pedro_lagunillas" ~ 21.218043,
-      municipio_clean == "mascota" ~ 20.527390,
-      municipio_clean == "ensenada" ~ 28.443258,
-      municipio_clean == "cabo_corrientes" ~ 20.392035,
-      municipio_clean == "bahía_de_banderas" ~ 20.759572,
-      municipio_clean == "ahome" ~ 25.918973,
-      municipio_clean == "rosario" ~ 27.84484348043768,
-      municipio_clean == "mascota" ~ 20.526449771988734,
-      TRUE ~ lat 
-    ),
-    long = case_when(
-      municipio_clean == "talpa_de_allende" ~ -104.820536,
-      municipio_clean == "tomatlán" ~ -105.249363,
-      municipio_clean == "san_sebastián_del_oeste" ~ -104.854319,
-      municipio_clean == "san_quintín" ~ -110.396823,
-      municipio_clean == "san_pedro_lagunillas" ~ -104.753181,
-      municipio_clean == "mascota" ~ -104.792100,
-      municipio_clean == "ensenada" ~ -112.880537,
-      municipio_clean == "cabo_corrientes" ~ -105.453138,
-      municipio_clean == "bahía_de_banderas" ~ -105.292800,
-      municipio_clean == "ahome" ~ -109.174074,
-      municipio_clean == "rosario" ~ -109.37340921304606,
-      municipio_clean == "mascota" ~ -104.79243186410368,
-      TRUE ~ long
+    municipio_clean = case_when(
+      municipio_clean %in% c("juan_josé_ríos", "juan_jose_rios") ~ "ahome",
+      municipio_clean %in% c("nuevo_nayarit") ~ "bahía_de_banderas",
+      TRUE ~ municipio_clean
     )
+  ) %>%
+  filter(!municipio_clean %in% drop_non_goc_munis) %>%
+  group_by(year, municipio_clean, arrival_type) %>%
+  summarize(
+    estimated_arrivals = sum(estimated_arrivals, na.rm = TRUE),
+    country = dplyr::first(stats::na.omit(country)),
+    estado = {
+      x <- estado[!is.na(estado) & estado != ""]
+      if (length(x) == 0) NA_character_ else x[[1]]
+    },
+    is_filled = dplyr::first(as.character(is_filled)),
+    .groups = "drop"
   )
 
-
-estimated_int_dom_arrivals_sf <- estimated_int_dom_arrivals_latlong_clean %>% 
-  st_as_sf(coords = c("long", "lat"),
-           crs = 4326, # WGS84
-           remove = FALSE) %>% 
-  select(-rgn_id) # because many were missing and it is easier to just intersect with ohi rgns.
-
-## Same rule as Scripts 1-2: only municipios whose point lies in inland_50km_goc.
-## Exception: ensenada / san_quintín Datatur is Pacific and dropped above; their
-## GOC-buffer DENUE gapfills are force-kept and scored as Region_2.
-inland_50 <- st_read(here::here(
-  "/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer",
-  "inland_50km_goc.shp"
-))
-estimated_int_dom_arrivals_sf <- st_transform(estimated_int_dom_arrivals_sf, st_crs(inland_50))
-
-goc_denue_force_keep <- c("ensenada", "san_quintín", "san_quintin")
-
-munis_pts <- estimated_int_dom_arrivals_sf %>%
-  distinct(municipio_clean, .keep_all = TRUE)
-in_50_flag <- lengths(st_intersects(munis_pts, inland_50)) > 0
-munis_in_50 <- unique(c(
-  munis_pts$municipio_clean[in_50_flag],
-  intersect(munis_pts$municipio_clean, goc_denue_force_keep)
-))
-munis_out_50 <- setdiff(munis_pts$municipio_clean, munis_in_50)
-message("Script 4 municipios KEPT (within inland_50km or GOC-DENUE force-keep): ",
-        paste(sort(munis_in_50), collapse = ", "))
-message("Script 4 municipios DROPPED (outside inland_50km): ",
-        paste(sort(munis_out_50), collapse = ", "))
-
-estimated_int_dom_arrivals_sf <- estimated_int_dom_arrivals_sf %>%
-  filter(municipio_clean %in% munis_in_50)
+message(
+  "Dropped non-GoC municipios from scoring panel: ",
+  paste(unique(drop_non_goc_munis), collapse = ", ")
+)
+message("Aliased juan_josé_ríos to ahome; kept huajicori (Region_9).")
 ```
 
-Now, assign each municipio to an OHI region from its coordinates (reproducible spatial join — not a manual table). Force Region_2 for ensenada / san_quintín GOC DENUE gapfills.
-
 ```{r}
-goc_poly <- st_read(here("spatial/ohi_regions", "goc_ohi_rgns.shp")) %>%
-  select(rgn_id) %>%
-  st_make_valid()
+## ASCII fold + snake_case so CSV names (BAHIA DE BANDERAS, trailing nbsp, etc.)
+## match pipeline municipio_clean (bahía_de_banderas, accents, underscores)
+fold_muni_key <- function(x) {
+  x <- as.character(x)
+  x <- gsub("\u00A0|\u2007|\u202F|\uFEFF|\u200B", "", x, perl = TRUE)
+  x <- trimws(x)
+  x <- tolower(x)
+  x <- iconv(x, from = "UTF-8", to = "ASCII//TRANSLIT")
+  x <- gsub("[^a-z0-9]+", "_", x)
+  x <- gsub("^_|_$", "", x)
+  x
+}
 
-goc_poly_t <- st_transform(goc_poly, st_crs(estimated_int_dom_arrivals_sf))
+muni_rgn_candidates <- c(
+  "/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid_update_tr.csv",
+  here::here("municipality_to_rgnid_update_tr.csv"),
+  here::here("../municipality_to_rgnid_update_tr.csv")
+)
+muni_rgn_csv_path <- muni_rgn_candidates[file.exists(muni_rgn_candidates)][1]
+if (is.na(muni_rgn_csv_path)) {
+  stop("Could not find municipality_to_rgnid_update_tr.csv (tried mazu path + local repo copies).")
+}
+message("Using municipality to region CSV: ", muni_rgn_csv_path)
 
-## one point per municipio for assignment, then join back to all year/type rows
-muni_pts_score <- estimated_int_dom_arrivals_sf %>%
-  distinct(municipio_clean, .keep_all = TRUE)
-
-nn <- st_nearest_feature(muni_pts_score, goc_poly_t)
-rgn_spatial <- muni_pts_score %>%
-  st_drop_geometry() %>%
-  transmute(municipio_clean, rgn_id = goc_poly_t$rgn_id[nn]) %>%
+goc_muni_rgn <- read_csv(muni_rgn_csv_path, show_col_types = FALSE) %>%
   mutate(
-    rgn_id = case_when(
-      municipio_clean %in% c("ensenada", "san_quintín", "san_quintin") ~ "Region_2",
-      TRUE ~ rgn_id
+    municipio = gsub("\u00A0|\u2007|\u202F|\uFEFF|\u200B", "", municipio, perl = TRUE),
+    municipio = trimws(municipio),
+    municipio_key = fold_muni_key(municipio),
+    ## treat literal "NA" / blank as missing region
+    rgn_id = na_if(as.character(rgn_id), "NA"),
+    rgn_id = na_if(rgn_id, ""),
+    include_tr_quantity = toupper(trimws(as.character(include_tr_quantity))),
+    include_tr_quantity = if_else(
+      include_tr_quantity %in% c("Y", "YES", "TRUE", "1"),
+      "Y",
+      "N"
     )
+  ) %>%
+  distinct(municipio_key, .keep_all = TRUE) %>%
+  select(
+    municipio_key, rgn_id_csv = rgn_id, municipio_csv = municipio,
+    both_pacific_gulf, directly_coastal, include_tr_quantity, tr_exclude_reason, notes
   )
 
-## any still missing? should be none after inland_50 filter
-rgn_spatial %>% filter(is.na(rgn_id) | rgn_id == "")
+## one row per municipio in the (already filtered/aliased) arrivals panel
+muni_in_data <- estimated_int_dom_arrivals %>%
+  distinct(municipio_clean) %>%
+  mutate(
+    municipio_for_rgn = municipio_clean,
+    municipio_key = fold_muni_key(municipio_for_rgn)
+  )
 
-## also refresh the lookup CSV so Script 3 / other readers stay in sync
-write_csv(
-  rgn_spatial %>% arrange(municipio_clean),
-  here::here(
-    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int",
-    "ohi_rgn_assign_for_municipio_clean.csv"
+rgn_lookup <- muni_in_data %>%
+  left_join(goc_muni_rgn, by = "municipio_key") %>%
+  mutate(
+    ## GOC DENUE gapfills for these municipios score as Western Midriff (Region_2).
+    ## Datatur Pacific SECTUR for the same names is dropped in Section 1.
+    ## Huajicori: Nayarit GoC table entry (Region_9); force if mazu CSV not yet updated.
+    rgn_id_csv = case_when(
+      municipio_clean %in% c("ensenada", "san_quintín", "san_quintin") ~ "Region_2",
+      municipio_clean %in% c("huajicori") ~ coalesce(rgn_id_csv, "Region_9"),
+      TRUE ~ rgn_id_csv
+    ),
+    ## default include_tr_quantity from CSV; force-include ensenada/san_quintín/huajicori
+    include_tr_quantity = case_when(
+      municipio_clean %in% c("ensenada", "san_quintín", "san_quintin", "huajicori") ~ "Y",
+      is.na(include_tr_quantity) ~ "N",
+      TRUE ~ include_tr_quantity
+    ),
+    rgn_assign_status = case_when(
+      municipio_clean %in% c("ensenada", "san_quintín", "san_quintin", "huajicori") ~
+        "matched_goc_muni_table",
+      is.na(municipio_csv) ~ "FLAG_not_in_goc_muni_table",
+      is.na(rgn_id_csv) ~ "FLAG_in_table_but_rgn_id_missing",
+      TRUE ~ "matched_goc_muni_table"
+    ),
+    rgn_id = rgn_id_csv,
+    in_goc_muni_table = !is.na(municipio_csv) |
+      municipio_clean %in% c("ensenada", "san_quintín", "san_quintin", "huajicori")
+  ) %>%
+  select(
+    municipio_clean, municipio_for_rgn, rgn_id, rgn_assign_status,
+    in_goc_muni_table, include_tr_quantity, tr_exclude_reason,
+    both_pacific_gulf, directly_coastal, notes
+  )
+
+message("=== OHI region assignment via municipality_to_rgnid_update_tr.csv ===")
+message("Matched with rgn_id: ",
+        sum(rgn_lookup$rgn_assign_status == "matched_goc_muni_table"))
+message("In table but rgn_id missing: ",
+        paste(sort(rgn_lookup$municipio_clean[rgn_lookup$rgn_assign_status == "FLAG_in_table_but_rgn_id_missing"]),
+              collapse = ", "))
+message("FLAG — not in GoC muni table (kept for evaluation): ",
+        paste(sort(rgn_lookup$municipio_clean[rgn_lookup$rgn_assign_status == "FLAG_not_in_goc_muni_table"]),
+              collapse = ", "))
+message(
+  "Excluded from TR quantity scores (include_tr_quantity = N): ",
+  paste(sort(rgn_lookup$municipio_clean[rgn_lookup$include_tr_quantity == "N"]), collapse = ", ")
+)
+message(
+  "Region_9 kept for scoring: ",
+  paste(
+    sort(rgn_lookup$municipio_clean[
+      rgn_lookup$rgn_id == "Region_9" & rgn_lookup$include_tr_quantity == "Y"
+    ]),
+    collapse = ", "
   )
 )
 
-estimated_int_dom_arrivals_rgn <- estimated_int_dom_arrivals_sf %>%
+rgn_lookup %>%
+  filter(rgn_assign_status != "matched_goc_muni_table" | include_tr_quantity == "N") %>%
+  arrange(include_tr_quantity, rgn_assign_status, municipio_clean)
+
+write_csv(
+  rgn_lookup %>% arrange(rgn_assign_status, include_tr_quantity, municipio_clean),
+  here::here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/hotel_monitoring_int",
+    "ohi_rgn_assign_for_municipio_clean_OGmodel.csv"
+  )
+)
+
+## keep matched GoC municipios (+ flagged only if still present); drop list already applied above
+estimated_int_dom_arrivals_rgn <- estimated_int_dom_arrivals %>%
   select(-any_of("rgn_id")) %>%
-  left_join(rgn_spatial, by = "municipio_clean")
+  left_join(
+    rgn_lookup %>% select(
+      municipio_clean, rgn_id, rgn_assign_status, in_goc_muni_table,
+      include_tr_quantity, tr_exclude_reason
+    ),
+    by = "municipio_clean"
+  )
 
 estimated_int_dom_arrivals_rgn %>%
-  st_drop_geometry() %>%
-  distinct(municipio_clean, rgn_id) %>%
-  count(missing = is.na(rgn_id))
-
-mapview(
-  muni_pts_score %>% mutate(rgn_id = goc_poly_t$rgn_id[nn]),
-  zcol = "rgn_id"
-) + mapview(goc_poly_t, alpha.regions = 0.2)
+  distinct(municipio_clean, rgn_id, rgn_assign_status, include_tr_quantity) %>%
+  count(rgn_assign_status, include_tr_quantity)
 ```
 
 Let's aggregate all tourism arrivals by region and type.
 
+Matched GoC municipios with a valid `rgn_id` **and** `include_tr_quantity == "Y"` enter regional scores.
+Inland / mountainous municipios (`include_tr_quantity == "N"` in the CSV) stay in
+`estimated_int_dom_arrivals_rgn` for evaluation but are excluded from regional sums
+(so Region_9 is not inflated by Tepic and other interior centers).
+
 ```{r}
-estimated_int_dom_arrivals_ohirgn <- estimated_int_dom_arrivals_rgn %>% 
-  group_by(rgn_id, arrival_type, year) %>% 
-  summarize(agg_tourist_arrivals = sum(estimated_arrivals, na.rm = TRUE)) %>% 
+estimated_int_dom_arrivals_ohirgn <- estimated_int_dom_arrivals_rgn %>%
+  filter(
+    rgn_assign_status == "matched_goc_muni_table",
+    include_tr_quantity == "Y",
+    !is.na(rgn_id),
+    rgn_id != ""
+  ) %>%
+  group_by(rgn_id, arrival_type, year) %>%
+  summarize(agg_tourist_arrivals = sum(estimated_arrivals, na.rm = TRUE), .groups = "drop") %>%
   filter(year %in% 2019:2025)
 ```
 
@@ -500,8 +552,7 @@ estimated_int_dom_arrivals_ohirgn <- estimated_int_dom_arrivals_rgn %>%
 ```{r}
 last_3yrs <- c(2023, 2024, 2025)
 
-trend_last3_slope <- estimated_int_dom_arrivals_ohirgn %>%
-  st_drop_geometry() %>% 
+trend_last3_slope <- estimated_int_dom_arrivals_ohirgn %>% 
   filter(year %in% last_3yrs) %>%
   group_by(rgn_id, arrival_type) %>%
   summarise(
@@ -509,8 +560,7 @@ trend_last3_slope <- estimated_int_dom_arrivals_ohirgn %>%
     .groups = "drop"
   )
 
-trend_last3_pct <- estimated_int_dom_arrivals_ohirgn %>%
-  st_drop_geometry() %>% 
+trend_last3_pct <- estimated_int_dom_arrivals_ohirgn %>% 
   filter(year %in% last_3yrs) %>%
   group_by(rgn_id, arrival_type) %>%
   summarise(
@@ -525,7 +575,7 @@ dom_trend_last3yrs <- full_join(trend_last3_pct, trend_last3_slope) %>%
   mutate(target_arrivals = arrivals_2025 * 1.098, # illustrative vs latest complete year; official score baseline remains 2024 elsewhere
          proj_arrivals_2030 = arrivals_2025 + (5 * slope_per_year), # 2025 -> 2030 = 5 years
          on_track = ifelse(proj_arrivals_2030 >= target_arrivals, 1, 0))
-write_csv(dom_trend_last3yrs, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_viz","dom_trend_last3yrs_arrivals_2023_2025.csv"))
+write_csv(dom_trend_last3yrs, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_viz","dom_trend_last3yrs_arrivals_2023_2025_OGmodel.csv"))
 
 #### join with ohi rgn polygons
 ohi <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
@@ -544,8 +594,7 @@ mapview(dom_trend_last3yrs_ohigns,
 ########################################
 
 ### across the gulf:
-trend_overall <- estimated_int_dom_arrivals_ohirgn %>%
-  st_drop_geometry() %>% 
+trend_overall <- estimated_int_dom_arrivals_ohirgn %>% 
   filter(year %in% last_3yrs) %>%
   group_by(arrival_type, year) %>%
   summarise(
@@ -569,7 +618,7 @@ trend_overall_pct_change <- trend_overall %>%
 
 dom_trend_goc <- full_join(trend_overall_slope, trend_overall_pct_change) %>% 
   filter(arrival_type == "dom")
-write_csv(dom_trend_goc, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_viz","dom_trend_goc_arrivals_2023_2025.csv"))
+write_csv(dom_trend_goc, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_viz","dom_trend_goc_arrivals_2023_2025_OGmodel.csv"))
 ```
 
 
@@ -581,9 +630,8 @@ prop_dom_by_rgn <- estimated_int_dom_arrivals_ohirgn %>%
   ungroup() %>% 
   mutate(prop_rgn_total = agg_tourist_arrivals / rgn_agg_arr) %>% 
   filter(year == 2025) %>% 
-  filter(arrival_type == "dom") %>% 
-  st_drop_geometry()
-write_csv(prop_dom_by_rgn, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_viz","prop_dom_by_rgn_arrivals_2025.csv"))
+  filter(arrival_type == "dom")
+write_csv(prop_dom_by_rgn, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_viz","prop_dom_by_rgn_arrivals_2025_OGmodel.csv"))
 
 ### join with ohi rgn polygons
 ohi <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
@@ -602,7 +650,6 @@ mapview(prop_dom_arrivals_ohigns,
 #### prop of total goc
 prop_dom_all <- estimated_int_dom_arrivals_ohirgn %>% 
   filter(year == 2025) %>% 
-  st_drop_geometry() %>% 
   group_by(year) %>% 
   mutate(all_agg_arr = sum(agg_tourist_arrivals)) %>% 
   ungroup() %>% 
@@ -641,13 +688,13 @@ quantity_current_status_rgn <- estimated_int_dom_arrivals_ohirgn %>%
 
     # CURRENT STATUS (0 to 100)
     current_status = (agg_tourist_arrivals / target_arrivals) * 100,
-  ) %>% 
-  st_drop_geometry()
+  ) %>%
+  ungroup()
 
 ## save this to outputs
-write_csv(quantity_current_status_rgn, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity","int_dom_quantity_current_status_2019_2026.csv"))
+write_csv(quantity_current_status_rgn, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity","int_dom_quantity_current_status_2019_2026_OGmodel.csv"))
 
-quantity_current_status_rgn <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity","int_dom_quantity_current_status_2019_2026.csv"))
+quantity_current_status_rgn <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity","int_dom_quantity_current_status_2019_2026_OGmodel.csv"))
 ```
 
 
@@ -685,7 +732,7 @@ final_int_score_plotly <- plotly::plot_ly(
   )
 final_int_score_plotly
 
-htmlwidgets::saveWidget(final_int_score_plotly, here::here("TR/sectur_quantity_exploration_int","int_current_status_gapfilled_by_municipio_2019_2026.html"), selfcontained = TRUE)
+htmlwidgets::saveWidget(final_int_score_plotly, here::here("TR/sectur_quantity_exploration_int","int_current_status_gapfilled_by_municipio_2019_2026_OGmodel.html"), selfcontained = TRUE)
 
 ## plot the number of arrivals over time
 final_int_arrivals_plotly <- plotly::plot_ly(
@@ -738,7 +785,7 @@ final_dom_score_plotly <- plotly::plot_ly(
   )
 final_dom_score_plotly
 
-htmlwidgets::saveWidget(final_dom_score_plotly, here::here("TR/sectur_quantity_exploration_int","dom_current_status_gapfilled_by_municipio_2019_2026.html"), selfcontained = TRUE)
+htmlwidgets::saveWidget(final_dom_score_plotly, here::here("TR/sectur_quantity_exploration_int","dom_current_status_gapfilled_by_municipio_2019_2026_OGmodel.html"), selfcontained = TRUE)
 
 ## plot the number of arrivals over time
 final_dom_arrivals_plotly <- plotly::plot_ly(
@@ -769,7 +816,7 @@ tr_quantity_overall_cs <- quantity_current_status_rgn %>%
   rename(score = current_status_new) %>% 
   select(rgn_id, year, score)
 
-write_csv(tr_quantity_overall_cs, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity","tr_quantity_current_status_2019_2026.csv"))
+write_csv(tr_quantity_overall_cs, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity","tr_quantity_current_status_2019_2026_OGmodel.csv"))
 
 
 ```
@@ -804,266 +851,13 @@ final_score_plotly <- plotly::plot_ly(
   )
 final_score_plotly
 
-htmlwidgets::saveWidget(final_score_plotly,here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity","plotly_quantity_current_status_2019_2026.html"), selfcontained = TRUE)
+htmlwidgets::saveWidget(final_score_plotly,here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity","plotly_quantity_current_status_2019_2026_OGmodel.html"), selfcontained = TRUE)
 ```
 
 
-# 7. Sensitivity: covid-scaled DENUE-only 2020 fills
-Uses Script 3 Section 7 output:
-`arrivals_filled_by_DENUE_accommodation_employees_2019_2026_covid_scaled.csv`
+# 7. Note on covid-scaled sensitivity
 
-Same scoring pipeline as above, but DENUE-only 2020 fills are scaled by the observed
-SECTUR \(A_{2020}/A_{2019}\) ratio instead of model1.5’s raw year factor. Baseline
-Section 1-6 outputs are unchanged. Requires Sections 1 and 4 objects already in memory
-(`all_sectur_arrivals_prep_join`, `all_sectur_prop_by_state`, `munis_in_50`,
-`rgn_spatial`, `rgn_colors`).
+Not included in this OG-model parallel. Compare against main `script4_tr_quantity.qmd` Section 7 if needed. This script scores only the model3 + model1 gapfills from `script3_OGmodel_gapfilling_arrivalls.qmd`.
 
-```{r}
-gapfilled_total_arrivals_covid_scaled <- read_csv(here::here(
-  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int",
-  "arrivals_filled_by_DENUE_accommodation_employees_2019_2026_covid_scaled.csv"
-)) %>%
-  mutate(country = "Mexico") %>%
-  select(
-    year = data_year, country, estado, municipio_clean, rgn_id,
-    arrivals_merged = arrivals_merged_no_neg, is_filled
-  )
 
-gapfilled_municipios_covid <- setdiff(
-  unique(gapfilled_total_arrivals_covid_scaled$municipio_clean),
-  unique(all_sectur_arrivals_prep_join$municipio_clean)
-)
-
-gapfilled_municipios_covid_df <- expand.grid(
-  municipio_clean = gapfilled_municipios_covid,
-  year = 2019:2026,
-  arrival_type = c("int", "dom"),
-  KEEP.OUT.ATTRS = FALSE,
-  stringsAsFactors = FALSE
-)
-
-gapfilled_and_sectur_covid <- full_join(
-  all_sectur_arrivals_prep_join,
-  gapfilled_municipios_covid_df,
-  by = c("municipio_clean", "year", "arrival_type")
-)
-
-joined_covid_scaled <- full_join(
-  gapfilled_total_arrivals_covid_scaled,
-  gapfilled_and_sectur_covid,
-  by = c("year", "municipio_clean"),
-  relationship = "many-to-many"
-) %>%
-  left_join(all_sectur_prop_by_state, by = c("estado", "arrival_type")) %>%
-  mutate(avg_prop = case_when(
-    estado == "nayarit" & arrival_type == "dom" ~ 0.56415674,
-    estado == "nayarit" & arrival_type == "int" ~ 0.43584326,
-    TRUE ~ avg_prop
-  )) %>%
-  mutate(estimated_arrivals = ifelse(
-    is_filled == "1" | is_filled == 1,
-    avg_prop * arrivals_merged,
-    raw_arrivals
-  ))
-
-## observed vs gapfilled totals by type (milder 2020 fill drop for both)
-joined_covid_scaled %>%
-  filter(year %in% c(2019, 2020, 2024)) %>%
-  group_by(arrival_type, year, is_filled) %>%
-  summarize(total = sum(estimated_arrivals, na.rm = TRUE), .groups = "drop")
-```
-
-```{r}
-## reuse spatially assigned municipio -> region from Section 4 (rgn_spatial)
-estimated_covid_scaled_ohirgn <- joined_covid_scaled %>%
-  select(-any_of("rgn_id")) %>%
-  ## same coastal mask as main Script 4 path
-  filter(municipio_clean %in% munis_in_50) %>%
-  left_join(rgn_spatial, by = "municipio_clean") %>%
-  group_by(rgn_id, arrival_type, year) %>%
-  summarize(agg_tourist_arrivals = sum(estimated_arrivals, na.rm = TRUE), .groups = "drop") %>%
-  filter(year %in% 2019:2025)
-
-baseline_year <- 2024
-
-quantity_current_status_rgn_covid_scaled <- estimated_covid_scaled_ohirgn %>%
-  mutate(year = as.numeric(year)) %>%
-  group_by(rgn_id, arrival_type) %>%
-  mutate(
-    baseline_arrivals = agg_tourist_arrivals[year == baseline_year][1],
-    target_multiplier = case_when(
-      arrival_type == "dom" ~ 1.098,
-      arrival_type == "int" ~ 1.30,
-      TRUE ~ NA_real_
-    ),
-    target_arrivals = baseline_arrivals * target_multiplier,
-    current_status = (agg_tourist_arrivals / target_arrivals) * 100
-  ) %>%
-  ungroup()
-
-write_csv(
-  quantity_current_status_rgn_covid_scaled,
-  here::here(
-    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity",
-    "int_dom_quantity_current_status_2019_2026_covid_scaled.csv"
-  )
-)
-
-tr_quantity_overall_cs_covid_scaled <- quantity_current_status_rgn_covid_scaled %>%
-  group_by(rgn_id, year) %>%
-  summarize(score = mean(current_status), .groups = "drop")
-
-write_csv(
-  tr_quantity_overall_cs_covid_scaled,
-  here::here(
-    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity",
-    "tr_quantity_current_status_2019_2026_covid_scaled.csv"
-  )
-)
-```
-
-```{r}
-library(plotly)
-
-## international scores
-int_cs_covid_scaled <- quantity_current_status_rgn_covid_scaled %>%
-  filter(arrival_type == "int") %>%
-  arrange(year)
-
-final_int_score_plotly_covid_scaled <- plot_ly(
-  int_cs_covid_scaled,
-  x = ~year,
-  y = ~current_status,
-  color = ~rgn_id,
-  colors = rgn_colors,
-  type = "scatter",
-  mode = "lines+markers"
-) %>%
-  layout(
-    title = "CURRENT STATUS (covid-scaled fills): International arrivals by region",
-    xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines(
-    x = range(int_cs_covid_scaled$year),
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal 2030 (100/100)",
-    inherit = FALSE
-  )
-final_int_score_plotly_covid_scaled
-
-## international raw arrivals
-final_int_arrivals_plotly_covid_scaled <- plot_ly(
-  int_cs_covid_scaled,
-  x = ~year,
-  y = ~agg_tourist_arrivals,
-  color = ~rgn_id,
-  colors = rgn_colors,
-  type = "scatter",
-  mode = "lines+markers"
-) %>%
-  layout(
-    title = "International arrivals by region (covid-scaled DENUE-only 2020 fills)",
-    xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "Aggregated tourist arrivals")
-  )
-final_int_arrivals_plotly_covid_scaled
-
-## domestic scores
-dom_cs_covid_scaled <- quantity_current_status_rgn_covid_scaled %>%
-  filter(arrival_type == "dom") %>%
-  arrange(year)
-
-final_dom_score_plotly_covid_scaled <- plot_ly(
-  dom_cs_covid_scaled,
-  x = ~year,
-  y = ~current_status,
-  color = ~rgn_id,
-  colors = rgn_colors,
-  type = "scatter",
-  mode = "lines+markers"
-) %>%
-  layout(
-    title = "CURRENT STATUS (covid-scaled fills): Domestic arrivals by region",
-    xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines(
-    x = range(dom_cs_covid_scaled$year),
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal 2030 (100/100)",
-    inherit = FALSE
-  )
-final_dom_score_plotly_covid_scaled
-
-## domestic raw arrivals
-final_dom_arrivals_plotly_covid_scaled <- plot_ly(
-  dom_cs_covid_scaled,
-  x = ~year,
-  y = ~agg_tourist_arrivals,
-  color = ~rgn_id,
-  colors = rgn_colors,
-  type = "scatter",
-  mode = "lines+markers"
-) %>%
-  layout(
-    title = "Domestic arrivals by region (covid-scaled DENUE-only 2020 fills)",
-    xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "Aggregated tourist arrivals")
-  )
-final_dom_arrivals_plotly_covid_scaled
-
-## overall TR quantity score (mean of int + dom)
-final_score_plotly_covid_scaled <- plot_ly(
-  tr_quantity_overall_cs_covid_scaled %>% arrange(year),
-  x = ~year,
-  y = ~score,
-  color = ~rgn_id,
-  colors = rgn_colors,
-  type = "scatter",
-  mode = "lines+markers"
-) %>%
-  layout(
-    title = "CURRENT STATUS: TR Quantity (covid-scaled fills)",
-    xaxis = list(title = "Año // Year"),
-    yaxis = list(title = "Puntaje // Percent (out of 100)")
-  ) %>%
-  add_lines(
-    x = range(tr_quantity_overall_cs_covid_scaled$year),
-    y = c(100, 100),
-    line = list(color = "black", width = 2, dash = "dash"),
-    name = "Meta // Goal 2030 (100/100)",
-    inherit = FALSE
-  )
-final_score_plotly_covid_scaled
-
-htmlwidgets::saveWidget(
-  final_int_score_plotly_covid_scaled,
-  here::here(
-    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity",
-    "plotly_int_current_status_2019_2026_covid_scaled.html"
-  ),
-  selfcontained = TRUE
-)
-
-htmlwidgets::saveWidget(
-  final_dom_score_plotly_covid_scaled,
-  here::here(
-    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity",
-    "plotly_dom_current_status_2019_2026_covid_scaled.html"
-  ),
-  selfcontained = TRUE
-)
-
-htmlwidgets::saveWidget(
-  final_score_plotly_covid_scaled,
-  here::here(
-    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_quantity",
-    "plotly_quantity_current_status_2019_2026_covid_scaled.html"
-  ),
-  selfcontained = TRUE
-)
-```
 
