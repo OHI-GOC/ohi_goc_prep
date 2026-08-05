@@ -1,0 +1,1055 @@
+---
+title: "Sense of Place (SP): LSP choropleth maps"
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    theme: cerulean
+editor_options:
+  chunk_output_type: console
+---
+
+# Purpose
+
+Static choropleth maps of **Lasting Special Places (LSP)** scores by OHI Gulf of California region, plus **process maps** that illustrate how each LSP type (scripts 2–7) is scored.
+
+- overall LSP current status (2025 snapshot)
+- each LSP category current status (where a region has no score: solid white)
+- method illustrations: special protected areas, dive sites, archaeology, fishing spots, special habitats, all other places
+
+Choropleths follow the TR / Access style (states underlay, marine OHI regions, 0–100 scale, white for NA). Process maps use focused extents and rule-based symbology.
+
+Outputs (PNG and PDF) are written to:
+
+`goal_prep/sp/lsp/v2025/viz` on Mazu, or `sp/lsp/v2025/viz` when using the local mirror.
+
+```{r setup}
+library(tidyverse)
+library(sf)
+library(here)
+library(ggplot2)
+library(grid)
+
+# Prefer Mazu goal_prep paths; fall back to local workspace mirror
+goc_root <- "/home/shares/ohi/OHI_GOC"
+local_lsp_root <- here("sp/lsp/v2025")
+mazu_lsp_root <- file.path(goc_root, "goal_prep/sp/lsp/v2025")
+
+lsp_prep_root <- if (dir.exists(file.path(mazu_lsp_root, "output"))) {
+  mazu_lsp_root
+} else if (dir.exists(file.path(local_lsp_root, "output"))) {
+  local_lsp_root
+} else {
+  mazu_lsp_root
+}
+
+lsp_output_dir <- file.path(lsp_prep_root, "output")
+lsp_int_dir <- file.path(lsp_prep_root, "int")
+viz_dir <- file.path(lsp_prep_root, "viz")
+dir.create(viz_dir, recursive = TRUE, showWarnings = FALSE)
+
+# first existing file among candidates
+first_path <- function(...) {
+  paths <- c(...)
+  hit <- paths[file.exists(paths)]
+  if (length(hit) == 0) NA_character_ else hit[[1]]
+}
+
+safe_read_csv <- function(path, ...) {
+  if (is.na(path) || !file.exists(path)) return(NULL)
+  tryCatch(read_csv(path, show_col_types = FALSE, ...), error = function(e) NULL)
+}
+
+safe_st_read <- function(path, ...) {
+  if (is.na(path) || !file.exists(path)) return(NULL)
+  tryCatch(st_read(path, quiet = TRUE, ...), error = function(e) NULL)
+}
+
+# TR / Access-style ramp (0 = dark red, 100 = dark blue)
+lsp_palette <- c(
+  "#8a0032", "#A50026", "#A50026", "#D73027", "#F46D43",
+  "#FDAE61", "#FEE090", "#FEE090", "#ABD9E9", "#4575B4", "#313695"
+)
+lsp_na_fill <- "white"
+lsp_legend_title <- "Current status score"
+
+normalize_rgn_id <- function(x) {
+  x %>%
+    as.character() %>%
+    str_squish() %>%
+    str_replace_all(" ", "_")
+}
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+```
+
+# Spatial layers
+
+```{r spatial}
+ohi_marine <- st_read(
+  here("spatial/ohi_regions/goc_ohi_rgns.shp"),
+  quiet = TRUE
+) %>%
+  filter(location == "marine") %>%
+  mutate(rgn_id = normalize_rgn_id(rgn_id)) %>%
+  dplyr::select(rgn_id, geometry)
+
+states <- st_read(
+  here("spatial/ohi_regions/states.shp"),
+  quiet = TRUE
+) %>%
+  st_transform(st_crs(ohi_marine))
+```
+
+# Score tables
+
+```{r scores}
+read_rgn_condition <- function(path, value_col = "condition") {
+  read_csv(path, show_col_types = FALSE) %>%
+    mutate(
+      rgn_id = normalize_rgn_id(rgn_id),
+      score = suppressWarnings(as.numeric(.data[[value_col]]))
+    ) %>%
+    dplyr::select(rgn_id, score) %>%
+    group_by(rgn_id) %>%
+    summarize(score = mean(score, na.rm = TRUE), .groups = "drop")
+}
+
+lsp_overall <- read_csv(
+  file.path(lsp_output_dir, "lsp_current_status.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    rgn_id = normalize_rgn_id(rgn_id),
+    score = suppressWarnings(as.numeric(current_status))
+  ) %>%
+  dplyr::select(rgn_id, score)
+
+score_layers <- list(
+  "lsp_overall_2025" = list(
+    data = lsp_overall,
+    title = "Lasting Special Places (LSP)\nCurrent status 2025"
+  ),
+  "lsp_special_protected_areas" = list(
+    data = read_rgn_condition(file.path(lsp_output_dir, "rgn_protected_area_condition.csv")),
+    title = "LSP: Special Protected Areas"
+  ),
+  "lsp_priority_dive_sites" = list(
+    data = read_rgn_condition(file.path(lsp_output_dir, "rgn_dive_sites_condition.csv")),
+    title = "LSP: Priority Dive Sites"
+  ),
+  "lsp_iconic_fishing_spots" = list(
+    data = read_rgn_condition(file.path(lsp_output_dir, "rgn_fishing_sites_condition.csv")),
+    title = "LSP: Iconic Fishing Spots"
+  ),
+  "lsp_archaeological_sites" = list(
+    data = read_rgn_condition(file.path(lsp_output_dir, "rgn_ewg_archaeological_sites_condition.csv")),
+    title = "LSP: Archaeological Sites"
+  ),
+  "lsp_special_habitats" = list(
+    data = read_rgn_condition(file.path(lsp_output_dir, "rgn_special_habitats_condition.csv")),
+    title = "LSP: Special Habitats"
+  ),
+  "lsp_all_other_special_places" = list(
+    data = read_rgn_condition(file.path(lsp_output_dir, "rgn_final_other_protections_condition.csv")),
+    title = "LSP: All other Special Places"
+  )
+)
+
+special_protec <- read_csv(here::here(lsp_output_dir, "rgn_protected_area_condition.csv"))
+dive_cond <- read_csv(here::here(lsp_output_dir, "rgn_dive_sites_condition.csv"))
+fish_cond <- read_csv(here::here(lsp_output_dir, "rgn_fishing_sites_condition.csv"))
+arch_cond <- read_csv(here::here(lsp_output_dir, "rgn_ewg_archaeological_sites_condition.csv"))
+hab_cond <- read_csv(here::here(lsp_output_dir, "rgn_special_habitats_condition.csv"))
+other_cond <- read_csv(here::here(lsp_output_dir, "rgn_final_other_protections_condition.csv"))
+
+```
+
+# Choropleth helper
+
+Join every score table to the full set of nine marine regions so missing categories stay NA (solid white), not dropped.
+
+```{r map-helper}
+join_scores_to_ohi <- function(score_df) {
+  ohi_marine %>%
+    left_join(score_df, by = "rgn_id") %>%
+    mutate(
+      rgn_label = unname(rgn_labels[rgn_id]),
+      score = ifelse(is.nan(score), NA_real_, score)
+    )
+}
+
+make_lsp_choropleth <- function(
+    score_df,
+    legend_title = lsp_legend_title,
+    plot_title = NULL,
+    label_scores = FALSE
+) {
+  dat <- join_scores_to_ohi(score_df)
+
+  p <- ggplot() +
+    geom_sf(
+      data = states,
+      fill = "#d6cac0",
+      color = "grey10",
+      linewidth = 0.1
+    ) +
+    geom_sf(
+      data = dat,
+      aes(fill = score),
+      color = "black",
+      linewidth = 0.2
+    ) +
+    scale_fill_gradientn(
+      colours = lsp_palette,
+      limits = c(0, 100),
+      na.value = lsp_na_fill,
+      name = legend_title,
+      breaks = seq(0, 100, by = 25)
+    ) +
+    labs(
+      title = plot_title,
+      caption = "White = no score (NA)"
+    ) +
+    coord_sf(expand = FALSE) +
+    theme_void(base_size = 12) +
+    theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
+      plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+      legend.position = "right",
+      legend.key.height = unit(0.9, "cm"),
+      legend.key.width = unit(0.45, "cm"),
+      legend.title = element_text(size = 11),
+      legend.text = element_text(size = 9),
+      plot.caption = element_text(size = 9, hjust = 0, color = "grey30"),
+      plot.margin = margin(10, 10, 10, 10)
+    )
+
+  if (label_scores) {
+    p <- p +
+      geom_sf_text(
+        data = dat %>%
+          mutate(label = ifelse(is.na(score), "NA", as.character(round(score)))),
+        aes(label = label),
+        size = 3,
+        color = "grey10",
+        fun.geometry = function(g) st_point_on_surface(st_make_valid(g))
+      )
+  }
+
+  p
+}
+
+save_lsp_map <- function(gg, stem, width = 8, height = 7) {
+  png_path <- file.path(viz_dir, paste0(stem, ".png"))
+  pdf_path <- file.path(viz_dir, paste0(stem, ".pdf"))
+  ggsave(png_path, gg, width = width, height = height, dpi = 300, bg = "white")
+  tryCatch(
+    ggsave(pdf_path, gg, width = width, height = height, device = cairo_pdf, bg = "white"),
+    error = function(e) {
+      ggsave(pdf_path, gg, width = width, height = height, device = "pdf", bg = "white")
+    }
+  )
+  message("Wrote:\n  ", png_path, "\n  ", pdf_path)
+  invisible(list(png = png_path, pdf = pdf_path))
+}
+```
+
+# Build, display, and save maps
+
+```{r maps, fig.width=8, fig.height=7}
+saved <- list()
+
+for (stem in names(score_layers)) {
+  layer <- score_layers[[stem]]
+  gg <- make_lsp_choropleth(
+    layer$data,
+    legend_title = lsp_legend_title,
+    plot_title = layer$title,
+    label_scores = FALSE
+  )
+  print(gg)
+  saved[[stem]] <- save_lsp_map(gg, stem)
+}
+```
+
+# Multi-panel of category maps
+
+```{r category-panel, fig.width=12, fig.height=10}
+cat_long <- bind_rows(
+  lapply(names(score_layers), function(stem) {
+    if (stem == "lsp_overall_2025") return(NULL)
+    score_layers[[stem]]$data %>%
+      mutate(
+        layer = stem,
+        panel_title = score_layers[[stem]]$title
+      )
+  })
+)
+
+panel_sf <- ohi_marine %>%
+  select(rgn_id) %>%
+  st_drop_geometry() %>%
+  tidyr::crossing(panel_title = unique(cat_long$panel_title)) %>%
+  left_join(cat_long, by = c("rgn_id", "panel_title")) %>%
+  left_join(ohi_marine, by = "rgn_id") %>%
+  st_as_sf() %>%
+  mutate(score = ifelse(is.nan(score), NA_real_, score))
+
+gg_panel <- ggplot() +
+  geom_sf(
+    data = states,
+    fill = "#d6cac0",
+    color = "grey10",
+    linewidth = 0.05
+  ) +
+  geom_sf(
+    data = panel_sf,
+    aes(fill = score),
+    color = "black",
+    linewidth = 0.15
+  ) +
+  scale_fill_gradientn(
+    colours = lsp_palette,
+    limits = c(0, 100),
+    na.value = lsp_na_fill,
+    name = lsp_legend_title,
+    breaks = seq(0, 100, by = 25)
+  ) +
+  facet_wrap(~ panel_title, ncol = 3) +
+  labs(caption = "White = no score (NA)") +
+  coord_sf(expand = FALSE) +
+  theme_void(base_size = 11) +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    strip.text = element_text(size = 9, face = "bold"),
+    legend.position = "right",
+    plot.caption = element_text(size = 9, hjust = 0, color = "grey30"),
+    plot.margin = margin(8, 8, 8, 8)
+  )
+
+gg_panel
+save_lsp_map(gg_panel, "lsp_categories_panel", width = 12, height = 10)
+```
+
+# Process maps: scoring methods by LSP type
+
+Static **method illustrations** (same spirit as the priority-dive Espíritu Santo map). Each map zooms to places where contrasting scoring rules are easy to see. White/outline underlays are land or ancillary layers; symbols and fills encode **how** points/polygons get their condition, not the regional choropleth.
+
+Paths try Mazu first, then the local `sp/lsp/v2025` mirror. Missing layers print a short message instead of stopping the document.
+
+```{r process-helpers}
+process_theme <- function(base_size = 11) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      legend.position = "bottom",
+      legend.box = "vertical",
+      panel.grid.minor = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+      plot.title = element_text(face = "bold", size = base_size + 1),
+      plot.subtitle = element_text(size = base_size - 1, color = "grey30"),
+      plot.caption = element_text(size = base_size - 2, hjust = 0, color = "grey40")
+    )
+}
+
+as_bbox <- function(xmin, xmax, ymin, ymax, crs = 4326) {
+  st_bbox(c(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), crs = st_crs(crs))
+}
+
+crop_sf <- function(x, bb) {
+  if (is.null(x) || nrow(x) == 0) return(x)
+  tryCatch(
+    suppressWarnings(st_crop(st_make_valid(x), bb)),
+    error = function(e) x
+  )
+}
+
+filter_points_in_bbox <- function(pts, bb) {
+  if (is.null(pts) || nrow(pts) == 0) return(pts)
+  coords <- st_coordinates(pts)
+  pts %>%
+    mutate(.x = coords[, 1], .y = coords[, 2]) %>%
+    filter(
+      .x >= bb["xmin"], .x <= bb["xmax"],
+      .y >= bb["ymin"], .y <= bb["ymax"]
+    ) %>%
+    dplyr::select(-.x, -.y)
+}
+
+# Shared land / ANP underlays for process maps
+process_states <- tryCatch(
+  {
+    if (exists("states") && !is.null(states)) {
+      states
+    } else {
+      safe_st_read(here("spatial/ohi_regions/states.shp")) %>%
+        st_transform(4326)
+    }
+  },
+  error = function(e) NULL
+)
+
+process_anp_sf <- safe_st_read(first_path(
+  file.path(goc_root, "spatial/from_hem_POEM_ANP/232_ANP-ITRF08_16062025/232_ANP-ITRF08_16062025.shp")
+))
+if (!is.null(process_anp_sf)) {
+  process_anp_sf <- process_anp_sf %>%
+    st_zm(drop = TRUE, what = "ZM") %>%
+    st_make_valid() %>%
+    st_transform(4326) %>%
+    st_simplify(dTolerance = 0.002, preserveTopology = TRUE)
+}
+
+all_protected_sf <- safe_st_read(first_path(
+  file.path(goc_root, "spatial/protected_areas_wdpa_conanp_and_hem/all_goc_protected_areas_v2_2025.shp"),
+  file.path(goc_root, "spatial/protected _areas_wdpa_and_hem/all_goc_protected_areas_2025.shp")
+))
+if (!is.null(all_protected_sf)) {
+  all_protected_sf <- all_protected_sf %>%
+    st_zm(drop = TRUE, what = "ZM") %>%
+    st_make_valid() %>%
+    st_transform(4326)
+  nm <- names(all_protected_sf)
+  name_col <- nm[tolower(nm) %in% c("name", "nombre", "orig_name", "wdpa_pid")][1]
+  if (!is.na(name_col) && name_col != "name") {
+    all_protected_sf <- all_protected_sf %>% rename(name = !!sym(name_col))
+  }
+}
+
+# Expert list with coordinates (for point-based LSP types)
+ewg_coords_v4 <- safe_read_csv(first_path(
+  file.path(lsp_prep_root, "identifying_lasting_special_places_collapsed_lsp_protections_v4.csv"),
+  file.path(mazu_lsp_root, "identifying_lasting_special_places_collapsed_lsp_protections_v4.csv"),
+  file.path(local_lsp_root, "identifying_lasting_special_places_collapsed_lsp_protections_v4.csv")
+))
+if (!is.null(ewg_coords_v4)) {
+  # janitor-style names without requiring janitor
+  names(ewg_coords_v4) <- names(ewg_coords_v4) %>%
+    tolower() %>%
+    str_replace_all("[^a-z0-9]+", "_") %>%
+    str_replace_all("^_|_$", "") %>%
+    str_replace_all("_+", "_")
+  # common cleaned name for the LSP identity column
+  if (!"lasting_special_place_lsp" %in% names(ewg_coords_v4)) {
+    hit <- names(ewg_coords_v4)[str_detect(names(ewg_coords_v4), "lasting_special_place")]
+    if (length(hit) > 0) {
+      ewg_coords_v4 <- ewg_coords_v4 %>% rename(lasting_special_place_lsp = !!sym(hit[[1]]))
+    }
+  }
+  ewg_coords_v4 <- ewg_coords_v4 %>%
+    mutate(
+      lat = suppressWarnings(as.numeric(lat)),
+      long = suppressWarnings(as.numeric(long)),
+      lasting_special_place_lsp = str_squish(as.character(lasting_special_place_lsp))
+    ) %>%
+    filter(!is.na(lat), !is.na(long), !is.na(lasting_special_place_lsp))
+}
+```
+
+## Script 2 — Special protected areas (SIMEC / Ramsar management)
+
+Special protected areas are **already** ANPs/Ramsar sites on the EWG list. Condition is SIMEC i-efectividad where available; Ramsar sites use management-plan rules (yes = max i-efectividad, in progress = 60, no = min). Focus: Upper Gulf / Colorado Delta (Biosphere Reserve vs Delta Ramsar).
+
+```{r process-protected-areas, fig.width=9, fig.height=6.5}
+pa_cond <- safe_read_csv(file.path(lsp_output_dir, "protected_area_condition.csv"))
+
+gg_pa_process <- NULL
+if (!is.null(pa_cond) && !is.null(all_protected_sf)) {
+  pa_cond <- pa_cond %>%
+    mutate(
+      overall_condition = suppressWarnings(as.numeric(overall_condition)),
+      scoring_rule = case_when(
+        !is.na(if_ramsar_has_management_plan) & if_ramsar_has_management_plan == "y" ~
+          "Ramsar: management plan present (max SIMEC)",
+        !is.na(if_ramsar_has_management_plan) & if_ramsar_has_management_plan == "in_progress" ~
+          "Ramsar: plan in progress (60)",
+        !is.na(if_ramsar_has_management_plan) & if_ramsar_has_management_plan == "n" ~
+          "Ramsar: no plan (min SIMEC)",
+        !is.na(i_efectividad_name) | i_efectividad_name == "" ~
+          "Special case / no SIMEC name",
+        TRUE ~ "CONANP SIMEC i-efectividad"
+      ),
+      join_name = str_squish(as.character(wdpa_orig_name))
+    )
+
+  pa_sf <- all_protected_sf %>%
+    mutate(join_name = str_squish(as.character(name))) %>%
+    inner_join(
+      pa_cond %>% dplyr::select(join_name, overall_condition, scoring_rule, lasting_special_place_description),
+      by = "join_name"
+    )
+
+  bb <- as_bbox(-115.2, -113.4, 31.0, 32.05)
+  pa_focus <- crop_sf(pa_sf, bb)
+  states_focus <- crop_sf(process_states, bb)
+  anp_focus <- crop_sf(process_anp_sf, bb)
+
+  if (!is.null(pa_focus) && nrow(pa_focus) > 0) {
+    gg_pa_process <- ggplot() +
+      {
+        if (!is.null(states_focus) && nrow(states_focus) > 0) {
+          geom_sf(data = states_focus, fill = "#d6cac0", color = "grey40", linewidth = 0.15)
+        }
+      } +
+      {
+        if (!is.null(anp_focus) && nrow(anp_focus) > 0) {
+          geom_sf(data = anp_focus, fill = NA, color = "grey50", linewidth = 0.2, linetype = "dotted")
+        }
+      } +
+      geom_sf(
+        data = pa_focus,
+        aes(fill = overall_condition),
+        color = "grey15",
+        linewidth = 0.25,
+        alpha = 0.85
+      ) +
+      scale_fill_gradientn(
+        colours = lsp_palette,
+        limits = c(0, 100),
+        na.value = "white",
+        name = "Condition\n(0–100)"
+      ) +
+      coord_sf(xlim = c(bb["xmin"], bb["xmax"]), ylim = c(bb["ymin"], bb["ymax"]), expand = FALSE) +
+      labs(
+        title = "Process: Special Protected Areas (script 2)",
+        subtitle = "Upper Gulf / Colorado Delta — condition from SIMEC or Ramsar management-plan rules",
+        caption = "Filled polygons = EWG special protected areas joined to WDPA/ANP geometry. Dotted outlines = Hem ANP layer for context."
+      ) +
+      process_theme()
+    print(gg_pa_process)
+    save_lsp_map(gg_pa_process, "process_special_protected_areas", width = 9, height = 6.5)
+  }
+}
+if (is.null(gg_pa_process)) {
+  message("Process map (protected areas): need protected_area_condition.csv + all_goc_protected_areas shapefile.")
+}
+```
+
+## Script 3 — Priority dive sites (inside PA vs NOM floor)
+
+Same decision rule as the website process map: sites inside scored ANPs use SIMEC/RMPP; outside use the unprotected default (currently 58). Focus: Espíritu Santo / La Paz.
+
+```{r process-dive-sites, fig.width=9, fig.height=6.5}
+dive_cond <- safe_read_csv(file.path(lsp_output_dir, "dive_sites_condition.csv"))
+dive_gpkg <- safe_st_read(first_path(
+  file.path(lsp_int_dir, "dive_sites_w_priority_goc_rgnid.gpkg"),
+  file.path(mazu_lsp_root, "int/dive_sites_w_priority_goc_rgnid.gpkg"),
+  file.path(local_lsp_root, "int/dive_sites_w_priority_goc_rgnid.gpkg")
+))
+
+gg_dive_process <- NULL
+if (!is.null(dive_cond) && !is.null(dive_gpkg)) {
+  dive_cond <- dive_cond %>%
+    mutate(
+      overall_condition = suppressWarnings(as.numeric(overall_condition)),
+      pa_condition = suppressWarnings(as.numeric(protected_area_condition)),
+      nombre_sitio_de_buceo = str_squish(as.character(nombre_sitio_de_buceo)),
+      scoring_rule = if_else(
+        !is.na(pa_condition),
+        "Inside scored protected area (SIMEC or RMPP)",
+        "Outside scored protected area (default 58)"
+      )
+    ) %>%
+    distinct(nombre_sitio_de_buceo, .keep_all = TRUE)
+
+  dives <- dive_gpkg %>%
+    st_transform(4326) %>%
+    mutate(nombre_sitio_de_buceo = str_squish(as.character(nombre_sitio_de_buceo))) %>%
+    left_join(
+      dive_cond %>% dplyr::select(nombre_sitio_de_buceo, overall_condition, scoring_rule),
+      by = "nombre_sitio_de_buceo"
+    )
+
+  bb <- as_bbox(-110.50, -110.15, 24.10, 24.55)
+  pa_focus <- crop_sf(if (!is.null(process_anp_sf)) process_anp_sf else all_protected_sf, bb)
+  dive_focus <- filter_points_in_bbox(dives, bb)
+
+  if (!is.null(dive_focus) && nrow(dive_focus) > 0) {
+    gg_dive_process <- ggplot() +
+      {
+        if (!is.null(pa_focus) && nrow(pa_focus) > 0) {
+          geom_sf(data = pa_focus, fill = "#98a25a", color = "gray30", linewidth = 0.2, alpha = 0.45)
+        }
+      } +
+      geom_sf(
+        data = dive_focus,
+        aes(color = scoring_rule, shape = scoring_rule),
+        size = 2.4,
+        alpha = 0.95
+      ) +
+      scale_color_manual(
+        name = "Dive site scoring rule",
+        values = c(
+          "Inside scored protected area (SIMEC or RMPP)" = "#C03729",
+          "Outside scored protected area (default 58)" = "#333333"
+        ),
+        na.value = "gray50"
+      ) +
+      scale_shape_manual(
+        name = "Dive site scoring rule",
+        values = c(
+          "Inside scored protected area (SIMEC or RMPP)" = 16,
+          "Outside scored protected area (default 58)" = 17
+        ),
+        na.value = 4
+      ) +
+      coord_sf(xlim = c(bb["xmin"], bb["xmax"]), ylim = c(bb["ymin"], bb["ymax"]), expand = FALSE) +
+      labs(
+        title = "Process: Priority Dive Sites (script 3)",
+        subtitle = "Espíritu Santo / Bahía de La Paz — inside scored ANPs vs unprotected default",
+        caption = "Red circles: condition from SIMEC/RMPP for the containing protected area. Black triangles: default 58 (min i-efectividad among PA dive sites)."
+      ) +
+      process_theme() +
+      guides(color = guide_legend(nrow = 2), shape = guide_legend(nrow = 2))
+    print(gg_dive_process)
+    save_lsp_map(gg_dive_process, "process_priority_dive_sites", width = 9, height = 6.5)
+  }
+}
+if (is.null(gg_dive_process)) {
+  message("Process map (dive): need dive_sites_condition.csv + dive_sites_w_priority_goc_rgnid.gpkg.")
+}
+```
+
+## Script 4 — Archaeological / cultural sites (INAH → PA → codified 30)
+
+Priority: INAH-managed directory (100) → overlapping ANP SIMEC → legal floor **30** under the federal monuments law when neither applies. Coordinates from the collapsed EWG list.
+
+```{r process-archaeological, fig.width=9, fig.height=6.5}
+arch_cond <- safe_read_csv(file.path(lsp_output_dir, "ewg_archaeological_sites_condition.csv"))
+
+gg_arch_process <- NULL
+if (!is.null(arch_cond) && !is.null(ewg_coords_v4)) {
+  arch_cond <- arch_cond %>%
+    mutate(
+      lasting_special_place_lsp = str_squish(as.character(lasting_special_place_lsp)),
+      overall_condition = suppressWarnings(as.numeric(overall_condition)),
+      pa_condition = suppressWarnings(as.numeric(protected_area_condition)),
+      in_inah = as.logical(in_INAH_directory),
+      scoring_rule = case_when(
+        !is.na(in_inah) & in_inah ~ "INAH directory (condition 100)",
+        !is.na(pa_condition) & pa_condition > 0 & (is.na(overall_condition) | abs(overall_condition - pa_condition) < 1e-6) ~
+          "Inside protected area (SIMEC / special)",
+        !is.na(overall_condition) & overall_condition >= 99 ~ "Strong non-INAH protection (e.g. sacred-site accord)",
+        !is.na(overall_condition) & overall_condition <= 35 ~ "Codified legal floor (30)",
+        TRUE ~ "Other / mixed rule"
+      )
+    )
+
+  arch_sf <- ewg_coords_v4 %>%
+    {
+      if ("protection_should_be" %in% names(.)) {
+        filter(., str_detect(str_to_upper(as.character(protection_should_be)), "INAH") |
+                 lasting_special_place_lsp %in% arch_cond$lasting_special_place_lsp)
+      } else {
+        filter(., lasting_special_place_lsp %in% arch_cond$lasting_special_place_lsp)
+      }
+    } %>%
+    distinct(lasting_special_place_lsp, .keep_all = TRUE) %>%
+    inner_join(
+      arch_cond %>% dplyr::select(lasting_special_place_lsp, overall_condition, scoring_rule),
+      by = "lasting_special_place_lsp"
+    ) %>%
+    st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+
+  # Baja mid-Gulf window captures Sierra San Francisco (INAH) plus codified sites
+  bb <- as_bbox(-114.2, -109.5, 23.0, 29.5)
+  states_focus <- crop_sf(process_states, bb)
+  anp_focus <- crop_sf(if (!is.null(all_protected_sf)) all_protected_sf else process_anp_sf, bb)
+  arch_focus <- filter_points_in_bbox(arch_sf, bb)
+
+  if (!is.null(arch_focus) && nrow(arch_focus) > 0) {
+    gg_arch_process <- ggplot() +
+      {
+        if (!is.null(states_focus) && nrow(states_focus) > 0) {
+          geom_sf(data = states_focus, fill = "#d6cac0", color = "grey40", linewidth = 0.15)
+        }
+      } +
+      {
+        if (!is.null(anp_focus) && nrow(anp_focus) > 0) {
+          geom_sf(data = anp_focus, fill = "#98a25a", color = "gray40", linewidth = 0.15, alpha = 0.25)
+        }
+      } +
+      geom_sf(
+        data = arch_focus,
+        aes(color = scoring_rule, shape = scoring_rule),
+        size = 2.8,
+        alpha = 0.95
+      ) +
+      scale_color_manual(
+        name = "Archaeological scoring rule",
+        values = c(
+          "INAH directory (condition 100)" = "#1b4f72",
+          "Inside protected area (SIMEC / special)" = "#C03729",
+          "Strong non-INAH protection (e.g. sacred-site accord)" = "#6c3483",
+          "Codified legal floor (30)" = "#333333",
+          "Other / mixed rule" = "grey50"
+        )
+      ) +
+      scale_shape_manual(
+        name = "Archaeological scoring rule",
+        values = c(
+          "INAH directory (condition 100)" = 15,
+          "Inside protected area (SIMEC / special)" = 16,
+          "Strong non-INAH protection (e.g. sacred-site accord)" = 18,
+          "Codified legal floor (30)" = 17,
+          "Other / mixed rule" = 4
+        )
+      ) +
+      coord_sf(xlim = c(bb["xmin"], bb["xmax"]), ylim = c(bb["ymin"], bb["ymax"]), expand = FALSE) +
+      labs(
+        title = "Process: Archaeological / cultural sites (script 4)",
+        subtitle = "Baja California mid-Gulf — INAH first, then ANP SIMEC, else legal floor 30",
+        caption = "Green wash = protected areas. Shapes encode the hierarchical rule applied in the prep script."
+      ) +
+      process_theme() +
+      guides(color = guide_legend(nrow = 3), shape = guide_legend(nrow = 3))
+    print(gg_arch_process)
+    save_lsp_map(gg_arch_process, "process_archaeological_sites", width = 9, height = 6.5)
+  }
+}
+if (is.null(gg_arch_process)) {
+  message("Process map (archaeology): need ewg_archaeological_sites_condition.csv + EWG coordinates list.")
+}
+```
+
+## Script 5 — Iconic fishing spots (ZRP → TURF → ANP)
+
+Hierarchy from prep: ZRP = 100, else TURF = 100, else ANP SIMEC. Only a handful of EWG points; map shows the full suite with regions where ZRP applies (San Cosme–Punta Coyote).
+
+```{r process-fishing, fig.width=9, fig.height=6.5}
+fish_cond <- safe_read_csv(file.path(lsp_output_dir, "fishing_sites_condition.csv"))
+zrp_sf <- safe_st_read(first_path(
+  file.path(goc_root, "_raw_data/TNC_geoportal_fishing_refuge_zones/d2026/Zonas_Refugios_Pesqueros_-8805549763229037385.geojson")
+))
+if (!is.null(zrp_sf)) {
+  zrp_sf <- zrp_sf %>% st_make_valid() %>% st_transform(4326)
+}
+
+gg_fish_process <- NULL
+if (!is.null(fish_cond) && !is.null(ewg_coords_v4)) {
+  fish_cond <- fish_cond %>%
+    mutate(
+      lasting_special_place_lsp = str_squish(as.character(lasting_special_place_lsp)),
+      overall_condition = suppressWarnings(as.numeric(overall_condition)),
+      in_zrp = as.logical(in_zrp),
+      in_turf = as.logical(in_turf),
+      pa_condition = suppressWarnings(as.numeric(protected_area_condition)),
+      scoring_rule = case_when(
+        !is.na(in_zrp) & in_zrp ~ "Inside fishing refuge (ZRP = 100)",
+        !is.na(in_turf) & in_turf ~ "Inside TURF (= 100)",
+        !is.na(pa_condition) & pa_condition > 0 ~ "Inside ANP (SIMEC / Ramsar)",
+        TRUE ~ "No ZRP / TURF / ANP match"
+      )
+    )
+
+  fish_sf <- ewg_coords_v4 %>%
+    mutate(lasting_special_place_lsp = str_squish(as.character(lasting_special_place_lsp))) %>%
+    inner_join(
+      fish_cond %>% dplyr::select(lasting_special_place_lsp, overall_condition, scoring_rule),
+      by = "lasting_special_place_lsp"
+    ) %>%
+    st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+
+  bb <- as_bbox(-115.0, -108.8, 22.8, 32.0)
+  states_focus <- crop_sf(process_states, bb)
+  zrp_focus <- crop_sf(zrp_sf, bb)
+  anp_focus <- crop_sf(all_protected_sf, bb)
+  fish_focus <- filter_points_in_bbox(fish_sf, bb)
+
+  if (!is.null(fish_focus) && nrow(fish_focus) > 0) {
+    gg_fish_process <- ggplot() +
+      {
+        if (!is.null(states_focus) && nrow(states_focus) > 0) {
+          geom_sf(data = states_focus, fill = "#d6cac0", color = "grey40", linewidth = 0.12)
+        }
+      } +
+      {
+        if (!is.null(anp_focus) && nrow(anp_focus) > 0) {
+          geom_sf(data = anp_focus, fill = "#98a25a", color = NA, alpha = 0.18)
+        }
+      } +
+      {
+        if (!is.null(zrp_focus) && nrow(zrp_focus) > 0) {
+          geom_sf(data = zrp_focus, fill = "#5dade2", color = "#1a5276", linewidth = 0.2, alpha = 0.35)
+        }
+      } +
+      geom_sf(
+        data = fish_focus,
+        aes(color = scoring_rule, shape = scoring_rule),
+        size = 3.2,
+        alpha = 0.95
+      ) +
+      scale_color_manual(
+        name = "Fishing-site scoring rule",
+        values = c(
+          "Inside fishing refuge (ZRP = 100)" = "#1a5276",
+          "Inside TURF (= 100)" = "#6c3483",
+          "Inside ANP (SIMEC / Ramsar)" = "#C03729",
+          "No ZRP / TURF / ANP match" = "#333333"
+        )
+      ) +
+      scale_shape_manual(
+        name = "Fishing-site scoring rule",
+        values = c(
+          "Inside fishing refuge (ZRP = 100)" = 15,
+          "Inside TURF (= 100)" = 18,
+          "Inside ANP (SIMEC / Ramsar)" = 16,
+          "No ZRP / TURF / ANP match" = 17
+        )
+      ) +
+      coord_sf(xlim = c(bb["xmin"], bb["xmax"]), ylim = c(bb["ymin"], bb["ymax"]), expand = FALSE) +
+      labs(
+        title = "Process: Iconic Fishing Spots (script 5)",
+        subtitle = "Gulf-wide EWG points — ZRP first, then TURF, then ANP SIMEC",
+        caption = "Blue polygons = fishing refuge zones (ZRP) when available on disk. Green wash = ANPs."
+      ) +
+      process_theme() +
+      guides(color = guide_legend(nrow = 2), shape = guide_legend(nrow = 2))
+    print(gg_fish_process)
+    save_lsp_map(gg_fish_process, "process_iconic_fishing_spots", width = 9, height = 6.5)
+  }
+}
+if (is.null(gg_fish_process)) {
+  message("Process map (fishing): need fishing_sites_condition.csv + EWG coordinates list.")
+}
+```
+
+## Script 6 — Special habitats (ANP SIMEC vs habitat NOM floor)
+
+Each habitat polygon takes `pmax(protected_area_condition, nom_condition)`. Coquina floor = 30 (weak legal coverage); coral / seagrass / mangrove floor = 70. Focus: upper eastern GOC where coquina features sit both in and out of ANPs.
+
+```{r process-special-habitats, fig.width=9, fig.height=6.5}
+coquina_sf <- safe_st_read(first_path(
+  file.path(lsp_int_dir, "coquina_reefs_condition.gpkg"),
+  file.path(local_lsp_root, "int/coquina_reefs_condition.gpkg"),
+  file.path(local_lsp_root, "int/condition_special_habitat_coquina.gpkg")
+))
+coral_sf <- safe_st_read(first_path(
+  file.path(lsp_int_dir, "coral_reefs_condition.gpkg"),
+  file.path(local_lsp_root, "int/coral_reefs_condition.gpkg"),
+  file.path(local_lsp_root, "int/condition_special_habitat_coral.gpkg")
+))
+
+gg_hab_process <- NULL
+  habitat_layers <- Filter(Negate(is.null), list(
+    Coquina = coquina_sf,
+    Coral = coral_sf
+  ))
+
+if (length(habitat_layers) > 0) {
+  hab_sf <- bind_rows(lapply(names(habitat_layers), function(nm) {
+    x <- habitat_layers[[nm]] %>% st_transform(4326)
+    if (!"overall_condition" %in% names(x) && "condition" %in% names(x)) {
+      x <- x %>% mutate(overall_condition = condition)
+    }
+    if (!"protected_area_condition" %in% names(x)) {
+      x$protected_area_condition <- NA_real_
+    }
+    if (!"in_protected_area" %in% names(x)) {
+      x$in_protected_area <- !is.na(x$protected_area_condition)
+    }
+    x %>%
+      mutate(
+        habitat_type = nm,
+        overall_condition = suppressWarnings(as.numeric(overall_condition)),
+        protected_area_condition = suppressWarnings(as.numeric(protected_area_condition)),
+        scoring_rule = case_when(
+          !is.na(protected_area_condition) &
+            !is.na(overall_condition) &
+            overall_condition > (if (nm == "Coquina") 30 else 70) + 1e-6 ~
+            "ANP SIMEC / Ramsar above NOM floor",
+          !is.na(in_protected_area) & as.logical(in_protected_area) ~
+            "Inside ANP (SIMEC or Ramsar rule)",
+          nm == "Coquina" ~ "Outside ANP: coquina NOM floor (30)",
+          TRUE ~ "Outside ANP: strong habitat NOM floor (70)"
+        )
+      )
+  }))
+
+  # Northern Sonora / upper Gulf for coquina contrast; include any coral that falls in view
+  bb <- as_bbox(-114.9, -112.6, 29.5, 31.9)
+  states_focus <- crop_sf(process_states, bb)
+  anp_focus <- crop_sf(if (!is.null(all_protected_sf)) all_protected_sf else process_anp_sf, bb)
+  hab_focus <- crop_sf(hab_sf, bb)
+
+  if (!is.null(hab_focus) && nrow(hab_focus) > 0) {
+    gg_hab_process <- ggplot() +
+      {
+        if (!is.null(states_focus) && nrow(states_focus) > 0) {
+          geom_sf(data = states_focus, fill = "#d6cac0", color = "grey40", linewidth = 0.12)
+        }
+      } +
+      {
+        if (!is.null(anp_focus) && nrow(anp_focus) > 0) {
+          geom_sf(data = anp_focus, fill = "#98a25a", color = "gray40", linewidth = 0.15, alpha = 0.3)
+        }
+      } +
+      geom_sf(
+        data = hab_focus,
+        aes(fill = scoring_rule),
+        color = "grey20",
+        linewidth = 0.15,
+        alpha = 0.85
+      ) +
+      scale_fill_manual(
+        name = "Habitat scoring rule",
+        values = c(
+          "ANP SIMEC / Ramsar above NOM floor" = "#C03729",
+          "Inside ANP (SIMEC or Ramsar rule)" = "#d68910",
+          "Outside ANP: coquina NOM floor (30)" = "#5d6d7e",
+          "Outside ANP: strong habitat NOM floor (70)" = "#1b4f72"
+        )
+      ) +
+      coord_sf(xlim = c(bb["xmin"], bb["xmax"]), ylim = c(bb["ymin"], bb["ymax"]), expand = FALSE) +
+      labs(
+        title = "Process: Special Habitats (script 6)",
+        subtitle = "Upper eastern Gulf — coquina (and any coral in view); max of ANP condition and NOM floor",
+        caption = "Coquina outside ANPs defaults to 30; coral/seagrass/mangrove NOM floor is 70. ANP green wash for context."
+      ) +
+      process_theme() +
+      guides(fill = guide_legend(nrow = 2))
+    print(gg_hab_process)
+    save_lsp_map(gg_hab_process, "process_special_habitats", width = 9, height = 6.5)
+  }
+}
+if (is.null(gg_hab_process)) {
+  message("Process map (habitats): need habitat condition gpkg layers under int/.")
+}
+```
+
+## Script 7 — All other special places (ANP vs codified scores)
+
+Remaining LSPs after removing larger categories. Condition = ANP SIMEC/Ramsar when overlap exists; otherwise expert-estimated codified protection scores. Points drawn from the EWG coordinate list joined by name.
+
+```{r process-all-other, fig.width=9, fig.height=6.5}
+other_cond <- safe_read_csv(file.path(lsp_output_dir, "final_other_protections_condition.csv"))
+
+gg_other_process <- NULL
+if (!is.null(other_cond) && !is.null(ewg_coords_v4)) {
+  other_cond <- other_cond %>%
+    mutate(
+      lsp_name = str_squish(as.character(lsp_name)),
+      overall_condition = suppressWarnings(as.numeric(overall_condition)),
+      pa_condition = suppressWarnings(as.numeric(protected_area_condition)),
+      codified = suppressWarnings(as.numeric(estimated_condition_of_protection)),
+      scoring_rule = case_when(
+        !is.na(pa_condition) & pa_condition > 0 &
+          (is.na(codified) | abs(overall_condition - pa_condition) < 1e-6) ~
+          "Inside ANP (SIMEC / Ramsar)",
+        !is.na(codified) & !is.na(overall_condition) &
+          abs(overall_condition - codified) < 1e-6 ~
+          "Codified / estimated legal protection",
+        TRUE ~ "Mixed or unresolved rule"
+      )
+    )
+
+  other_sf <- ewg_coords_v4 %>%
+    mutate(lsp_name = str_squish(as.character(lasting_special_place_lsp))) %>%
+    inner_join(
+      other_cond %>% dplyr::select(lsp_name, overall_condition, scoring_rule),
+      by = "lsp_name"
+    ) %>%
+    st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+
+  bb <- as_bbox(-115.0, -108.5, 22.5, 32.2)
+  states_focus <- crop_sf(process_states, bb)
+  anp_focus <- crop_sf(all_protected_sf, bb)
+  other_focus <- filter_points_in_bbox(other_sf, bb)
+
+  if (!is.null(other_focus) && nrow(other_focus) > 0) {
+    gg_other_process <- ggplot() +
+      {
+        if (!is.null(states_focus) && nrow(states_focus) > 0) {
+          geom_sf(data = states_focus, fill = "#d6cac0", color = "grey40", linewidth = 0.12)
+        }
+      } +
+      {
+        if (!is.null(anp_focus) && nrow(anp_focus) > 0) {
+          geom_sf(data = anp_focus, fill = "#98a25a", color = NA, alpha = 0.22)
+        }
+      } +
+      geom_sf(
+        data = other_focus,
+        aes(color = scoring_rule, shape = scoring_rule),
+        size = 2.6,
+        alpha = 0.95
+      ) +
+      scale_color_manual(
+        name = "Other-LSP scoring rule",
+        values = c(
+          "Inside ANP (SIMEC / Ramsar)" = "#C03729",
+          "Codified / estimated legal protection" = "#333333",
+          "Mixed or unresolved rule" = "grey50"
+        )
+      ) +
+      scale_shape_manual(
+        name = "Other-LSP scoring rule",
+        values = c(
+          "Inside ANP (SIMEC / Ramsar)" = 16,
+          "Codified / estimated legal protection" = 17,
+          "Mixed or unresolved rule" = 4
+        )
+      ) +
+      coord_sf(xlim = c(bb["xmin"], bb["xmax"]), ylim = c(bb["ymin"], bb["ymax"]), expand = FALSE) +
+      labs(
+        title = "Process: All other Special Places (script 7)",
+        subtitle = "Gulf-wide residual LSPs — ANP condition when overlapping, else codified protection scores",
+        caption = "Only sites with coordinates that match final_other_protections_condition names are shown."
+      ) +
+      process_theme() +
+      guides(color = guide_legend(nrow = 2), shape = guide_legend(nrow = 2))
+    print(gg_other_process)
+    save_lsp_map(gg_other_process, "process_all_other_special_places", width = 9, height = 6.5)
+  }
+}
+if (is.null(gg_other_process)) {
+  message("Process map (other LSPs): need final_other_protections_condition.csv + EWG coordinates list.")
+}
+```
+
+```{r process-maps-saved-summary}
+process_outputs <- tibble::tibble(
+  type = c(
+    "Special Protected Areas",
+    "Priority Dive Sites",
+    "Archaeological Sites",
+    "Iconic Fishing Spots",
+    "Special Habitats",
+    "All other Special Places"
+  ),
+  stem = c(
+    "process_special_protected_areas",
+    "process_priority_dive_sites",
+    "process_archaeological_sites",
+    "process_iconic_fishing_spots",
+    "process_special_habitats",
+    "process_all_other_special_places"
+  )
+) %>%
+  mutate(
+    png = file.path(viz_dir, paste0(stem, ".png")),
+    wrote = file.exists(png)
+  )
+print(process_outputs)
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
