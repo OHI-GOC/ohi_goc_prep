@@ -12,143 +12,178 @@ format:
     highlight-style: haddock
   pdf:
     toc: true
-editor: 
+editor:
   markdown:
     wrap: sentence
   chunk_output_type: console
-editor_options: 
+editor_options:
   chunk_output_type: console
 ---
 
 # Sentido de Pertenencia: Lasting Special Places
 
-This notebook is **script 1** in the Lasting Special Places prep chain. We clean up CONANP’s releases for Pacific Gulf states, stack them with WDPA and HEM so we are not blind to a polygon just because one inventory missed it, then dissolve optionally for maps and save canonical shapefiles for downstream scripts. At the end we pull in the **prepared EWG inventory** from Google Sheets (`google_sheets/`) so we can sanity-check points against that unified protection shell.
+## Script 1: combine protected area layers and read the EWG list
 
-**Contents**
+In this script I build one protected area layer for the Gulf of California. Let's put CONANP, WDPA, and HEM polygons into the same table, dissolve once if I need a simple footprint map, and write the result to Mazu for scripts 2 through 7. At the end I also load the prepared EWG inventory so I can plot expert points on top of those polygons.
 
-1. Pull CONANP voluntary sites, primary zonification, July ANPs, and regional layers—mostly exploratory QC with `mapview`.
-2. Align CRS, cast geometries, `bind_rows` WDPA + HEM + CONANP into `all_protected`, dissolve once if we want a single footprint.
-3. Write `all_goc_protected_areas_v2_2025.shp` (plus dissolved twin) to Mazu for everyone else to reuse.
-4. Read `ewg_lsp_inventory_prepared.csv`, turn valid coordinates into `sf`, overlay with protections.
+**What I do**
 
-We keep this separate from score calculations so spatial prep stays reproducible when SIMEC or EWG tables update.
+1. Explore CONANP downloads for the Gulf states.
+2. Align CRS and geometry types, then bind WDPA, HEM, and CONANP into `all_protected`.
+3. Write `all_goc_protected_areas_v2_2025.shp` (and a dissolved version).
+4. Read the EWG list and map the points.
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+```
 
 ## Make one protected area layer
 
-Here we stage individual CONANP downloads (voluntary conservation areas, zonificación primaria, ANPs mid‑2025, regional boundaries), drop Z dimensions where needed, and subset to the Gulf states we actually score in OHI GoC.
+### Explore CONANP layers
+
+First I read voluntary conservation sites, primary zonification, July 2025 ANPs, and CONANP regions. I only keep Gulf states we score for OHI GoC.
 
 ```{r}
-voluntariamente_conanp <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONANP/619_ADVC_VIGENTES_MARZO_2026/619_ADVC_VIGENTES_MARZO_2026.shp")) %>% 
-  st_zm(voluntariamente_conanp, drop = TRUE, what = "ZM") %>% 
-  janitor::clean_names() %>% 
-  filter(estado %in% c("Baja California", "Baja California Sur","Sonora","Sinaloa","Nayarit","Jalisco"))
+gulf_states <- c(
+  "Baja California", "Baja California Sur",
+  "Sonora", "Sinaloa", "Nayarit", "Jalisco"
+)
 
-# verify the geometry types are now consistent
+voluntariamente_conanp <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CONANP/619_ADVC_VIGENTES_MARZO_2026",
+    "619_ADVC_VIGENTES_MARZO_2026.shp"
+  ),
+  quiet = TRUE
+) %>%
+  st_zm(drop = TRUE, what = "ZM") %>%
+  janitor::clean_names() %>%
+  filter(estado %in% gulf_states)
+
 table(st_geometry_type(voluntariamente_conanp))
-
 mapview(voluntariamente_conanp)
 ```
 
 ```{r}
-zonification_primaria <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONANP/SHAPE_ANPS_ZN/ZP_ANPS_22042024.shp")) %>% 
-  janitor::clean_names() 
-  filter(estado %in% c("Baja California", "Baja California Sur","Sonora","Sinaloa","Nayarit","Jalisco"))
+zonification_primaria <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CONANP/SHAPE_ANPS_ZN",
+    "ZP_ANPS_22042024.shp"
+  ),
+  quiet = TRUE
+) %>%
+  janitor::clean_names() %>%
+  filter(estado %in% gulf_states)
 
 mapview(zonification_primaria)
 ```
 
 ```{r}
-conanp_anps_julio_2025 <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONANP/232_ANP-ITRF08_04072025/232_ANP-ITRF08_04072025.shp")) %>% 
-  st_zm(conanp_anps_julio_2025, drop = TRUE, what = "ZM") %>% 
+conanp_anps_julio_2025 <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CONANP/232_ANP-ITRF08_04072025",
+    "232_ANP-ITRF08_04072025.shp"
+  ),
+  quiet = TRUE
+) %>%
+  st_zm(drop = TRUE, what = "ZM") %>%
   janitor::clean_names()
 
-# verify the geometry types are now consistent
 table(st_geometry_type(conanp_anps_julio_2025))
-
-mapview(conanp_anps_julio_2025) + mapview(all_protected, col.regions = "pink")
+mapview(conanp_anps_julio_2025)
 ```
 
 ```{r}
-regions_CONANP <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONANP/Regionalizacion_22052017/Regionalizacion_22052017.shp")) %>% 
+regions_CONANP <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CONANP/Regionalizacion_22052017",
+    "Regionalizacion_22052017.shp"
+  ),
+  quiet = TRUE
+) %>%
   janitor::clean_names()
 ```
 
-##### Dissolve protected areas into one layer
+### Combine WDPA, HEM, and CONANP
 
-Once WDPA (`wdpa_poly_all`), HEM ANPs, and CONANP polygons share a CRS and geometry type, we row-bind them with explicit `source` tags, dissolve if we need one multipolygon for quick visuals, and export both versions.
+I need WDPA and HEM objects in the R session (from earlier prep, or re-read them if needed). Then I reproject everything to the WDPA CRS, cast to multipolygon, and bind the rows. I keep a `source` column so I know where each polygon came from.
 
 ```{r}
-# check CRS
-st_crs(wdpa_poly_all) == st_crs(hem_protected_anps) # FALSE
-
-# transform hem to match wdpa (or vice versa)
+# Reproject so all three layers share CRS
 hem_protected_anps_reproj <- st_transform(hem_protected_anps, st_crs(wdpa_poly_all))
-```
-
-
-```{r}
-st_crs(conanp_anps_julio_2025) == st_crs(hem_protected_anps_reproj) ## FALSE
-
-# transform conanp to match wdpa 
 conanp_anps_julio_2025_reproj <- st_transform(conanp_anps_julio_2025, st_crs(wdpa_poly_all))
-```
 
-
-```{r}
-# harmonize geometry types (cast both to MULTIPOLYGON to be safe)
-wdpa_clean <- st_cast(wdpa_poly_all, "MULTIPOLYGON") %>% 
+wdpa_clean <- st_cast(wdpa_poly_all, "MULTIPOLYGON") %>%
   mutate(source = "wdpa_2025")
-hem_clean  <- st_cast(hem_protected_anps_reproj, "MULTIPOLYGON") %>% 
+
+hem_clean <- st_cast(hem_protected_anps_reproj, "MULTIPOLYGON") %>%
   mutate(source = "hem")
-conanp_clean <- st_cast(conanp_anps_julio_2025_reproj, "MULTIPOLYGON") %>% 
+
+conanp_clean <- st_cast(conanp_anps_julio_2025_reproj, "MULTIPOLYGON") %>%
   mutate(source = "conanp_2025")
 
-# select only shared/needed columns before binding (bind_rows will fill NA for mismatched columns — fine, but tidy to be explicit)
 all_protected <- bind_rows(
   wdpa_clean %>% dplyr::select(name, source, geometry),
   hem_clean %>% dplyr::select(name = nombre, source, geometry),
   conanp_clean %>% dplyr::select(name = nombre, source, geometry)
-) 
+)
+
 mapview(all_protected)
 
-# dissolve overlaps for a single coverage layer
+# One multipolygon if I just need coverage for a quick map
 all_protected_dissolved <- st_union(all_protected)
 mapview(all_protected_dissolved)
-
-# write out to mazu
-st_write(all_protected, here::here("/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem", "all_goc_protected_areas_v2_2025.shp"))
-st_write(all_protected_dissolved, here::here("/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem", "all_goc_protected_areas_dissolved_v2_2025.shp"))
 ```
 
+### Write the combined layer to Mazu
 
-## List of coordinates from the Expert Working Group (EWG)
+Later scripts (2 through 7) should read this v2 file so everyone uses the same polygons, including Alto Golfo.
 
-This subgoal's current status is based on whether there is a protection on the Lasting Special Place (LSP), and the condition is then determined by the effectiveness of that protection on the LSP.  For example, if the LSP is a specific island such as Isla Tiburón, so the island falls within a protected area, then its condition will be based on the management effectiveness determined by CONANP's SIMEC index of effectiveness (i-efectividad).
+```{r}
+out_pa_dir <- "/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem"
+dir.create(out_pa_dir, recursive = TRUE, showWarnings = FALSE)
 
-If they do not fall within a protected area, then the condition of protection will be determined accordingly.  Here is a table of the types of LSPs and their associated protections: <https://docs.google.com/spreadsheets/d/1RwNTzRZdBIDtzi7d1ceFxhNmVghN47NxTgrhZV8O2SM/edit?gid=1758421523#gid=1758421523>
+st_write(
+  all_protected,
+  file.path(out_pa_dir, "all_goc_protected_areas_v2_2025.shp"),
+  delete_dsn = TRUE
+)
+st_write(
+  all_protected_dissolved,
+  file.path(out_pa_dir, "all_goc_protected_areas_dissolved_v2_2025.shp"),
+  delete_dsn = TRUE
+)
+```
 
-So, first, we need to go through the list and separate into the type of LSP...
+## Read in the EWG list of LSP sites
 
-The paragraph above sets expectations for later scripts; nothing executes until the next section—there we actually hydrate the cleaned spreadsheet rows.
+Current status for this goal depends on whether a lasting special place has a protection, and how well that protection is managed. For example, if Isla Tiburón sits inside an ANP, its condition may follow CONANP's SIMEC i-efectividad score. Sites outside ANPs get other rules in later scripts.
 
+Types of LSPs and their intended protections:  
+<https://docs.google.com/spreadsheets/d/1RwNTzRZdBIDtzi7d1ceFxhNmVghN47NxTgrhZV8O2SM/edit?gid=1758421523#gid=1758421523>
 
-## Read in EWG list of LSP sites
-
-Load `ewg_lsp_inventory_prepared.csv` from `goal_prep/sp/lsp/v2025/google_sheets`, coerce coordinates, and overlay every resolved point on `all_protected` so we can visually confirm gaps before scripts 2–7 specialize by LSP type.
+Let's load the prepared inventory and map points on the combined protected areas.
 
 ```{r}
 lsp_google_sheets_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets"
-lsp_list_ewg <- read_csv(file.path(lsp_google_sheets_dir, "ewg_lsp_inventory_prepared.csv")) %>% 
+
+lsp_list_ewg <- read_csv(
+  file.path(lsp_google_sheets_dir, "ewg_lsp_inventory_prepared.csv"),
+  show_col_types = FALSE
+) %>%
   janitor::clean_names()
 
 lsp_list_ewg_pts <- lsp_list_ewg %>%
-  mutate(lat = as.numeric(lat), long = as.numeric(long)) %>%
+  mutate(
+    lat = as.numeric(lat),
+    long = as.numeric(long)
+  ) %>%
   filter(!is.na(lat), !is.na(long)) %>%
-  sf::st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+  st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
 
-mapview(lsp_list_ewg_pts, col.regions = "orange") + mapview(all_protected, col.regions = "blue")
+mapview(lsp_list_ewg_pts, col.regions = "orange") +
+  mapview(all_protected, col.regions = "blue")
 ```
-
-
-
-

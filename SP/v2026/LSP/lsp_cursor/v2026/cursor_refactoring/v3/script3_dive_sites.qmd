@@ -12,25 +12,40 @@ format:
     highlight-style: haddock
   pdf:
     toc: true
-editor: 
+editor:
   markdown:
     wrap: sentence
   chunk_output_type: console
-editor_options: 
+editor_options:
   chunk_output_type: console
 ---
 
 # Sentido de Pertenencia: Lasting Special Places
 
-**Script 3 — Dive-site LSPs.** We borrow CBMC–GCMP layers, clip to GoC regions (marine + inland 10 km buffer), buffer priority sites slightly so polygon edges do not lie exactly between pixels, then marry overlaps to SIMEC via fuzzy names. Where no ANP intersects, we still carry NOM‑012’s tourism obligations into the score logic.
+## Script 3: dive sites
 
-**Contents**
+In this script I score dive sites as lasting special places. People travel far to see wildlife and underwater habitats, so if those sites are not protected they can lose what makes them special.
 
-1. Load every dive site plus the conservation-priority subset with coordinates.
-2. Build `marine_and_inland10`, intersect both layers, stash intermediate geopackages.
-3. Merge WDPA + HEM into `all_protected`, spatial join buffered priority sites, fuzzy-match SIMEC, collapse duplicates, average per region, export CSVs.
+When a dive site sits inside a protected area, I give it that park's SIMEC management score. When it sits outside any park, I still use a soft floor based on NOM-012-TUR-2016, which sets rules for all dive tourism (inside and outside ANPs).
 
-## Dive Sites
+**What I do**
+
+1. Read all dive sites and the conservation priority table from CBMC GCMP.
+2. Keep points that fall in Gulf of California marine regions or the 10 km inland buffer, and assign `rgn_id`.
+3. Buffer priority sites, join protected areas, fuzzy match SIMEC names, set condition, average by region, write CSVs.
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+library(stringdist)
+library(stringi)
+```
+
+## Why dive sites matter
+
+Dive tourism is a direct human ocean connection. Operators earn more when wildlife is intact, which often means no take zones and careful management (Arcos-Aguilar et al. 2021). Protections can include ANPs and NOMs for ecotourism, especially NOM-012-TUR-2016.
 
 The qualitative sections below explain why dive tourism counts as sense of place; the executable chunks starting with **Read in dive sites** implement the quantitative pathway.
 
@@ -55,277 +70,222 @@ If it falls into a protected area, the condition will be based on the management
 
 https://ecojurisprudence.org/initiatives/mexico-law-on-ecological-equilibrium-and-environmental-protection//
 
+## Read dive sites
+
+I start with every dive site polygon or point, plus a smaller priority table with coordinates and popularity fields.
 
 ```{r}
-library(tidyverse)
-library(here)
-library(sf)
-library(mapview)
-```
+cbmc_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main"
 
-
-## Read in dive sites
-
-Bring `dive_sites.shp` + `tabla_prioridad.xlsx` straight from CBMC–GCMP so we inherit their QC’d geometries before limiting to OHI regions.
-
-<!-- ```{r} -->
-<!-- final_mpa_layer <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main/shp/final_mpa_layer.shp")) %>% -->
-<!--   janitor::clean_names() -->
-
-<!-- # get rid of Z coordinates to make all geometries 2D -->
-<!-- final_mpa_layer <- st_zm(final_mpa_layer, drop = TRUE, what = "ZM") -->
-
-<!-- # verify the geometry types are now consistent -->
-<!-- table(st_geometry_type(final_mpa_layer)) -->
-<!-- ``` -->
-
-### All dive sites
-
-Every polygon/point in the master shapefile—mostly for coverage maps before we prioritise.
-
-```{r}
-dive_sites_raw <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main/shp/Diving_sites_v1.0_01032021/dive_sites.shp")) %>% 
+dive_sites_raw <- st_read(
+  here(cbmc_dir, "shp/Diving_sites_v1.0_01032021/dive_sites.shp"),
+  quiet = TRUE
+) %>%
   janitor::clean_names()
-  
+
 mapview(dive_sites_raw)
-```
 
-### Dive sites with conservation priority
-
-These rows carry popularity, threats, and socio-economic fields we later join back after SIMEC scoring.
-
-```{r}
-dive_sites_w_priority <- readxl::read_xlsx(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main/data/tabla_prioridad.xlsx")) %>% 
-  janitor::clean_names() %>% 
-  st_as_sf(coords = c("longitud", "latitud"), # making sf object
-           crs = 4326, # WGS84
-           remove = FALSE)
+dive_sites_w_priority <- readxl::read_xlsx(
+  here(cbmc_dir, "data/tabla_prioridad.xlsx")
+) %>%
+  janitor::clean_names() %>%
+  st_as_sf(coords = c("longitud", "latitud"), crs = 4326, remove = FALSE)
 
 mapview(dive_sites_w_priority)
 ```
 
+## Limit to the Gulf of California
 
-### Limit to the GoC 
+Let's union marine OHI regions with the inland 10 km buffer. That way nearshore sites still get a region id.
 
-First, group by region and unite the polygons for inland 10km with the marine polygons.
-
-We union marine region polygons with CONAP-style inland buffers so nearshore dive coordinates inherit the same `rgn_id` naming convention OHI reporting uses elsewhere.
 ```{r}
-## intersect with inland_10:
-inland_10 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer","inland_10km_goc.shp"))
-regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+inland_10 <- st_read(
+  here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer", "inland_10km_goc.shp"),
+  quiet = TRUE
+)
+
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp"), quiet = TRUE) %>%
   filter(location == "marine")
 
-st_crs(inland_10) == st_crs(regions_marine) # TRUE
-
-marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>% 
-  dplyr::select(rgn_id, geometry) %>% 
-  group_by(rgn_id) %>% 
-  summarize(
-    geometry = st_union(geometry)
-  )
+marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>%
+  dplyr::select(rgn_id, geometry) %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
 
 mapview(marine_and_inland10)
 ```
 
-Now, we can intersect with the `marine_and_inland10` so that each dive site is assigned an OHI GoC Region ID.
-```{r}
-# intersect with GoC
-dive_sites_goc_rgnid <- st_intersection(st_transform(dive_sites_raw, st_crs(marine_and_inland10)), marine_and_inland10)
-dive_sites_w_priority_goc_rgnid <- st_intersection(st_transform(dive_sites_w_priority, st_crs(marine_and_inland10)), marine_and_inland10)
+Now I intersect both dive layers with that region layer.
 
-mapview(dive_sites_goc_rgnid, zcol = "rgn_id") 
+```{r}
+int_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/int"
+dir.create(int_dir, recursive = TRUE, showWarnings = FALSE)
+
+dive_sites_goc_rgnid <- st_intersection(
+  st_transform(dive_sites_raw, st_crs(marine_and_inland10)),
+  marine_and_inland10
+)
+
+dive_sites_w_priority_goc_rgnid <- st_intersection(
+  st_transform(dive_sites_w_priority, st_crs(marine_and_inland10)),
+  marine_and_inland10
+)
+
+mapview(dive_sites_goc_rgnid, zcol = "rgn_id")
 mapview(dive_sites_w_priority_goc_rgnid, zcol = "rgn_id")
 
-# compare them
-mapview(dive_sites_goc_rgnid, col.regions = "blue") + mapview(dive_sites_w_priority_goc_rgnid, col.regions = "red")
-
-st_write(dive_sites_goc_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/int","prep_dive_sites_with_region.gpkg"))
-st_write(dive_sites_w_priority_goc_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/int","prep_dive_sites_priority_with_region.gpkg"))
+st_write(
+  dive_sites_goc_rgnid,
+  file.path(int_dir, "prep_dive_sites_with_region.gpkg"),
+  delete_dsn = TRUE
+)
+st_write(
+  dive_sites_w_priority_goc_rgnid,
+  file.path(int_dir, "prep_dive_sites_priority_with_region.gpkg"),
+  delete_dsn = TRUE
+)
 ```
 
+## Which priority sites fall in a protected area?
 
-<!-- ```{r} -->
-<!-- tourism_operators <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main/shp/Tourism_operators_v1.0_01032021/operators.shp")) %>%  -->
-<!--   janitor::clean_names() -->
-
-<!-- mapview(tourism_operators) -->
-<!-- ``` -->
-
-## Determine if priority dive sites fall within protected areas
-
-Quick overlay plot plus rebuild of `all_protected` when we only have WDPA + HEM handy on this machine—matches script 1 outputs conceptually.
+I use the v2 protected area layer from script 1 (includes Alto Golfo). I buffer each priority site by 300 m so GPS jitter still picks up nearby park edges. I keep sites outside parks as well (`left = TRUE`).
 
 ```{r}
-mapview(dive_sites_w_priority_goc_rgnid, col.regions = "red") + mapview(wdpa_poly_all, col.regions = "blue") + mapview(hem_protected_anps, col.regions = "black")
-```
+all_protected <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem",
+    "all_goc_protected_areas_v2_2025.shp"
+  ),
+  quiet = TRUE
+)
 
-
-### Intersect diving priority areas w protected areas
-
-100 m buffers mimic GPS jitter; `st_join(..., left=TRUE)` keeps dives outside MPAs so we can fall back to NOM logic later.
-
-```{r}
-# buffer dive sites by 100m
 dive_sites_buffered <- st_buffer(
   st_transform(dive_sites_w_priority_goc_rgnid, st_crs(all_protected)),
-  dist = 100
+  dist = 300
 )
-mapview(dive_sites_buffered) + mapview(dive_sites_w_priority_goc_rgnid)
 
-# spatial join to the non-dissolved layer (all_protected) to keep protected area names
 dive_sites_protected <- st_join(
   dive_sites_buffered,
   all_protected %>% dplyr::select(name, geometry),
   join = st_intersects,
-  left = TRUE  # keep all dive sites, even those outside of protected areas
+  left = TRUE
 ) %>%
   mutate(in_protected_area = !is.na(name)) %>%
-  rename(protected_area_name = name) 
+  rename(protected_area_name = name)
 
-# quick checks for sanity
-mapview(dive_sites_w_priority_goc_rgnid) + mapview(dive_sites_protected, zcol = "in_protected_area") + mapview(all_protected, col.regions = "pink")
 table(dive_sites_protected$in_protected_area)
-table(dive_sites_protected$protected_area_name)
-table(dive_sites_protected$nombre_sitio_de_buceo) # multiple observations for each dive site.
+mapview(dive_sites_protected, zcol = "in_protected_area") +
+  mapview(all_protected, col.regions = "pink")
 ```
 
-The only problem is that if a buffered dive site overlaps multiple protected areas, `st_join()` will return one row per match, giving us duplicate dive sites. So that is something to keep in mind.
+Note: if a buffer hits more than one park, I get one row per park. I collapse those later by taking the best score.
 
-## i-efectividad for each dive site in a protected area
+## Match each park name to SIMEC
 
-SIMEC extract comes from `google_sheets/simec_i_efectividad_anp_2025.csv`; next chunks normalize strings + `amatch()` because WDPA labels rarely equal SIMEC `nombre`.
+WDPA names and SIMEC `nombre` values rarely match character for character, so I normalize strings and use a fuzzy match.
 
 ```{r}
 lsp_google_sheets_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets"
-i_efectividad_raw <- read_csv(file.path(lsp_google_sheets_dir, "simec_i_efectividad_anp_2025.csv")) %>% 
+
+i_efectividad_raw <- read_csv(
+  file.path(lsp_google_sheets_dir, "simec_i_efectividad_anp_2025.csv"),
+  show_col_types = FALSE
+) %>%
   janitor::clean_names()
 
-unique(i_efectividad_raw$nombre)
-unique(dive_sites_protected$protected_area_name)
-```
-
-### Fuzzy matching the protected area names
-
-Helpers strip accents and institutional prefixes so `"PARQUE NACIONAL XYZ"` can marry `"XYZ"`.
-
-```{r}
-library(stringdist)
-library(stringi)
-
-# normalize protected area names...uppercase, remove accents, remove common filler words
 normalize_name <- function(x) {
   x %>%
-    stringi::stri_trans_general("Latin-ASCII") %>%  # remove accents
+    stringi::stri_trans_general("Latin-ASCII") %>%
     str_to_upper() %>%
-    str_remove_all("\\bPARQUE NACIONAL\\b|\\bPARQUE\\b|\\bNACIONAL\\b|\\bZONA MARINA\\b|\\bARCHIPIELAGO\\b") %>%
-    str_squish()  # remove extra whitespace left behind
+    str_remove_all(
+      "\\bPARQUE NACIONAL\\b|\\bPARQUE\\b|\\bNACIONAL\\b|\\bZONA MARINA\\b|\\bARCHIPIELAGO\\b"
+    ) %>%
+    str_squish()
 }
-```
 
-
-```{r}
-# make normalized versions for matching
 i_efectividad_norm <- i_efectividad_raw %>%
   mutate(nombre_norm = normalize_name(nombre))
 
 dive_sites_norm <- dive_sites_protected %>%
   mutate(protected_area_norm = normalize_name(protected_area_name))
-```
 
-
-```{r}
-# fuzzy match: for each dive site protected area name, find the closest match in i_efectividad
 matches <- stringdist::amatch(
   dive_sites_norm$protected_area_norm,
   i_efectividad_norm$nombre_norm,
-  method = "jw", # Jaro-Winkler works well for place names
-  maxDist = 0.2 # adjust threshold as needed; lower = stricter
+  method = "jw",
+  maxDist = 0.2 #0.5
 )
-```
 
-
-```{r}
-# attach matched nombre from i_efectividad back to dive sites
 dive_sites_matched <- dive_sites_norm %>%
   mutate(
     nombre_matched = i_efectividad_norm$nombre[matches],
     nombre_norm_matched = i_efectividad_norm$nombre_norm[matches]
   )
 
-# inspect the matches before joining, here or by opening the df ^
+# inspect matches before scoring
 dive_sites_matched %>%
   st_drop_geometry() %>%
   distinct(protected_area_name, protected_area_norm, nombre_matched) %>%
   print(n = Inf)
-```
 
-```{r}
-# join them!!!
 dive_sites_w_SIMEC <- dive_sites_matched %>%
-  left_join(
-    i_efectividad_raw,
-    by = c("nombre_matched" = "nombre")
-  ) %>% 
-  mutate(protected_area_condition = ifelse(!is.na(i_efectividad), i_efectividad, NA)) %>% 
-  dplyr::select(rgn_id, nombre_sitio_de_buceo, protected_area_name, protected_area_condition, popularidad_de_los_sitios, riqueza_de_especies, amenaza_de_cambio_climatico, valor_turistico, estado, latitud, longitud)
+  left_join(i_efectividad_raw, by = c("nombre_matched" = "nombre")) %>%
+  mutate(
+    protected_area_condition = ifelse(!is.na(i_efectividad), i_efectividad, NA_real_)
+  ) %>%
+  dplyr::select(
+    rgn_id, nombre_sitio_de_buceo, protected_area_name, protected_area_condition,
+    popularidad_de_los_sitios, riqueza_de_especies, amenaza_de_cambio_climatico,
+    valor_turistico, estado, latitud, longitud
+  )
 ```
 
 ## Condition for each dive site
 
-Collapse duplicate overlaps per dive name, blend SIMEC hits with the NOM-derived floor, rebuild point `sf` for mapping.
+If SIMEC is present I use it. If not, I use a NOM floor equal to the lowest SIMEC value in the sheet. That captures the idea that divers face some legal limits everywhere under NOM-012, even though those limits are weaker than park management.
 
 ```{r}
-# now, summarize by dive site, so we have one condition for each site
-dive_sites_condition <- dive_sites_w_SIMEC %>% 
-  mutate(nom_condition = min(protected_area_condition, na.rm = TRUE)) %>%  # because in NOM-012-TUR-2016, in section 6.11, it says this: "6.11 Para la práctica de buceo, tanto en las áreas naturales protegidas como en aquellas que se encuentran fuera, el prestador de servicios turísticos de buceo debe informar que las actividades de buceo deben realizarse sin dañar o extraer la flora y fauna silvestre acuática (viva o muerta), así como no intervenir, alterar o extraer monumentos y vestigios arqueológicos, históricos y artísticos, entendiéndose por éstos tanto los bienes prehistóricos y paleontológicos, así como los naufragios o pecios. En caso de realizar inmersiones en lugares que contengan patrimonio cultural subacuático, por seguridad del turista o usuario y de dicho patrimonio deberán mantener una distancia mínima de un metro de los elementos que conformen el patrimonio cultural subacuático. Los usuarios deberán verificar que todos los instrumentos que porten estén debidamente sujetos para que no arrastren y no dañen el patrimonio cultural o las formaciones coralinas. En caso de practicarse el buceo en cavidades naturales, lo anterior debe aplicarse también para no ocasionar daño a las formaciones geológicas ahí presentes." Therefore, there are some legal limitations on the actions of divers to protected the marine area, regardless of whether it falls into a protected area or not.  Legal restrictions are not perfect, though: <https://insideclimatenews.org/news/02082025/mexico-marine-tourism-damaging-wildlife/>
-  group_by(nombre_sitio_de_buceo, rgn_id, latitud) %>% 
-  mutate(nom_condition = mean(nom_condition), # not really needed because it is all the same value, but still
-         # multiple MPAs / Ramsar overlaps: take best (highest) management score
-         protected_area_condition = max(protected_area_condition)) %>% 
-  dplyr::select(-protected_area_name) %>% 
-  distinct() %>% 
-  ungroup() %>% 
-  mutate(overall_condition = ifelse(!is.na(protected_area_condition), protected_area_condition, nom_condition)) %>% 
-  st_drop_geometry() %>% 
-  dplyr::select(rgn_id, nombre_sitio_de_buceo, overall_condition, protected_area_condition, popularidad_de_los_sitios, riqueza_de_especies, amenaza_de_cambio_climatico, valor_turistico, estado, latitud, longitud)
+dive_sites_condition <- dive_sites_w_SIMEC %>%
+  mutate(nom_condition = min(protected_area_condition, na.rm = TRUE)) %>%
+  group_by(nombre_sitio_de_buceo, rgn_id, latitud) %>%
+  mutate(
+    nom_condition = mean(nom_condition),
+    protected_area_condition = max(protected_area_condition, na.rm = TRUE)
+  ) %>%
+  dplyr::select(-protected_area_name) %>%
+  distinct() %>%
+  ungroup() %>%
+  mutate(
+    overall_condition = ifelse(
+      !is.na(protected_area_condition) & is.finite(protected_area_condition),
+      protected_area_condition,
+      nom_condition
+    )
+  ) %>%
+  st_drop_geometry() %>%
+  dplyr::select(
+    rgn_id, nombre_sitio_de_buceo, overall_condition, protected_area_condition,
+    popularidad_de_los_sitios, riqueza_de_especies, amenaza_de_cambio_climatico,
+    valor_turistico, estado, latitud, longitud
+  )
 
-dive_sites_condition_sf <- dive_sites_condition %>% 
-  st_as_sf(coords = c("longitud", "latitud"), # making points again, not buffered area
-           crs = 4326, # WGS84
-           remove = FALSE) 
+dive_sites_condition_sf <- dive_sites_condition %>%
+  st_as_sf(coords = c("longitud", "latitud"), crs = 4326, remove = FALSE)
 
-mapview(dive_sites_condition_sf, zcol = "protected_area_condition") + mapview(all_protected)
-mapview(dive_sites_condition_sf, zcol = "overall_condition") + mapview(all_protected)
+mapview(dive_sites_condition_sf, zcol = "overall_condition") +
+  mapview(all_protected)
 ```
 
-# Condition per region
-
-Unweighted mean of `overall_condition` across dives inside each `rgn_id`.
+## Condition per region and write to Mazu
 
 ```{r}
-rgn_dive_sites_condition <- dive_sites_condition %>% 
-  group_by(rgn_id) %>% 
-  summarize(
-    condition = mean(overall_condition, na.rm = TRUE)
-  ) %>% 
-  ungroup()
+rgn_dive_sites_condition <- dive_sites_condition %>%
+  group_by(rgn_id) %>%
+  summarize(condition = mean(overall_condition, na.rm = TRUE), .groups = "drop")
+
+out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+write_csv(dive_sites_condition, file.path(out_dir, "condition_lsp_dive_sites.csv"))
+write_csv(rgn_dive_sites_condition, file.path(out_dir, "condition_region_dive_sites.csv"))
 ```
-
-
-## Write to Mazu
-
-Drop per-site + regional summaries next to the other LSP pipelines.
-
-```{r}
-write_csv(dive_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_lsp_dive_sites.csv"))
-write_csv(rgn_dive_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_dive_sites.csv"))
-```
-
-
-
-
-
-
-
-

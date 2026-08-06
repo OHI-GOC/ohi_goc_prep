@@ -167,14 +167,6 @@ score_layers <- list(
     title = "LSP: All other Special Places"
   )
 )
-
-special_protec <- read_csv(here::here(lsp_output_dir, "rgn_protected_area_condition.csv"))
-dive_cond <- read_csv(here::here(lsp_output_dir, "rgn_dive_sites_condition.csv"))
-fish_cond <- read_csv(here::here(lsp_output_dir, "rgn_fishing_sites_condition.csv"))
-arch_cond <- read_csv(here::here(lsp_output_dir, "rgn_ewg_archaeological_sites_condition.csv"))
-hab_cond <- read_csv(here::here(lsp_output_dir, "rgn_special_habitats_condition.csv"))
-other_cond <- read_csv(here::here(lsp_output_dir, "rgn_final_other_protections_condition.csv"))
-
 ```
 
 # Choropleth helper
@@ -348,11 +340,27 @@ save_lsp_map(gg_panel, "lsp_categories_panel", width = 12, height = 10)
 
 # Process maps: scoring methods by LSP type
 
-Static **method illustrations** (same spirit as the priority-dive Espíritu Santo map). Each map zooms to places where contrasting scoring rules are easy to see. White/outline underlays are land or ancillary layers; symbols and fills encode **how** points/polygons get their condition, not the regional choropleth.
-
-Paths try Mazu first, then the local `sp/lsp/v2025` mirror. Missing layers print a short message instead of stopping the document.
+Static **method illustrations** for each LSP prep script (2–7). Review each object in the console with `print()`; **nothing is written to disk** until you set `save_process_maps <- TRUE` below.
 
 ```{r process-helpers}
+# --- toggle: leave FALSE while exploring in the console ---
+save_process_maps <- FALSE
+
+show_process_map <- function(gg, stem, width = 9, height = 6.5) {
+  if (is.null(gg)) {
+    message("No plot object for ", stem)
+    return(invisible(NULL))
+  }
+  print(gg)
+  if (isTRUE(save_process_maps)) {
+    save_lsp_map(gg, stem, width = width, height = height)
+    message("Saved: ", stem)
+  } else {
+    message("Console only (not saved). Set save_process_maps <- TRUE to write PNG/PDF for ", stem)
+  }
+  invisible(gg)
+}
+
 process_theme <- function(base_size = 11) {
   theme_minimal(base_size = base_size) +
     theme(
@@ -370,16 +378,26 @@ as_bbox <- function(xmin, xmax, ymin, ymax, crs = 4326) {
   st_bbox(c(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), crs = st_crs(crs))
 }
 
+# Crop safely even when layer CRS differs from the target bbox CRS
 crop_sf <- function(x, bb) {
   if (is.null(x) || nrow(x) == 0) return(x)
   tryCatch(
-    suppressWarnings(st_crop(st_make_valid(x), bb)),
+    {
+      x <- st_make_valid(x)
+      if (is.na(st_crs(x))) st_crs(x) <- 4326
+      bb_poly <- st_as_sfc(st_bbox(bb))
+      if (st_crs(bb_poly) != st_crs(x)) {
+        bb_poly <- st_transform(bb_poly, st_crs(x))
+      }
+      suppressWarnings(st_crop(x, bb_poly))
+    },
     error = function(e) x
   )
 }
 
 filter_points_in_bbox <- function(pts, bb) {
   if (is.null(pts) || nrow(pts) == 0) return(pts)
+  pts <- st_transform(pts, 4326)
   coords <- st_coordinates(pts)
   pts %>%
     mutate(.x = coords[, 1], .y = coords[, 2]) %>%
@@ -390,15 +408,15 @@ filter_points_in_bbox <- function(pts, bb) {
     dplyr::select(-.x, -.y)
 }
 
-# Shared land / ANP underlays for process maps
+# Always WGS84 for process maps (choropleth `states` may be in OHI projected CRS)
 process_states <- tryCatch(
   {
-    if (exists("states") && !is.null(states)) {
+    src <- if (exists("states") && !is.null(states)) {
       states
     } else {
-      safe_st_read(here("spatial/ohi_regions/states.shp")) %>%
-        st_transform(4326)
+      safe_st_read(here("spatial/ohi_regions/states.shp"))
     }
+    if (is.null(src)) NULL else st_transform(src, 4326)
   },
   error = function(e) NULL
 )
@@ -430,20 +448,17 @@ if (!is.null(all_protected_sf)) {
   }
 }
 
-# Expert list with coordinates (for point-based LSP types)
 ewg_coords_v4 <- safe_read_csv(first_path(
   file.path(lsp_prep_root, "identifying_lasting_special_places_collapsed_lsp_protections_v4.csv"),
   file.path(mazu_lsp_root, "identifying_lasting_special_places_collapsed_lsp_protections_v4.csv"),
   file.path(local_lsp_root, "identifying_lasting_special_places_collapsed_lsp_protections_v4.csv")
 ))
 if (!is.null(ewg_coords_v4)) {
-  # janitor-style names without requiring janitor
   names(ewg_coords_v4) <- names(ewg_coords_v4) %>%
     tolower() %>%
     str_replace_all("[^a-z0-9]+", "_") %>%
     str_replace_all("^_|_$", "") %>%
     str_replace_all("_+", "_")
-  # common cleaned name for the LSP identity column
   if (!"lasting_special_place_lsp" %in% names(ewg_coords_v4)) {
     hit <- names(ewg_coords_v4)[str_detect(names(ewg_coords_v4), "lasting_special_place")]
     if (length(hit) > 0) {
@@ -458,13 +473,24 @@ if (!is.null(ewg_coords_v4)) {
     ) %>%
     filter(!is.na(lat), !is.na(long), !is.na(lasting_special_place_lsp))
 }
+
+# SIMEC raw table (optional; used when we want pure i-efectividad fill)
+simec_raw <- safe_read_csv(first_path(
+  file.path(goc_root, "_raw_data/SIMEC/identifying_lasting_special_places_SIMEC.csv"),
+  file.path(lsp_prep_root, "identifying_lasting_special_places_SIMEC.csv")
+))
+if (!is.null(simec_raw)) {
+  names(simec_raw) <- tolower(names(simec_raw))
+}
 ```
 
-## Script 2 — Special protected areas (SIMEC / Ramsar management)
+## Script 2 — Special protected areas (Gulf-wide condition choropleth)
 
-Special protected areas are **already** ANPs/Ramsar sites on the EWG list. Condition is SIMEC i-efectividad where available; Ramsar sites use management-plan rules (yes = max i-efectividad, in progress = 60, no = min). Focus: Upper Gulf / Colorado Delta (Biosphere Reserve vs Delta Ramsar).
+EWG special protected areas joined to polygons and filled with prep **`overall_condition`**:
 
-```{r process-protected-areas, fig.width=9, fig.height=6.5}
+**SIMEC i-efectividad when available → else Ramsar management-plan rule → else leave unshown (NA / no fill for that record).**
+
+```{r process-protected-areas, fig.width=9, fig.height=7}
 pa_cond <- safe_read_csv(file.path(lsp_output_dir, "protected_area_condition.csv"))
 
 gg_pa_process <- NULL
@@ -472,76 +498,62 @@ if (!is.null(pa_cond) && !is.null(all_protected_sf)) {
   pa_cond <- pa_cond %>%
     mutate(
       overall_condition = suppressWarnings(as.numeric(overall_condition)),
-      scoring_rule = case_when(
-        !is.na(if_ramsar_has_management_plan) & if_ramsar_has_management_plan == "y" ~
-          "Ramsar: management plan present (max SIMEC)",
-        !is.na(if_ramsar_has_management_plan) & if_ramsar_has_management_plan == "in_progress" ~
-          "Ramsar: plan in progress (60)",
-        !is.na(if_ramsar_has_management_plan) & if_ramsar_has_management_plan == "n" ~
-          "Ramsar: no plan (min SIMEC)",
-        !is.na(i_efectividad_name) | i_efectividad_name == "" ~
-          "Special case / no SIMEC name",
-        TRUE ~ "CONANP SIMEC i-efectividad"
-      ),
-      join_name = str_squish(as.character(wdpa_orig_name))
+      join_name = str_squish(str_replace_all(as.character(wdpa_orig_name), "\\n", " "))
     )
 
   pa_sf <- all_protected_sf %>%
-    mutate(join_name = str_squish(as.character(name))) %>%
+    mutate(join_name = str_squish(str_replace_all(as.character(name), "\\n", " "))) %>%
     inner_join(
-      pa_cond %>% dplyr::select(join_name, overall_condition, scoring_rule, lasting_special_place_description),
-      by = "join_name"
-    )
+      pa_cond %>%
+        dplyr::select(join_name, overall_condition, lasting_special_place_description, i_efectividad_name),
+      by = "join_name",
+      relationship = "many-to-many"
+    ) %>%
+    filter(!is.na(overall_condition))
 
-  bb <- as_bbox(-115.2, -113.4, 31.0, 32.05)
-  pa_focus <- crop_sf(pa_sf, bb)
-  states_focus <- crop_sf(process_states, bb)
-  anp_focus <- crop_sf(process_anp_sf, bb)
+  # join failures are common if names differ slightly — report for console review
+  n_matched <- length(unique(pa_sf$join_name))
+  n_requested <- length(unique(pa_cond$join_name[!is.na(pa_cond$join_name) & pa_cond$join_name != ""]))
+  message("PA polygons matched: ", n_matched, " of ", n_requested, " named protected areas in condition table")
 
-  if (!is.null(pa_focus) && nrow(pa_focus) > 0) {
-    gg_pa_process <- ggplot() +
-      {
-        if (!is.null(states_focus) && nrow(states_focus) > 0) {
-          geom_sf(data = states_focus, fill = "#d6cac0", color = "grey40", linewidth = 0.15)
-        }
-      } +
-      {
-        if (!is.null(anp_focus) && nrow(anp_focus) > 0) {
-          geom_sf(data = anp_focus, fill = NA, color = "grey50", linewidth = 0.2, linetype = "dotted")
-        }
-      } +
-      geom_sf(
-        data = pa_focus,
-        aes(fill = overall_condition),
-        color = "grey15",
-        linewidth = 0.25,
-        alpha = 0.85
-      ) +
-      scale_fill_gradientn(
-        colours = lsp_palette,
-        limits = c(0, 100),
-        na.value = "white",
-        name = "Condition\n(0–100)"
-      ) +
-      coord_sf(xlim = c(bb["xmin"], bb["xmax"]), ylim = c(bb["ymin"], bb["ymax"]), expand = FALSE) +
-      labs(
-        title = "Process: Special Protected Areas (script 2)",
-        subtitle = "Upper Gulf / Colorado Delta — condition from SIMEC or Ramsar management-plan rules",
-        caption = "Filled polygons = EWG special protected areas joined to WDPA/ANP geometry. Dotted outlines = Hem ANP layer for context."
-      ) +
-      process_theme()
-    print(gg_pa_process)
-    save_lsp_map(gg_pa_process, "process_special_protected_areas", width = 9, height = 6.5)
-  }
+  gg_pa_process <- ggplot() +
+    {
+      if (!is.null(process_states) && nrow(process_states) > 0) {
+        geom_sf(data = process_states, fill = "#d6cac0", color = "grey40", linewidth = 0.12)
+      }
+    } +
+    geom_sf(
+      data = pa_sf,
+      aes(fill = overall_condition),
+      color = "grey20",
+      linewidth = 0.15,
+      alpha = 0.9
+    ) +
+    scale_fill_gradientn(
+      colours = lsp_palette,
+      limits = c(0, 100),
+      na.value = "white",
+      name = "Overall\ncondition\n(0–100)"
+    ) +
+    coord_sf(expand = FALSE) +
+    labs(
+      title = "Process: Special Protected Areas (script 2)",
+      subtitle = "Gulf-wide: EWG special protected areas colored by overall condition",
+      caption = paste0(
+        "Fill = overall_condition (SIMEC i-efectividad when available; else Ramsar plan rule; ",
+        "records with no score are omitted). Matched ", n_matched, "/", n_requested, " named PAs."
+      )
+    ) +
+    process_theme()
 }
-if (is.null(gg_pa_process)) {
-  message("Process map (protected areas): need protected_area_condition.csv + all_goc_protected_areas shapefile.")
-}
+
+gg_pa_process  # console review first
+show_process_map(gg_pa_process, "process_special_protected_areas", width = 9, height = 7)
 ```
 
-## Script 3 — Priority dive sites (inside PA vs NOM floor)
+## Script 3 — Priority dive sites (keep Espíritu Santo example)
 
-Same decision rule as the website process map: sites inside scored ANPs use SIMEC/RMPP; outside use the unprotected default (currently 58). Focus: Espíritu Santo / La Paz.
+Same decision rule as the EWG page: inside scored ANP → SIMEC/RMPP; outside → default **58**.
 
 ```{r process-dive-sites, fig.width=9, fig.height=6.5}
 dive_cond <- safe_read_csv(file.path(lsp_output_dir, "dive_sites_condition.csv"))
@@ -611,126 +623,27 @@ if (!is.null(dive_cond) && !is.null(dive_gpkg)) {
       labs(
         title = "Process: Priority Dive Sites (script 3)",
         subtitle = "Espíritu Santo / Bahía de La Paz — inside scored ANPs vs unprotected default",
-        caption = "Red circles: condition from SIMEC/RMPP for the containing protected area. Black triangles: default 58 (min i-efectividad among PA dive sites)."
+        caption = "Red circles: SIMEC/RMPP for containing PA. Black triangles: default 58."
       ) +
       process_theme() +
       guides(color = guide_legend(nrow = 2), shape = guide_legend(nrow = 2))
-    print(gg_dive_process)
-    save_lsp_map(gg_dive_process, "process_priority_dive_sites", width = 9, height = 6.5)
   }
 }
-if (is.null(gg_dive_process)) {
-  message("Process map (dive): need dive_sites_condition.csv + dive_sites_w_priority_goc_rgnid.gpkg.")
-}
+
+gg_dive_process
+show_process_map(gg_dive_process, "process_priority_dive_sites")
 ```
 
-## Script 4 — Archaeological / cultural sites (INAH → PA → codified 30)
+## Script 5 — Iconic fishing spots (Gulf-wide points) + ZRP overview
 
-Priority: INAH-managed directory (100) → overlapping ANP SIMEC → legal floor **30** under the federal monuments law when neither applies. Coordinates from the collapsed EWG list.
+Gulf-wide map of all iconic fishing points, dive-style binary symbology:
 
-```{r process-archaeological, fig.width=9, fig.height=6.5}
-arch_cond <- safe_read_csv(file.path(lsp_output_dir, "ewg_archaeological_sites_condition.csv"))
+- **Red circles** = site is inside a ZRP (`in_zrp`; condition 100)
+- **Black triangles** = otherwise (ANP SIMEC / TURF / other path in prep)
 
-gg_arch_process <- NULL
-if (!is.null(arch_cond) && !is.null(ewg_coords_v4)) {
-  arch_cond <- arch_cond %>%
-    mutate(
-      lasting_special_place_lsp = str_squish(as.character(lasting_special_place_lsp)),
-      overall_condition = suppressWarnings(as.numeric(overall_condition)),
-      pa_condition = suppressWarnings(as.numeric(protected_area_condition)),
-      in_inah = as.logical(in_INAH_directory),
-      scoring_rule = case_when(
-        !is.na(in_inah) & in_inah ~ "INAH directory (condition 100)",
-        !is.na(pa_condition) & pa_condition > 0 & (is.na(overall_condition) | abs(overall_condition - pa_condition) < 1e-6) ~
-          "Inside protected area (SIMEC / special)",
-        !is.na(overall_condition) & overall_condition >= 99 ~ "Strong non-INAH protection (e.g. sacred-site accord)",
-        !is.na(overall_condition) & overall_condition <= 35 ~ "Codified legal floor (30)",
-        TRUE ~ "Other / mixed rule"
-      )
-    )
+**TURFs** are not drawn as polygons. For EWG discussion use **Aceves-Bueno et al. 2023**. Light blue wash under the points shows ZRP polygons for context.
 
-  arch_sf <- ewg_coords_v4 %>%
-    {
-      if ("protection_should_be" %in% names(.)) {
-        filter(., str_detect(str_to_upper(as.character(protection_should_be)), "INAH") |
-                 lasting_special_place_lsp %in% arch_cond$lasting_special_place_lsp)
-      } else {
-        filter(., lasting_special_place_lsp %in% arch_cond$lasting_special_place_lsp)
-      }
-    } %>%
-    distinct(lasting_special_place_lsp, .keep_all = TRUE) %>%
-    inner_join(
-      arch_cond %>% dplyr::select(lasting_special_place_lsp, overall_condition, scoring_rule),
-      by = "lasting_special_place_lsp"
-    ) %>%
-    st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
-
-  # Baja mid-Gulf window captures Sierra San Francisco (INAH) plus codified sites
-  bb <- as_bbox(-114.2, -109.5, 23.0, 29.5)
-  states_focus <- crop_sf(process_states, bb)
-  anp_focus <- crop_sf(if (!is.null(all_protected_sf)) all_protected_sf else process_anp_sf, bb)
-  arch_focus <- filter_points_in_bbox(arch_sf, bb)
-
-  if (!is.null(arch_focus) && nrow(arch_focus) > 0) {
-    gg_arch_process <- ggplot() +
-      {
-        if (!is.null(states_focus) && nrow(states_focus) > 0) {
-          geom_sf(data = states_focus, fill = "#d6cac0", color = "grey40", linewidth = 0.15)
-        }
-      } +
-      {
-        if (!is.null(anp_focus) && nrow(anp_focus) > 0) {
-          geom_sf(data = anp_focus, fill = "#98a25a", color = "gray40", linewidth = 0.15, alpha = 0.25)
-        }
-      } +
-      geom_sf(
-        data = arch_focus,
-        aes(color = scoring_rule, shape = scoring_rule),
-        size = 2.8,
-        alpha = 0.95
-      ) +
-      scale_color_manual(
-        name = "Archaeological scoring rule",
-        values = c(
-          "INAH directory (condition 100)" = "#1b4f72",
-          "Inside protected area (SIMEC / special)" = "#C03729",
-          "Strong non-INAH protection (e.g. sacred-site accord)" = "#6c3483",
-          "Codified legal floor (30)" = "#333333",
-          "Other / mixed rule" = "grey50"
-        )
-      ) +
-      scale_shape_manual(
-        name = "Archaeological scoring rule",
-        values = c(
-          "INAH directory (condition 100)" = 15,
-          "Inside protected area (SIMEC / special)" = 16,
-          "Strong non-INAH protection (e.g. sacred-site accord)" = 18,
-          "Codified legal floor (30)" = 17,
-          "Other / mixed rule" = 4
-        )
-      ) +
-      coord_sf(xlim = c(bb["xmin"], bb["xmax"]), ylim = c(bb["ymin"], bb["ymax"]), expand = FALSE) +
-      labs(
-        title = "Process: Archaeological / cultural sites (script 4)",
-        subtitle = "Baja California mid-Gulf — INAH first, then ANP SIMEC, else legal floor 30",
-        caption = "Green wash = protected areas. Shapes encode the hierarchical rule applied in the prep script."
-      ) +
-      process_theme() +
-      guides(color = guide_legend(nrow = 3), shape = guide_legend(nrow = 3))
-    print(gg_arch_process)
-    save_lsp_map(gg_arch_process, "process_archaeological_sites", width = 9, height = 6.5)
-  }
-}
-if (is.null(gg_arch_process)) {
-  message("Process map (archaeology): need ewg_archaeological_sites_condition.csv + EWG coordinates list.")
-}
-```
-
-## Script 5 — Iconic fishing spots (ZRP → TURF → ANP)
-
-Hierarchy from prep: ZRP = 100, else TURF = 100, else ANP SIMEC. Only a handful of EWG points; map shows the full suite with regions where ZRP applies (San Cosme–Punta Coyote).
-
-```{r process-fishing, fig.width=9, fig.height=6.5}
+```{r process-fishing-gulf, fig.width=9, fig.height=7}
 fish_cond <- safe_read_csv(file.path(lsp_output_dir, "fishing_sites_condition.csv"))
 zrp_sf <- safe_st_read(first_path(
   file.path(goc_root, "_raw_data/TNC_geoportal_fishing_refuge_zones/d2026/Zonas_Refugios_Pesqueros_-8805549763229037385.geojson")
@@ -739,203 +652,691 @@ if (!is.null(zrp_sf)) {
   zrp_sf <- zrp_sf %>% st_make_valid() %>% st_transform(4326)
 }
 
-gg_fish_process <- NULL
+gg_fish_loreto <- NULL
 if (!is.null(fish_cond) && !is.null(ewg_coords_v4)) {
   fish_cond <- fish_cond %>%
     mutate(
       lasting_special_place_lsp = str_squish(as.character(lasting_special_place_lsp)),
       overall_condition = suppressWarnings(as.numeric(overall_condition)),
       in_zrp = as.logical(in_zrp),
-      in_turf = as.logical(in_turf),
-      pa_condition = suppressWarnings(as.numeric(protected_area_condition)),
-      scoring_rule = case_when(
-        !is.na(in_zrp) & in_zrp ~ "Inside fishing refuge (ZRP = 100)",
-        !is.na(in_turf) & in_turf ~ "Inside TURF (= 100)",
-        !is.na(pa_condition) & pa_condition > 0 ~ "Inside ANP (SIMEC / Ramsar)",
-        TRUE ~ "No ZRP / TURF / ANP match"
+      # Dive-style binary: ZRP vs everything else (TURF/ANP geography not mapped here)
+      scoring_rule = if_else(
+        !is.na(in_zrp) & in_zrp,
+        "Inside ZRP (condition 100)",
+        "Outside ZRP (ANP / TURF / other path)"
       )
     )
 
   fish_sf <- ewg_coords_v4 %>%
     mutate(lasting_special_place_lsp = str_squish(as.character(lasting_special_place_lsp))) %>%
     inner_join(
-      fish_cond %>% dplyr::select(lasting_special_place_lsp, overall_condition, scoring_rule),
+      fish_cond %>% dplyr::select(lasting_special_place_lsp, overall_condition, scoring_rule, in_zrp),
       by = "lasting_special_place_lsp"
     ) %>%
     st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
 
-  bb <- as_bbox(-115.0, -108.8, 22.8, 32.0)
-  states_focus <- crop_sf(process_states, bb)
-  zrp_focus <- crop_sf(zrp_sf, bb)
-  anp_focus <- crop_sf(all_protected_sf, bb)
-  fish_focus <- filter_points_in_bbox(fish_sf, bb)
+  message("Iconic fishing sites plotted (Gulf-wide): ", nrow(fish_sf))
+  message(
+    "  In ZRP: ", sum(fish_sf$scoring_rule == "Inside ZRP (condition 100)", na.rm = TRUE),
+    " | Outside ZRP: ", sum(fish_sf$scoring_rule == "Outside ZRP (ANP / TURF / other path)", na.rm = TRUE)
+  )
 
-  if (!is.null(fish_focus) && nrow(fish_focus) > 0) {
-    gg_fish_process <- ggplot() +
+  if (nrow(fish_sf) > 0) {
+    gg_fish_loreto <- ggplot() +
       {
-        if (!is.null(states_focus) && nrow(states_focus) > 0) {
-          geom_sf(data = states_focus, fill = "#d6cac0", color = "grey40", linewidth = 0.12)
+        if (!is.null(process_states) && nrow(process_states) > 0) {
+          geom_sf(data = process_states, fill = "#d6cac0", color = "grey40", linewidth = 0.12)
         }
       } +
       {
-        if (!is.null(anp_focus) && nrow(anp_focus) > 0) {
-          geom_sf(data = anp_focus, fill = "#98a25a", color = NA, alpha = 0.18)
-        }
-      } +
-      {
-        if (!is.null(zrp_focus) && nrow(zrp_focus) > 0) {
-          geom_sf(data = zrp_focus, fill = "#5dade2", color = "#1a5276", linewidth = 0.2, alpha = 0.35)
+        if (!is.null(zrp_sf) && nrow(zrp_sf) > 0) {
+          geom_sf(
+            data = zrp_sf,
+            fill = "#5dade2",
+            color = "#1a5276",
+            linewidth = 0.15,
+            alpha = 0.35
+          )
         }
       } +
       geom_sf(
-        data = fish_focus,
+        data = fish_sf,
         aes(color = scoring_rule, shape = scoring_rule),
-        size = 3.2,
+        size = 2.8,
         alpha = 0.95
       ) +
       scale_color_manual(
-        name = "Fishing-site scoring rule",
+        name = "Fishing site scoring rule",
         values = c(
-          "Inside fishing refuge (ZRP = 100)" = "#1a5276",
-          "Inside TURF (= 100)" = "#6c3483",
-          "Inside ANP (SIMEC / Ramsar)" = "#C03729",
-          "No ZRP / TURF / ANP match" = "#333333"
+          "Inside ZRP (condition 100)" = "#C03729",
+          "Outside ZRP (ANP / TURF / other path)" = "#333333"
         )
       ) +
       scale_shape_manual(
-        name = "Fishing-site scoring rule",
+        name = "Fishing site scoring rule",
         values = c(
-          "Inside fishing refuge (ZRP = 100)" = 15,
-          "Inside TURF (= 100)" = 18,
-          "Inside ANP (SIMEC / Ramsar)" = 16,
-          "No ZRP / TURF / ANP match" = 17
+          "Inside ZRP (condition 100)" = 16,
+          "Outside ZRP (ANP / TURF / other path)" = 17
         )
       ) +
-      coord_sf(xlim = c(bb["xmin"], bb["xmax"]), ylim = c(bb["ymin"], bb["ymax"]), expand = FALSE) +
+      coord_sf(expand = FALSE) +
       labs(
         title = "Process: Iconic Fishing Spots (script 5)",
-        subtitle = "Gulf-wide EWG points — ZRP first, then TURF, then ANP SIMEC",
-        caption = "Blue polygons = fishing refuge zones (ZRP) when available on disk. Green wash = ANPs."
+        subtitle = "Gulf-wide: red = inside ZRP; black = outside ZRP. Blue wash = ZRP polygons.",
+        caption = paste0(
+          "Prep hierarchy: ZRP → TURF (Aceves-Bueno et al. 2023; not plotted) → ANP SIMEC. ",
+          "Symbology highlights the top rule (ZRP) only."
+        )
       ) +
       process_theme() +
       guides(color = guide_legend(nrow = 2), shape = guide_legend(nrow = 2))
-    print(gg_fish_process)
-    save_lsp_map(gg_fish_process, "process_iconic_fishing_spots", width = 9, height = 6.5)
   }
 }
-if (is.null(gg_fish_process)) {
-  message("Process map (fishing): need fishing_sites_condition.csv + EWG coordinates list.")
+
+gg_fish_loreto
+show_process_map(gg_fish_loreto, "process_iconic_fishing_gulf", width = 9, height = 7)
+```
+
+### Fishing refuges (ZRP) Gulf-wide — where the tools are
+
+Separate overview so experts can see **where ZRPs are** without fishing points. TURF geography will be discussed with the **Aceves-Bueno et al. 2023** map (not plotted in this script).
+
+```{r process-zrp-overview, fig.width=9, fig.height=7}
+gg_zrp_overview <- NULL
+if (!is.null(zrp_sf) && nrow(zrp_sf) > 0) {
+  gg_zrp_overview <- ggplot() +
+    {
+      if (!is.null(process_states) && nrow(process_states) > 0) {
+        geom_sf(data = process_states, fill = "#d6cac0", color = "grey40", linewidth = 0.12)
+      }
+    } +
+    {
+      if (!is.null(all_protected_sf) && nrow(all_protected_sf) > 0) {
+        geom_sf(data = all_protected_sf, fill = "#98a25a", color = NA, alpha = 0.15)
+      }
+    } +
+    geom_sf(
+      data = zrp_sf,
+      fill = "#5dade2",
+      color = "#1a5276",
+      linewidth = 0.2,
+      alpha = 0.55
+    ) +
+    coord_sf(expand = FALSE) +
+    labs(
+      title = "Context: Zonas de Refugio Pesquero (ZRP) in the GOC",
+      subtitle = "Fishing refuges used for ZRP = 100 scoring (script 5)",
+      caption = "Green wash = ANP layer for context. TURFs: use Aceves-Bueno et al. 2023 figure for EWG discussion (not plotted here)."
+    ) +
+    process_theme()
+}
+
+gg_zrp_overview
+show_process_map(gg_zrp_overview, "process_zrp_overview", width = 9, height = 7)
+```
+
+## Script 4 — Archaeological sites (table + optional buffer diagram)
+
+There are only ~20 scored sites. A **kable table** is clearer than a cluttered Gulf choropleth. Columns show which hierarchical rule applied.
+
+Prep buffers (from script 4): **10 km** around EWG points for the INAH directory join, **500 m** for the ANP join. Full site score = INAH 100 if matched, else PA SIMEC path, else codified floor **30**.
+
+```{r process-arch-table}
+arch_cond <- safe_read_csv(file.path(lsp_output_dir, "ewg_archaeological_sites_condition.csv"))
+
+arch_table <- NULL
+if (!is.null(arch_cond)) {
+  arch_table <- arch_cond %>%
+    mutate(
+      overall_condition = suppressWarnings(as.numeric(overall_condition)),
+      pa_condition = suppressWarnings(as.numeric(protected_area_condition)),
+      in_inah = as.logical(in_INAH_directory),
+      scoring_rule = case_when(
+        !is.na(in_inah) & in_inah ~ "INAH directory (100)",
+        !is.na(pa_condition) & pa_condition > 0 ~ "ANP / special protection (SIMEC path)",
+        !is.na(overall_condition) & overall_condition <= 35 ~ "Codified legal floor (30)",
+        TRUE ~ "Other / special case"
+      ),
+      site = str_trunc(str_squish(as.character(lasting_special_place_lsp)), 70)
+    ) %>%
+    dplyr::select(
+      rgn_id,
+      site,
+      overall_condition,
+      scoring_rule,
+      in_INAH = in_inah,
+      nombre_INAH,
+      protected_area_condition = pa_condition
+    ) %>%
+    arrange(rgn_id, desc(overall_condition))
+
+  # print for console; knitr will also render the table in the HTML doc
+  print(arch_table, n = Inf)
+  knitr::kable(
+    arch_table %>% dplyr::select(rgn_id, site, overall_condition, scoring_rule),
+    caption = "Archaeological / cultural LSPs: condition and hierarchical scoring rule (script 4)"
+  )
 }
 ```
 
-## Script 6 — Special habitats (ANP SIMEC vs habitat NOM floor)
+Optional: static map of archaeological points with **500 m** (ANP) and **10 km** (INAH) buffers. Extent from the sites themselves in WGS84 (Gulf-wide), not a hard-coded crop that can break when underlays are still in a projected CRS.
 
-Each habitat polygon takes `pmax(protected_area_condition, nom_condition)`. Coquina floor = 30 (weak legal coverage); coral / seagrass / mangrove floor = 70. Focus: upper eastern GOC where coquina features sit both in and out of ANPs.
-
-```{r process-special-habitats, fig.width=9, fig.height=6.5}
-coquina_sf <- safe_st_read(first_path(
-  file.path(lsp_int_dir, "coquina_reefs_condition.gpkg"),
-  file.path(local_lsp_root, "int/coquina_reefs_condition.gpkg"),
-  file.path(local_lsp_root, "int/condition_special_habitat_coquina.gpkg")
-))
-coral_sf <- safe_st_read(first_path(
-  file.path(lsp_int_dir, "coral_reefs_condition.gpkg"),
-  file.path(local_lsp_root, "int/coral_reefs_condition.gpkg"),
-  file.path(local_lsp_root, "int/condition_special_habitat_coral.gpkg")
-))
-
-gg_hab_process <- NULL
-  habitat_layers <- Filter(Negate(is.null), list(
-    Coquina = coquina_sf,
-    Coral = coral_sf
-  ))
-
-if (length(habitat_layers) > 0) {
-  hab_sf <- bind_rows(lapply(names(habitat_layers), function(nm) {
-    x <- habitat_layers[[nm]] %>% st_transform(4326)
-    if (!"overall_condition" %in% names(x) && "condition" %in% names(x)) {
-      x <- x %>% mutate(overall_condition = condition)
-    }
-    if (!"protected_area_condition" %in% names(x)) {
-      x$protected_area_condition <- NA_real_
-    }
-    if (!"in_protected_area" %in% names(x)) {
-      x$in_protected_area <- !is.na(x$protected_area_condition)
-    }
-    x %>%
-      mutate(
-        habitat_type = nm,
-        overall_condition = suppressWarnings(as.numeric(overall_condition)),
-        protected_area_condition = suppressWarnings(as.numeric(protected_area_condition)),
-        scoring_rule = case_when(
-          !is.na(protected_area_condition) &
-            !is.na(overall_condition) &
-            overall_condition > (if (nm == "Coquina") 30 else 70) + 1e-6 ~
-            "ANP SIMEC / Ramsar above NOM floor",
-          !is.na(in_protected_area) & as.logical(in_protected_area) ~
-            "Inside ANP (SIMEC or Ramsar rule)",
-          nm == "Coquina" ~ "Outside ANP: coquina NOM floor (30)",
-          TRUE ~ "Outside ANP: strong habitat NOM floor (70)"
-        )
+```{r process-arch-buffer-map, fig.width=9, fig.height=7}
+gg_arch_buffer <- NULL
+if (!is.null(arch_cond) && !is.null(ewg_coords_v4)) {
+  arch_rule <- arch_cond %>%
+    mutate(
+      lasting_special_place_lsp = str_squish(as.character(lasting_special_place_lsp)),
+      overall_condition = suppressWarnings(as.numeric(overall_condition)),
+      pa_condition = suppressWarnings(as.numeric(protected_area_condition)),
+      in_inah = as.logical(in_INAH_directory),
+      scoring_rule = case_when(
+        !is.na(in_inah) & in_inah ~ "INAH directory (100)",
+        !is.na(pa_condition) & pa_condition > 0 ~ "ANP / special protection (SIMEC path)",
+        !is.na(overall_condition) & overall_condition <= 35 ~ "Codified legal floor (30)",
+        TRUE ~ "Other / special case"
       )
-  }))
+    ) %>%
+    dplyr::select(lasting_special_place_lsp, overall_condition, scoring_rule)
 
-  # Northern Sonora / upper Gulf for coquina contrast; include any coral that falls in view
-  bb <- as_bbox(-114.9, -112.6, 29.5, 31.9)
-  states_focus <- crop_sf(process_states, bb)
-  anp_focus <- crop_sf(if (!is.null(all_protected_sf)) all_protected_sf else process_anp_sf, bb)
-  hab_focus <- crop_sf(hab_sf, bb)
+  arch_pts <- ewg_coords_v4 %>%
+    mutate(lasting_special_place_lsp = str_squish(as.character(lasting_special_place_lsp))) %>%
+    inner_join(arch_rule, by = "lasting_special_place_lsp") %>%
+    st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
 
-  if (!is.null(hab_focus) && nrow(hab_focus) > 0) {
-    gg_hab_process <- ggplot() +
+  if (nrow(arch_pts) > 0) {
+    # Buffers in UTM (meters), then back to WGS84 for display
+    pts_proj <- st_transform(arch_pts, 32612)
+    buf500 <- st_buffer(pts_proj, dist = 500) %>% st_transform(4326)
+    buf10k <- st_buffer(pts_proj, dist = 10000) %>% st_transform(4326)
+
+    # Extent from all sites + 10 km buffer ring, with pad; south enough for northern Jalisco
+    bb_c <- st_bbox(buf10k)
+    pad <- 0.15
+    bb <- as_bbox(
+      bb_c["xmin"] - pad,
+      bb_c["xmax"] + pad,
+      min(as.numeric(bb_c["ymin"]) - pad, 20.5),
+      bb_c["ymax"] + pad
+    )
+    # Fall back to Gulf envelope if something is degenerate
+    if (!all(is.finite(c(bb["xmin"], bb["xmax"], bb["ymin"], bb["ymax"]))) ||
+        (bb["xmax"] - bb["xmin"]) < 0.2 ||
+        (bb["ymax"] - bb["ymin"]) < 0.2) {
+      bb <- as_bbox(-115.5, -105.5, 20.5, 32.5)
+    }
+
+    states_f <- process_states
+    if (!is.null(states_f) && nrow(states_f) > 0) {
+      states_f <- st_transform(states_f, 4326)
+    }
+    anp_src <- if (!is.null(process_anp_sf)) process_anp_sf else all_protected_sf
+    anp_f <- anp_src
+    if (!is.null(anp_f) && nrow(anp_f) > 0) {
+      anp_f <- st_transform(anp_f, 4326)
+    }
+
+    message(
+      "Arch sites plotted: ", nrow(arch_pts),
+      "; map lon [", round(bb["xmin"], 2), ", ", round(bb["xmax"], 2),
+      "], lat [", round(bb["ymin"], 2), ", ", round(bb["ymax"], 2), "]"
+    )
+
+    gg_arch_buffer <- ggplot() +
       {
-        if (!is.null(states_focus) && nrow(states_focus) > 0) {
-          geom_sf(data = states_focus, fill = "#d6cac0", color = "grey40", linewidth = 0.12)
+        if (!is.null(states_f) && nrow(states_f) > 0) {
+          geom_sf(data = states_f, fill = "#d6cac0", color = "grey40", linewidth = 0.12)
         }
       } +
       {
-        if (!is.null(anp_focus) && nrow(anp_focus) > 0) {
-          geom_sf(data = anp_focus, fill = "#98a25a", color = "gray40", linewidth = 0.15, alpha = 0.3)
+        if (!is.null(anp_f) && nrow(anp_f) > 0) {
+          geom_sf(data = anp_f, fill = "#98a25a", color = NA, alpha = 0.18)
+        }
+      } +
+      geom_sf(data = buf10k, fill = NA, color = "#5dade2", linewidth = 0.3, linetype = "dashed") +
+      geom_sf(data = buf500, fill = NA, color = "#C03729", linewidth = 0.4) +
+      geom_sf(
+        data = arch_pts,
+        aes(color = scoring_rule, shape = scoring_rule),
+        size = 2.4,
+        alpha = 0.95
+      ) +
+      scale_color_manual(
+        name = "Arch site scoring rule",
+        values = c(
+          "INAH directory (100)" = "#1a5276",
+          "ANP / special protection (SIMEC path)" = "#C03729",
+          "Codified legal floor (30)" = "#333333",
+          "Other / special case" = "#7f8c8d"
+        )
+      ) +
+      scale_shape_manual(
+        name = "Arch site scoring rule",
+        values = c(
+          "INAH directory (100)" = 15,
+          "ANP / special protection (SIMEC path)" = 16,
+          "Codified legal floor (30)" = 17,
+          "Other / special case" = 18
+        )
+      ) +
+      coord_sf(
+        xlim = c(bb["xmin"], bb["xmax"]),
+        ylim = c(bb["ymin"], bb["ymax"]),
+        expand = FALSE,
+        crs = st_crs(4326)
+      ) +
+      labs(
+        title = "Process: Archaeological sites (script 4)",
+        subtitle = "Points by scoring rule; red ring = 500 m (ANP join); blue dashed = 10 km (INAH join)",
+        caption = "Light green wash = ANPs. Map extent is from all scored sites in WGS84 (not a mid-Baja crop)."
+      ) +
+      process_theme() +
+      guides(color = guide_legend(nrow = 2), shape = guide_legend(nrow = 2))
+  }
+}
+
+gg_arch_buffer
+show_process_map(gg_arch_buffer, "process_archaeological_buffers", width = 9, height = 7)
+```
+
+### Upper Gulf zoom — QC for codified-floor (black) points vs ANPs
+
+Prep ANP rule uses a **500 m buffer** + intersection with `all_protected`. Sites scored as codified floor (**30**) should **not** touch an ANP after that buffer; if they do, they should take the ANP SIMEC path instead (unless PA condition collapses to 0—for example a special Ramsar rule—then floor 30 can still appear).
+
+This zoom shows Upper Gulf points with ANP polygons, **500 m rings**, short labels, and an orange halo when a **floor-scored** site’s buffer still intersects an ANP.
+
+```{r process-arch-upper-gulf, fig.width=9, fig.height=7}
+gg_arch_upper_gulf <- NULL
+
+if (!is.null(arch_cond) && !is.null(ewg_coords_v4)) {
+  arch_rule_ug <- arch_cond %>%
+    mutate(
+      lasting_special_place_lsp = str_squish(as.character(lasting_special_place_lsp)),
+      overall_condition = suppressWarnings(as.numeric(overall_condition)),
+      pa_condition = suppressWarnings(as.numeric(protected_area_condition)),
+      in_inah = as.logical(in_INAH_directory),
+      scoring_rule = case_when(
+        !is.na(in_inah) & in_inah ~ "INAH directory (100)",
+        !is.na(pa_condition) & pa_condition > 0 ~ "ANP / special protection (SIMEC path)",
+        !is.na(overall_condition) & overall_condition <= 35 ~ "Codified legal floor (30)",
+        TRUE ~ "Other / special case"
+      )
+    ) %>%
+    dplyr::select(
+      lasting_special_place_lsp, overall_condition, pa_condition, scoring_rule
+    )
+
+  arch_all <- ewg_coords_v4 %>%
+    mutate(lasting_special_place_lsp = str_squish(as.character(lasting_special_place_lsp))) %>%
+    inner_join(arch_rule_ug, by = "lasting_special_place_lsp") %>%
+    st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+
+  # Upper Gulf / Peñasco – El Golfo / western Upper Gulf shore
+  bb_ug <- as_bbox(-115.15, -113.15, 30.95, 32.15)
+  arch_ug <- filter_points_in_bbox(arch_all, bb_ug)
+
+  if (!is.null(arch_ug) && nrow(arch_ug) > 0) {
+    anp_src <- if (!is.null(all_protected_sf)) {
+      all_protected_sf
+    } else {
+      process_anp_sf
+    }
+    if (!is.null(anp_src) && nrow(anp_src) > 0) {
+      anp_src <- st_transform(st_make_valid(anp_src), 4326)
+    }
+
+    # Independent spatial QC: does the prep 500 m buffer touch any ANP?
+    pts_proj <- st_transform(arch_ug, 32612)
+    buf500_ug <- st_buffer(pts_proj, dist = 500) %>% st_transform(4326)
+    touches_anp <- rep(FALSE, nrow(arch_ug))
+    anp_names_hit <- rep(NA_character_, nrow(arch_ug))
+
+    if (!is.null(anp_src) && nrow(anp_src) > 0) {
+      anp_u <- anp_src %>% st_union() %>% st_make_valid()
+      hits <- suppressWarnings(st_intersects(buf500_ug, anp_u, sparse = TRUE))
+      touches_anp <- lengths(hits) > 0
+
+      # best-effort name of first intersecting ANP polygon (for console table)
+      hit_poly <- suppressWarnings(st_intersects(buf500_ug, anp_src, sparse = TRUE))
+      nm_col <- if ("name" %in% names(anp_src)) "name" else names(anp_src)[1]
+      anp_names_hit <- vapply(hit_poly, function(ix) {
+        if (length(ix) == 0) return(NA_character_)
+        paste(unique(as.character(anp_src[[nm_col]][ix])), collapse = "; ")
+      }, character(1))
+    }
+
+    arch_ug <- arch_ug %>%
+      mutate(
+        touches_anp_500m = touches_anp,
+        anp_name_hit = anp_names_hit,
+        short_label = lasting_special_place_lsp %>%
+          str_replace("\\s*\\(.*$", "") %>%
+          str_trunc(28),
+        # QC flag for floor sites that would be expected to take ANP path if SIMEC > 0
+        qc_issue = scoring_rule == "Codified legal floor (30)" & touches_anp_500m,
+        plot_class = case_when(
+          qc_issue ~ "Floor score BUT buffer touches ANP (review)",
+          TRUE ~ scoring_rule
+        )
+      )
+
+    message("Upper Gulf arch sites: ", nrow(arch_ug))
+    print(
+      st_drop_geometry(arch_ug) %>%
+        dplyr::select(
+          short_label, scoring_rule, overall_condition, pa_condition,
+          touches_anp_500m, anp_name_hit, qc_issue
+        ) %>%
+        arrange(desc(qc_issue), scoring_rule, short_label)
+    )
+    n_issue <- sum(arch_ug$qc_issue, na.rm = TRUE)
+    message(
+      "Codified-floor sites whose 500 m buffer still touches an ANP: ", n_issue,
+      if (n_issue > 0) " (shown with orange stroke)" else " (none)"
+    )
+
+    states_ug <- process_states
+    if (!is.null(states_ug) && nrow(states_ug) > 0) {
+      states_ug <- st_transform(states_ug, 4326)
+    }
+    anp_ug <- if (!is.null(anp_src)) crop_sf(anp_src, bb_ug) else NULL
+
+    gg_arch_upper_gulf <- ggplot() +
+      {
+        if (!is.null(states_ug) && nrow(states_ug) > 0) {
+          geom_sf(data = states_ug, fill = "#d6cac0", color = "grey40", linewidth = 0.15)
+        }
+      } +
+      {
+        if (!is.null(anp_ug) && nrow(anp_ug) > 0) {
+          geom_sf(
+            data = anp_ug,
+            fill = "#98a25a",
+            color = "#4a5c2a",
+            linewidth = 0.35,
+            alpha = 0.4
+          )
         }
       } +
       geom_sf(
-        data = hab_focus,
-        aes(fill = scoring_rule),
-        color = "grey20",
-        linewidth = 0.15,
-        alpha = 0.85
+        data = buf500_ug,
+        fill = NA,
+        color = "#C03729",
+        linewidth = 0.45,
+        alpha = 0.9
       ) +
-      scale_fill_manual(
-        name = "Habitat scoring rule",
+      geom_sf(
+        data = arch_ug,
+        aes(color = plot_class, shape = plot_class),
+        size = 3.2,
+        stroke = 0.9,
+        alpha = 0.98
+      ) +
+      geom_text(
+        data = st_drop_geometry(arch_ug),
+        aes(x = long, y = lat, label = short_label),
+        size = 2.5,
+        hjust = 0,
+        nudge_x = 0.02,
+        color = "grey15",
+        check_overlap = TRUE
+      ) +
+      scale_color_manual(
+        name = "Prep score / QC",
         values = c(
-          "ANP SIMEC / Ramsar above NOM floor" = "#C03729",
-          "Inside ANP (SIMEC or Ramsar rule)" = "#d68910",
-          "Outside ANP: coquina NOM floor (30)" = "#5d6d7e",
-          "Outside ANP: strong habitat NOM floor (70)" = "#1b4f72"
+          "INAH directory (100)" = "#1a5276",
+          "ANP / special protection (SIMEC path)" = "#C03729",
+          "Codified legal floor (30)" = "#333333",
+          "Other / special case" = "#7f8c8d",
+          "Floor score BUT buffer touches ANP (review)" = "#e67e22"
         )
       ) +
-      coord_sf(xlim = c(bb["xmin"], bb["xmax"]), ylim = c(bb["ymin"], bb["ymax"]), expand = FALSE) +
+      scale_shape_manual(
+        name = "Prep score / QC",
+        values = c(
+          "INAH directory (100)" = 15,
+          "ANP / special protection (SIMEC path)" = 16,
+          "Codified legal floor (30)" = 17,
+          "Other / special case" = 18,
+          "Floor score BUT buffer touches ANP (review)" = 17
+        )
+      ) +
+      coord_sf(
+        xlim = c(bb_ug["xmin"], bb_ug["xmax"]),
+        ylim = c(bb_ug["ymin"], bb_ug["ymax"]),
+        expand = FALSE,
+        crs = st_crs(4326)
+      ) +
       labs(
-        title = "Process: Special Habitats (script 6)",
-        subtitle = "Upper eastern Gulf — coquina (and any coral in view); max of ANP condition and NOM floor",
-        caption = "Coquina outside ANPs defaults to 30; coral/seagrass/mangrove NOM floor is 70. ANP green wash for context."
+        title = "Process: Archaeological sites — Upper Gulf zoom (script 4)",
+        subtitle = "Red rings = 500 m ANP-join buffers. Green fill + outline = ANP polygons.",
+        caption = paste0(
+          "Black triangles = codified floor (30) in prep. Orange = floor score but 500 m buffer ",
+          "intersects an ANP (possible mismatch or PA condition = 0). Check console table."
+        )
       ) +
       process_theme() +
-      guides(fill = guide_legend(nrow = 2))
-    print(gg_hab_process)
-    save_lsp_map(gg_hab_process, "process_special_habitats", width = 9, height = 6.5)
+      guides(color = guide_legend(nrow = 3), shape = guide_legend(nrow = 3))
+  } else {
+    message("No archaeological points found in Upper Gulf window; adjust bb_ug if needed.")
   }
 }
-if (is.null(gg_hab_process)) {
-  message("Process map (habitats): need habitat condition gpkg layers under int/.")
+
+gg_arch_upper_gulf
+show_process_map(gg_arch_upper_gulf, "process_archaeological_upper_gulf", width = 9, height = 7)
+```
+
+## Script 6 — Special habitats (how scoring works + visual)
+
+### Confirmed from `script6_special_habitats.qmd`
+
+1. **Each habitat feature** gets `overall_condition = pmax(protected_area_condition, nom_condition)`:
+   - Coquina NOM floor = **30**
+   - Coral / seagrass / mangrove NOM floor = **70**
+2. **Protected-area test:** habitat geometry is buffered by **100 m**, then `st_intersects` against **non-dissolved** ANPs. If it **touches** a PA (after that buffer), it is flagged `in_protected_area` and receives that PA’s full SIMEC (or Ramsar plan rule)—**not** an area-weighted fraction of overlap. Multiple overlapping PAs are averaged with `mean()`.
+3. **Regional special-habitats score:** first average feature scores **within each habitat type** for the region, then average those **type-level** means. So habitat **types present in the region are treated as equally important** (coral one unit, seagrass one unit, …)—not equal weight per individual patch. (Comment in code says “features,” but the combine step is mean of type rows.)
+
+```{r process-habitats-method-figure, fig.width=10, fig.height=7}
+hab_feat <- safe_read_csv(file.path(lsp_output_dir, "special_habitats_features_condition.csv"))
+gg_hab_features <- NULL
+
+if (!is.null(hab_feat)) {
+  # console summary of equal-type aggregation recipe
+  type_rgn <- hab_feat %>%
+    mutate(
+      overall_condition = suppressWarnings(as.numeric(overall_condition)),
+      rgn_id = normalize_rgn_id(rgn_id)
+    ) %>%
+    group_by(rgn_id, habitat_type) %>%
+    summarize(
+      type_mean = mean(overall_condition, na.rm = TRUE),
+      n_features = n(),
+      .groups = "drop"
+    )
+
+  rgn_hab <- type_rgn %>%
+    group_by(rgn_id) %>%
+    summarize(
+      condition = mean(type_mean, na.rm = TRUE),
+      n_types = n(),
+      n_features_total = sum(n_features),
+      .groups = "drop"
+    )
+
+  message("Regional special-habitats condition = mean of per-type means (equal type weights):")
+  print(rgn_hab)
+
+  # Habitat colors (type-linked): seagrass green, mangrove brown, coral dark red, coquina purple-grey
+  habitat_fills <- c(
+    "Coquina Reef" = "#6E667A",
+    "Coral Reef" = "#7A1212",
+    "Mangrove" = "#7A4F2D",
+    "Seagrass (Zostera marina)" = "#2F6B3A"
+  )
+
+  # Visual A: strip of type means contributing to each region
+  gg_hab_types <- ggplot(type_rgn, aes(x = habitat_type, y = type_mean, fill = habitat_type)) +
+    geom_col(width = 0.7, show.legend = FALSE) +
+    geom_text(
+      aes(label = sprintf("%.0f", type_mean)),
+      vjust = -0.35,
+      size = 2.6,
+      color = "grey20"
+    ) +
+    scale_fill_manual(values = habitat_fills, na.value = "grey60") +
+    facet_wrap(~ rgn_id, ncol = 3) +
+    coord_cartesian(ylim = c(0, 108)) +
+    labs(
+      title = "Process: Special Habitats (type means by region)",
+      subtitle = "Regional LSP habitat score = average of the type bars shown (equal type weight)",
+      x = NULL,
+      y = "Mean feature condition"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+      strip.text = element_text(face = "bold", size = 8),
+      plot.title = element_text(face = "bold", size = 11),
+      plot.subtitle = element_text(size = 9, color = "grey30")
+    )
+
+  gg_hab_types
+  show_process_map(gg_hab_types, "process_special_habitats_type_means", width = 10, height = 7)
+
+  # Visual B: feature inventory — in PA vs NOM floor only (tabular console)
+  rule_summary <- hab_feat %>%
+    mutate(
+      overall_condition = suppressWarnings(as.numeric(overall_condition)),
+      pa_condition = suppressWarnings(as.numeric(protected_area_condition)),
+      in_pa = as.logical(in_protected_area),
+      scoring_rule = case_when(
+        !is.na(in_pa) & in_pa & !is.na(pa_condition) ~ "Touches PA (full SIMEC / Ramsar, after 100 m buffer)",
+        TRUE ~ "Outside PA (NOM habitat floor only)"
+      )
+    ) %>%
+    count(habitat_type, scoring_rule)
+
+  print(rule_summary)
+  knitr::kable(rule_summary, caption = "Special habitat features by PA-touch vs NOM-only rule")
+}
+
+# Optional polygon map: coquina habitats showing PA-touch rule (Upper Gulf)
+coquina_sf <- safe_st_read(first_path(
+  file.path(lsp_int_dir, "coquina_reefs_condition.gpkg"),
+  file.path(local_lsp_root, "int/coquina_reefs_condition.gpkg")
+))
+gg_hab_coquina <- NULL
+if (!is.null(coquina_sf) && nrow(coquina_sf) > 0) {
+  coquina_sf <- coquina_sf %>%
+    st_zm(drop = TRUE, what = "ZM") %>%
+    st_make_valid() %>%
+    st_transform(4326)
+
+  if ("in_protected_area" %in% names(coquina_sf)) {
+    coquina_sf <- coquina_sf %>%
+      mutate(in_pa = as.logical(in_protected_area))
+  } else if ("protected_area_condition" %in% names(coquina_sf)) {
+    coquina_sf <- coquina_sf %>%
+      mutate(in_pa = !is.na(suppressWarnings(as.numeric(protected_area_condition))))
+  } else {
+    coquina_sf <- coquina_sf %>% mutate(in_pa = FALSE)
+  }
+  coquina_sf <- coquina_sf %>%
+    mutate(
+      overall_condition = suppressWarnings(as.numeric(overall_condition)),
+      in_pa = ifelse(is.na(in_pa), FALSE, in_pa),
+      pa_rule = factor(
+        if_else(in_pa, "Yes → SIMEC / Ramsar then max with NOM", "No → NOM floor only (coquina 30)"),
+        levels = c(
+          "Yes → SIMEC / Ramsar then max with NOM",
+          "No → NOM floor only (coquina 30)"
+        )
+      )
+    )
+
+  # Extent from coquina features (with pad), not a hard-coded window alone
+  bb_c <- st_bbox(coquina_sf)
+  pad <- 0.35
+  bb <- as_bbox(
+    bb_c["xmin"] - pad, bb_c["xmax"] + pad,
+    bb_c["ymin"] - pad, bb_c["ymax"] + pad
+  )
+  # Guard against degenerate / empty extent
+  if (!all(is.finite(c(bb["xmin"], bb["xmax"], bb["ymin"], bb["ymax"]))) ||
+      (bb["xmax"] - bb["xmin"]) < 0.05 ||
+      (bb["ymax"] - bb["ymin"]) < 0.05) {
+    bb <- as_bbox(-114.9, -112.4, 29.3, 32.0)
+  }
+
+  states_c <- crop_sf(process_states, bb)
+  anp_c <- crop_sf(
+    if (!is.null(process_anp_sf)) process_anp_sf else all_protected_sf,
+    bb
+  )
+  coq_c <- crop_sf(coquina_sf, bb)
+  if (is.null(coq_c) || nrow(coq_c) == 0) coq_c <- coquina_sf
+
+  message(
+    "Coquina map: ", nrow(coq_c), " features; bbox lon [",
+    round(bb["xmin"], 2), ", ", round(bb["xmax"], 2), "], lat [",
+    round(bb["ymin"], 2), ", ", round(bb["ymax"], 2), "]"
+  )
+
+  gg_hab_coquina <- ggplot() +
+    {
+      if (!is.null(states_c) && nrow(states_c) > 0) {
+        geom_sf(data = states_c, fill = "#d6cac0", color = "grey40", linewidth = 0.1)
+      }
+    } +
+    {
+      if (!is.null(anp_c) && nrow(anp_c) > 0) {
+        geom_sf(
+          data = anp_c,
+          fill = "#98a25a",
+          color = "gray30",
+          alpha = 0.18,
+          linewidth = 0.12
+        )
+      }
+    } +
+    geom_sf(
+      data = coq_c,
+      aes(fill = pa_rule),
+      color = "grey15",
+      linewidth = 0.2,
+      alpha = 0.9
+    ) +
+    scale_fill_manual(
+      name = "Touches PA\n(100 m buffer + intersects)?",
+      values = c(
+        "Yes → SIMEC / Ramsar then max with NOM" = "#C03729",
+        "No → NOM floor only (coquina 30)" = "#6E667A"
+      ),
+      drop = FALSE
+    ) +
+    coord_sf(
+      xlim = c(bb["xmin"], bb["xmax"]),
+      ylim = c(bb["ymin"], bb["ymax"]),
+      expand = FALSE,
+      crs = st_crs(4326)
+    ) +
+    labs(
+      title = "Process: Special Habitats (coquina × PA intersection)",
+      subtitle = "Any intersection after 100 m buffer gets the full PA score for that match (not area-weighted)",
+      caption = "Red = coquina feature touches a PA. Purple-grey = NOM floor only (30). Light green wash = ANPs."
+    ) +
+    process_theme()
+
+  gg_hab_coquina
+  show_process_map(gg_hab_coquina, "process_special_habitats_pa_touch", width = 9, height = 7)
 }
 ```
 
-## Script 7 — All other special places (ANP vs codified scores)
+## Script 7 — All other LSPs (dive-style map + codified protection table)
 
-Remaining LSPs after removing larger categories. Condition = ANP SIMEC/Ramsar when overlap exists; otherwise expert-estimated codified protection scores. Points drawn from the EWG coordinate list joined by name.
+Outside scored ANPs, condition comes from the expert **codified protection spreadsheet** (`codified_protection_scores_v3.csv`). Sites that land in a PA use SIMEC/Ramsar like dives.
 
-```{r process-all-other, fig.width=9, fig.height=6.5}
+```{r process-other-map, fig.width=9, fig.height=7}
 other_cond <- safe_read_csv(file.path(lsp_output_dir, "final_other_protections_condition.csv"))
 
 gg_other_process <- NULL
@@ -945,15 +1346,10 @@ if (!is.null(other_cond) && !is.null(ewg_coords_v4)) {
       lsp_name = str_squish(as.character(lsp_name)),
       overall_condition = suppressWarnings(as.numeric(overall_condition)),
       pa_condition = suppressWarnings(as.numeric(protected_area_condition)),
-      codified = suppressWarnings(as.numeric(estimated_condition_of_protection)),
-      scoring_rule = case_when(
-        !is.na(pa_condition) & pa_condition > 0 &
-          (is.na(codified) | abs(overall_condition - pa_condition) < 1e-6) ~
-          "Inside ANP (SIMEC / Ramsar)",
-        !is.na(codified) & !is.na(overall_condition) &
-          abs(overall_condition - codified) < 1e-6 ~
-          "Codified / estimated legal protection",
-        TRUE ~ "Mixed or unresolved rule"
+      scoring_rule = if_else(
+        !is.na(pa_condition) & pa_condition > 0,
+        "Inside scored protected area (SIMEC / Ramsar)",
+        "Outside PA → codified protection score (expert table)"
       )
     )
 
@@ -965,25 +1361,39 @@ if (!is.null(other_cond) && !is.null(ewg_coords_v4)) {
     ) %>%
     st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
 
-  bb <- as_bbox(-115.0, -108.5, 22.5, 32.2)
-  states_focus <- crop_sf(process_states, bb)
-  anp_focus <- crop_sf(all_protected_sf, bb)
-  other_focus <- filter_points_in_bbox(other_sf, bb)
+  message("Other LSPs plotted (Gulf-wide): ", nrow(other_sf))
+  message(
+    "  Inside PA: ",
+    sum(other_sf$scoring_rule == "Inside scored protected area (SIMEC / Ramsar)", na.rm = TRUE),
+    " | Outside PA (codified): ",
+    sum(other_sf$scoring_rule == "Outside PA → codified protection score (expert table)", na.rm = TRUE)
+  )
 
-  if (!is.null(other_focus) && nrow(other_focus) > 0) {
+  # Gulf-wide: all points + full underlays in WGS84 (no tight bbox — avoids CRS zoom crashes)
+  states_f <- process_states
+  if (!is.null(states_f) && nrow(states_f) > 0) {
+    states_f <- st_transform(states_f, 4326)
+  }
+  anp_src <- if (!is.null(process_anp_sf)) process_anp_sf else all_protected_sf
+  anp_f <- anp_src
+  if (!is.null(anp_f) && nrow(anp_f) > 0) {
+    anp_f <- st_transform(anp_f, 4326)
+  }
+
+  if (nrow(other_sf) > 0) {
     gg_other_process <- ggplot() +
       {
-        if (!is.null(states_focus) && nrow(states_focus) > 0) {
-          geom_sf(data = states_focus, fill = "#d6cac0", color = "grey40", linewidth = 0.12)
+        if (!is.null(states_f) && nrow(states_f) > 0) {
+          geom_sf(data = states_f, fill = "#d6cac0", color = "grey40", linewidth = 0.12)
         }
       } +
       {
-        if (!is.null(anp_focus) && nrow(anp_focus) > 0) {
-          geom_sf(data = anp_focus, fill = "#98a25a", color = NA, alpha = 0.22)
+        if (!is.null(anp_f) && nrow(anp_f) > 0) {
+          geom_sf(data = anp_f, fill = "#98a25a", color = NA, alpha = 0.2)
         }
       } +
       geom_sf(
-        data = other_focus,
+        data = other_sf,
         aes(color = scoring_rule, shape = scoring_rule),
         size = 2.6,
         alpha = 0.95
@@ -991,60 +1401,74 @@ if (!is.null(other_cond) && !is.null(ewg_coords_v4)) {
       scale_color_manual(
         name = "Other-LSP scoring rule",
         values = c(
-          "Inside ANP (SIMEC / Ramsar)" = "#C03729",
-          "Codified / estimated legal protection" = "#333333",
-          "Mixed or unresolved rule" = "grey50"
+          "Inside scored protected area (SIMEC / Ramsar)" = "#C03729",
+          "Outside PA → codified protection score (expert table)" = "#333333"
         )
       ) +
       scale_shape_manual(
         name = "Other-LSP scoring rule",
         values = c(
-          "Inside ANP (SIMEC / Ramsar)" = 16,
-          "Codified / estimated legal protection" = 17,
-          "Mixed or unresolved rule" = 4
+          "Inside scored protected area (SIMEC / Ramsar)" = 16,
+          "Outside PA → codified protection score (expert table)" = 17
         )
       ) +
-      coord_sf(xlim = c(bb["xmin"], bb["xmax"]), ylim = c(bb["ymin"], bb["ymax"]), expand = FALSE) +
+      coord_sf(expand = FALSE, crs = st_crs(4326)) +
       labs(
         title = "Process: All other Special Places (script 7)",
-        subtitle = "Gulf-wide residual LSPs — ANP condition when overlapping, else codified protection scores",
-        caption = "Only sites with coordinates that match final_other_protections_condition names are shown."
+        subtitle = "Gulf-wide: red = PA SIMEC path; black = codified protection score when outside ANPs",
+        caption = "Codified scores are expert-assigned estimates and need EWG review (see table below)."
       ) +
       process_theme() +
       guides(color = guide_legend(nrow = 2), shape = guide_legend(nrow = 2))
-    print(gg_other_process)
-    save_lsp_map(gg_other_process, "process_all_other_special_places", width = 9, height = 6.5)
   }
 }
-if (is.null(gg_other_process)) {
-  message("Process map (other LSPs): need final_other_protections_condition.csv + EWG coordinates list.")
+
+gg_other_process
+show_process_map(gg_other_process, "process_all_other_special_places", width = 9, height = 7)
+```
+
+### Codified protection spreadsheet (for sites outside SIMEC)
+
+```{r process-other-codified-table}
+codified <- safe_read_csv(first_path(
+  file.path(lsp_int_dir, "codified_protection_scores_v3.csv"),
+  file.path(local_lsp_root, "int/codified_protection_scores_v3.csv"),
+  file.path(lsp_prep_root, "int/codified_protection_scores_v3.csv")
+))
+
+if (!is.null(codified)) {
+  cod_show <- codified %>%
+    mutate(
+      lsp_name = str_trunc(str_squish(as.character(lsp_name)), 55),
+      estimated_condition_of_protection = suppressWarnings(as.numeric(estimated_condition_of_protection)),
+      other_legal = str_trunc(str_squish(as.character(other_legal_protections_other_than_ANPs)), 50)
+    ) %>%
+    dplyr::select(
+      lsp_name,
+      estimated_condition = estimated_condition_of_protection,
+      level,
+      other_legal
+    ) %>%
+    arrange(desc(estimated_condition), lsp_name)
+
+  print(cod_show, n = 30)
+  knitr::kable(
+    cod_show,
+    caption = "Codified protection scores (int/codified_protection_scores_v3.csv) used when other LSPs fall outside scored PAs"
+  )
+} else {
+  message("Codified spreadsheet not found under int/codified_protection_scores_v3.csv")
 }
 ```
 
-```{r process-maps-saved-summary}
-process_outputs <- tibble::tibble(
-  type = c(
-    "Special Protected Areas",
-    "Priority Dive Sites",
-    "Archaeological Sites",
-    "Iconic Fishing Spots",
-    "Special Habitats",
-    "All other Special Places"
-  ),
-  stem = c(
-    "process_special_protected_areas",
-    "process_priority_dive_sites",
-    "process_archaeological_sites",
-    "process_iconic_fishing_spots",
-    "process_special_habitats",
-    "process_all_other_special_places"
-  )
-) %>%
-  mutate(
-    png = file.path(viz_dir, paste0(stem, ".png")),
-    wrote = file.exists(png)
-  )
-print(process_outputs)
+```{r process-maps-console-objects}
+message(
+  "Process plot objects for console review:\n",
+  "  gg_pa_process, gg_dive_process, gg_fish_loreto, gg_zrp_overview,\n",
+  "  gg_arch_buffer, gg_hab_types (if habitats ran), gg_hab_coquina, gg_other_process\n",
+  "Tables: arch_table, cod_show (if loaded)\n",
+  "save_process_maps is currently: ", save_process_maps
+)
 ```
 
 # Session info
@@ -1053,3 +1477,14 @@ print(process_outputs)
 sessionInfo()
 ```
 
+
+## Check conditon of each type
+
+```{r}
+special_protec <- read_csv(here::here(lsp_output_dir, "rgn_protected_area_condition.csv"))
+dive_cond <- read_csv(here::here(lsp_output_dir, "rgn_dive_sites_condition.csv"))
+fish_cond <- read_csv(here::here(lsp_output_dir, "rgn_fishing_sites_condition.csv"))
+arch_cond <- read_csv(here::here(lsp_output_dir, "rgn_ewg_archaeological_sites_condition.csv"))
+hab_cond <- read_csv(here::here(lsp_output_dir, "rgn_special_habitats_condition.csv"))
+other_cond <- read_csv(here::here(lsp_output_dir, "rgn_final_other_protections_condition.csv"))
+```

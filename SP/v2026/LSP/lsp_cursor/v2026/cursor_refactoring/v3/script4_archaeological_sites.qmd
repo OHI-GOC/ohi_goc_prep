@@ -22,20 +22,21 @@ editor_options:
 
 # Sentido de Pertenencia: Lasting Special Places
 
-**Script 4 — INAH-linked cultural LSPs.** We isolate rows whose protection pathway should run through INAH, spatially crosswalk them against INAH’s published inventory (large buffers so naming drift does not bite us), then layer federal protected-area polygons + SIMEC for places that also fall inside ANPs. Anything still orphaned picks up a modest codified score grounded in how incomplete statutory coverage can be for paleontological heritage.
+## Script 4: archaeological and cultural sites
 
-**Contents**
+I score sites the EWG flagged as special when protection should run through INAH. I start by pulling those rows from the EWG list. I then check whether each site sits near an official INAH inventory point. If it does, I set condition to 100. Next I check whether the site falls inside a natural protected area and, if so, give it that protected area SIMEC management score (or the score already stored in script 2 protected area table). If a site is neither in the INAH inventory nor inside a scored protected area, I assign a codified floor of 30, because paleontological and archaeological remains still have partial legal cover even when sites are not formally managed.
 
-1. Filter `ewg_lsp_inventory_prepared.csv` for INAH obligations; intersect with OHI regions.
-2. Load `INAH_archaeological_sites.csv`, buffer-match both ways.
-3. Smaller-buffer overlap with `all_protected`, fuzzy SIMEC joins, merge paths, average per region, export CSVs.
+**What I do in this script**
 
-## Cultural and archaelogical sites
+1. Keep only EWG rows where protection should be INAH, and assign each site to an OHI region.
+2. Load the INAH inventory and see which EWG sites fall within 10 km of an official INAH site.
+3. Overlap sites with protected area polygons, attach SIMEC (or script 2) scores, average conditions by region, and write the CSVs.
 
-Long-form justification (INAH mandates, quotes) lives in the bullets beneath; executable steps resume once libraries attach.
+## Cultural and archaeological sites
 
 *Overview*
-This includes archaeological sites, such as the shell middens near Puerto Peñasco. These locations have existence, cultural, and educational value. Condition of the archaeological site is determined by whether the agency, National Institute of Anthropology and History (INAH).
+
+This includes archaeological sites, such as the shell middens near Puerto Peñasco. These locations have existence, cultural, and educational value. I determine the condition of each site mainly by asking whether it is managed by the National Institute of Anthropology and History (INAH).
 
 *Why the INAH?*
 [From their website for archaeological sites:](https://www.inah.gob.mx/zonas-arqueologicas)
@@ -63,7 +64,7 @@ library(mapview)
 
 ## Read in archaeological sites the EWG identified as special in the GoC
 
-Filter `protection_should_be == INAH`, coerce coordinates, promote to `sf` so later joins inherit CRS-aware buffering.
+I read the prepared EWG list, keep rows where protection should be INAH, and turn coordinates into an `sf` object.
 
 ```{r}
 lsp_google_sheets_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets"
@@ -85,16 +86,18 @@ mapview(ewg_cultural_site_list)
 
 ### Limit to the GoC 
 
-First, read in the marine and land polygons.
+First I read the marine and land polygons.
 
-Clip cultural sites to official `goc_ohi_rgns.shp` extents so `rgn_id` stays comparable with every other script.
+Then I intersect sites with the official OHI region shapefile so each site gets a region id like every other goal script.
+
 ```{r}
 ohi_rgns <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) 
 
 mapview(ohi_rgns, zcol = "rgn_id")
 ```
 
-Now, we can intersect with `ohi_rgns` so that each site is assigned an OHI GoC Region ID.
+Now I assign each site an OHI GoC region id.
+
 ```{r}
 # intersect with GoC
 ewg_cultural_site_list_goc_rgnid <- st_intersection(st_transform(ewg_cultural_site_list, st_crs(ohi_rgns)), ohi_rgns)
@@ -105,7 +108,7 @@ mapview(ewg_cultural_site_list_goc_rgnid, zcol = "rgn_id")
 
 ## Bring in all sites in the GoC managed by the INAH
 
-Google Sheets export `INAH_archaeological_sites.csv` becomes another point layer—brown markers when juxtaposed against EWG blues.
+I load the INAH inventory from Google Sheets and map it in brown next to the EWG sites in blue.
 
 ```{r}
 INAH_aechaeological_sites <- read_csv(file.path(lsp_google_sheets_dir, "INAH_archaeological_sites.csv")) %>% 
@@ -124,18 +127,19 @@ mapview(ewg_cultural_site_list_goc_rgnid, col.regions = "blue") + mapview(INAH_a
 
 ### Determine if there is overlap between the EWG and INAH sites
 
-I chose to do this spatially, in case the names between the sites do not match up exactly.
+I do this spatially, in case the names between the sites do not match up exactly.
 
-Ten-kilometre buffers emulate fuzzy attribution when CSV labels disagree but geography almost certainly aligns.
+I buffer both sets of points by 10 km so nearby sites still count even when labels differ slightly.
 
 ```{r}
-# buffer dive sites by 10000m
-ewg_cultural_site_list_buffered <- st_buffer(
-  st_transform(ewg_cultural_site_list_goc_rgnid, st_crs(INAH_aechaeological_sites)),
-  dist = 10000
-)
+# buffer EWG and INAH points by 10 km (project so distances are in meters)
+ewg_cultural_site_list_buffered <- st_transform(ewg_cultural_site_list_goc_rgnid, 32612) %>% 
+  st_buffer(dist = 10000) %>% 
+  st_transform(st_crs(INAH_aechaeological_sites))
 
-INAH_aechaeological_sites_buffered <- st_buffer(INAH_aechaeological_sites, dist = 10000)
+INAH_aechaeological_sites_buffered <- st_transform(INAH_aechaeological_sites, 32612) %>% 
+  st_buffer(dist = 10000) %>% 
+  st_transform(st_crs(INAH_aechaeological_sites))
 
 mapview(ewg_cultural_site_list_buffered) + mapview(INAH_aechaeological_sites_buffered, col.regions = "red")
 ```
@@ -150,7 +154,7 @@ ewg_archaeological_sites_protected_INAH <- st_join(
   left = TRUE  # keep all sites, even those outside of INAH sites
 ) %>%
   mutate(in_INAH_directory = !is.na(nombre)) %>% 
-  mutate(overall_condition = ifelse(in_INAH_directory == "TRUE", 100, 0)) 
+  mutate(overall_condition = ifelse(in_INAH_directory, 100, 0)) 
 
 ewg_archaeological_sites_condition <- ewg_archaeological_sites_protected_INAH %>% 
   dplyr::select( rgn_id, lasting_special_place_lsp, in_INAH_directory, nombre_INAH = nombre, overall_condition, link, significado, relevancia_cultural, costo_pesos_nonresidences) %>% 
@@ -161,34 +165,38 @@ ewg_archaeological_sites_condition <- ewg_archaeological_sites_protected_INAH %>
 
 ### Determine if there is overlap between the EWG sites and protected areas
 
-Even INAH-listed heritage often sits inside biosphere reserves—this branch captures SIMEC-backed stewardship where it applies.
+Many of these sites also sit inside biosphere reserves or other ANPs, so I bring in SIMEC where that protection applies.
 
 #### Bring in protected areas
 
 This aggregated layer was built using Hem's layer of ANPs, and WDPA's protected area polygons downloaded in January 2025.
 
-We reuse `all_goc_protected_areas_2025.shp` from the WDPA+HEM fusion referenced earlier in the dive-site workflow.
+I use the updated protected area layer (`all_goc_protected_areas_v2_2025.shp`), which includes Alto Golfo and related polygons that were missing from the older file.
 
 ```{r}
-all_protected <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/protected _areas_wdpa_and_hem", "all_goc_protected_areas_2025.shp"))
+all_protected <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem",
+    "all_goc_protected_areas_v2_2025.shp"
+  ),
+  quiet = TRUE
+)
 mapview(all_protected)
 ```
 
 ### Intersect with protected areas
 
-Switch to 500 m buffers for ANP intersections—tight enough for meaningful overlap stats without exploding polygon counts.
+I put a 500 m buffer around each cultural site (in true meters), then join each buffer to the protected area polygons.
 
 ```{r}
-## NEW BUFFER that is smaller:
-# buffer dive sites by 10000m
-ewg_cultural_site_list_buffered <- st_buffer(
-  st_transform(ewg_cultural_site_list_goc_rgnid, st_crs(INAH_aechaeological_sites)),
-  dist = 500
-)
+# buffer sites by 500 m (project to UTM so 500 means meters, not degrees)
+ewg_cultural_site_list_buffered <- st_transform(ewg_cultural_site_list_goc_rgnid, 32612) %>% 
+  st_buffer(dist = 500) %>% 
+  st_transform(st_crs(all_protected))
 
-# spatial join to the non-dissolved layer (all_protected) to keep protected area names
+# spatial join to the non dissolved layer (all_protected) to keep protected area names
 ewg_archaeological_sites_protected_ANP <- st_join(
-  st_transform(ewg_cultural_site_list_buffered, st_crs(all_protected)),
+  ewg_cultural_site_list_buffered,
   all_protected %>% dplyr::select(name, geometry),
   join = st_intersects,
   left = TRUE  # keep all sites, even those outside of protected areas
@@ -203,29 +211,40 @@ table(ewg_archaeological_sites_protected_ANP$protected_area_name)
 table(ewg_archaeological_sites_protected_ANP$lasting_special_place_lsp) # multiple observations for each site.
 ```
 
-The only problem is that if a buffered site overlaps multiple protected areas, `st_join()` will return one row per match, giving us duplicate sites. So that is something to keep in mind.
+Watch out: if a buffered site overlaps several protected areas, `st_join()` returns one row per match, so I end up with duplicate site names. I deal with that later by keeping the highest score per site.
 
-#### i-efectividad for each dive site in a protected area
+#### i efectividad for each site in a protected area
 
-(Text still says “dive site” historically—here it is archaeological overlap.) Pull SIMEC rows from `google_sheets/simec_i_efectividad_anp_2025.csv` before fuzzy joins.
+I read the SIMEC sheet. I also read the protected area condition table from script 2 so I can look up scores by protected area name (for example Alto Golfo = 46), no matter which OHI region the archaeological site sits in.
 
 ```{r}
 i_efectividad_raw <- read_csv(file.path(lsp_google_sheets_dir, "simec_i_efectividad_anp_2025.csv")) %>% 
   janitor::clean_names()
 
+# condition scores by protected area name (from script 2)
+protected_area_condition_table <- read_csv(
+  here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output",
+    "condition_lsp_protected_areas.csv"
+  ),
+  show_col_types = FALSE
+) %>%
+  janitor::clean_names() %>%
+  mutate(overall_condition = as.numeric(overall_condition))
+
 unique(i_efectividad_raw$nombre)
 unique(ewg_archaeological_sites_protected_ANP$protected_area_name)
 ```
 
-#### Fuzzy matching the protected area names
+#### Matching protected area names to SIMEC
 
-Same normalization recipe as scripts 3 & 5—critical because Ramsar labels seldom match SIMEC uppercase strings.
+Protected area names on the map and in SIMEC are often written differently. I clean both sets of names the same way I do in scripts 3 and 5, then match them.
 
 ```{r}
 library(stringdist)
 library(stringi)
 
-# normalize protected area names...uppercase, remove accents, remove common filler words
+# normalize protected area names: uppercase, remove accents, remove common filler words
 normalize_name <- function(x) {
   x %>%
     stringi::stri_trans_general("Latin-ASCII") %>%  # remove accents
@@ -238,10 +257,16 @@ normalize_name <- function(x) {
 i_efectividad_norm <- i_efectividad_raw %>%
   mutate(nombre_norm = normalize_name(nombre))
 
+# one score per protected area name from the script 2 table
+pa_condition_by_name <- protected_area_condition_table %>%
+  mutate(name_norm = normalize_name(wdpa_orig_name)) %>%
+  group_by(name_norm) %>%
+  summarize(pa_table_score = max(overall_condition, na.rm = TRUE), .groups = "drop")
+
 arch_sites_norm <- ewg_archaeological_sites_protected_ANP %>%
   mutate(protected_area_norm = normalize_name(protected_area_name))
 
-# fuzzy match: for each dive site protected area name, find the closest match in i_efectividad
+# for each protected area name, find the closest match in i_efectividad
 matches <- stringdist::amatch(
   arch_sites_norm$protected_area_norm,
   i_efectividad_norm$nombre_norm,
@@ -252,50 +277,78 @@ matches <- stringdist::amatch(
 
 
 ```{r}
-# attach matched nombre from i_efectividad back to dive sites
+# attach matched nombre from i_efectividad
 arch_sites_matched <- arch_sites_norm %>%
   mutate(
     nombre_matched = i_efectividad_norm$nombre[matches],
     nombre_norm_matched = i_efectividad_norm$nombre_norm[matches]
   )
 
-# inspect the matches before joining
-# join them!!!
-arch_sites_w_SIMEC <- arch_sites_matched %>%
+# SIMEC scores
+arch_sites_matched <- arch_sites_matched %>%
   left_join(
     i_efectividad_raw,
     by = c("nombre_matched" = "nombre")
-  ) %>% 
-  mutate(protected_area_condition = ifelse(!is.na(i_efectividad), i_efectividad, NA),
-         protected_area_condition = ifelse(protected_area_name == "Humedales de Bahía Adaír", 30, protected_area_condition), # Humedales de Bahía Adaír does not have a managment plan in place: https://rsis.ramsar.org/?f%5B0%5D=region_en_s%3ANorth+America&f%5B1%5D=managementPlanAvailable_i%3A0&q=Mexico#map 
-         protected_area_condition = ifelse(lasting_special_place_lsp == "LA PIEDRA DE LA VIRGEN, / O PIEDRA DEL CRISTO DEL MAR.  Important for the huichol people, they recognize as the point of origin of their people (https://visitnayarit.travel/en/blog-nayarit-en/tatei-haramara-the-origin-of-the-world-according-to-the-wixarika-worldview/) (JGH)", 100, protected_area_condition), # "In November 2008, Tatei Haramara, along with other Wixarika sacred sites, was protected by governments through the signing of a common agreement called the ‘Hauxa Manaka Pact for the Preservation and Development of Wixarika Culture.’ A total of 6 hectares of this site were protected, committing to ‘prevent the Wixaritari and/or individuals not of their culture from using elements of the same for purposes contrary to the ceremonial and tradition of the Wixárika People." https://visitnayarit.travel/en/blog-nayarit-en/tatei-haramara-the-origin-of-the-world-according-to-the-wixarika-worldview/ https://www.wixarika.org/pronouncement-wixarika-sacred-site-route-wirikuta-cultural-and-natural-world-heritage-unesco https://www.wixarika.org/recognition-wixarika-sacred-route-will-avoid-pillage-peyote 
-         protected_area_condition = ifelse(is.na(protected_area_condition), 0, protected_area_condition)
-  ) %>%
-  group_by(lasting_special_place_lsp) %>% 
-  # multiple MPAs / Ramsar overlaps: take best (highest) management score
-  mutate(protected_area_condition = max(protected_area_condition, na.rm = TRUE)) %>% 
-  ungroup() %>% 
-  dplyr::select(rgn_id, lasting_special_place_lsp, protected_area_condition) %>% 
-  distinct()
+  )
 
-## note that "LA PIEDRA DE LA VIRGEN, / O PIEDRA DEL CRISTO DEL MAR.  Important for the huichol people, they recognize as the point of origin of their people (https://visitnayarit.travel/en/blog-nayarit-en/tatei-haramara-the-origin-of-the-world-according-to-the-wixarika-worldview/) (JGH)" is fully protected by Hauxa Manaka Pact for the Preservation and Development of Wixarika Culture (2008) and UNESCO (as of 2025).
+# script 2 protected area scores by name (works the same in Region 1 and Region 5)
+arch_sites_matched <- arch_sites_matched %>%
+  left_join(
+    pa_condition_by_name,
+    by = c("protected_area_norm" = "name_norm")
+  )
+
+# prefer the script 2 score when I have it; otherwise use SIMEC; then apply a few special cases
+arch_sites_w_SIMEC <- arch_sites_matched %>%
+  mutate(
+    protected_area_condition = ifelse(!is.na(pa_table_score), pa_table_score, i_efectividad),
+    # Humedales de Bahía Adaír does not have a management plan in place
+    protected_area_condition = ifelse(
+      protected_area_name == "Humedales de Bahía Adaír",
+      30,
+      protected_area_condition
+    ),
+    # Alto Golfo biosphere reserve: SIMEC i efectividad = 46
+    protected_area_condition = ifelse(
+      str_detect(protected_area_name, "Alto Golfo de California y Delta"),
+      46,
+      protected_area_condition
+    ),
+    # Wixárika site: Hauxa Manaka Pact and UNESCO
+    protected_area_condition = ifelse(
+      lasting_special_place_lsp == "LA PIEDRA DE LA VIRGEN, / O PIEDRA DEL CRISTO DEL MAR.  Important for the huichol people, they recognize as the point of origin of their people (https://visitnayarit.travel/en/blog-nayarit-en/tatei-haramara-the-origin-of-the-world-according-to-the-wixarika-worldview/) (JGH)",
+      100,
+      protected_area_condition
+    ), # "In November 2008, Tatei Haramara, along with other Wixarika sacred sites, was protected by governments through the signing of a common agreement called the ‘Hauxa Manaka Pact for the Preservation and Development of Wixarika Culture.’ A total of 6 hectares of this site were protected, committing to ‘prevent the Wixaritari and/or individuals not of their culture from using elements of the same for purposes contrary to the ceremonial and tradition of the Wixárika People." https://visitnayarit.travel/en/blog-nayarit-en/tatei-haramara-the-origin-of-the-world-according-to-the-wixarika-worldview/ https://www.wixarika.org/pronouncement-wixarika-sacred-site-route-wirikuta-cultural-and-natural-world-heritage-unesco https://www.wixarika.org/recognition-wixarika-sacred-route-will-avoid-pillage-peyote 
+    protected_area_condition = ifelse(is.na(protected_area_condition), 0, protected_area_condition)
+  ) %>%
+  group_by(lasting_special_place_lsp) %>%
+  # if a site overlaps several protected areas, keep the highest score
+  mutate(protected_area_condition = max(protected_area_condition, na.rm = TRUE)) %>%
+  ungroup() %>%
+  dplyr::select(rgn_id, lasting_special_place_lsp, protected_area_condition) %>%
+  distinct()
 ```
+
+Note: many Upper Gulf archaeological sites fall inside *Alto Golfo de California y Delta del Río Colorado*. That ANP has a SIMEC score of **46**. Those sites should get 46, not the codified floor of 30.
+
+Also, "LA PIEDRA DE LA VIRGEN..." is fully protected by the Hauxa Manaka Pact (2008) and UNESCO (as of 2025).
 
 ### Codified protection condition
 
-Literature quote below motivates why “not INAH + not inside ANP” still earns a **30** rather than zero—partial statutory scaffolding beats pretending no governance exists.
+The quote below is why I still give a score of **30** when a site is not in the INAH inventory and not inside a scored ANP. There is some legal protection for remains even when management is weak.
 
 From [Guerrero-Arenas et al. 2022:](https://paleontologiamexicana.geologia.unam.mx/index.php/paleontologia/article/view/165/299)
 
-"The paleontological heritage of Mexico consists of the fossil specimens housed in scientific collections (movable heritage), as well as those found in fossiliferous localities throughout the country’s territory (immovable heritage). Since 1986, as stated in the Federal Law on Monuments and Archaeological, Artistic and Historical Zones, the National Institute of Anthropology and History is in charge of protecting fossils discovered in Mexico. Fossils are considered cultural heritage by law in several Latin American countries, such as Argentina, Chile, El Salvador, Peru, and Mexico. *However, this classification is not the most adequate because it does not guarantee its comprehensive protection.*"
+"The paleontological heritage of Mexico consists of the fossil specimens housed in scientific collections (movable heritage), as well as those found in fossiliferous localities throughout the country's territory (immovable heritage). Since 1986, as stated in the Federal Law on Monuments and Archaeological, Artistic and Historical Zones, the National Institute of Anthropology and History is in charge of protecting fossils discovered in Mexico. Fossils are considered cultural heritage by law in several Latin American countries, such as Argentina, Chile, El Salvador, Peru, and Mexico. *However, this classification is not the most adequate because it does not guarantee its comprehensive protection.*"
 
-"There is no law in Mexico defining the criteria for considering fossil sites as objects of protection; however, there are various instruments that allow their registration and therefore, a proposal for their long-term management and protection. Nonetheless, paleontologists working on Mexican territory must be commited to comply with the requirements already established by the law for the registration of palaeontological movable and immovable property. With this, it is possible to improve and adapt the instruments and legal processes that allow the safeguarding of Mexico’s paleontological heritage."
+"There is no law in Mexico defining the criteria for considering fossil sites as objects of protection; however, there are various instruments that allow their registration and therefore, a proposal for their long-term management and protection. Nonetheless, paleontologists working on Mexican territory must be commited to comply with the requirements already established by the law for the registration of palaeontological movable and immovable property. With this, it is possible to improve and adapt the instruments and legal processes that allow the safeguarding of Mexico's paleontological heritage."
 
-Therefore, I will be giving any archaeological site that is a managed site by INAH nor does it fall into a natural protected are a management condition score of 30 (relatively weak, but partial protection).
+Therefore, I give any archaeological site that is not managed by INAH and does not fall into a natural protected area a management condition score of 30 (relatively weak, but partial protection).
 
 ```{r}
 ewg_archaeological_sites_condition_protected <- ewg_archaeological_sites_condition %>% 
-  left_join(arch_sites_w_SIMEC) %>% 
+  left_join(arch_sites_w_SIMEC, by = c("lasting_special_place_lsp","rgn_id")) %>% 
   mutate(overall_condition = ifelse(overall_condition == 0, protected_area_condition, overall_condition)) %>% 
   mutate(overall_condition = ifelse(overall_condition == 0, 30, overall_condition)) # codified
 ```
@@ -304,12 +357,11 @@ ewg_archaeological_sites_condition_protected <- ewg_archaeological_sites_conditi
 
 ## Condition per region
 
-Drop geometry columns that sneak in after joins, average `overall_condition` per `rgn_id`.
+I drop geometry if it is still there, then average overall condition by region.
 
 ```{r}
 final_ewg_archaeological_sites_condition <- ewg_archaeological_sites_condition_protected %>% 
-  st_drop_geometry() %>% 
-  dplyr::select(-geometry)
+  st_drop_geometry()
 
 rgn_final_ewg_archaeological_sites_condition <- final_ewg_archaeological_sites_condition %>% 
   group_by(rgn_id) %>% 
@@ -321,17 +373,19 @@ rgn_final_ewg_archaeological_sites_condition <- final_ewg_archaeological_sites_c
 
 ### Write to Mazu
 
-Persist archaeological outputs beside fishing/diving tables for script 7’s residual accounting.
+I write the site level and region level tables to the shared output folder so I can use them later when I merge all LSP current status scores.
 
 ```{r}
-write_csv(final_ewg_archaeological_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_lsp_archaeological_sites.csv"))
-write_csv(rgn_final_ewg_archaeological_sites_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_archaeological_sites.csv"))
+out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+write_csv(
+  final_ewg_archaeological_sites_condition,
+  file.path(out_dir, "condition_lsp_archaeological_sites.csv")
+)
+write_csv(
+  rgn_final_ewg_archaeological_sites_condition,
+  file.path(out_dir, "condition_region_archaeological_sites.csv")
+)
 ```
-
-
-
-
-
-
-
 

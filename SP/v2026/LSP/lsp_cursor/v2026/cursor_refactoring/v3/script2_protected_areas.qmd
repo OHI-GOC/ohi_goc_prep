@@ -12,31 +12,25 @@ format:
     highlight-style: haddock
   pdf:
     toc: true
-editor: 
+editor:
   markdown:
     wrap: sentence
   chunk_output_type: console
-editor_options: 
+editor_options:
   chunk_output_type: console
 ---
 
 # Sentido de Pertenencia: Lasting Special Places
 
-**Script 2 — Protected-area LSPs.** Every polygon the EWG flagged as an explicitly named protected area inherits SIMEC’s *i‑efectividad* when CONANP reports it; Ramsar-only rows borrow rules tied to management-plan availability. Outputs feed both maps (`condition_lsp_protected_areas.csv`) and regional means (`condition_region_protected_areas.csv`) for script 8.
+## Script 2: special protected areas on the EWG list
 
-**Contents**
+In this script I score the protected areas the EWG named explicitly. When CONANP reports a SIMEC i-efectividad score, I use that as condition. For Ramsar-only sites I follow simple rules based on whether a management plan is present. I write both a site table and a region average so script 8 can merge everything later.
 
-1. Load the fused WDPA/CONANP/HEM layer plus auxiliary CBMC and WDPA clips for context maps.
-2. Pull `ewg_special_protected_areas_on_list.csv` + SIMEC export from `google_sheets/`.
-3. Join, encode Ramsar / refuge overrides, attach geometries, average by `rgn_id`, write CSVs.
+**What I do**
 
-## Protected areas (ANPs)
-
-This subgoal's current status is based on whether there is a protection on the Lasting Special Place (LSP), and the condition is then determined by the effectiveness of that protection on the LSP.  
-
-For protected areas, they are all inherently protected, and are also all on the list from experts. The condition will be based on the management effectiveness determined by CONANP's SIMEC index of effectiveness (i-efectividad).
-
-Libraries first—everything downstream is `sf` + `tidyverse` + quick maps.
+1. Read the combined protected area layer (`all_goc_protected_areas_v2_2025.shp`).
+2. Read the EWG special protected areas table and the SIMEC spreadsheet.
+3. Join SIMEC onto the EWG list, apply Ramsar rules, average by region, write CSVs.
 
 ```{r}
 library(tidyverse)
@@ -45,127 +39,152 @@ library(sf)
 library(mapview)
 ```
 
+## Protected areas (ANPs)
 
-## Bring in protected areas
+Protected areas on the list are already protected by design. I still need a condition score that reflects management quality. I rely mainly on CONANP's SIMEC i-efectividad.
 
-This aggregated layer was built using Hem's layer of ANPs, and WDPA's protected area polygons downloaded in January 2025.
+### Read the combined protected area layer
 
-We read `all_goc_protected_areas_v2_2025.shp`, optionally compare older CBMC MPAs and the raw WDPA clip, mostly as orientation—your joins later rely on `all_protected`.
+Let's load the v2 layer from script 1 (WDPA + CONANP + HEM). This is the same layer scripts 3 through 7 should use.
 
 ```{r}
-all_protected <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem", "all_goc_protected_areas_v2_2025.shp"))
+all_protected <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem",
+    "all_goc_protected_areas_v2_2025.shp"
+  ),
+  quiet = TRUE
+)
+
 mapview(all_protected)
 ```
 
-For more information on all PAs designated before 2020: CBMC GCMP 
+Optional: older CBMC GCMP MPAs for context (sites designated before 2020).
 
 ```{r}
-cbmc_gcmp_2020_mpas <- st_read(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main/shp/final_mpa_layer.shp")) %>%
-  janitor::clean_names()
+cbmc_gcmp_2020_mpas <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main/shp",
+    "final_mpa_layer.shp"
+  ),
+  quiet = TRUE
+) %>%
+  janitor::clean_names() %>%
+  st_zm(drop = TRUE, what = "ZM")
 
-# get rid of Z coordinates to make all geometries 2D
-cbmc_gcmp_2020_mpas <- st_zm(cbmc_gcmp_2020_mpas, drop = TRUE, what = "ZM")
-
-# verify the geometry types are now consistent
 table(st_geometry_type(cbmc_gcmp_2020_mpas))
-
 mapview(cbmc_gcmp_2020_mpas)
 ```
 
-Only WDPA January 2025:
+## Read the EWG list of protected areas
 
-```{r}
-wdpa_2025 <- st_read(here::here("/home/lecuona/OHI_Intro/ohi_goc_prep/LSP/v2025/output/WDPA_Jan2025_shp_clipped_all.shp")) # `sub_loc` can help us make sure the protected area is in the correct region. 
-
-mapview(wdpa_2025)
-
-wdpa_2025_df <- wdpa_2025 %>% 
-  st_drop_geometry()
-```
-
-
-### Bring in the list from the EWG
-
-These rows tie each expert-named site to WDPA labels, SIMEC names, Ramsar flags, and coordinates—straight from `google_sheets/ewg_special_protected_areas_on_list.csv`.
+I need the expert names, WDPA labels, SIMEC names, Ramsar flags, and region ids.
 
 ```{r}
 lsp_google_sheets_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets"
-ewg_mentioned_protected_areas <- read_csv(file.path(lsp_google_sheets_dir, "ewg_special_protected_areas_on_list.csv")) %>% 
+
+ewg_mentioned_protected_areas <- read_csv(
+  file.path(lsp_google_sheets_dir, "ewg_special_protected_areas_on_list.csv"),
+  show_col_types = FALSE
+) %>%
   janitor::clean_names()
 ```
 
+## Join with i-efectividad
 
-## Join with i-efectividad for each CONANP protected area
-
-SIMEC lives in `google_sheets/simec_i_efectividad_anp_2025.csv`; we left_join on `i_efectividad_name` ↔ `nombre` so CONANP spelling wins even when WDPA strings differ.
+I join the SIMEC table on the CONANP name (`i_efectividad_name` to `nombre`).
 
 ```{r}
-i_efectividad_raw <- read_csv(file.path(lsp_google_sheets_dir, "simec_i_efectividad_anp_2025.csv")) %>% 
+i_efectividad_raw <- read_csv(
+  file.path(lsp_google_sheets_dir, "simec_i_efectividad_anp_2025.csv"),
+  show_col_types = FALSE
+) %>%
   janitor::clean_names()
+
+i_efectividad_w_ewg_list <- left_join(
+  ewg_mentioned_protected_areas,
+  i_efectividad_raw,
+  by = c("i_efectividad_name" = "nombre")
+)
 ```
 
+## Assign condition (SIMEC and Ramsar rules)
+
+Let's start with SIMEC when it exists. Then I apply Ramsar management plan rules and a few special cases (whale shark refuge, vaquita refuge, Loreto II).
+
 ```{r}
-i_efectividad_w_ewg_list <- left_join(ewg_mentioned_protected_areas, i_efectividad_raw, by = c("i_efectividad_name" = "nombre"))
+protected_area_condition <- i_efectividad_w_ewg_list %>%
+  mutate(
+    overall_condition = ifelse(is.na(i_efectividad), 0, i_efectividad),
+    overall_condition = case_when(
+      # Ramsar plan in progress: take the better of SIMEC and 60
+      if_ramsar_has_management_plan == "in_progress" ~
+        max(c(i_efectividad, 60), na.rm = TRUE),
+      # Ramsar plan yes: use at least the highest SIMEC in the table
+      if_ramsar_has_management_plan == "y" ~
+        max(c(i_efectividad, max(i_efectividad_raw$i_efectividad, na.rm = TRUE)), na.rm = TRUE),
+      # Ramsar plan no: cap at the lowest SIMEC in the table
+      if_ramsar_has_management_plan == "n" ~
+        min(c(i_efectividad, min(i_efectividad_raw$i_efectividad, na.rm = TRUE)), na.rm = TRUE),
+      lasting_special_place_description == "Whale shark Area de Refugio in La Paz - AHW , BW" ~ 75,
+      # Loreto II is new; leave NA until SIMEC is published
+      lasting_special_place_description == "Loreto II" ~ NA_real_,
+      lasting_special_place_description == "Área de Refúgio para la Protección de la Vaquita" ~ 75,
+      TRUE ~ overall_condition
+    ),
+    rgn_id = str_replace_all(rgn_id, " ", "_")
+  ) %>%
+  dplyr::select(
+    rgn_id,
+    lasting_special_place_description,
+    overall_condition,
+    i_efectividad_name,
+    wdpa_orig_name,
+    if_ramsar_has_management_plan,
+    ramsar_link
+  )
 ```
 
-
-
-## Assign condition for the RAMSAR sites
-
-`case_when()` blends numeric SIMEC scores with Ramsar management-plan states plus hand-entered exceptions (vaquita refuge, whale shark refuge, Loreto II NA until SIMEC catches up).
+I attach geometry from `all_protected` by WDPA name so I can map condition.
 
 ```{r}
-protected_area_condition <- i_efectividad_w_ewg_list %>% 
-  mutate(overall_condition = ifelse(is.na(i_efectividad), 0, i_efectividad),
-         overall_condition = case_when(
-           # Ramsar / SIMEC on same site: keep the better (higher) management signal vs table-wide ceiling/floor
-           if_ramsar_has_management_plan == "in_progress" ~ max(c(i_efectividad, 60), na.rm = TRUE),
-           if_ramsar_has_management_plan == "y" ~ max(
-             c(i_efectividad, max(i_efectividad_raw$i_efectividad, na.rm = TRUE)),
-             na.rm = TRUE
-           ),
-           if_ramsar_has_management_plan == "n" ~ min(
-             c(i_efectividad, min(i_efectividad_raw$i_efectividad, na.rm = TRUE)),
-             na.rm = TRUE
-           ),
-           lasting_special_place_description == "Whale shark Area de Refugio in La Paz - AHW , BW" ~ 75, 
-           lasting_special_place_description == "Loreto II" ~ NA, # as of May 2026, the Parque Nacional Loreto II, decreed on August 15, 2023, is a relatively new federal protected area managed by CONANP. Due to its recent establishment, a finalized long-term SIMEC management effectiveness score may not yet be published, as of early 2025 the management plan was still in progress.
-           lasting_special_place_description == "Área de Refúgio para la Protección de la Vaquita" ~ 75, 
-           TRUE ~ overall_condition
-           )) %>% 
-  mutate(rgn_id = str_replace_all(rgn_id, pattern = " ", replacement = "_")) %>% 
-  dplyr::select(rgn_id, lasting_special_place_description, overall_condition, i_efectividad_name, wdpa_orig_name, if_ramsar_has_management_plan, ramsar_link)
-```
-
-
-```{r}
-protected_condition_w_geometry <- left_join(protected_area_condition, all_protected, by = c("wdpa_orig_name" = "name")) %>% 
+protected_condition_w_geometry <- left_join(
+  protected_area_condition,
+  all_protected,
+  by = c("wdpa_orig_name" = "name")
+) %>%
   st_as_sf()
 
 mapview(protected_condition_w_geometry, zcol = "overall_condition")
 ```
 
-
 ## Condition per region
 
-Simple average of `overall_condition` inside each `rgn_id`; na.rm keeps partially scored regions from collapsing.
+I average site conditions within each OHI region.
 
 ```{r}
-rgn_protected_area_condition <- protected_area_condition %>% 
-  group_by(rgn_id) %>% 
+rgn_protected_area_condition <- protected_area_condition %>%
+  group_by(rgn_id) %>%
   summarize(
-    condition = mean(overall_condition, na.rm = TRUE)
-  ) %>% 
-  ungroup()
+    condition = mean(overall_condition, na.rm = TRUE),
+    .groups = "drop"
+  )
 ```
 
+## Write to Mazu
 
-# Write to Mazu
-
-Persist per-place and per-region tables under `goal_prep/sp/lsp/v2025/output/` so scripts 7–8 can ingest them without rerunning SIMEC logic.
+I save site level and region level tables for scripts 7 and 8.
 
 ```{r}
-write_csv(protected_area_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_lsp_protected_areas.csv"))
-write_csv(rgn_protected_area_condition, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_protected_areas.csv"))
-```
+out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
+write_csv(
+  protected_area_condition,
+  file.path(out_dir, "condition_lsp_protected_areas.csv")
+)
+write_csv(
+  rgn_protected_area_condition,
+  file.path(out_dir, "condition_region_protected_areas.csv")
+)
+```

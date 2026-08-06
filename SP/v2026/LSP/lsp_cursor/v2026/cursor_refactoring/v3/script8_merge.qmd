@@ -12,74 +12,97 @@ format:
     highlight-style: haddock
   pdf:
     toc: true
-editor: 
+editor:
   markdown:
     wrap: sentence
   chunk_output_type: console
-editor_options: 
+editor_options:
   chunk_output_type: console
 ---
 
 # Sentido de Pertenencia: Lasting Special Places
 
-**Script 8 — Goal-level rollup.** Every thematic script exported both detailed tables and `condition_region_*` summaries. Here we simply align `rgn_id` strings, stack those summaries with `bind_rows()`, and average across categories so each OHI region carries one **current status** figure for the Sentido de Pertenencia / Lasting Special Places lens (year tag hard-coded to the assessment vintage).
+## Script 8: merge region scores into one current status
 
-**Contents**
+Scripts 2 through 7 each write a region level condition table. Here I read those tables, stack them, and take a simple average so each OHI region has one **current status** score for Lasting Special Places. I stamp the year as 2025.
 
-1. Read each `condition_region_*.csv` produced by scripts 2–7 (fishing, archaeology, protected areas, diving, habitats, residual marine places).
-2. `bind_rows()` into a long table, group by `rgn_id`, take `mean(condition)` as `current_status`, stamp `year`.
-3. Write `lsp_goal_current_status_by_region.csv` for Mazu + OHI bookkeeping.
+**What I do**
 
-## Merge all types of LSPs and determine a condition for each region
-
-No modelling happens—just ingestion + sanity checks on column names; tweak weights later if we decide some LSP classes deserve more influence than a naive average.
+1. Read each `condition_region_*.csv` from scripts 2 through 7.
+2. Make sure `rgn_id` uses underscores.
+3. Average `condition` by region and write `lsp_goal_current_status_by_region.csv`.
 
 ```{r}
-# fishing sites
-rgn_fishing_site_condition <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_fishing_sites.csv")) %>% 
-  mutate(rgn_id = str_replace_all(rgn_id, " ", "_"))
-
-# archaeological sites
-rgn_archaeological_site_condition <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_archaeological_sites.csv")) %>% 
-  mutate(rgn_id = str_replace_all(rgn_id, " ", "_"))
-
-# protected area sites
-rgn_protected_area_condition <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_protected_areas.csv")) %>%
-  mutate(rgn_id = str_replace_all(rgn_id, " ", "_"))
-
-# dive sites
-rgn_dive_sites_condition <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_dive_sites.csv"))%>% 
-  mutate(rgn_id = str_replace_all(rgn_id, " ", "_"))
-
-# special habitats (coral, coquina, seagrass, mangroves)
-rgn_special_habitats_condition <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_special_habitats.csv"))%>% 
-  mutate(rgn_id = str_replace_all(rgn_id, " ", "_")) %>% 
-  dplyr::select(-n_features)
-
-# all other LSPs
-other_sites_condition <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/condition_region_other_marine_places.csv"))%>% 
-  mutate(rgn_id = str_replace_all(rgn_id, " ", "_"))
-
+library(tidyverse)
+library(here)
 ```
 
+## Read region tables from each LSP type
 
-## Bind rows
-
-Row-bind every regional summary, compute unweighted means per region, emit final CSV beside other `output/` artifacts.
+Let's load fishing, archaeology, protected areas, dive sites, special habitats, and all other marine places.
 
 ```{r}
-all_rgn_lsp_conditions <- bind_rows(rgn_fishing_site_condition, rgn_archaeological_site_condition, rgn_protected_area_condition, rgn_dive_sites_condition, rgn_special_habitats_condition, other_sites_condition)
+out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output"
 
-lsp_current_status <- all_rgn_lsp_conditions %>% 
-  group_by(rgn_id) %>% 
+clean_rgn <- function(path) {
+  read_csv(path, show_col_types = FALSE) %>%
+    mutate(rgn_id = str_replace_all(rgn_id, " ", "_"))
+}
+
+rgn_fishing_site_condition <- clean_rgn(
+  file.path(out_dir, "condition_region_fishing_sites.csv")
+)
+
+rgn_archaeological_site_condition <- clean_rgn(
+  file.path(out_dir, "condition_region_archaeological_sites.csv")
+)
+
+rgn_protected_area_condition <- clean_rgn(
+  file.path(out_dir, "condition_region_protected_areas.csv")
+)
+
+rgn_dive_sites_condition <- clean_rgn(
+  file.path(out_dir, "condition_region_dive_sites.csv")
+)
+
+rgn_special_habitats_condition <- clean_rgn(
+  file.path(out_dir, "condition_region_special_habitats.csv")
+) %>%
+  dplyr::select(-any_of("n_features"))
+
+other_sites_condition <- clean_rgn(
+  file.path(out_dir, "condition_region_other_marine_places.csv")
+)
+```
+
+## Average across LSP types and write
+
+I use an equal average for now. If we decide one type should weigh more later, I can change this step.
+
+```{r}
+all_rgn_lsp_conditions <- bind_rows(
+  rgn_fishing_site_condition,
+  rgn_archaeological_site_condition,
+  rgn_protected_area_condition,
+  rgn_dive_sites_condition,
+  rgn_special_habitats_condition,
+  other_sites_condition
+)
+
+lsp_current_status <- all_rgn_lsp_conditions %>%
+  group_by(rgn_id) %>%
   summarize(
-    current_status = mean(condition)
-  ) %>% 
-  ungroup() %>% 
+    current_status = mean(condition, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
   mutate(year = 2025)
 
-write_csv(lsp_current_status, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/lsp_goal_current_status_by_region.csv"))
-```
+write_csv(
+  lsp_current_status,
+  file.path(out_dir, "lsp_goal_current_status_by_region.csv")
+)
 
+print(lsp_current_status)
+```
 
 
