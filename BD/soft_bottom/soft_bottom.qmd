@@ -1,0 +1,549 @@
+---
+title: "Soft bottom - Gulf of California OHI"
+author: "Austin Martinez"
+date: 07/10/2026
+format: 
+  html:
+    code-fold: show
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+
+
+```{r}
+# Load in Libraries
+library(sf)
+library(dplyr)
+library(here)
+library(terra)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tmap)
+```
+
+```{r}
+# Read in OHI region boundaries
+ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |> st_make_valid()
+
+# Filter OHI regions to marine polygons
+ohi_regions_marine <- ohi_regions |>
+  filter(location == "marine")
+```
+
+```{r}
+# Read in Arrecife rocoso (rocky reef) data
+rocky_reef <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/Arrecife rocoso/Arrecife rocoso.shp")) |> 
+  st_make_valid() |> 
+  st_transform(st_crs(ohi_regions))
+
+# Read in Seamounts data
+seamounts <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/seamount/seamount_merge.shp")) |> 
+  st_make_valid() |> 
+  st_transform(st_crs(ohi_regions))
+
+# Check if CRSs are the same
+print(st_crs(seamounts) == st_crs(ohi_regions))
+```
+
+```{r}
+# Make data match extent of the ohi_regions layer
+seamounts <- st_intersection(seamounts, ohi_regions)
+```
+
+## rocky_reef work:
+```{r}
+# Find proportion of pixel that is rocky reef
+rocky_reef <- rocky_reef |>
+  mutate(
+    rocky_km2 = rocky_ha / 100, # Convert rocky_ha from hectares to km2
+    polygon_km2 = as.numeric(st_area(geometry)) / 1e6, # Find area of polygons
+    prop_rocky_reef = rocky_km2 / polygon_km2 # Find proportion of polygon that is rocky reef
+  )
+```
+
+
+```{r}
+# Make a template raster to use in rasterization to make sure cell grids line up
+template <- rast(here("spatial", "ohi_regions", "ohi_marine_raster_1km.tif "))
+
+template_100m <- rast(
+  ext(ohi_regions),
+  resolution = 100,   # 100 m res
+  crs = st_crs(ohi_regions)$wkt
+)
+```
+
+# Rocky reef rasterization:
+```{r}
+# Rasterize rocky reef polygon proportions
+rocky_reef_prop_r <- rasterize(vect(rocky_reef), template_100m, field = "prop_rocky_reef", background = 0)
+
+# Crop raster to OHI regions
+rocky_reef_prop_crop <- crop(rocky_reef_prop_r, ohi_regions)
+
+# Mask raster to OHI regions
+rocky_reef_prop_mask <- mask(rocky_reef_prop_crop, ohi_regions)
+```
+
+```{r}
+# Check to see if the min and max are between 0-1
+max(rocky_reef_prop_r)
+```
+
+
+```{r}
+tmap_mode("view")
+
+tm_shape(rocky_reef_prop_mask) +
+  tm_raster(
+    palette = "-viridis",
+    title = "Proportion Rocky Reef",
+    alpha = 0.8,
+    style = "fixed",
+    breaks = c(0, 0.0092, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+    legend.format = list(digits = 4)
+  ) +
+tm_shape(ohi_regions_marine) +
+  tm_borders(
+    col = "white",
+    lwd = 2,
+    alpha = 0.9
+  ) +
+tm_layout(
+    legend.outside = TRUE,
+    frame = FALSE
+)
+```
+
+
+```{r}
+# Rasterize the vector seamounts data
+seamounts_r  <- rasterize(vect(seamounts),  template_100m, field = 1, background = 0)
+```
+
+
+## Quick validation
+```{r}
+# Check if values are between 0-1
+max(seamounts_r)
+```
+```{r}
+# Check alignment (resolution, origin, extent, CRS, rotation, cell alignment)
+compareGeom(rocky_reef_prop_mask, template_100m)
+compareGeom(seamounts_r, template_100m)
+```
+
+```{r}
+# Make raster where 0 = no hard‑bottom and 1+ = hard‑bottom present
+hard_bottom_100m <- rocky_reef_prop_mask +
+                    seamounts_r
+```
+
+```{r}
+# Check if values are between 0-1
+max(hard_bottom_100m)
+```
+```{r}
+# Cap values at 1 to make a proportion
+hard_bottom_100m[hard_bottom_100m > 1] <- 1
+```
+
+```{r}
+# Check if values are between 0-1
+max(hard_bottom_100m)
+```
+
+
+```{r}
+# Groups every 10×10 block of 100‑m cells into one 1‑km cell, and computes the mean of values inside that block
+hard_bottom_fraction <- aggregate(hard_bottom_100m, fact = 10, fun = "mean")
+
+# flips the fraction so more soft bottom = 1
+soft_bottom_fraction <- 1 - hard_bottom_fraction
+```
+
+```{r}
+# Check if values are between 0-1
+max(soft_bottom_fraction)
+```
+
+
+```{r}
+tmap_mode("view")
+
+tm_shape(soft_bottom_fraction) +
+  tm_raster(
+    palette = "-viridis",
+    title = "Proportion Soft bottom",
+    alpha = 0.8,
+    breaks = seq(0, 1, by = 0.1),   # FORCE scale 0 → 1
+    legend.format = list(digits = 2)
+  ) +
+tm_shape(ohi_regions_marine) +
+  tm_borders(
+    col = "gray",
+    lwd = 2,
+    alpha = 0.9
+  ) +
+tm_layout(
+    legend.outside = TRUE,
+    frame = FALSE
+)
+
+```
+
+```{r}
+# Mask to the OHI marine region extent
+marine_mask <- rasterize(
+  vect(ohi_regions_marine),
+  soft_bottom_fraction,
+  field = 1,
+  background = NA
+)
+
+soft_bottom_fraction_marine <- mask(soft_bottom_fraction, marine_mask)
+```
+
+
+
+```{r}
+tmap_mode("view")
+
+tm_shape(soft_bottom_fraction_marine) +
+  tm_raster(
+    palette = "-viridis",
+    title = "Proportion Soft Bottom",
+    alpha = 0.8,
+    breaks = seq(0, 1, by = 0.1),   # FORCE scale 0 → 1
+    legend.format = list(digits = 2)
+  ) +
+tm_shape(ohi_regions_marine) +
+  tm_borders(
+    col = "white",
+    lwd = 2,
+    alpha = 0.9
+  ) +
+tm_layout(
+    legend.outside = TRUE,
+    frame = FALSE
+)
+```
+
+
+
+```{r}
+# View the 
+tmap_mode("view")
+tmap_options(check.and.fix = TRUE)
+
+tm_shape(ohi_regions_marine) +
+  tm_borders(col = "black", lwd = 1) +
+
+#tm_shape(rocky_reef) +
+#  tm_fill(col = "green", alpha = 0.5) +
+#  tm_borders(col = "green") +
+
+tm_shape(seamounts) +
+  tm_fill(col = "red", alpha = 0.5) +
+  tm_borders(col = "red") +
+
+tm_layout(
+  frame = FALSE,
+  legend.outside = TRUE,
+  legend.outside.position = "right"
+)
+```
+
+## Redundancy Check
+-   Is the soft bottom layer resolution 1km
+-   Are all values between 0-1
+```{r}
+soft_res <- res(soft_bottom_fraction_marine)
+print(paste("Resolution (m):", soft_res))
+max(soft_bottom_fraction_marine, na.rm = TRUE)
+```
+
+## Destructive fishing data
+
+```{r}
+# Years of destructive fishing data available
+years <- 2007:2025
+
+# Build full file paths for each year's raster and load them into a multi-layer SpatRaster
+fishing_rasters <- rast(
+  paste0(
+    "/home/shares/ohi/OHI_GOC/goal_prep/pressures/vessels/benthic_destructive_fishing/destructive_fishing_hours_",
+    years,
+    "_1km.tif"
+  )
+)
+
+# Print the total rasters in the stack
+nlyr(fishing_rasters)
+```
+
+```{r}
+# Reproject soft-bottom habitat raster to match the fishing raster grid
+soft_bottom_aligned <- project(soft_bottom_fraction_marine, fishing_rasters[[1]])
+# Check if geometries of the aligned raster and fishing rasters match
+compareGeom(soft_bottom_aligned, fishing_rasters)
+```
+
+
+```{r}
+# Convert fishing hours to area km² of disturbance for each raster cell
+disturbance_raster_km2 <- fishing_rasters * 3.704 * 0.030
+```
+
+```{r}
+# Check if values are between 0-1
+max(disturbance_raster_km2[[7]])
+```
+
+```{r}
+# Cap disturbance at 1 km² since there can't be more than 1 km² disturbance in a 1km² cell
+disturbance_raster_km2[disturbance_raster_km2 > 1] <- 1
+```
+
+
+## Take sum of pressures for each region and take the sum of soft bottom for each region 
+## Then divide total pressures by total soft bottom in the region
+
+disturbance_raster_km2 = actual km² of seafloor disturbed in each pixel
+disturbance_km_per_km_soft_bottom = ratio of disturbance to soft-bottom habitat
+
+We use disturbance_raster_km2 because this requires area-weighted pressure:
+```{r}
+# Here we use disturbance_raster_km2 and not disturbance_km_per_km_soft_bottom because ...
+# Find the km² of soft‑bottom habitat disturbed
+disturbed_soft_bottom_area <- disturbance_raster_km2 * soft_bottom_aligned
+summary(values(disturbed_soft_bottom_area[[7]]))
+```
+soft_bottom_aligned = soft bottom area
+```{r}
+# Load region raster template (1 km resolution)
+template <- rast(here("spatial", "ohi_regions", "ohi_marine_raster_1km.tif"))
+
+# Extract region_ids
+region_ids <- as.vector(values(template))
+
+# Correct alignment: project your rasters TO the template grid
+disturbed_soft_bottom_area_aligned <- project(disturbed_soft_bottom_area, template)
+soft_bottom_area_aligned           <- project(soft_bottom_aligned, template)
+
+# Number of cells in the 1‑km OHI template raster
+n_cells <- ncell(template)
+
+# Number of years (layers) in the disturbed_soft_bottom_area raster stack
+n_years <- nlyr(disturbed_soft_bottom_area_aligned)
+
+# Build a tibble where each row = one pixel × one year
+df_regions <- tibble(
+  region_id        = rep(region_ids, times = n_years), # Region ID for each pixel, repeated for every year
+  year             = rep(years, each = n_cells), # Year column: each year repeated for all n_cells pixels
+  disturbed_area   = as.vector(values(disturbed_soft_bottom_area_aligned)), # Disturbed soft-bottom area (km²) for each pixel × year
+  soft_bottom_area = rep(as.vector(values(soft_bottom_area_aligned)), times = n_years)  # Soft-bottom area (km²) for each pixel — same every year
+)
+
+# Remove rows with missing region IDs or invalid numeric values
+df_regions <- df_regions |>
+  filter(!is.na(region_id), !is.nan(disturbed_area), !is.nan(soft_bottom_area))
+
+df_regions
+```
+```{r}
+# Calculate Pressure and SOF score for each region for each year
+pressure_df <- df_regions |>
+  group_by(region_id, year) |>
+  summarise(
+    disturbed_sum   = sum(disturbed_area, na.rm = TRUE),
+    soft_bottom_sum = sum(soft_bottom_area, na.rm = TRUE),
+    Pressure        = disturbed_sum / soft_bottom_sum,
+    SOF_score       = 1 - Pressure,
+    Pressure        = Pressure * 100,
+    SOF_score       = SOF_score * 100,  
+    .groups = "drop"
+  )
+
+pressure_df
+```
+
+## Current Sof
+```{r}
+# Select a single year
+year_to_show <- 2025   # <-- change this to any year you want
+
+# Filter for selected year
+pressure_year <- pressure_df |>
+  filter(year == year_to_show) |>
+  arrange(region_id)
+
+# Make a kable table
+pressure_year |>
+  select(region_id, Pressure, SOF_score) |>
+  kable(
+    digits = 4,
+    col.names = c("Region ID", "Pressure", "SOF_score"),
+    align = c("c", "r", "r")
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "bordered", "hover"),
+    full_width = FALSE
+  ) |>
+  add_header_above(
+    setNames(3, paste0("Soft-bottom Pressure & SOF — Year ", year_to_show))
+  )
+
+```
+
+```{r}
+# Match region_id type to polygon ID
+pressure_year <- pressure_year |>
+  mutate(region_id = as.integer(region_id))
+
+# Join SOF scores to polygons using region ID column
+ohi_regions_map <- ohi_regions_marine |>
+  left_join(
+    pressure_year |> select(region_id, SOF_score),
+    by = c("id" = "region_id")
+  )
+
+
+tmap_mode("view")
+tm_shape(ohi_regions_map) +
+  tm_polygons(
+    col = "SOF_score",
+    palette = "-viridis",
+    title = paste0("SOF_score (Year ", year_to_show, ")"),
+    alpha = 0.9,
+    border.col = "white",
+    border.lwd = 1
+  ) +
+tm_layout(
+    legend.outside = TRUE,
+    frame = FALSE
+)
+
+```
+```{r, fig.width=12, fig.height=7}
+# Define region colors
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+# Clean region names in pressure_df to match color names
+pressure_df <- pressure_df |>
+  mutate(
+    region_clean = paste0("Region_", region_id),   # numeric → Region_#
+    region_clean = gsub("_", " ", region_clean)    # Region_1 → Region 1
+  )
+
+# Clean color names to match cleaned labels ("Region 1", etc.)
+rgn_colors_clean <- setNames(
+  rgn_colors,
+  gsub("_", " ", names(rgn_colors))                # Region_1 → Region 1
+)
+
+# SOF time series plot with custom colors
+ggplot(
+  pressure_df,
+  aes(
+    x = year,
+    y = SOF_score,
+    group = region_clean,
+    color = region_clean
+  )
+) +
+  geom_point(size = 2) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = rgn_colors_clean) +
+  labs(
+    title = "SOF Score Over Time",
+    x = "Year",
+    y = "SOF Score",
+    color = "Region ID"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+
+
+## Current Status Calculation
+
+```{r}
+# Calculate condition score: SOF_2025 / SOF_2007 for each region
+condition_df <- pressure_df |>
+  filter(year %in% c(2007, 2025)) |>                     # keep only baseline and current year
+  select(region_id, year, SOF_score) |>                  # keep needed columns
+  pivot_wider(names_from = year, values_from = SOF_score) |>  # wide format: columns 2007 and 2025
+  mutate(
+    condition_score = (`2025` / `2007`) * 100,           # compute condition score
+    condition_score = pmin(condition_score, 100)         # cap at 100
+  )
+condition_df
+```
+
+## Trend Calculation
+
+```{r}
+# Trend Calculation: annualized SOF trend from 2015 to 2025
+trend_df <- pressure_df |>
+  filter(year %in% c(2015, 2025)) |>                     # use baseline and current year
+  select(region_id, year, SOF_score) |>                  # keep needed columns
+  pivot_wider(names_from = year, values_from = SOF_score) |>  # wide format: columns 2015 and 2025
+  mutate(
+    trend = ((`2025` / `2015`)^(1/10) - 1) * 100,        # 10-year annualized % change
+    year  = 2025                                         # set trend year
+  ) |>
+  select(region_id, year, trend)
+
+trend_df
+
+```
+
+
+```{r}
+# Write SOF CSV outputs
+
+# Current SOF (2025)
+write.csv(
+  pressure_year,
+  "SOF_outputs/sof_current.csv",
+  row.names = FALSE
+)
+
+# Current Status (SOF_2025 / SOF_2007)
+write.csv(
+  condition_df,
+  "SOF_outputs/sof_current_status.csv",
+  row.names = FALSE
+)
+
+# Trend (SOF_2025 / SOF_2015)
+write.csv(
+  trend_df,
+  "SOF_outputs/sof_trend.csv",
+  row.names = FALSE
+)
+
+# SOF score per region per year
+write.csv(
+  pressure_df,
+  "SOF_outputs/sof_region_scores_per_year.csv",
+  row.names = FALSE
+)
+```
+
