@@ -1,0 +1,624 @@
+---
+title: 'OHI GoC 2026: SS Safety + Security Current Status'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Overview
+
+In this script, we combine the **Safety** and **Security** current status scores into a single Safety and Security (SS) pressure score.
+
+1. **Prep (loading packages)** We load the tidyverse and libraries used throughout the script.
+2. **Read Safety current status** from SESNSP goal-level crime rates, scored with the **global 90th quantile** reference for now.
+3. **Read Security current status** from ENSU March perception (`100 − pct_unsafe`).
+4. **Simple average** the two statuses by region, year, and OHI goal.
+5. **Summarize and plot** the combined SS status.
+
+Safety status is goal-specific (SESNSP crimes mapped to each OHI goal).
+Security status is not goal-specific (one ENSU city-safety perception score per region and year), so that same security score is reused for every goal when averaging.
+
+\[
+\text{SS current status} = \frac{\text{safety status (global 90th quantile)} + \text{security status}}{2}
+\]
+
+Scores are only computed for region-year (and goal) combinations where **both** components are available.
+Security (ENSU March) currently starts in 2018, so the combined series is limited by that overlap with Safety (2015 through 2025).
+
+Intermediate outputs are saved to `/home/shares/ohi/OHI_GOC/goal_prep/ss/ss_int`.
+Final outputs are saved to `/home/shares/ohi/OHI_GOC/goal_prep/ss/ss_output`.
+
+Upstream scripts:
+
+- Safety goal-level rates and status alternatives: `ss_total/safety/ss_safety_goal_specific.qmd`
+- Security ENSU current status: `ss_total/security/ensu_security.qmd`
+
+# Background
+
+## Safety (SESNSP)
+
+Safety uses municipal crime incidence from the **Secretariado Ejecutivo del Sistema Nacional de Seguridad Publica** (SESNSP), standardized by population and scored by OHI goal.  Here we use the **global 90th quantile** scoring method explored in the safety script (section 6c):
+
+- Reference crime rate = 90th percentile of `crime_rate` across **all** goals, regions, and years
+- `safety_status = pmax(0, (1 - crime_rate / ref_global_q90) * 100)`
+- Observations at or above the reference score 0 (scores are not allowed to go negative)
+
+## Security (ENSU)
+
+Security uses March rounds of the **Encuesta Nacional de Seguridad Pública Urbana** (ENSU). Region-level current status is:
+
+\[
+\text{security status} = 100 - \%\ \text{unsafe}
+\]
+
+where percent unsafe is the weighted share of adults who say living in their named city is *inseguro* (`BP1_1` = 2). Ideal is 100 (everyone feels safe).
+
+## 1. Load packages
+
+```{r}
+#| label: step_01_load_packages
+
+library(tidyverse) # data manipulation and visualization
+library(magrittr) # pipe operators
+library(here) # project relative paths
+library(janitor) # clean column names
+library(readr) # read csv files
+library(scales) # axis helpers for plots
+
+# intermediate and final folders for the combined SS score
+ss_int <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/ss_int"
+ss_output <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/ss_output"
+
+# upstream safety and security products
+safety_output <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output"
+security_output <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/security_output"
+
+# safety: crime rates by region, year, and OHI goal (from ss_safety_goal_specific.qmd)
+rate_of_incidence_path <- file.path(
+  safety_output,
+  "rate_of_incidence_per_goal_2015_2025.csv"
+)
+
+# optional: precomputed alternatives table (if already written by safety script)
+safety_status_alt_path <- file.path(
+  safety_output,
+  "current_status_alternatives_2015_2025.csv"
+)
+
+# security: ENSU March current status by region and year (from ensu_security.qmd)
+cs_security_path <- file.path(security_output, "cs_security.csv")
+
+# create output folders if missing (e.g. first run on a machine with the share mounted)
+if (!dir.exists(ss_int)) dir.create(ss_int, recursive = TRUE)
+if (!dir.exists(ss_output)) dir.create(ss_output, recursive = TRUE)
+```
+
+## 2. Read Safety data and score with global 90th quantile
+
+We prefer recomputing `status_global_q90` from the crime-rate table so the method is explicit in this script.
+If only the alternatives table is available, we can fall back to that column.
+
+```{r}
+#| label: step_02_safety_global_q90
+
+if (file.exists(rate_of_incidence_path)) {
+  rate_of_incidence_per_goal <- read_csv(here::here(rate_of_incidence_path)) %>%
+    janitor::clean_names()
+
+  # one reference across all goals, regions, and years
+  ref_global_q90 <- quantile(
+    rate_of_incidence_per_goal$crime_rate,
+    probs = 0.90,
+    na.rm = TRUE
+  )
+
+  ref_global_q90
+
+  safety_status <- rate_of_incidence_per_goal %>%
+    mutate(
+      safety_status = pmax(0, (1 - (crime_rate / as.numeric(ref_global_q90))) * 100),
+      method_safety = "Global 90th quantile"
+    ) %>%
+    dplyr::select(
+      rgn_id, ano, ohi_goal,
+      total_crimes_reported, population_interpolated, crime_rate,
+      safety_status, method_safety
+    )
+} else if (file.exists(safety_status_alt_path)) {
+  # fallback if the rate table is not on this machine but alternatives were saved
+  message("rate table missing; using status_global_q90 from alternatives CSV")
+
+  safety_status <- read_csv(here::here(safety_status_alt_path)) %>%
+    janitor::clean_names() %>%
+    mutate(
+      safety_status = status_global_q90,
+      method_safety = "Global 90th quantile"
+    ) %>%
+    dplyr::select(
+      rgn_id, ano, ohi_goal,
+      dplyr::any_of(c(
+        "total_crimes_reported", "population_interpolated", "crime_rate"
+      )),
+      safety_status, method_safety
+    )
+} else {
+  stop(
+    "Could not find Safety inputs.\n",
+    "Expected either:\n  ", rate_of_incidence_path, "\n",
+    "or:\n  ", safety_status_alt_path
+  )
+}
+
+summary(safety_status$safety_status)
+unique(safety_status$ano)
+unique(safety_status$rgn_id)
+sort(unique(safety_status$ohi_goal))
+
+write_csv(
+  safety_status,
+  here::here(ss_int, "safety_status_global_q90_2015_2025.csv")
+)
+```
+
+## 3. Read Security current status (ENSU)
+
+```{r}
+#| label: step_03_read_security
+
+if (!file.exists(cs_security_path)) {
+  stop(
+    "Could not find Security current status at:\n  ", cs_security_path, "\n",
+    "Run ss_total/security/ensu_security.qmd first."
+  )
+}
+
+cs_security <- read_csv(here::here(cs_security_path)) %>%
+  janitor::clean_names()
+
+# harmonize year column name for joining with safety (ano)
+security_status <- cs_security %>%
+  mutate(
+    ano = as.integer(year_march),
+    security_status = current_status,
+    method_security = "100 - pct_unsafe (ENSU March)"
+  ) %>%
+  dplyr::select(
+    rgn_id, ano, rgn_label,
+    dplyr::any_of(c("n_cities", "n_substantive", "pct_unsafe")),
+    security_status, method_security
+  )
+
+summary(security_status$security_status)
+unique(security_status$ano)
+unique(security_status$rgn_id)
+
+write_csv(
+  security_status,
+  here::here(ss_int, "security_status_ensu_march.csv")
+)
+```
+
+## 4. Simple average of Safety and Security status
+
+Join on `rgn_id` and `ano`. Security has no `ohi_goal` dimension, so its region-year score is joined onto every goal. The combined status is the unweighted mean of the two components where both are non-missing.
+
+```{r}
+#| label: step_04_average_ss
+
+ss_current_status <- safety_status %>%
+  left_join(security_status, by = c("rgn_id", "ano")) %>%
+  mutate(
+    ss_current_status = dplyr::if_else(
+      !is.na(safety_status) & !is.na(security_status),
+      (safety_status + security_status) / 2,
+      NA_real_
+    ),
+    has_both = !is.na(ss_current_status)
+  )
+
+# how many rows have both components vs safety-only
+ss_coverage <- ss_current_status %>%
+  summarise(
+    n_rows = dplyr::n(),
+    n_with_both = sum(has_both, na.rm = TRUE),
+    n_safety_only = sum(!is.na(safety_status) & is.na(security_status)),
+    n_missing_safety = sum(is.na(safety_status)),
+    years_with_both = paste(sort(unique(ano[has_both])), collapse = ", "),
+    years_safety = paste(sort(unique(ano[!is.na(safety_status)])), collapse = ", "),
+    years_security = paste(sort(unique(security_status$ano)), collapse = ", ")
+  )
+
+ss_coverage
+
+# final ss: keep only complete safety + security nonNAs for the SS score
+ss_current_status_complete <- ss_current_status %>%
+  filter(has_both) %>%
+  dplyr::select(
+    rgn_id, ano, ohi_goal,
+    dplyr::any_of(c(
+      "rgn_label", "total_crimes_reported", "population_interpolated",
+      "crime_rate", "pct_unsafe", "n_cities", "n_substantive"
+    )),
+    safety_status, security_status, ss_current_status,
+    method_safety, method_security
+  ) %>%
+  arrange(ohi_goal, rgn_id, ano)
+
+summary(ss_current_status_complete$ss_current_status)
+unique(ss_current_status_complete$ano)
+unique(ss_current_status_complete$rgn_id) # rgns 2, 3, and 5 are missing
+sort(unique(ss_current_status_complete$ohi_goal))
+
+write_csv(
+  ss_current_status,
+  here::here(ss_output, "ss_current_status_full_join_2015_2025.csv")
+)
+
+write_csv(
+  ss_current_status_complete,
+  here::here(ss_output, "ss_current_status_safety_security_avg.csv")
+)
+```
+
+### 4a. Summaries by goal and overall
+
+```{r}
+#| label: step_04a_summaries
+
+# summary of combined SS status by goal
+ss_summary_by_goal <- ss_current_status_complete %>%
+  group_by(ohi_goal, ano) %>%
+  summarise(
+    n = dplyr::n(),
+    min = min(ss_current_status, na.rm = TRUE),
+    q1 = quantile(ss_current_status, 0.25, na.rm = TRUE),
+    median = median(ss_current_status, na.rm = TRUE),
+    mean = mean(ss_current_status, na.rm = TRUE),
+    q3 = quantile(ss_current_status, 0.75, na.rm = TRUE),
+    max = max(ss_current_status, na.rm = TRUE),
+    mean_safety = mean(safety_status, na.rm = TRUE),
+    mean_security = mean(security_status, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(ohi_goal)
+
+ss_summary_by_goal
+kableExtra::kable(ss_summary_by_goal)
+
+# overall summary comparing each layer
+ss_summary_overall <- ss_current_status_complete %>%
+  tidyr::pivot_longer(
+    cols = c(safety_status, security_status, ss_current_status),
+    names_to = "component",
+    values_to = "status"
+  ) %>%
+  mutate(
+    component = dplyr::recode(
+      component,
+      safety_status = "Safety (global q90)",
+      security_status = "Security (ENSU)",
+      ss_current_status = "SS average"
+    ),
+    component = factor(
+      component,
+      levels = c("Safety (global q90)", "Security (ENSU)", "SS average")
+    )
+  ) %>%
+  group_by(component) %>%
+  summarise(
+    n = dplyr::n(),
+    min = min(status, na.rm = TRUE),
+    q1 = quantile(status, 0.25, na.rm = TRUE),
+    median = median(status, na.rm = TRUE),
+    mean = mean(status, na.rm = TRUE),
+    q3 = quantile(status, 0.75, na.rm = TRUE),
+    max = max(status, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ss_summary_overall
+
+write_csv(
+  ss_summary_by_goal,
+  here::here(ss_output, "ss_current_status_summary_by_goal.csv")
+)
+
+write_csv(
+  ss_summary_overall,
+  here::here(ss_output, "ss_current_status_summary_overall.csv")
+)
+```
+
+## 5. Plots
+
+Region labels and colors match the safety script so maps and line plots stay consistent.
+
+```{r}
+#| label: step_05_plot_setup
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
+
+if (requireNamespace("showtext", quietly = TRUE)) {
+  showtext::showtext_auto(FALSE)
+}
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+theme_status <- theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey40"),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    legend.position = "bottom",
+    legend.key.size = unit(0.5, "cm"),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(6, 8, 4, 6)
+  )
+
+ss_plot_data <- ss_current_status_complete %>%
+  mutate(
+    ano = as.integer(ano),
+    rgn_id = factor(as.character(rgn_id), levels = names(rgn_labels)),
+    ohi_goal = as.character(ohi_goal)
+  )
+
+goal_list <- sort(unique(ss_plot_data$ohi_goal))
+```
+
+### 5a. Component comparison (pooled)
+
+```{r}
+#| label: step_05a_component_box
+#| fig-width: 9
+#| fig-height: 5
+#| fig-dpi: 96
+
+status_long_components <- ss_plot_data %>%
+  tidyr::pivot_longer(
+    cols = c(safety_status, security_status, ss_current_status),
+    names_to = "component",
+    values_to = "status"
+  ) %>%
+  mutate(
+    component = dplyr::recode(
+      component,
+      safety_status = "Safety (global q90)",
+      security_status = "Security (ENSU)",
+      ss_current_status = "SS average"
+    ),
+    component = factor(
+      component,
+      levels = c("Safety (global q90)", "Security (ENSU)", "SS average")
+    )
+  )
+
+p_box_components <- ggplot(
+  status_long_components,
+  aes(x = component, y = status, fill = component)
+) +
+  geom_boxplot(outlier.size = 0.8, alpha = 0.8) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 25)) +
+  labs(
+    title = "Status distributions: Safety, Security, and SS average",
+    subtitle = "Region-year-goal rows where both Safety and Security are available",
+    x = NULL,
+    y = "Status (100 = best)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 15, hjust = 1),
+    plot.title = element_text(face = "bold")
+  )
+
+p_box_components
+
+# ggsave(
+#   here::here(ss_output, "plot_ss_component_boxplot.png"),
+#   p_box_components, width = 9, height = 5, dpi = 300
+# )
+```
+
+### 5b. SS current status by goal
+
+One plot per OHI goal, with region trajectories over years.
+Plots are stored in `p_ss_status_list` so any goal can be called individually.
+
+```{r}
+#| label: step_05b_status_plots
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
+
+p_ss_status_list <- list()
+
+for (g in goal_list) {
+  goal_title <- stringr::str_replace_all(g, "_", " ") %>%
+    stringr::str_to_title()
+
+  p_ss_status_list[[g]] <- ss_plot_data %>%
+    filter(ohi_goal == g) %>%
+    ggplot(aes(x = ano, y = ss_current_status, color = rgn_id, group = rgn_id)) +
+    geom_line(linewidth = 1.1, alpha = 0.9) +
+    geom_point(size = 2) +
+    scale_color_manual(values = rgn_colors, labels = rgn_labels) +
+    scale_x_continuous(breaks = pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 25)) +
+    labs(
+      title = goal_title,
+      subtitle = "SS status = mean(Safety global q90, Security ENSU); 100 = best",
+      x = NULL,
+      y = "SS status",
+      color = NULL
+    ) +
+    guides(color = guide_legend(nrow = 3, byrow = TRUE)) +
+    theme_status
+
+  # ggsave(
+  #   here::here(ss_output, paste0("plot_ss_status_", g, ".png")),
+  #   p_ss_status_list[[g]], width = 7, height = 4, dpi = 300
+  # )
+}
+
+names(p_ss_status_list)
+```
+
+#### Call individual SS status plots by goal
+
+```{r}
+#| label: step_05b_print_status_by_goal
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
+
+p_ss_status_list[["biodiversity_habitats"]]
+p_ss_status_list[["biodiversity_species"]]
+p_ss_status_list[["clean_waters"]]
+p_ss_status_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
+p_ss_status_list[["coastal_opportunities_coastal_access"]]
+p_ss_status_list[["food_provisioning_fisheries"]]
+p_ss_status_list[["food_provisioning_mariculture"]]
+p_ss_status_list[["habitat_services_carbon_storage"]]
+p_ss_status_list[["habitat_services_coastal_protection"]]
+p_ss_status_list[["habitat_services_filtration"]]
+p_ss_status_list[["livelihoods_economies_economies"]]
+p_ss_status_list[["livelihoods_economies_livelihoods"]]
+p_ss_status_list[["natural_products"]]
+p_ss_status_list[["research_ocean_literacy"]]
+p_ss_status_list[["sentido_de_pertenencia"]]
+p_ss_status_list[["tourism_recreation"]]
+```
+
+### 5c. Safety vs Security vs SS average by goal
+
+Faceted comparison: the two inputs and the average, for one goal at a time.
+
+```{r}
+#| label: step_05c_compare_by_goal
+#| fig-width: 10
+#| fig-height: 7
+#| fig-dpi: 96
+
+p_ss_compare_list <- list()
+
+for (g in goal_list) {
+  goal_title <- stringr::str_replace_all(g, "_", " ") %>%
+    stringr::str_to_title()
+
+  p_ss_compare_list[[g]] <- status_long_components %>%
+    filter(ohi_goal == g) %>%
+    mutate(rgn_id = factor(as.character(rgn_id), levels = names(rgn_labels))) %>%
+    ggplot(aes(x = ano, y = status, color = rgn_id, group = rgn_id)) +
+    geom_line(linewidth = 0.9, alpha = 0.9) +
+    geom_point(size = 1.5) +
+    facet_wrap(~ component, ncol = 3) +
+    scale_color_manual(values = rgn_colors, labels = rgn_labels) +
+    scale_x_continuous(breaks = pretty_breaks(n = 5)) +
+    scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 25)) +
+    labs(
+      title = paste0(goal_title, ": Safety, Security, and SS average"),
+      x = NULL,
+      y = "Status",
+      color = NULL
+    ) +
+    guides(color = guide_legend(nrow = 3, byrow = TRUE)) +
+    theme_minimal(base_size = 11) +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold", size = 9)
+    )
+
+  # ggsave(
+  #   here::here(ss_output, paste0("plot_ss_compare_", g, ".png")),
+  #   p_ss_compare_list[[g]], width = 10, height = 7, dpi = 300
+  # )
+}
+
+names(p_ss_compare_list)
+```
+
+#### Call individual comparison plots by goal
+
+```{r}
+#| label: step_05c_print_compare_by_goal
+#| fig-width: 10
+#| fig-height: 7
+#| fig-dpi: 96
+
+p_ss_compare_list[["biodiversity_habitats"]]
+p_ss_compare_list[["biodiversity_species"]]
+p_ss_compare_list[["clean_waters"]]
+p_ss_compare_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
+p_ss_compare_list[["coastal_opportunities_coastal_access"]]
+p_ss_compare_list[["food_provisioning_fisheries"]]
+p_ss_compare_list[["food_provisioning_mariculture"]]
+p_ss_compare_list[["habitat_services_carbon_storage"]]
+p_ss_compare_list[["habitat_services_coastal_protection"]]
+p_ss_compare_list[["habitat_services_filtration"]]
+p_ss_compare_list[["livelihoods_economies_economies"]]
+p_ss_compare_list[["livelihoods_economies_livelihoods"]]
+p_ss_compare_list[["natural_products"]]
+p_ss_compare_list[["research_ocean_literacy"]]
+p_ss_compare_list[["sentido_de_pertenencia"]]
+p_ss_compare_list[["tourism_recreation"]]
+```
+
+# Outputs
+
+| File | Description |
+|:---|:---|
+| `ss_int/safety_status_global_q90_2015_2025.csv` | Safety status using global 90th quantile of crime rate |
+| `ss_int/security_status_ensu_march.csv` | Security status from ENSU March (`100 − pct_unsafe`) |
+| `ss_output/ss_current_status_full_join_2015_2025.csv` | Full left join of safety onto security (includes safety-only years) |
+| `ss_output/ss_current_status_safety_security_avg.csv` | **Main product:** simple average where both components exist |
+| `ss_output/ss_current_status_summary_by_goal.csv` | Summary stats of SS status by OHI goal |
+| `ss_output/ss_current_status_summary_overall.csv` | Summary stats for Safety, Security, and SS average |
+
+Main score:
+
+```text
+ss_current_status = (safety_status_global_q90 + security_status) / 2
+```
