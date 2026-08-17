@@ -1,0 +1,191 @@
+---
+title: "Mangrove - Gulf of California OHI"
+author: "Austin Martinez"
+date: 08/03/2026
+format: 
+  html:
+    code-fold: show
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+
+```{r}
+# Load in Libraries
+library(sf)
+library(dplyr)
+library(here)
+library(terra)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tmap)
+```
+
+```{r}
+# Read in OHI region boundaries
+ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |>
+  st_make_valid()
+```
+
+```{r}
+# Create 20 km buffer (run once)
+sf::sf_use_s2(FALSE)
+
+ohi_regions_marine <- ohi_regions |>
+  filter(location == "marine") |>
+  st_union()
+
+# Make a buffer ring
+buffer_outer <- st_buffer(ohi_regions_marine, dist = 20000)
+buffer_ring  <- st_difference(buffer_outer, ohi_regions_marine) |>
+  st_make_valid()
+
+# Union it to the marine OHI layer
+ohi_marine_plus_20km <- st_union(ohi_regions_marine, buffer_ring)
+```
+
+```{r}
+# Helper to read one year from new Science mangrove data
+read_cgmd_year <- function(year) {
+  st_read(here(
+    paste0(
+      "/home/shares/ohi/OHI_GOC/_raw_data/new_mangroves_data/projected_",
+      year,
+      "/projected_",
+      year,
+      ".shp"
+    )
+  )) |>
+    st_make_valid() |>
+    st_transform(st_crs(ohi_regions))
+}
+
+cgmd_1996 <- read_cgmd_year(1996)
+cgmd_2010 <- read_cgmd_year(2010)
+cgmd_2020 <- read_cgmd_year(2020)
+cgmd_2023 <- read_cgmd_year(2023)
+```
+
+```{r}
+# Quick map check
+cgmd_2023_plot <- st_intersection(cgmd_2023, ohi_regions)
+
+tmap_mode("view")
+
+tm_shape(cgmd_2023_plot) +
+  tm_polygons(col = "darkgreen", border.col = "darkgreen", lwd = 0.5) +
+  tm_shape(ohi_marine_plus_20km) +
+  tm_polygons(
+    col = "lightblue",
+    border.col = "lightblue",
+    lwd = 0.5,
+    alpha = 0.2
+  )
+```
+
+
+```{r}
+# Clip to buffer, then sum mangrove area by OHI region
+calc_mangrove_area_by_region <- function(mangrove_layer, year) {
+  mangrove_layer |>
+    st_intersection(ohi_marine_plus_20km) |>
+    st_intersection(ohi_regions) |>
+    group_by(rgn_id) |>
+    summarise(geometry = st_union(geometry), .groups = "drop") |>
+    mutate(
+      area_km2 = as.numeric(st_area(geometry)) / 1e6,
+      year = year
+    ) |>
+    st_drop_geometry()
+}
+```
+
+## CONDITION — CGMD 1996 vs 2020
+```{r}
+rgns_cgmd_1996 <- calc_mangrove_area_by_region(cgmd_1996, 1996)
+rgns_cgmd_2010 <- calc_mangrove_area_by_region(cgmd_2010, 2010)
+rgns_cgmd_2020 <- calc_mangrove_area_by_region(cgmd_2020, 2020)
+rgns_cgmd_2023 <- calc_mangrove_area_by_region(cgmd_2023, 2023)
+
+cgmd_area <- bind_rows(
+  rgns_cgmd_1996,
+  rgns_cgmd_2010,
+  rgns_cgmd_2020,
+  rgns_cgmd_2023
+) |>
+  group_by(rgn_id, year) |>
+  summarise(area_km2 = sum(area_km2), .groups = "drop")
+
+mangrove_condition <- cgmd_area |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  mutate(
+    condition = `2020` / `1996`,
+    condition = pmin(condition, 1),
+    year = 2020
+  ) |>
+  select(rgn_id, year, condition)
+```
+
+```{r}
+mangrove_condition |>
+  filter(!rgn_id %in% c("Region_2", "Region_3")) |>
+  kable(
+    digits = 4,
+    col.names = c("Region", "Year", "Condition (2020/1996)")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  add_header_above(c("Mangrove Condition (CGMD)" = 3))
+```
+
+
+## EXTENT — CGMD 2023
+```{r}
+rgns_cgmd_2023_extent <- rgns_cgmd_2023
+
+rgns_cgmd_2023_extent |>
+    filter(!rgn_id %in% c("Region_2", "Region_3")) |>
+  kable(
+    digits = 4,
+    col.names = c("Region", "Extent (km²)", "Year")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  add_header_above(c("Mangrove Extent (CGMD)" = 3))
+```
+
+
+## TREND — CGMD 2010 → 2020
+```{r}
+mangrove_trend <- cgmd_area |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  mutate(
+    trend = (`2020` / `2010`)^(1 / 10) - 1,
+    year = 2020
+  ) |>
+  select(rgn_id, year, trend)
+```
+
+
+```{r}
+cgmd_area |>
+  filter(year %in% c(1996, 2010, 2020)) |>
+  pivot_wider(names_from = year, values_from = area_km2) |>
+  arrange(rgn_id) |>
+  kable(
+    digits = 2,
+    col.names = c("Region", "1996 (km²)", "2010 (km²)", "2020 (km²)"),
+    caption = "Mangrove extent by region (CGMD)"
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "bordered", "hover"),
+    full_width = FALSE,
+    position = "left"
+  )
+```
+
+
+
+
+
