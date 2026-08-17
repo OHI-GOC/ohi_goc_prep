@@ -55,6 +55,277 @@ mean(AFO_Scores$AFO_Score[AFO_Scores$year == 2024], na.rm = TRUE)
 mean(AFO_Scores$AFO_Score, na.rm = TRUE)
 ```
 
+# STEP 1: Load in and summarize GOC_MarineLandings0
+
+```{r Load in GOC_MarineLandings0 as necessary}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+# NOTE TO SELF: This source file may change in later Summer / Fall run. - EMF, June 4 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+```
+
+
+# PATCH 1 - Look into groups that are unassigned to a Major_Functional_Group:
+NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+```{r Load in GenusFamilyGroup_Key as needed}
+GenusFamilyGroup_Key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Taxonomic_Keys/GenusFamilyGroupKey_COMPLETE_Apr042026.csv")
+
+# NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+MajorFunctionalGroup_Key<- GenusFamilyGroup_Key %>%
+  select(estimated_genus_name, Major_Functional_Group)
+```
+
+```{r Major_Functional_Group patch for GOC_MarineLandings}
+# Fill in missing values based on MajorFunctionalGroup_Key:
+GOC_MarineLandings <- GOC_MarineLandings0 %>%
+  left_join(
+    MajorFunctionalGroup_Key %>%
+      select(estimated_genus_name, Major_Functional_Group),
+    by = "estimated_genus_name",
+    suffix = c("", ".lookup")
+  )
+
+GOC_MarineLandings <- GOC_MarineLandings %>%
+  mutate(
+    Major_Functional_Group = coalesce(
+      Major_Functional_Group,
+      Major_Functional_Group.lookup
+    )
+  ) %>%
+  select(-Major_Functional_Group.lookup)
+
+# 3246583 obs., 58 var.
+
+# SANITY CHECK:
+sum(is.na(GOC_MarineLandings$Major_Functional_Group))
+# Only 26 records unassigned. Looks good!
+```
+
+# PATCH 2 - Re-assign litopenaeus as paneus:
+
+```{r Re-assign paneus as litopenaeus}
+GOC_MarineLandings <- GOC_MarineLandings %>%
+  mutate(
+    estimated_genus_name = case_when(
+      estimated_genus_name == "Litopenaeus" ~ "Penaeus",
+      TRUE ~ estimated_genus_name
+    )
+  )
+
+unique(GOC_MarineLandings$estimated_genus_name)
+```
+
+```{r Select Sectors_of_Interest}
+table(GOC_MarineLandings$sector_estimate_draft)
+
+# SANITY CHECK: Which species are included in the freshwater or marine sector?
+TEST<- GOC_MarineLandings %>%
+  filter(sector_estimate_draft== "freshwater or marine: fishery sector yet to be classified")
+
+table(TEST$recorded_taxa_group)
+# Species like Mojarra (the overwhelming majority of catch), trout, and catfish, which can move from freshwater to marine systems and are a bit ambiguous in terms of where they can be caught.
+
+
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
+                          "marine: small-scale capture",
+                          "marine: large-scale capture")
+  
+PossibleMarineFishery_Sectors<- c("freshwater or marine: large-scale capture",
+                          "freshwater or marine: small-scale capture",
+                          "freshwater or marine: fishery sector yet to be classified")
+
+GOC_MarineFisheryLandings0<- GOC_MarineLandings %>%
+  filter(sector_estimate_draft %in% c(MarineFishery_Sectors, PossibleMarineFishery_Sectors))
+
+# 3137044 obs., 58 var.
+```
+
+```{r How many landings are produced by SSF in the GOC?}
+table(GOC_MarineFisheryLandings0$GOC_est)
+# All GOC records
+
+colnames(GOC_MarineFisheryLandings0)
+table(GOC_MarineFisheryLandings0$sector_estimate_draft)
+
+set.seed(123)
+
+slice <- GOC_MarineFisheryLandings0 %>%
+  filter(year >= 2018 & year <= 2024) %>%
+  slice_sample(n = 200)
+
+# Summarize total landings and value from SSF
+GOC_SSF <- GOC_MarineFisheryLandings0 %>%
+  filter(year >= 2018 & year <= 2024) %>%
+  group_by(year) %>%
+  summarise(
+    SSF_landings = sum(
+      weight_kg_corrected[grepl("small-scale capture", sector_estimate_draft)],
+      na.rm = TRUE
+    ),
+    total_landings = sum(weight_kg_corrected, na.rm = TRUE),
+    
+    SSF_value = sum(
+      value[grepl("small-scale capture", sector_estimate_draft)],
+      na.rm = TRUE
+    ),
+    total_value = sum(value, na.rm = TRUE),
+    
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_catch = 100 * SSF_landings / total_landings,
+    pct_value = 100 * SSF_value / total_value
+  )
+  
+
+# Mean from 2018-2024
+mean(GOC_SSF$pct_catch) # ~19%
+mean(GOC_SSF$pct_value) # ~51%
+
+#
+GOC_boats <- GOC_MarineFisheryLandings0 %>%
+  filter(
+    year >= 2018 & year <= 2024,
+    grepl("small-scale capture|large-scale capture", sector_estimate_draft)
+  ) %>%
+  mutate(
+    sector = case_when(
+      grepl("small-scale capture", sector_estimate_draft) ~ "SSF",
+      grepl("large-scale capture", sector_estimate_draft) ~ "Large-scale"
+    )
+  ) %>%
+  group_by(year, sector) %>%
+  summarise(
+    n_eu = n_distinct(eu_rnpa),
+    .groups = "drop"
+  ) %>%
+  group_by(year) %>%
+  mutate(
+    pct_eu = 100 * n_eu / sum(n_eu)
+  ) %>%
+  ungroup()
+
+# Mean from 2018-2024
+mean(GOC_boats$pct_eu[GOC_boats$sector=="SSF"]) # ~88%
+```
+
+```{r Graph of top SSF capture}
+GOC_SSF_taxa <- GOC_MarineFisheryLandings0 %>%
+  filter(
+    year >= 2018 & year <= 2024,
+    grepl("small-scale capture", sector_estimate_draft),
+    !is.na(Major_Functional_Group)
+  ) %>%
+  group_by(year, Major_Functional_Group) %>%
+  summarise(
+    total_landings = sum(weight_kg_corrected, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+library(ggplot2)
+
+table(GOC_SSF_taxa$Major_Functional_Group)
+
+# Remove marine NEI and unknown:
+GOC_SSF_taxa_plot <- GOC_SSF_taxa %>%
+  filter(
+    !Major_Functional_Group %in% c(
+      "marine species NEI",
+      "unknown",
+      "Other marine invertebrates",
+      "Marine species NEI",
+      "Diadromous fishes"
+    )
+  )
+
+unique(GOC_SSF_taxa_plot$Major_Functional_Group)
+
+# Relevel:
+GOC_SSF_taxa_plot <- GOC_SSF_taxa_plot %>%
+  mutate(
+    Major_Functional_Group = factor(
+      Major_Functional_Group,
+      levels = c(
+        "Anchovy & Sardine (small pelagics)",
+        "Demersal marine fishes",
+        "Pelagic marine fish (excl. anchovy & sardine)",
+        "Sharks",
+        "Marine fishes NEI",
+        "Marine or freshwater fishes NEI",
+        "Cephalopods",
+        "Molluscs excl. Cephalopods",
+        "Crustaceans",
+        "Shrimps, prawns",
+        "Echinoderms",
+        "Jellies",
+        "Marine algae"
+      )
+    )
+  )
+
+GOC_SSF_taxa_plot <- GOC_SSF_taxa_plot %>%
+  mutate(
+    Functional_group = recode(
+      Major_Functional_Group,
+      "Anchovy & Sardine (small pelagics)" = "Small pelagic fishes",
+      "Demersal marine fishes" = "Demersal fishes",
+      "Pelagic marine fish (excl. anchovy & sardine)" = "Other pelagic fishes",
+      "Sharks" = "Sharks",
+      "Marine fishes NEI" = "Marine fishes NEI",
+      "Marine or freshwater fishes NEI" = "Marine/freshwater fishes NEI",
+      "Cephalopods" = "Cephalopods",
+      "Molluscs excl. Cephalopods" = "Other molluscs",
+      "Crustaceans" = "Crustaceans",
+      "Shrimps, prawns" = "Shrimps & prawns",
+      "Echinoderms" = "Echinoderms",
+      "Jellies" = "Jellies",
+      "Marine algae" = "Marine algae"
+    )
+  )
+
+# Then plot:
+SSF_Taxa_Plot<- ggplot(
+  GOC_SSF_taxa_plot,
+  aes(
+    x = factor(year),
+    y = total_landings,
+    fill = Major_Functional_Group
+  )
+) +
+  geom_col(width = 0.75) +
+  labs(
+    x = "Year",
+    y = "SSF landings (kg)",
+    fill = "Major functional group",
+    title = "SSF catch by major functional group",
+    subtitle = "2018–2024"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(face = "bold")
+  )
+
+SSF_Taxa_Plot
+```
+
+```{r SAVE regional AFO score plot}
+ggsave(
+  plot = SSF_Taxa_Plot,
+  filename = "/home/ferrer/ohi_goc_prep/AO/v2025/AO_Scores/AFO_Scores/SSF_Catch_plot_MOVE_Aug132026.png",
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+```
+
 
 
 ```{r How much seafood is produced in this region in 2024?}
