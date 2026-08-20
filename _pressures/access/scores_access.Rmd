@@ -1,0 +1,394 @@
+---
+title: "Scores"
+output: html_document
+date: "2026-07-27"
+---
+
+The current access model incorporates 3 equally weighted components:
+
+1. Legal protection: YES, ZOFEMAT
+2. Enforcement ability: YES, 3 measures
+3. Actual measured access
+
+In regard to 3, I explored obtaining access scores for each beach in each locality. This proved to be beyond the scope of this project. 
+
+For 1, every region scores a 1 given that the ZOFEMAT is legally protected public property.
+
+For 2, we included three equally weighted values:
+
+1. Whether each locality has a municipal ZOFEMAT office (0 = no, or unconfired, 1 = yes).
+2. Whether each area has an inventory of beaches with a measure of access
+(0=no, 0.25=plans for this, 0.5= in review, completed = 0.75, 1=easily available)
+3. Measure of enforcement capability. This is comprised of two averaged metrics: Plazas (personel) in enforcement branch of PROFEPA, scaled to population. Investment in PROFEPA enforcement (inflation and population adjusted values). Ideally, this would be scaled to the amount that would be neeeded to meet all enforcement demands, but I don't have the ability to measure that, so it will be based on the highest value across all years. Caveats, includes all enformcement of protected and natural areas (not just beaches) and there is no way to get regional (e.g., state or municipal levels of enforcment.). 
+ 
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+
+```
+
+Step 1. Get list of all localities considered.
+```{r setup, include=FALSE}
+
+beach_locs <- list.files(here("_pressures/access/beach_access/data/locality_beaches"), full=TRUE)
+
+all_beaches <- beach_locs |>
+  map_dfr(\(path) {
+    read_csv(path, show_col_types = FALSE, locale = locale(encoding = "UTF-8")) |>
+      mutate(source_file = basename(path), .before = 1)
+  })
+
+```
+
+Step 2. Get beach lengths in each region (probably use for weighting)
+Identify all urban beaches and determine which OHI region each falls in and get total length of urban (+20 km radius) area beaches in each OHI region.
+```{r}
+unique_beaches <- unique(all_beaches$ID_Beach)
+
+beach_sf <- st_read(here("_pressures/access/beach_access/data/beach.shp"), quiet = TRUE) |>
+  filter(ID_Beach %in% unique_beaches) |>
+  mutate(length_km = as.numeric(st_length(geometry)) / 1000)
+
+ohi_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp"), quiet = TRUE) |>
+  filter(location == "marine") |>
+  select(rgn_id, ecorgn)
+
+beach_sf <- st_transform(beach_sf, st_crs(ohi_marine))
+
+# Assign region from segment centroid (one row per beach; matches locality OHI assignment)
+beach_centroids <- st_centroid(beach_sf)
+beach_rgn <- beach_centroids |>
+  st_join(ohi_marine, join = st_intersects, left = TRUE)
+
+missing_rgn <- is.na(beach_rgn$rgn_id)
+beach_rgn$ohi_join_method <- "centroid_intersects"
+if (any(missing_rgn)) {
+  nearest_idx <- st_nearest_feature(beach_rgn[missing_rgn, ], ohi_marine)
+  beach_rgn$rgn_id[missing_rgn] <- ohi_marine$rgn_id[nearest_idx]
+  beach_rgn$ecorgn[missing_rgn] <- ohi_marine$ecorgn[nearest_idx]
+  beach_rgn$ohi_join_method[missing_rgn] <- "centroid_nearest"
+}
+
+# Locality–beach lengths: if a beach falls in multiple localities, split length equally
+beach_length_lookup <- beach_sf |>
+  st_drop_geometry() |>
+  select(ID_Beach, length_km)
+
+beach_by_locality <- all_beaches |>
+  distinct(ID_Beach, city) |>
+  left_join(beach_length_lookup, by = "ID_Beach") |>
+  left_join(
+    beach_rgn |> st_drop_geometry() |> select(ID_Beach, rgn_id, ecorgn),
+    by = "ID_Beach"
+  ) |>
+  group_by(ID_Beach) |>
+  mutate(
+    n_localities = n(),
+    length_km_share = length_km / n_localities
+  ) |>
+  ungroup()
+
+# Total beach km per locality (shared beaches counted fractionally)
+beach_length_by_locality <- beach_by_locality |>
+  group_by(city) |>
+  summarise(
+    n_beaches = n(),
+    n_shared_beaches = sum(n_localities > 1),
+    km_beaches = sum(length_km_share, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(km_beaches))
+
+beach_length_by_rgn <- beach_rgn |>
+  st_drop_geometry() |>
+  select(ID_Beach, length_km, rgn_id, ecorgn) |>
+  group_by(rgn_id, ecorgn) |>
+  summarize(km_urban_beaches = round(sum(length_km), 0), .groups = "drop")
+```
+
+
+Get length of all beaches in each OHI region and combine with urban (+20 km) beach lengths.
+```{r}
+# All Gulf beach segments (not limited to study localities)
+all_beach_sf <- st_read(here("_pressures/access/beach_access/data/beach.shp"), quiet = TRUE) |>
+  mutate(length_km = as.numeric(st_length(geometry)) / 1000) |>
+  st_transform(st_crs(ohi_marine))
+
+all_beach_centroids <- st_centroid(all_beach_sf)
+all_beach_rgn <- all_beach_centroids |>
+  st_join(ohi_marine, join = st_intersects, left = TRUE)
+
+missing_all <- is.na(all_beach_rgn$rgn_id)
+if (any(missing_all)) {
+  nearest_all <- st_nearest_feature(all_beach_rgn[missing_all, ], ohi_marine)
+  all_beach_rgn$rgn_id[missing_all] <- ohi_marine$rgn_id[nearest_all]
+  all_beach_rgn$ecorgn[missing_all] <- ohi_marine$ecorgn[nearest_all]
+}
+
+beach_length_all_by_rgn <- all_beach_rgn |>
+  st_drop_geometry() |>
+  filter(!is.na(rgn_id)) |>
+  group_by(rgn_id, ecorgn) |>
+  summarise(
+ #   n_beaches_all = n(),
+    km_all_beaches = round(sum(length_km, na.rm = TRUE), 0),
+    .groups = "drop"
+  )
+
+beach_lengths <- beach_length_all_by_rgn |>
+  left_join(beach_length_by_rgn, by = c("rgn_id", "ecorgn")) |>
+  mutate(
+    km_urban_beaches = coalesce(km_urban_beaches, 0),
+    prop_urban_of_all = round(km_urban_beaches / km_all_beaches, 3)
+  ) |>
+  arrange(rgn_id)
+
+beach_lengths
+```
+
+Step 3. Obtain locality scale data.
+We focused mainly on INEGI urban localities. We also included a small set of INEGI rural localities where coastal tourism and/or gated/private beachfront development made access pressure likely — especially resort corridors adjacent to urban areas (e.g. Bahía de Banderas, East Cape) and a few popular tourist destinations (e.g. Altata, Yelapa, Punta Mita).
+```{r}
+
+all_locs <- all_beaches %>%
+  select(city, CVE_ENT, CVE_MUN, NOM_MUN) %>%
+  unique() %>%
+  mutate(urban_rural_desig = ifelse(city %in% c("Nuevo Vallarta", "Flamingos", "Punta Mita", "Higuera Blanca",
+                                                "Lo de Marcos", "Los Barriles", "La Ribera", "Altata", "Yelapa"), "rural", "urban"))
+
+# join with state and municipality name
+loc_meta <- read_csv(
+  here("_pressures/access/local_zofemat/local_zofemat_by_locality.csv"),
+  show_col_types = FALSE
+) %>%
+  rename(city = locality) %>%
+  select(-CVE_ENT, -CVE_MUN)
+
+all_locs <- all_locs %>%
+  left_join(loc_meta, by = "city")
+
+## combine with OHI region
+loc_ohi <- read_csv(
+  here("_pressures/access/budget_plazas/output/study_localities_ohi_region.csv"),
+  show_col_types = FALSE
+) %>%
+  distinct(city, rgn_id)
+
+all_locs <- all_locs %>%
+  left_join(loc_ohi, by = "city")
+
+
+all_locs <- all_locs %>%
+  select(-municipality_coded, -CVE_LOC_list)
+
+```
+
+STEP 5: Add in information of whether there is a ZOFEMAT office in city municipality.
+```{r}
+zofemat_offices <- read_csv(
+  here("_pressures/access/local_zofemat/local_zofemat_by_municipio.csv"),
+  show_col_types = FALSE
+) %>%
+  select(
+    CVE_ENT, CVE_MUN,
+    has_local_zofemat_office,
+    office_name,
+    office_type
+  )
+
+all_mun <- all_locs %>%
+  select(CVE_ENT, state, CVE_MUN, NOM_MUN) %>%
+  distinct() %>%
+  left_join(zofemat_offices, by = c("CVE_ENT", "CVE_MUN")) %>%
+  mutate(
+    # Binary used for scoring: confirmed active office only
+    local_zofemat = as.integer(has_local_zofemat_office == "yes")
+  )
+
+# Carry office flag onto locality table as well
+all_locs <- all_locs %>%
+  left_join(
+    all_mun %>% select(CVE_ENT, CVE_MUN, has_local_zofemat_office, local_zofemat_score = local_zofemat),
+    by = c("CVE_ENT", "CVE_MUN")
+  )
+
+all_mun
+```
+
+STEP 6: Add in information about beach inventory.
+```{r}
+# Scores: 0=none, 0.25=planned, 0.5=in review, 0.75=completed (not public), 1=easily available
+beach_inventory <- read_csv(
+  here("_pressures/access/local_zofemat/beach_access_inventory_by_locality.csv"),
+  show_col_types = FALSE
+) %>%
+  select(
+    city = locality,
+    inventory_score,
+    inventory_status)
+
+all_locs <- all_locs %>%
+  left_join(beach_inventory, by = "city")
+
+all_locs %>%
+  count(inventory_score, inventory_status)
+
+```
+
+
+STEP 7: Add in information about PROFEPA plazas and funding.
+```{r}
+pef_dir <- here("_pressures/access/budget_plazas/output")
+
+# National PROFEPA authorized plazas (whole agency), raw + per capita
+profepa_plazas <- read_csv(
+  file.path(pef_dir, "indicator_profepa_plazas_national.csv"),
+  show_col_types = FALSE
+)
+
+# Inspection PEF rescaled to constant 2018 pesos AND population
+profepa_inspection <- read_csv(
+  file.path(pef_dir, "indicator_profepa_inspection_national.csv"),
+  show_col_types = FALSE
+) %>%
+  select(
+    year,
+    mdp_current,
+    mdp_real_2018,
+    mdp_real_per_million_people,
+    index_real_pc_2018
+  )
+
+# Average of: real per-capita inspection index + population-scaled plazas index
+# (both indexed to 2018 = 100). Use latest year (2026); national value applies to all localities.
+profepa_score <- profepa_inspection %>%
+  left_join(profepa_plazas, by = "year") %>%
+  mutate(profepa_score = (index_real_pc_2018 + index_plazas_pop_2018) / 2 / 100) %>%
+  select(year, profepa_score)
+
+all_locs <- all_locs %>%
+  mutate(profepa_score = profepa_score$profepa_score[profepa_score$year == 2026])
+```
+
+
+STEP 8: Add in score for local ZOFEMAT protection of access.
+
+```{r}
+all_locs <- all_locs %>%
+  mutate(legal_score = 1)
+```
+
+STEP 9: Average the four scores for each locality, then length-weighted mean by OHI region
+```{r}
+all_locs <- all_locs %>%
+  left_join(beach_length_by_locality, by = "city") %>%
+  mutate(
+    manage_enforce_score = (local_zofemat_score + inventory_score + profepa_score) / 3
+  ) %>%
+  mutate(access_score = (manage_enforce_score + legal_score)/2)
+
+# Locality scores averaged within each OHI region, weighted by beach length
+region_access_scored <- all_locs %>%
+  group_by(rgn_id) %>%
+  summarise(
+    score = sum(access_score * km_beaches, na.rm = TRUE) / sum(km_beaches, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Keep all marine OHI regions (e.g. Region_2 with no study localities → NA)
+region_access_score <- ohi_marine %>%
+  st_drop_geometry() %>%
+  distinct(rgn_id, ecorgn) %>%
+  arrange(rgn_id) %>%
+  left_join(region_access_scored, by = "rgn_id")
+
+region_access_score
+```
+
+STEP 10: Map OHI regions colored by access score
+```{r}
+# Standard OHI score palette (from spatial/pretty_map_images.Rmd)
+score_colors <- c(
+  "#8a0032", "#A50026", "#D73027", "#F46D43", "#FDAE61",
+  "#FEE090", "#ABD9E9", "#74ADD1", "#4575B4", "#313695"
+)
+
+# Background land (same basemap style as spatial/pretty_map_images.Rmd / rgn_labels)
+states <- st_read(here("spatial/ohi_regions/states.shp"), quiet = TRUE) %>%
+  st_transform(st_crs(ohi_marine))
+
+ohi_scores_sf <- ohi_marine %>%
+  left_join(region_access_score %>% select(rgn_id, score), by = "rgn_id") %>%
+  mutate(
+    score_label = ifelse(is.na(score), "NA", sprintf("%.2f", score))
+  )
+
+ohi_label_pts <- suppressWarnings(st_point_on_surface(ohi_scores_sf))
+
+bbox_limits <- st_bbox(ohi_scores_sf)
+pad <- 25000 # meters (Mexico LCC)
+bbox_padded <- bbox_limits
+bbox_padded["xmin"] <- bbox_limits["xmin"] - pad
+bbox_padded["xmax"] <- bbox_limits["xmax"] + pad
+bbox_padded["ymin"] <- bbox_limits["ymin"] - pad
+bbox_padded["ymax"] <- bbox_limits["ymax"] + pad
+
+access_score_map <- ggplot() +
+  geom_sf(
+    data = states,
+    fill = "#d6cac0",
+    color = "grey10",
+    linewidth = 0.1
+  ) +
+  geom_sf(
+    data = ohi_scores_sf,
+    aes(fill = score),
+    color = "black",
+    linewidth = 0.2
+  ) +
+ # geom_sf_text(
+  #  data = ohi_label_pts,
+  #  aes(label = score_label),
+  #  size = 3,
+  #  fontface = "bold",
+  #  color = "grey15"
+  #) +
+  scale_fill_gradientn(
+    colours = score_colors,
+    limits = c(0, 1),
+    na.value = "grey80",
+    name = "Access score"
+  ) +
+  coord_sf(
+    xlim = c(bbox_padded["xmin"], bbox_padded["xmax"]),
+    ylim = c(bbox_padded["ymin"], bbox_padded["ymax"]),
+    expand = FALSE
+  ) +
+ # labs(title = "Beach access score by OHI region") +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "right",
+    legend.key.height = unit(0.8, "cm"),
+    legend.key.width = unit(0.5, "cm"),
+    plot.title = element_text(face = "bold"),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_line(color = "grey85", linewidth = 0.3),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 35, hjust = 1)
+  )
+
+access_score_map
+
+out_map_dir <- here("_pressures/access/output")
+dir.create(out_map_dir, showWarnings = FALSE, recursive = TRUE)
+ggsave(
+  filename = file.path(out_map_dir, "access_score_by_ohi_region.png"),
+  plot = access_score_map,
+  width = 8,
+  height = 9,
+  dpi = 150
+)
+```
