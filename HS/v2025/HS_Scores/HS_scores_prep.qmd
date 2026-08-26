@@ -1,0 +1,181 @@
+---
+title: "OHI Habitat servics data prep - Gulf of California OHI"
+author: "Austin Martinez"
+date: 6/30/2026
+format: 
+  html:
+    code-fold: show
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+
+```{r}
+# Load in Libraries
+library(sf)
+library(readr)
+library(dplyr)
+library(here)
+library(terra)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tmap)
+library(stringr)
+```
+
+## Read in trend, current_status, and extent output files
+```{r}
+# Mangroves
+mangrove_current_status <- read_csv(here::here("_habitats", "HAB_mangroves", "MAN_outputs", "mangrove_condition.csv"))
+mangrove_extent <- read_csv(here::here("_habitats", "HAB_mangroves", "MAN_outputs", "mangrove_extent.csv"))
+mangrove_trend <- read_csv(here::here("_habitats", "HAB_mangroves", "MAN_outputs", "mangrove_trend.csv"))
+
+# Saltmarsh
+#saltmarsh_condition <- read_csv(here::here("_habitats", "HAB_saltmarsh", "SAL_outputs", "saltmarsh_condition.csv"))
+#saltmarsh_extent <- read_csv(here::here("_habitats", "HAB_saltmarsh", "SAL_outputs", "saltmarsh_extent.csv"))
+#saltmarsh_trend <- read_csv(here::here("_habitats", "HAB_saltmarsh", "SAL_outputs", "saltmarsh_trend.csv"))
+
+# Coastal Dunes
+#coastal_dune_condition <- read_csv(here::here("_habitats", "HAB_coastal_dunes", "DUN_outputs", "coastal_dune_condition.csv"))
+#coastal_dune_extent <- read_csv(here::here("_habitats", "HAB_coastal_dunes", "DUN_outputs", "coastal_dune_extent.csv"))
+#coastal_dune_trend <- read_csv(here::here("_habitats", "HAB_coastal_dunes", "DUN_outputs", "coastal_dune_trend.csv"))
+
+# Seagrass
+seagrass_current_status <- read_csv(here::here("_habitats", "HAB_seagrass", "SEA_outputs", "seagrass_condition.csv"))
+seagrass_extent <- read_csv(here::here("_habitats", "HAB_seagrass", "SEA_outputs", "seagrass_extent.csv"))
+
+# Coral
+coral_current_status <- read_csv(here::here("_habitats", "HAB_corals", "CRL_outputs", "coral_current_status.csv"))
+coral_extent <- read_csv(here::here("_habitats", "HAB_corals", "CRL_outputs", "corals_extent.csv"))
+
+# Wetlands
+wetland_current_status <- read_csv(here::here("_habitats", "HAB_wetlands", "WET_outputs", "wetland_condition.csv"))
+wetland_extent <- read_csv(here::here("_habitats", "HAB_wetlands", "WET_outputs", "wetland_extent.csv"))
+wetland_trend <- read_csv(here::here("_habitats", "HAB_wetlands", "WET_outputs", "wetland_trend.csv"))
+```
+
+## Mangrve
+```{r}
+# Join mangrove trend, current_status, and extent CSVs
+mangrove <- mangrove_current_status |>
+  left_join(mangrove_extent, by = c("rgn_id")) |>
+  left_join(mangrove_trend,  by = c("rgn_id")) |>
+  mutate(habitat = "mangrove") |>
+  rename(extent = area_km2) |>
+  select(-year.x, -year.y) |>
+  select(rgn_id, year, condition, extent, trend, habitat)
+```
+
+## Wetland
+```{r}
+# Join wetland trend, current_status, and extent CSVs
+
+# Fix rgn_id mismatch
+wetland_trend <- wetland_trend %>%
+  mutate(rgn_id = str_replace_all(rgn_id, " ", "_"))
+
+# Join condition + extent
+wetland_joined <- wetland_current_status %>%
+  left_join(wetland_extent, by = c("rgn_id", "year"))
+
+# Join trend ONLY by rgn_id and rename trend$year
+wetland_trend_fixed <- wetland_trend %>%
+  rename(trend_year = year)
+wetland_joined <- wetland_joined %>%
+  left_join(wetland_trend_fixed, by = "rgn_id")
+
+# Build final clean table
+wetland <- wetland_joined %>%
+  mutate(
+    habitat = "wetland",
+    extent = area_km2
+  ) %>%
+  select(rgn_id, year, condition, extent, trend, habitat)
+```
+
+## Coastal dune
+```{r}
+# Join coastal_dune trend, condition, and extent CSVs
+#coastal_dune <- coastal_dune_condition |>
+#  left_join(coastal_dune_extent, by = c("rgn_id", "year")) |>
+#  left_join(coastal_dune_trend,  by = c("rgn_id", "year")) |>
+#  mutate(habitat = "coastal_dune") |>
+#  rename(extent = area_km2)
+```
+
+## Coral
+```{r}
+# Join coral current_status, and extent
+
+# Fix rgn_id formatting in BOTH data frames
+coral_current_status <- coral_current_status |>
+  mutate(rgn_id = str_replace(rgn_id, " ", "_"))
+coral_extent <- coral_extent |>
+  mutate(rgn_id = str_replace(rgn_id, " ", "_"))
+
+# Build final clean table
+coral <- coral_current_status |>
+  rename(condition = current_status) |>
+  left_join(coral_extent, by = c("rgn_id", "year")) |>
+  mutate(
+    habitat = "coral_reef",   # <-- updated here
+    extent = area_km2
+  ) |>
+  select(rgn_id, year, condition, extent, habitat)
+
+```
+
+## Seagrass
+```{r}
+# Join seagrass current_status, and extent
+seagrass <- seagrass_current_status %>%
+  left_join(seagrass_extent, by = c("rgn_id", "year")) %>%
+  mutate(
+    habitat = "seagrass"
+  ) %>%
+  select(rgn_id, year, condition, extent, habitat)
+```
+
+
+```{r}
+# Concatenate dataframes
+habitat_full <- bind_rows(mangrove, wetland, seagrass, coral)
+```
+
+
+```{r}
+# Read in habitat service lit review scores for filtration, carbon sequestoration, and coastal protection
+service_weights <- read_csv("/home/shares/ohi/OHI_GOC/_raw_data/habitat_services.csv")
+```
+
+```{r}
+# Rename mangroves to mangrove
+service_weights <- service_weights |>
+  rename(habitat = habitat_type) |>
+  mutate(habitat = ifelse(habitat == "mangroves", "mangrove", habitat))
+
+# Select necessary columns and lowercase habitat names
+service_weights_sub <- service_weights |>
+  select(habitat, coastal_protection, `carbon_sequestration_(g C m⁻² yr⁻¹)`, filtration) |>
+  mutate(habitat = tolower(habitat))
+```
+
+```{r}
+# Combine service weights and habitat data
+# Rename condition → current_status
+habitat_services_full <- habitat_full %>%
+  rename(current_status = condition) %>%
+  left_join(service_weights_sub,
+            by = c("habitat" = "habitat"))
+```
+
+
+```{r}
+# Write CSVs to output_data directory
+write.csv(habitat_services_full,
+          "habitat_services_output/habitat_services_full.csv",
+          row.names = FALSE)
+```
