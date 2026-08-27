@@ -1,0 +1,1584 @@
+---
+title: "OHI GoC: Gulf news engagement per capita, 2019-2025 (GDELT GKG)"
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# What this script does
+
+This script builds a news **engagement-per-capita** indicator for the Gulf of California. The default path now **downloads free GKG zip files** and filters them in R. BigQuery is optional and currently off (the free 1 TB quota on `ohi-goc-cce-gdelt` is used up).
+
+GDELT 2.0 is an open index of worldwide news. About every 15 minutes it reads articles in many languages, translates most non-English coverage into English, finds people, places, organizations, events, and themes, and publishes the result as open metadata.
+
+**How to run.** Restart R, then **Run All**. The script downloads **January 2024** GKG 15-minute zips from `data.gdeltproject.org` (~3,000 files, often 1 to 3 hours), keeps only **Spanish originals** that use **Spanish Gulf names** (`golfo de california`, `mar de cortés` / `cortes` / `cortez`) **and** **Spanish marine/coast terms** (pesca, manglar, vaquita, playa, and related words), then clips points to the 50 km study area. Re-run is safe: finished timestamps are skipped. Change `zip_start` / `zip_end` to try another month. Monthly GKG files go to `/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/int/gkg_by_month/`. Only region-year current-status scores go to `.../v2026/output/`.
+
+Every search is limited in **two** ways, because a map clip alone is not enough:
+
+1. **The article must name the Gulf.** GDELT cannot nest two OR lists, so each query pairs one ocean-engagement topic list with one required Gulf / Sea of Cortez phrase (`"gulf of california"`, `"golfo de california"`, `"sea of cortez"`, `"mar de cortes"`). A protest in La Paz about an inland road, with no Gulf or ocean language, should not come through.
+2. **The mapped location must sit in the study area.** After the search, we keep only points inside the OHI Gulf marine regions, **including islands**, plus the **50 km inland buffer**:
+
+`/home/shares/ohi/OHI_GOC/spatial/OHI_regions/marine_and_inland50.gpkg`
+
+The topic lists are meant to reflect **the marine environment and people’s engagement with the ocean**: protest and *manifestaciones* tied to the Gulf, megaprojects on the coast, and coverage of fishing, mangroves, beaches, whales, vaquita, and related coastal care. It is still **not** a finished Coastal Community Engagement score. GDELT measures news language, not belonging. More articles can mean more conflict or more tourism press, not more sense of place.
+
+**Spanish coverage and Spanish ANEW.** Gulf news will be in Spanish. The GEO and DOC searches can still use English keywords because GDELT translates Spanish articles into English for search, but we restrict to **Spanish-language originals** (`sourcelang:spanish`). Emotion is **not** taken from that English translation. For Spanish articles, GDELT automatically scores the original Spanish text with the **Spanish adaptation of ANEW** inside GCAM (Global Content Analysis Measures). Those scores live in the GKG `GCAM` field as dictionary 22 (`v22.1` valence, `v22.2` arousal, `v22.3` dominance, plus familiarity, concreteness, and imageability). The GEO and DOC APIs do not return GCAM. Section 8 reads Spanish ANEW from BigQuery GKG. An optional 24-hour GKG zip loop remains in section 6 if `download_gkg <- TRUE`.
+
+Cite Spanish ANEW as: Redondo, Jaime, Isabel Fraga, Isabel Padrón, and Montserrat Comesaña. 2007. "The Spanish adaptation of ANEW (affective norms for English words)." *Behavior Research Methods* 39 (3): 600-605.
+
+Codebook: <http://data.gdeltproject.org/documentation/GCAM-MASTER-CODEBOOK.TXT>
+Spanish ANEW in GCAM: <https://blog.gdeltproject.org/spanish-edition-of-anew-now-available-in-gcam/>
+
+**Time windows you should know about**
+
+- **This run (default):** free GKG zip download for **1-31 January 2024**, Spanish Gulf + Spanish marine filters, then clip in R.
+- **GEO 2.0 API** (optional snapshot): last **7 days**. Set `run_gdelt <- TRUE` if you want it. Not a time series.
+- **DOC 2.0 API** (optional snapshot): about the last **3 months**. Same flag. Not a time series.
+- **BigQuery** (optional): partitioned GKG 2019-2025. Needs billing. `use_bigquery` is FALSE.
+
+GDELT searches the **English translations** of articles, so English keywords also retrieve Spanish coverage. We still require `sourcelang:spanish` (GEO/DOC) or Spanish ANEW `v22.1` in GCAM (GKG) so the articles we keep are Spanish originals.
+
+Docs:
+
+- GDELT 2.0 announcement: <https://blog.gdeltproject.org/gdelt-2-0-our-global-world-in-realtime/>
+- GEO 2.0 API: <https://blog.gdeltproject.org/gdelt-geo-2-0-api-debuts/>
+- DOC 2.0 API: <https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/>
+- Data overview: <https://www.gdeltproject.org/data.html>
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(httr)
+library(jsonlite)
+library(janitor)
+
+# This 50 km buffer has self-intersections. s2 (spherical) geometry
+# rejects them ("Edge 4 crosses edge 6"); GEOS (planar) does not.
+sf::sf_use_s2(FALSE)
+
+# Optional 7-day GEO / 3-month DOC snapshot. Leave FALSE for the
+# 2019-2025 indicator.
+run_gdelt <- FALSE
+try_mapview <- FALSE
+
+geo_timespan <- "7d"     # GEO API maximum is 1 week
+doc_timespan <- "3months" # DOC API looks back about 3 months
+geo_maxpoints <- 1000
+
+# Optional 24-hour GKG zip test. Not the historical series.
+download_gkg <- FALSE
+gkg_lookback_hours <- 24
+
+# Free path: download GKG 15-minute zips and filter in R.
+# One month is the test. Expand zip_start/zip_end after it works.
+download_gkg_zips <- TRUE
+zip_start <- as.Date("2024-01-01")
+zip_end <- as.Date("2024-01-31")
+
+# BigQuery path. Leave FALSE while the free 1 TB quota is exhausted.
+use_bigquery <- FALSE
+bq_project_default <- "ohi-goc-cce-gdelt"
+# The free 1 TB/month quota is already exhausted on this project.
+# Enable billing (trial credits are fine) before querying again:
+# https://console.cloud.google.com/billing?project=ohi-goc-cce-gdelt
+series_start <- as.Date("2019-01-01")
+series_end <- as.Date("2025-12-31")
+reference_years <- 2019:2022
+series_years <- as.integer(format(series_start, "%Y")):as.integer(format(series_end, "%Y"))
+query_events <- FALSE
+# GCAM/Spanish ANEW is a huge column. FALSE = engagement counts only (cheap).
+# TRUE = also pull valence/arousal (much more data scanned).
+gkg_include_anew <- FALSE
+bq_max_gb_per_year <- 200
+# GDELT 2.0 GKG / GCAM coverage begins 18 February 2015 (not used while series starts 2019).
+gkg_v2_start <- as.Date("2015-02-18")
+
+# Intermediate GKG zips, article tables, and working CSVs.
+# Current-status scores only go to output_dir.
+cce_root_candidates <- c(
+  "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026",
+  here::here("sp", "cce", "v2026"),
+  here::here("goal_prep", "sp", "cce", "v2026")
+)
+cce_root_hits <- cce_root_candidates[dir.exists(cce_root_candidates)]
+cce_root <- if (length(cce_root_hits) > 0) {
+  cce_root_hits[[1]]
+} else {
+  here::here("CCE", "gdelt_goc_news")
+}
+
+int_dir <- file.path(cce_root, "int")
+gkg_month_dir <- file.path(int_dir, "gkg_by_month")
+output_dir <- file.path(cce_root, "output")
+dir.create(gkg_month_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(int_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+message("GKG monthly files: ", gkg_month_dir)
+message("Other intermediates: ", int_dir)
+message("Current-status scores: ", output_dir)
+
+gdelt_geo <- NULL
+gdelt_in_goc <- NULL
+gdelt_doc <- tibble()
+gkg_gulf_es <- tibble()
+gkg_bq <- tibble()
+
+if (!nzchar(Sys.getenv("BIGQUERY_PROJECT", unset = ""))) {
+  Sys.setenv(BIGQUERY_PROJECT = bq_project_default)
+}
+message("BIGQUERY_PROJECT = ", Sys.getenv("BIGQUERY_PROJECT"))
+```
+
+```{r}
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+add_rgn_labels <- function(df) {
+  df %>%
+    mutate(
+      rgn_name = recode(as.character(rgn_id), !!!rgn_labels, .default = as.character(rgn_id))
+    )
+}
+
+first_existing <- function(paths) {
+  hits <- paths[file.exists(paths)]
+  if (length(hits) == 0) {
+    stop(
+      "Could not find marine_and_inland50.gpkg. Tried:\n",
+      paste0("  - ", paths, collapse = "\n")
+    )
+  }
+  hits[[1]]
+}
+
+# GDELT GEO returns HTTP 404 when a query has no matches. Timeouts are
+# common. Never let one failed query abort the rest of the pull.
+gdelt_request <- function(url, timeout_sec = 180, times = 3) {
+  tryCatch(
+    httr::RETRY(
+      "GET",
+      url,
+      httr::user_agent("OHI-GOC-GDELT/1.0 (open research; Gulf of California)"),
+      httr::timeout(timeout_sec),
+      times = times,
+      pause_base = 2,
+      pause_cap = 16,
+      terminate_on = c(400, 404)
+    ),
+    error = function(e) {
+      warning("Request failed: ", conditionMessage(e), "\n  ", url)
+      NULL
+    }
+  )
+}
+
+extract_hrefs <- function(html) {
+  html <- ifelse(is.na(html), "", as.character(html))
+  matches <- stringr::str_match_all(html, 'href=\"([^\"]+)\"')
+  purrr::map_chr(matches, function(m) {
+    if (nrow(m) == 0) return(NA_character_)
+    paste(unique(m[, 2]), collapse = " | ")
+  })
+}
+
+extract_gcam_value <- function(gcam, key) {
+  gcam <- ifelse(is.na(gcam), "", as.character(gcam))
+  key_re <- gsub("\\.", "\\\\.", key)
+  m <- stringr::str_match(gcam, paste0("(?:^|,)", key_re, ":([^,]+)"))
+  as.numeric(m[, 2])
+}
+
+spanish_anew_ids <- c(
+  valence = "v22.1",
+  arousal = "v22.2",
+  dominance = "v22.3",
+  familiarity = "v22.10",
+  concreteness = "v22.11",
+  imageability = "v22.12"
+)
+
+parse_spanish_anew <- function(df) {
+  gcam_col <- if ("gcam" %in% names(df)) df$gcam else df$GCAM
+  df %>%
+    mutate(
+      anew_valence = extract_gcam_value(gcam_col, spanish_anew_ids[["valence"]]),
+      anew_arousal = extract_gcam_value(gcam_col, spanish_anew_ids[["arousal"]]),
+      anew_dominance = extract_gcam_value(gcam_col, spanish_anew_ids[["dominance"]]),
+      anew_familiarity = extract_gcam_value(gcam_col, spanish_anew_ids[["familiarity"]]),
+      anew_concreteness = extract_gcam_value(gcam_col, spanish_anew_ids[["concreteness"]]),
+      anew_imageability = extract_gcam_value(gcam_col, spanish_anew_ids[["imageability"]])
+    )
+}
+
+# GKG V2Locations: Type#Name#CountryCode#ADM1[#ADM2]#Lat#Long#FeatureID;
+# Find the first numeric pair that looks like latitude, longitude.
+latlon_from_parts <- function(parts) {
+  nums <- suppressWarnings(as.numeric(parts))
+  ok <- which(!is.na(nums) & nzchar(parts))
+  if (length(ok) < 2) return(NULL)
+  for (i in seq_len(length(ok) - 1)) {
+    lat <- nums[ok[i]]
+    lon <- nums[ok[i + 1]]
+    if (!is.na(lat) && !is.na(lon) && abs(lat) <= 90 && abs(lon) <= 180) {
+      return(c(lon = lon, lat = lat))
+    }
+  }
+  NULL
+}
+
+parse_gkg_location_points <- function(v2locations, locations) {
+  v2locations <- ifelse(is.na(v2locations), "", as.character(v2locations))
+  locations <- ifelse(is.na(locations), "", as.character(locations))
+
+  parse_one <- function(v2, loc) {
+    pts <- tibble(longitude = numeric(), latitude = numeric())
+    add_chunks <- function(text, sep) {
+      if (!nzchar(text)) return(pts)
+      chunks <- unlist(strsplit(text, ";", fixed = TRUE))
+      for (ch in chunks) {
+        parts <- unlist(strsplit(ch, sep, fixed = TRUE))
+        ll <- latlon_from_parts(parts)
+        if (!is.null(ll)) {
+          pts <- bind_rows(pts, tibble(longitude = unname(ll["lon"]), latitude = unname(ll["lat"])))
+        }
+      }
+      pts
+    }
+    pts <- add_chunks(v2, "#")
+    if (nrow(pts) == 0) pts <- add_chunks(loc, "#")
+    if (nrow(pts) == 0) pts <- add_chunks(loc, ";")
+    distinct(pts)
+  }
+
+  purrr::map2(v2locations, locations, parse_one)
+}
+
+gulf_text_regex <- regex(
+  "golfo de california|gulf of california|mar de cort[eé]s|mar de cortez|sea of cortez|sea of cortes",
+  ignore_case = TRUE
+)
+
+# Spanish-only keep filters for the free zip pull.
+gulf_es_regex <- regex(
+  "golfo de california|mar de cort[eé]s|mar de cortez",
+  ignore_case = TRUE
+)
+
+marine_es_regex <- regex(
+  paste(
+    "pesca|pesquer|manglar|\\bmangle\\b|vaquita|totoaba|ballena|delf[ií]n",
+    "lobo marino|tibur[oó]n|tortuga|playa|\\bcostas?\\b|costera|costero",
+    "litoral|marino|mar[ií]timo|oc[eé]ano|estero|arrecife|coral",
+    "sargazo|humedal|marea|camar[oó]n|sardina|jaiba|almeja",
+    "\\banp\\b|conanp|semarnat|captura incidental|pesca incidental",
+    "area natural protegida|área natural protegida|vedas?",
+    "malec[oó]n|muelle|humedales|laguna costera|zona federal mar[ií]tima",
+    sep = "|"
+  ),
+  ignore_case = TRUE
+)
+
+ocean_engagement_pattern <- paste(
+  "pesca|pesquer|manglar|vaquita|ballena|playa|costera|marino|",
+  "limpieza|totoaba|manifest|protest|megaproyecto|malecon|malec[oó]n|",
+  "fishing|fishery|mangrove|whale|beach|coastal|marine|ocean|cleanup|",
+  "protected area|bycatch|theme_protest|env_|water_|fish_",
+  sep = ""
+)
+```
+
+# 1. Gulf study area: marine regions, islands, and 50 km inland
+
+```{r}
+goc_path <- first_existing(c(
+  "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/marine_and_inland50.gpkg",
+  "/home/shares/ohi/OHI_GOC/spatial/ohi_regions/marine_and_inland50.gpkg",
+  here::here("spatial", "OHI_regions", "marine_and_inland50.gpkg"),
+  here::here("spatial", "ohi_regions", "marine_and_inland50.gpkg"),
+  here::here("..", "spatial", "OHI_regions", "marine_and_inland50.gpkg")
+))
+
+message("Using study area: ", goc_path)
+
+goc <- st_read(goc_path, quiet = TRUE) %>%
+  st_transform(4326) %>%
+  st_make_valid()
+
+# Keep a region id if the file already has one.
+rgn_col <- intersect(
+  names(goc),
+  c("rgn_id", "rgn", "region_id", "OHI_rgn", "ohi_rgn", "id")
+)
+if (length(rgn_col) == 1 && rgn_col != "rgn_id") {
+  goc <- goc %>% rename(rgn_id = all_of(rgn_col))
+}
+
+goc_union <- suppressWarnings(
+  goc %>%
+    st_union() %>%
+    st_make_valid() %>%
+    st_as_sf()
+)
+if (is.na(st_crs(goc_union))) st_crs(goc_union) <- st_crs(goc)
+
+bbox <- st_bbox(goc_union)
+# Planar centroid is fine here: s2 is off, and this point is only for the
+# optional GEO near: box, not for the 2019-2025 BigQuery clip.
+centroid <- suppressWarnings(st_centroid(st_geometry(goc_union)))
+centroid_lon <- as.numeric(st_coordinates(centroid)[1, 1])
+centroid_lat <- as.numeric(st_coordinates(centroid)[1, 2])
+
+# GEO's near: operator is a bounding box around a radius, not a true circle.
+# Use a radius that covers the Gulf bbox, then clip tightly with the geopackage.
+if (requireNamespace("geosphere", quietly = TRUE)) {
+  half_diag_km <- as.numeric(
+    geosphere::distHaversine(
+      c(bbox["xmin"], bbox["ymin"]),
+      c(bbox["xmax"], bbox["ymax"])
+    ) / 1000 / 2
+  )
+  near_radius_km <- ceiling(half_diag_km + 25)
+} else {
+  near_radius_km <- 650
+  message("geosphere is not installed. Using near_radius_km = 650.")
+}
+
+tibble(
+  west = unname(bbox["xmin"]),
+  south = unname(bbox["ymin"]),
+  east = unname(bbox["xmax"]),
+  north = unname(bbox["ymax"]),
+  centroid_lon = centroid_lon,
+  centroid_lat = centroid_lat,
+  near_radius_km = near_radius_km
+)
+```
+
+If `mapview` is available, this is the exact polygon GDELT points must land in.
+
+```{r}
+if (isTRUE(try_mapview) && requireNamespace("mapview", quietly = TRUE)) {
+  tryCatch(
+    mapview::mapview(goc, layer.name = "OHI marine + 50 km inland + islands"),
+    error = function(e) {
+      warning("mapview failed (", conditionMessage(e), "). Restart R if this is a C++ NULL symbol error.")
+      NULL
+    }
+  )
+}
+```
+
+# 2. Keyword sets: Gulf name AND ocean engagement
+
+GDELT does not allow two OR blocks in one query. Space between terms is AND. So we do **not** search "protest anywhere in Mexico, then keep Gulf dots." We search:
+
+`[ocean / community topic OR list] "[required Gulf phrase]"`
+
+and repeat that for each Gulf name. That is why the next tibble has 24 rows (4 topics × 6 Gulf phrases). `query_name` is only a label we store in the output CSVs. **GDELT uses `query_text`.** The doubled names you saw (`protest.protest___gulf_of_california_`) were an R list-flattening artifact, not a GDELT error, and not the cause of the GEO 404s.
+
+```{r}
+# Required. An article has to use one of these names for the water body.
+gulf_phrases <- c(
+  '"gulf of california"',
+  '"golfo de california"',
+  '"sea of cortez"',
+  '"sea of cortes"',
+  '"mar de cortes"',
+  '"mar de cortez"'
+)
+
+# One OR block per theme. These are about the ocean, the coast, or people
+# organizing around them. Not generic city politics.
+topic_sets <- list(
+  protest = paste(
+    "(manifestacion OR manifestaciones OR protesta OR protestas",
+    "OR protester OR protest OR manifestation OR \"movimiento social\"",
+    "OR \"social movement\")"
+  ),
+  megaproject = paste(
+    "(megaproyecto OR megaproyectos OR malecon OR malecón",
+    "OR \"desarrollo turistico\" OR marina OR megaproject",
+    "OR \"mega project\" OR \"tourist development\")"
+  ),
+  ocean_environment = paste(
+    "(pesca OR pesqueria OR pesquería OR manglar OR vaquita OR ballena",
+    "OR playa OR costera OR marino OR limpieza OR totoaba",
+    "OR \"area natural protegida\" OR fishing OR fishery OR mangrove",
+    "OR whale OR beach OR coastal OR marine OR ocean OR cleanup",
+    "OR \"protected area\" OR bycatch)"
+  )
+)
+
+# GKG theme plus a required Gulf phrase. Theme names are GDELT's.
+theme_sets <- list(
+  gkg_protest = "theme:PROTEST"
+)
+
+# Labels for our output tables only. GDELT never sees these names.
+# GDELT receives query_text (topic OR-list + one quoted Gulf phrase).
+gulf_phrase_slug <- function(phrase) {
+  phrase %>%
+    str_replace_all('"', "") %>%
+    str_to_lower() %>%
+    str_replace_all("[^a-z]+", "_") %>%
+    str_replace_all("^_|_$", "")
+}
+
+cross_gulf_queries <- function(topic_block, topic_name) {
+  setNames(
+    paste(topic_block, gulf_phrases),
+    paste(topic_name, gulf_phrase_slug(gulf_phrases), sep = "__")
+  )
+}
+
+# Flatten without R's outer.inner name prefix (protest.protest__...).
+query_parts <- unname(c(
+  purrr::imap(topic_sets, cross_gulf_queries),
+  purrr::imap(theme_sets, cross_gulf_queries)
+))
+query_sets <- setNames(
+  unlist(query_parts, use.names = FALSE),
+  unlist(lapply(query_parts, names), use.names = FALSE)
+)
+
+add_geo_operators <- function(core_query) {
+  paste(
+    core_query,
+    "sourcelang:spanish",
+    "locationcc:MX",
+    sprintf("near:%s,%s,%skm", centroid_lat, centroid_lon, near_radius_km)
+  )
+}
+
+# Inventory of searches. query_name is a local label; query_text is what GDELT gets.
+tibble(
+  query_name = names(query_sets),
+  query_text = unname(query_sets)
+)
+```
+
+# 3. GEO 2.0 API: locations mentioned near the keywords
+
+The GEO API returns points for places named close to the query in **Spanish-language** news (searched via GDELT's English translation, restricted with `sourcelang:spanish`). We ask for city and landmark resolution (`geores=2`) so a vague mention of "Mexico" does not become a point.
+
+Then we **intersect with `marine_and_inland50.gpkg`**, which is the real geographic limit: Gulf waters, islands, and 50 km inland. The `near:` radius is only a coarse net.
+
+```{r}
+gdelt_geo_url <- function(query, timespan = geo_timespan, maxpoints = geo_maxpoints) {
+  httr::modify_url(
+    "https://api.gdeltproject.org/api/v2/geo/geo",
+    query = list(
+      query = query,
+      mode = "PointData",
+      format = "GeoJSON",
+      timespan = timespan,
+      maxpoints = maxpoints,
+      geores = 2
+    )
+  )
+}
+
+fetch_gdelt_geo <- function(query, query_name) {
+  url <- gdelt_geo_url(query)
+  message("GEO query [", query_name, "]: ", url)
+
+  resp <- gdelt_request(url)
+  if (is.null(resp)) return(NULL)
+
+  code <- httr::status_code(resp)
+  # GEO returns 404 when the query has no mapped points this week.
+  if (code == 404) {
+    message("GEO [", query_name, "]: no matches (HTTP 404).")
+    return(NULL)
+  }
+  if (code >= 400) {
+    warning("GEO [", query_name, "]: HTTP ", code)
+    return(NULL)
+  }
+
+  raw <- httr::content(resp, as = "text", encoding = "UTF-8")
+  if (!grepl("FeatureCollection|Feature", raw)) {
+    warning("GEO query [", query_name, "] did not return GeoJSON. First 300 characters:\n", substr(raw, 1, 300))
+    return(NULL)
+  }
+
+  tmp <- tempfile(fileext = ".geojson")
+  writeLines(raw, tmp, useBytes = TRUE)
+  out <- tryCatch(
+    st_read(tmp, quiet = TRUE),
+    error = function(e) {
+      warning("Could not parse GeoJSON for [", query_name, "]: ", e$message)
+      NULL
+    }
+  )
+  if (is.null(out) || nrow(out) == 0) return(NULL)
+
+  out %>%
+    mutate(
+      query_name = query_name,
+      query_text = query,
+      article_urls = extract_hrefs(if ("html" %in% names(.)) html else NA_character_)
+    )
+}
+
+gdelt_geo <- NULL
+if (isTRUE(run_gdelt)) {
+  geo_queries <- purrr::imap(as.list(query_sets), ~ add_geo_operators(.x))
+
+  geo_raw <- purrr::imap(geo_queries, fetch_gdelt_geo) %>%
+    purrr::compact()
+
+  gdelt_geo <- if (length(geo_raw) == 0) {
+    warning("No GEO features returned. The API may be down, or the week may have no matches.")
+    NULL
+  } else {
+    bind_rows(geo_raw) %>%
+      st_transform(4326)
+  }
+}
+
+if (!is.null(gdelt_geo)) gdelt_geo
+```
+
+# 4. Clip to the 50 km inland Gulf layer and assign OHI regions
+
+```{r}
+if (!is.null(gdelt_geo) && nrow(gdelt_geo) > 0) {
+  gdelt_pts <- gdelt_geo %>%
+    st_cast("POINT", warn = FALSE) %>%
+    st_make_valid()
+
+  # Drop empty or invalid points before the join.
+  gdelt_pts <- gdelt_pts[!st_is_empty(gdelt_pts), ]
+
+  goc_join <- goc
+  if (!"rgn_id" %in% names(goc_join)) {
+    goc_join$rgn_id <- NA_character_
+  }
+
+  gdelt_in_goc <- st_join(
+    gdelt_pts,
+    goc_join %>% dplyr::select(any_of(c("rgn_id", "rgn_name"))),
+    join = st_intersects,
+    left = FALSE
+  ) %>%
+    add_rgn_labels() %>%
+    mutate(
+      longitude = st_coordinates(geometry)[, 1],
+      latitude = st_coordinates(geometry)[, 2]
+    )
+
+  message(
+    nrow(gdelt_pts), " GEO points in the coarse near-box; ",
+    nrow(gdelt_in_goc), " remain inside marine + 50 km inland + islands."
+  )
+
+  gdelt_in_goc_tbl <- gdelt_in_goc %>%
+    st_drop_geometry() %>%
+    distinct(query_name, name, latitude, longitude, rgn_id, rgn_name, count, article_urls, .keep_all = TRUE)
+
+  write_csv(gdelt_in_goc_tbl, file.path(int_dir, "gdelt_geo_points_in_goc.csv"))
+  st_write(
+    gdelt_in_goc,
+    file.path(int_dir, "gdelt_geo_points_in_goc.gpkg"),
+    delete_dsn = TRUE,
+    quiet = TRUE
+  )
+
+  gdelt_in_goc_tbl %>%
+    count(rgn_name, query_name, name = "n_locations") %>%
+    arrange(rgn_name, desc(n_locations))
+} else {
+  gdelt_in_goc <- NULL
+  gdelt_in_goc_tbl <- tibble()
+  message("No GEO points to clip.")
+}
+```
+
+```{r}
+if (!is.null(gdelt_in_goc) && isTRUE(try_mapview) && requireNamespace("mapview", quietly = TRUE)) {
+  tryCatch(
+    mapview::mapview(
+      goc_union,
+      col.regions = "gray90",
+      alpha.regions = 0.2,
+      layer.name = "Study area"
+    ) +
+      mapview::mapview(
+        gdelt_in_goc,
+        zcol = "query_name",
+        layer.name = "GDELT locations in GoC"
+      ),
+    error = function(e) {
+      warning("mapview failed (", conditionMessage(e), "). Restart R if this is a C++ NULL symbol error.")
+      NULL
+    }
+  )
+}
+```
+
+# 5. DOC 2.0 API: article list for the same Gulf + ocean topics
+
+DOC cannot clip to the geopackage. It still uses the same **Gulf phrase plus ocean-engagement** queries, Mexican outlets (`sourcecountry:mexico`), and Spanish originals (`sourcelang:spanish`).
+
+```{r}
+gdelt_doc_url <- function(query, mode = "ArtList", timespan = doc_timespan, maxrecords = 75) {
+  httr::modify_url(
+    "https://api.gdeltproject.org/api/v2/doc/doc",
+    query = list(
+      query = query,
+      mode = mode,
+      format = "json",
+      timespan = timespan,
+      maxrecords = maxrecords,
+      sort = "datedesc"
+    )
+  )
+}
+
+fetch_gdelt_doc <- function(query, query_name) {
+  # query already includes a required Gulf / Sea of Cortez phrase.
+  full_query <- paste(query, "sourcecountry:mexico", "sourcelang:spanish")
+  url <- gdelt_doc_url(full_query)
+  message("DOC query [", query_name, "]: ", url)
+
+  resp <- gdelt_request(url, timeout_sec = 180, times = 4)
+  if (is.null(resp)) return(NULL)
+
+  code <- httr::status_code(resp)
+  if (code == 404) {
+    message("DOC [", query_name, "]: no matches (HTTP 404).")
+    return(NULL)
+  }
+  if (code >= 400) {
+    warning("DOC [", query_name, "]: HTTP ", code)
+    return(NULL)
+  }
+
+  parsed <- tryCatch(
+    jsonlite::fromJSON(httr::content(resp, as = "text", encoding = "UTF-8")),
+    error = function(e) NULL
+  )
+  arts <- parsed$articles
+  if (is.null(arts) || length(arts) == 0) return(NULL)
+
+  as_tibble(arts) %>%
+    mutate(query_name = query_name, query_text = full_query)
+}
+
+gdelt_doc <- tibble()
+if (isTRUE(run_gdelt)) {
+  doc_raw <- purrr::imap(query_sets, fetch_gdelt_doc) %>%
+    purrr::compact()
+
+  gdelt_doc <- if (length(doc_raw) == 0) {
+    tibble()
+  } else {
+    bind_rows(doc_raw) %>%
+      distinct(url, query_name, .keep_all = TRUE)
+  }
+
+  if (nrow(gdelt_doc) > 0) {
+    write_csv(gdelt_doc, file.path(int_dir, "gdelt_doc_articles_gulf_ocean.csv"))
+  }
+
+  gdelt_doc
+}
+```
+
+# 6. Spanish ANEW emotion scores from GCAM
+
+Spanish ANEW is **usable**, and it is the right emotion lexicon here, because it is applied to Spanish text rather than to an English translation. GDELT stores it in the GKG `GCAM` string as dictionary **22**:
+
+| GCAM id | What it measures (Spanish ANEW) | Typical scale |
+|---------|----------------------------------|---------------|
+| `v22.1` | Valence / pleasure (all) | about 1 (unpleasant) to 9 (pleasant), 5 is middle |
+| `v22.2` | Arousal (all) | about 1 (calm) to 9 (excited) |
+| `v22.3` | Dominance (all) | about 1 (out of control) to 9 (in control) |
+| `v22.10` | Familiarity | higher = more familiar wording |
+| `v22.11` | Concreteness | higher = more concrete |
+| `v22.12` | Imageability | higher = easier to picture |
+
+`c22.*` are word counts for the same dimensions. We use the scored `v22.*` values. These fields appear only when GDELT ingested the article as Spanish. English ANEW (`v19.*`) is a different dictionary and should not be the primary score for this Gulf corpus.
+
+This chunk downloads recent GKG 2.1 files (open zip files, no login), keeps rows that look like Spanish Gulf coverage, and parses Spanish ANEW. Set `gkg_lookback_hours` to 168 for a week. For months of history, use the BigQuery block in section 8.
+
+```{r}
+gulf_text_pattern <- gulf_text_regex
+
+gkg_col_names <- c(
+  "gkgrecordid", "date", "sourcecollectionidentifier", "sourcecommonname",
+  "documentidentifier", "counts", "v2counts", "themes", "v2themes",
+  "locations", "v2locations", "persons", "v2persons", "organizations",
+  "v2organizations", "v2tone", "dates", "gcam", "sharingimage",
+  "relatedimages", "socialimageembeds", "socialvideoembeds", "quotations",
+  "allnames", "amounts", "translationinfo", "extras"
+)
+
+gkg_stamp <- function(t) {
+  t <- as.POSIXlt(t, tz = "UTC")
+  t$min <- (t$min %/% 15) * 15
+  t$sec <- 0
+  format(t, "%Y%m%d%H%M%S")
+}
+
+fetch_one_gkg <- function(stamp) {
+  url <- paste0("http://data.gdeltproject.org/gdeltv2/", stamp, ".gkg.csv.zip")
+  tmp <- tempfile(fileext = ".zip")
+  resp <- tryCatch(
+    httr::RETRY(
+      "GET",
+      url,
+      httr::write_disk(tmp, overwrite = TRUE),
+      httr::user_agent("OHI-GOC-GDELT/1.0"),
+      httr::timeout(120),
+      times = 3,
+      terminate_on = c(404)
+    ),
+    error = function(e) NULL
+  )
+
+  if (is.null(resp) || httr::status_code(resp) != 200 ||
+      !file.exists(tmp) || file.info(tmp)$size < 1000) {
+    unlink(tmp)
+    return(NULL)
+  }
+
+  dat <- tryCatch(
+    {
+      unzip_dir <- tempfile()
+      dir.create(unzip_dir)
+      on.exit(unlink(unzip_dir, recursive = TRUE), add = TRUE)
+      utils::unzip(tmp, exdir = unzip_dir)
+      inner <- list.files(unzip_dir, full.names = TRUE)[1]
+      if (is.na(inner) || !file.exists(inner)) return(NULL)
+      read_tsv(
+        inner,
+        col_names = gkg_col_names,
+        col_types = cols(.default = col_character()),
+        quote = "",
+        progress = FALSE
+      )
+    },
+    error = function(e) NULL
+  )
+  unlink(tmp)
+  dat
+}
+
+gkg_gulf_es <- tibble()
+if (isTRUE(run_gdelt) && isTRUE(download_gkg)) {
+  stamps <- seq(
+    Sys.time() - gkg_lookback_hours * 3600,
+    Sys.time(),
+    by = 15 * 60
+  ) %>%
+    unique() %>%
+    purrr::map_chr(gkg_stamp) %>%
+    unique()
+
+  message("Downloading ", length(stamps), " GKG files for Spanish ANEW (GCAM v22).")
+
+  gkg_raw <- purrr::map(stamps, fetch_one_gkg) %>%
+    purrr::compact()
+
+  message("Parsed ", length(gkg_raw), " of ", length(stamps), " GKG files.")
+
+  gkg_gulf_es <- if (length(gkg_raw) == 0) {
+    warning("No GKG files could be parsed. Check network access to data.gdeltproject.org.")
+    tibble()
+  } else {
+    gkg_all <- bind_rows(gkg_raw)
+    message("GKG rows before Gulf/Spanish filter: ", nrow(gkg_all))
+    gkg_all %>%
+      filter(
+        !is.na(gcam),
+        str_detect(gcam, "v22\\.1:"),
+        str_detect(
+          paste(locations, v2locations, documentidentifier, extras, sep = " "),
+          gulf_text_pattern
+        )
+      ) %>%
+      parse_spanish_anew() %>%
+      filter(!is.na(anew_valence)) %>%
+      distinct(documentidentifier, .keep_all = TRUE)
+  }
+
+  if (nrow(gkg_gulf_es) > 0) {
+    write_csv(
+      gkg_gulf_es %>%
+        dplyr::select(
+          date, sourcecommonname, documentidentifier, translationinfo,
+          starts_with("anew_"), v2tone, themes
+        ),
+      file.path(int_dir, "gdelt_gkg_spanish_anew_gulf.csv")
+    )
+    gkg_gulf_es %>%
+      summarise(
+        n_articles = n(),
+        mean_valence = mean(anew_valence, na.rm = TRUE),
+        mean_arousal = mean(anew_arousal, na.rm = TRUE),
+        mean_dominance = mean(anew_dominance, na.rm = TRUE)
+      )
+  } else if (length(gkg_raw) > 0) {
+    message(
+      "GKG files parsed, but none matched Spanish ANEW + Gulf text in this ",
+      gkg_lookback_hours, "-hour window. That can be a true zero for a short lookback."
+    )
+    gkg_gulf_es
+  }
+}
+```
+
+If DOC returned URLs, you can join them to the GKG table on `documentidentifier` to attach Spanish ANEW scores to the article list.
+
+# 6b. Free test: one month of GKG zips (Spanish + marine)
+
+This path does not use BigQuery. It downloads the public 15-minute GKG zips and keeps a row only if **all** of these are true:
+
+1. **Spanish original:** GCAM dictionary 22 (`v22.1`) or `TranslationInfo` contains `srclc:spa`.
+2. **Spanish Gulf name:** `golfo de california` or `mar de cortés` / `cortes` / `cortez` (not English "gulf of california" / "sea of cortez").
+3. **Spanish marine or coastal language:** fishing, mangroves, vaquita, totoaba, whales, beaches, coast, protected areas, and related terms. English marine words are not enough to keep a row.
+
+January 2024 is about 2,976 files. Missing 15-minute stamps are skipped. Finished stamps are stored so a second run continues where it left off.
+
+```{r}
+gkg_month_dir <- file.path(int_dir, "gkg_by_month")
+dir.create(gkg_month_dir, recursive = TRUE, showWarnings = FALSE)
+zip_month_tag <- format(zip_start, "%Y-%m")
+zip_csv <- file.path(gkg_month_dir, paste0("gkg_gulf_es_marine_", zip_month_tag, ".csv"))
+zip_progress <- file.path(gkg_month_dir, paste0("stamps_done_", zip_month_tag, ".txt"))
+
+gulf_line_grep <- "golfo de california|mar de cort"
+
+is_spanish_original <- function(gcam, translationinfo) {
+  gcam <- ifelse(is.na(gcam), "", as.character(gcam))
+  translationinfo <- ifelse(is.na(translationinfo), "", as.character(translationinfo))
+  str_detect(gcam, "v22\\.1:") | str_detect(translationinfo, regex("srclc:spa", ignore_case = TRUE))
+}
+
+filter_spanish_gulf_marine <- function(dat) {
+  if (is.null(dat) || nrow(dat) == 0) return(tibble())
+  blob <- paste(
+    dat$locations, dat$v2locations, dat$documentidentifier,
+    dat$extras, dat$themes, dat$v2themes,
+    sep = " "
+  )
+  dat %>%
+    mutate(
+      is_spanish = is_spanish_original(gcam, translationinfo),
+      has_gulf_es = str_detect(blob, gulf_es_regex),
+      has_marine_es = str_detect(blob, marine_es_regex)
+    ) %>%
+    filter(is_spanish, has_gulf_es, has_marine_es)
+}
+
+fetch_one_gkg_filtered <- function(stamp) {
+  url <- paste0("http://data.gdeltproject.org/gdeltv2/", stamp, ".gkg.csv.zip")
+  tmp <- tempfile(fileext = ".zip")
+  resp <- tryCatch(
+    httr::RETRY(
+      "GET",
+      url,
+      httr::write_disk(tmp, overwrite = TRUE),
+      httr::user_agent("OHI-GOC-GDELT/1.0"),
+      httr::timeout(120),
+      times = 2,
+      terminate_on = c(404)
+    ),
+    error = function(e) NULL
+  )
+  if (is.null(resp) || httr::status_code(resp) != 200 ||
+      !file.exists(tmp) || file.info(tmp)$size < 1000) {
+    unlink(tmp)
+    return(NULL)
+  }
+
+  dat <- tryCatch(
+    {
+      unzip_dir <- tempfile()
+      dir.create(unzip_dir)
+      on.exit(unlink(unzip_dir, recursive = TRUE), add = TRUE)
+      utils::unzip(tmp, exdir = unzip_dir)
+      inner <- list.files(unzip_dir, full.names = TRUE)[1]
+      if (is.na(inner) || !file.exists(inner)) return(NULL)
+      raw_lines <- readLines(inner, warn = FALSE, encoding = "UTF-8")
+      if (length(raw_lines) == 0) return(NULL)
+      hit <- grepl(gulf_line_grep, raw_lines, ignore.case = TRUE, useBytes = TRUE)
+      if (!any(hit)) return(tibble())
+      parsed <- read_tsv(
+        I(paste(raw_lines[hit], collapse = "\n")),
+        col_names = gkg_col_names,
+        col_types = cols(.default = col_character()),
+        quote = "",
+        progress = FALSE
+      )
+      filter_spanish_gulf_marine(parsed)
+    },
+    error = function(e) NULL
+  )
+  unlink(tmp)
+  dat
+}
+
+done_stamps <- if (file.exists(zip_progress)) {
+  unique(readLines(zip_progress, warn = FALSE))
+} else {
+  character()
+}
+
+if (isTRUE(download_gkg_zips)) {
+  zip_stamps <- seq(
+    as.POSIXct(paste(zip_start, "00:00:00"), tz = "UTC"),
+    as.POSIXct(paste(zip_end, "23:45:00"), tz = "UTC"),
+    by = 15 * 60
+  ) %>%
+    purrr::map_chr(gkg_stamp) %>%
+    unique()
+
+  zip_stamps <- setdiff(zip_stamps, done_stamps)
+  message(
+    "GKG zip pull ", zip_month_tag, ": ",
+    length(zip_stamps), " stamps left (",
+    length(done_stamps), " already done)."
+  )
+
+  n_ok <- 0L
+  n_hit <- 0L
+  for (i in seq_along(zip_stamps)) {
+    stamp <- zip_stamps[[i]]
+    one <- fetch_one_gkg_filtered(stamp)
+    write(stamp, zip_progress, append = TRUE)
+    if (!is.null(one) && nrow(one) > 0) {
+      n_hit <- n_hit + nrow(one)
+      write_csv(one, zip_csv, append = file.exists(zip_csv))
+    }
+    n_ok <- n_ok + 1L
+    if (i %% 50 == 0 || i == length(zip_stamps)) {
+      message(
+        sprintf(
+          "  %d / %d files, %d Spanish Gulf-marine rows so far",
+          i, length(zip_stamps), n_hit
+        )
+      )
+    }
+  }
+
+  if (file.exists(zip_csv)) {
+    gkg_bq <- read_csv(zip_csv, show_col_types = FALSE) %>%
+      janitor::clean_names() %>%
+      parse_spanish_anew() %>%
+      mutate(
+        document_date = as.Date(substr(as.character(date), 1, 8), format = "%Y%m%d"),
+        ocean_engagement = TRUE
+      ) %>%
+      distinct(documentidentifier, .keep_all = TRUE)
+    write_csv(gkg_bq, file.path(gkg_month_dir, "gdelt_zip_spanish_gulf_marine.csv"))
+    message("Kept ", nrow(gkg_bq), " distinct Spanish Gulf-marine articles for ", zip_month_tag)
+    gkg_bq %>%
+      summarise(
+        n_articles = n(),
+        mean_valence = mean(anew_valence, na.rm = TRUE),
+        mean_arousal = mean(anew_arousal, na.rm = TRUE)
+      )
+  } else {
+    message("No Spanish Gulf-marine rows in this month.")
+  }
+}
+```
+
+# 7. What to save and how to repeat this
+
+On the NCEAS shares the script writes here (or to the matching `sp/cce/v2026` folder if you are working locally):
+
+**GKG month files** (`.../int/gkg_by_month/`):
+
+- `gkg_gulf_es_marine_YYYY-MM.csv`: Spanish Gulf + Spanish marine rows from the free zip pull
+- `stamps_done_YYYY-MM.txt`: finished 15-minute timestamps so a rerun can skip them
+- `gdelt_zip_spanish_gulf_marine.csv`: the combined month extract after Spanish + Gulf + marine filters
+
+**Other intermediates** (`.../int/`): GEO/DOC snapshots, clipped articles, coastal population, annual rates, the full status table (with counts, per-capita rates, and sentiment), and BigQuery yearly caches in `gkg_by_year/`.
+
+**Current-status scores only** (`.../output/`):
+
+- `gdelt_news_engagement_current_status.csv`: one row per OHI region and year, with `rgn_id`, `year`, and `current_status` (uncapped engagement vs the 2019-2022 mean). Gulf-wide rows stay in the intermediate status table.
+
+To repeat the 2019-2025 indicator, keep this script, the geopackage path, `BIGQUERY_PROJECT`, and the monthly CSVs in `int/gkg_by_month/`. GEO/DOC are a rolling window and are off by default.
+
+**Limits that matter for CCE**
+
+1. GEO and DOC are optional snapshots (7 days / 3 months). The 2019-2025 series is partitioned BigQuery GKG in section 8.
+2. A Gulf place-name in an article is not the same as ocean engagement. Spot-check URLs. A tourism listicle that says "Sea of Cortez" can still pass the name filter.
+3. GDELT geocoding is automated. Same-name places get mixed up. Always spot-check URLs.
+4. This still should not be averaged into CCE until there is an agreed keyword list, an agreed archive of each pull, and a reference point.
+
+# 8. Historical series, 2019-2025: engagement per capita and sentiment
+
+The GEO and DOC APIs cannot build this series. Use **`gdelt-bq.gdeltv2.gkg_partitioned`** with `_PARTITIONTIME`, one year at a time. Keep **Spanish originals** (GCAM dictionary 22 / Spanish ANEW), require a **Gulf of California / Sea of Cortez / Mar de Cortés** name, then clip mapped coordinates to `marine_and_inland50.gpkg`. The unpartitioned `gkg` table is several terabytes and will exceed the free query quota.
+
+**What "engagement" and "sentiment" mean here**
+
+- **Engagement** is media volume: distinct Spanish Gulf articles per year, after the spatial clip. The scored layer further requires ocean / coast / protest / megaproject language so a generic tourism mention is less likely to count. We divide by **coastal locality population** in the same 50 km study area (INEGI 2020 localities, the same population family CCE already uses). The rate is articles per 100,000 coastal residents. Population is a **static 2020** denominator; we do not yet have yearly coastal-locality counts.
+- **Sentiment** is mean Spanish ANEW valence (`v22.1`, about 1 = unpleasant to 9 = pleasant). Valence is already a rate, so we do **not** divide it by population. Arousal (`v22.2`) is kept as a companion (emotional intensity).
+
+**Reference point (2019-2022)**
+
+1. Compute one annual engagement-per-capita value for each year 2019 through 2022.
+2. Average those four yearly values. That mean is the historical reference.
+3. For every year 2019-2025:
+
+$$\mathrm{status}_{r,t} = 100 \times \frac{\text{engagement per 100,000}_{r,t}}{\text{mean of 2019-2022 annual values}}$$
+
+We do **not** cap at 100, so a rise above the historical mean is visible. Status = 100 means matching the 2019-2022 average. Each region uses **its own** 2019-2022 mean, and we also compute a Gulf-wide series (distinct articles Gulf-wide / sum of regional population) with one Gulf-wide 2019-2022 mean.
+
+`use_bigquery` is already `TRUE`. The default project is `ohi-goc-cce-gdelt`. Enable billing if the free 1 TB quota is already used. After `gcloud auth application-default login`, Run All. Yearly CSVs in `output/gkg_by_year/` are reused so a later year can resume after a quota stop.
+
+Do not mix English ANEW (`v19`) into these results.
+
+```{r}
+bq_project <- Sys.getenv("BIGQUERY_PROJECT", unset = "")
+gkg_cache <- file.path(int_dir, "gdelt_bigquery_spanish_anew_gulf.csv")
+gkg_year_dir <- file.path(int_dir, "gkg_by_year")
+dir.create(gkg_year_dir, recursive = TRUE, showWarnings = FALSE)
+gulf_re_sql <- paste(
+  "golfo de california",
+  "gulf of california",
+  "mar de cort[eé]s",
+  "mar de cortez",
+  "sea of cortez",
+  "sea of cortes",
+  sep = "|"
+)
+
+gkg_year_sql <- function(year) {
+  d0 <- max(series_start, as.Date(sprintf("%d-01-01", year)))
+  d1 <- min(series_end, as.Date(sprintf("%d-12-31", year)))
+  d2 <- d1 + 1
+  select_cols <- paste(
+    "DATE, SourceCommonName, DocumentIdentifier, TranslationInfo,",
+    "V2Locations, Locations"
+  )
+  if (isTRUE(gkg_include_anew)) {
+    select_cols <- paste(
+      select_cols,
+      ", V2Tone, V2Themes, Extras,",
+      "REGEXP_EXTRACT(GCAM, r'(?:^|,)v22\\.1:([^,]+)') AS anew_valence,",
+      "REGEXP_EXTRACT(GCAM, r'(?:^|,)v22\\.2:([^,]+)') AS anew_arousal,",
+      "REGEXP_EXTRACT(GCAM, r'(?:^|,)v22\\.3:([^,]+)') AS anew_dominance"
+    )
+  }
+  paste0(
+    "SELECT ", select_cols, " ",
+    "FROM `gdelt-bq.gdeltv2.gkg_partitioned` ",
+    "WHERE _PARTITIONTIME >= TIMESTAMP('", d0, "') ",
+    "AND _PARTITIONTIME < TIMESTAMP('", d2, "') ",
+    "AND DATE >= ", format(d0, "%Y%m%d"), "000000 ",
+    "AND DATE <= ", format(d1, "%Y%m%d"), "235959 ",
+    "AND LOWER(IFNULL(TranslationInfo, '')) LIKE '%srclc:spa%' ",
+    "AND (",
+    "REGEXP_CONTAINS(LOWER(IFNULL(V2Locations, '')), r'", gulf_re_sql, "') ",
+    "OR REGEXP_CONTAINS(LOWER(IFNULL(DocumentIdentifier, '')), r'", gulf_re_sql, "')",
+    ")"
+  )
+}
+
+gkg_bq <- tibble()
+
+if (isTRUE(use_bigquery) && nrow(gkg_bq) == 0) {
+  if (!requireNamespace("bigrquery", quietly = TRUE)) {
+    stop("Install bigrquery to use this section: install.packages('bigrquery')")
+  }
+  if (!nzchar(bq_project)) {
+    stop("Set BIGQUERY_PROJECT to your Google Cloud project id.")
+  }
+
+  writeLines(
+    gkg_year_sql(series_years[[1]]),
+    file.path(int_dir, "gdelt_bigquery_gkg_query.sql")
+  )
+
+  year_files <- character()
+  for (yr in series_years) {
+    year_csv <- file.path(gkg_year_dir, sprintf("gkg_gulf_%d.csv", yr))
+    if (file.exists(year_csv)) {
+      message("Reusing cached ", year_csv)
+      year_files <- c(year_files, year_csv)
+      next
+    }
+
+    sql <- gkg_year_sql(yr)
+    gb <- tryCatch(
+      {
+        job <- bigrquery::bq_perform_query(sql, billing = bq_project, dry_run = TRUE)
+        bytes <- job$statistics$query$totalBytesProcessed
+        if (is.null(bytes)) bytes <- job$statistics$totalBytesProcessed
+        bytes <- as.numeric(bytes)
+        if (length(bytes) != 1 || is.na(bytes)) NA_real_ else bytes / 1e9
+      },
+      error = function(e) NA_real_
+    )
+    if (isTRUE(length(gb) == 1 && !is.na(gb))) {
+      message(sprintf("Year %d dry run: about %.2f GB to scan", yr, gb))
+    }
+
+    message("Querying partitioned GKG for ", yr, " ...")
+    one <- tryCatch(
+      {
+        tbl <- bigrquery::bq_project_query(
+          bq_project,
+          sql,
+          maximum_bytes_billed = as.numeric(bq_max_gb_per_year) * 1e9
+        )
+        bigrquery::bq_table_download(tbl)
+      },
+      error = function(e) {
+        warning(conditionMessage(e), call. = FALSE)
+        if (grepl("quotaExceeded|free query bytes|maximumBytesBilled", conditionMessage(e), ignore.case = TRUE)) {
+          message(
+            "Stopped at ", yr, ". The free 1 TB quota on this project is used up.\n",
+            "Path forward: enable billing (trial credits are OK):\n",
+            "  https://console.cloud.google.com/billing?project=", bq_project, "\n",
+            "Then re-run this chunk. Years already saved in gkg_by_year/ will be reused."
+          )
+        }
+        NULL
+      }
+    )
+    if (is.null(one) || !is.data.frame(one)) break
+
+    one <- one %>%
+      janitor::clean_names() %>%
+      mutate(
+        document_date = as.Date(substr(as.character(date), 1, 8), format = "%Y%m%d")
+      )
+    if ("anew_valence" %in% names(one)) {
+      one <- one %>%
+        mutate(across(starts_with("anew_"), as.numeric)) %>%
+        filter(!is.na(anew_valence))
+    }
+    one <- one %>%
+      filter(document_date >= series_start, document_date <= series_end) %>%
+      distinct(documentidentifier, .keep_all = TRUE)
+
+    write_csv(one, year_csv)
+    year_files <- c(year_files, year_csv)
+    message("Saved ", nrow(one), " Spanish Gulf rows for ", yr)
+  }
+
+  if (length(year_files) > 0) {
+    gkg_bq <- purrr::map(year_files, ~ read_csv(.x, show_col_types = FALSE)) %>%
+      bind_rows() %>%
+      janitor::clean_names() %>%
+      distinct(documentidentifier, .keep_all = TRUE)
+    write_csv(gkg_bq, gkg_cache)
+  }
+} else if (file.exists(gkg_cache)) {
+  message("use_bigquery is FALSE. Reusing ", gkg_cache)
+  gkg_bq <- read_csv(gkg_cache, show_col_types = FALSE) %>%
+    janitor::clean_names()
+  if (!"anew_valence" %in% names(gkg_bq) && "gcam" %in% names(gkg_bq)) {
+    gkg_bq <- parse_spanish_anew(gkg_bq)
+  }
+  if (!"document_date" %in% names(gkg_bq)) {
+    gkg_bq <- gkg_bq %>%
+      mutate(document_date = as.Date(substr(as.character(date), 1, 8), format = "%Y%m%d"))
+  }
+} else {
+  message(
+    "No GKG table yet. Set use_bigquery <- TRUE and BIGQUERY_PROJECT, ",
+    "or place a previous pull at:\n  ", gkg_cache
+  )
+}
+```
+
+## Coastal population (2020 localities in the 50 km study area)
+
+Same INEGI locality population CCE uses, intersected here with the **50 km** Gulf layer so the denominator matches the article clip. If the shapefile is not on this machine, per-capita columns stay empty and article counts are still written.
+
+```{r}
+pop_path_candidates <- c(
+  "/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_localities/inegi_boundaries_pop.shp",
+  here::here("goal_prep", "pressures", "population_localities", "inegi_boundaries_pop.shp"),
+  here::here("spatial", "population_localities", "inegi_boundaries_pop.shp")
+)
+pop_hits <- pop_path_candidates[file.exists(pop_path_candidates)]
+pop_path <- if (length(pop_hits) > 0) pop_hits[[1]] else NULL
+
+pop_by_rgn <- tibble(rgn_id = character(), rgn_name = character(), pobtot = numeric())
+
+if (!is.null(pop_path)) {
+  message("Using coastal population: ", pop_path)
+  cities <- st_read(pop_path, quiet = TRUE) %>%
+    janitor::clean_names() %>%
+    st_make_valid() %>%
+    st_transform(4326)
+
+  if (!"pobtot" %in% names(cities)) {
+    stop("Population shapefile needs a pobtot column.")
+  }
+
+  goc_join <- goc
+  if (!"rgn_id" %in% names(goc_join)) {
+    goc_join$rgn_id <- NA_character_
+  }
+
+  city_pts <- suppressWarnings(st_centroid(cities, of_largest_polygon = TRUE))
+  pop_by_rgn <- st_join(
+    city_pts,
+    goc_join %>% dplyr::select(any_of("rgn_id")),
+    join = st_intersects,
+    left = FALSE
+  ) %>%
+    st_drop_geometry() %>%
+    group_by(rgn_id) %>%
+    summarise(pobtot = sum(as.numeric(pobtot), na.rm = TRUE), .groups = "drop") %>%
+    add_rgn_labels()
+
+  write_csv(pop_by_rgn, file.path(int_dir, "gdelt_coastal_population_by_region.csv"))
+  pop_by_rgn
+} else {
+  message("Population shapefile not found. Engagement per capita will be NA.")
+  pop_by_rgn
+}
+```
+
+## Clip GKG locations, annual rates, and the 2019-2022 reference
+
+```{r}
+gkg_in_goc <- tibble()
+engagement_annual <- tibble()
+engagement_status <- tibble()
+sentiment_annual <- tibble()
+
+if (nrow(gkg_bq) > 0) {
+  loc_col <- if ("v2locations" %in% names(gkg_bq)) gkg_bq$v2locations else NA_character_
+  loc_old <- if ("locations" %in% names(gkg_bq)) gkg_bq$locations else NA_character_
+  theme_col <- if ("v2themes" %in% names(gkg_bq)) gkg_bq$v2themes else ""
+  extra_col <- if ("extras" %in% names(gkg_bq)) gkg_bq$extras else ""
+  url_col <- if ("documentidentifier" %in% names(gkg_bq)) gkg_bq$documentidentifier else ""
+
+  gkg_pts <- gkg_bq %>%
+    mutate(
+      pts = parse_gkg_location_points(loc_col, loc_old),
+      ocean_engagement = str_detect(
+        paste(theme_col, loc_col, extra_col, url_col, sep = " "),
+        marine_es_regex
+      )
+    ) %>%
+    tidyr::unnest(pts, keep_empty = FALSE)
+
+  if (nrow(gkg_pts) > 0) {
+    goc_join <- goc
+    if (!"rgn_id" %in% names(goc_join)) goc_join$rgn_id <- NA_character_
+
+    gkg_in_goc <- gkg_pts %>%
+      st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) %>%
+      st_join(
+        goc_join %>% dplyr::select(any_of("rgn_id")),
+        join = st_intersects,
+        left = FALSE
+      ) %>%
+      add_rgn_labels()
+
+    write_csv(
+      gkg_in_goc %>% st_drop_geometry(),
+      file.path(int_dir, "gdelt_gkg_articles_in_goc.csv")
+    )
+  }
+}
+
+days_2015 <- as.numeric(as.Date("2015-12-31") - gkg_v2_start) + 1
+annualize_n <- function(n, year) {
+  ifelse(year == 2015, n * 365 / days_2015, n)
+}
+
+if (nrow(gkg_in_goc) > 0) {
+  articles <- gkg_in_goc %>%
+    st_drop_geometry() %>%
+    mutate(year = as.integer(format(document_date, "%Y"))) %>%
+    filter(year >= min(series_years), year <= max(series_years))
+  if (!"anew_valence" %in% names(articles)) articles$anew_valence <- NA_real_
+  if (!"anew_arousal" %in% names(articles)) articles$anew_arousal <- NA_real_
+
+  rgn_year <- articles %>%
+    distinct(documentidentifier, rgn_id, rgn_name, year, ocean_engagement, .keep_all = TRUE) %>%
+    group_by(rgn_id, rgn_name, year) %>%
+    summarise(
+      n_gulf = n_distinct(documentidentifier),
+      n_gulf_ocean = n_distinct(documentidentifier[ocean_engagement]),
+      mean_valence = mean(anew_valence, na.rm = TRUE),
+      mean_arousal = mean(anew_arousal, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  gulf_year <- articles %>%
+    distinct(documentidentifier, year, .keep_all = TRUE) %>%
+    group_by(year) %>%
+    summarise(
+      n_gulf = n_distinct(documentidentifier),
+      n_gulf_ocean = n_distinct(documentidentifier[ocean_engagement]),
+      mean_valence = mean(anew_valence, na.rm = TRUE),
+      mean_arousal = mean(anew_arousal, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(rgn_id = "Gulf", rgn_name = "Gulf of California")
+
+  pop_gulf <- pop_by_rgn %>%
+    summarise(
+      rgn_id = "Gulf",
+      rgn_name = "Gulf of California",
+      pobtot = sum(pobtot, na.rm = TRUE)
+    )
+
+  pop_join <- bind_rows(
+    pop_by_rgn %>% mutate(rgn_id = as.character(rgn_id)),
+    pop_gulf
+  )
+
+  rgn_ids <- unique(c(
+    as.character(pop_by_rgn$rgn_id),
+    as.character(rgn_year$rgn_id),
+    "Gulf"
+  ))
+
+  rgn_grid <- tidyr::expand_grid(rgn_id = rgn_ids, year = series_years) %>%
+    left_join(
+      bind_rows(rgn_year, gulf_year) %>% mutate(rgn_id = as.character(rgn_id)),
+      by = c("rgn_id", "year")
+    ) %>%
+    left_join(
+      pop_join %>% dplyr::select(rgn_id, pobtot, rgn_name_pop = rgn_name),
+      by = "rgn_id"
+    ) %>%
+    mutate(
+      rgn_name = dplyr::coalesce(
+        rgn_name,
+        rgn_name_pop,
+        recode(rgn_id, !!!rgn_labels, .default = rgn_id)
+      ),
+      n_gulf = replace_na(n_gulf, 0),
+      n_gulf_ocean = replace_na(n_gulf_ocean, 0),
+      n_gulf_annualized = annualize_n(n_gulf, year),
+      n_gulf_ocean_annualized = annualize_n(n_gulf_ocean, year),
+      n_engagement = n_gulf_ocean_annualized,
+      engagement_per_100k = if_else(
+        !is.na(pobtot) & pobtot > 0,
+        1e5 * n_engagement / pobtot,
+        NA_real_
+      )
+    ) %>%
+    dplyr::select(-rgn_name_pop)
+
+  ref_by_rgn <- rgn_grid %>%
+    filter(year %in% reference_years, !is.na(engagement_per_100k)) %>%
+    group_by(rgn_id) %>%
+    summarise(
+      n_reference_years = n(),
+      engagement_ref = mean(engagement_per_100k, na.rm = TRUE),
+      valence_ref = mean(mean_valence, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  engagement_annual <- rgn_grid
+
+  engagement_status <- rgn_grid %>%
+    left_join(ref_by_rgn, by = "rgn_id") %>%
+    mutate(
+      engagement_status = if_else(
+        !is.na(engagement_ref) & engagement_ref > 0,
+        100 * engagement_per_100k / engagement_ref,
+        NA_real_
+      ),
+      valence_status = if_else(
+        !is.na(valence_ref) & valence_ref > 0,
+        100 * mean_valence / valence_ref,
+        NA_real_
+      ),
+      reference_note = paste(
+        "Mean of annual engagement per 100,000 coastal residents, 2019-2022.",
+        "Status is uncapped."
+      )
+    )
+
+  write_csv(engagement_annual, file.path(int_dir, "gdelt_engagement_per_capita_annual.csv"))
+  write_csv(engagement_status, file.path(int_dir, "gdelt_engagement_status_2019_2022_ref.csv"))
+
+  sentiment_annual <- engagement_status %>%
+    dplyr::select(
+      rgn_id, rgn_name, year, n_gulf, n_gulf_ocean,
+      mean_valence, mean_arousal, valence_ref, valence_status
+    )
+  write_csv(sentiment_annual, file.path(int_dir, "gdelt_sentiment_annual.csv"))
+
+  current_status_scores <- engagement_status %>%
+    filter(rgn_id != "Gulf") %>%
+    transmute(
+      rgn_id,
+      year,
+      current_status = engagement_status
+    ) %>%
+    arrange(rgn_id, year)
+  write_csv(
+    current_status_scores,
+    file.path(output_dir, "gdelt_news_engagement_current_status.csv")
+  )
+
+  engagement_status %>%
+    filter(rgn_id == "Gulf") %>%
+    dplyr::select(
+      year, n_gulf_ocean, n_engagement, pobtot, engagement_per_100k,
+      engagement_ref, engagement_status, mean_valence, valence_status
+    )
+} else if (nrow(gkg_bq) > 0) {
+  message("GKG rows downloaded, but none had coordinates inside the 50 km Gulf layer.")
+}
+```
+
+```{r}
+#| fig-cap: "Gulf-wide news engagement per 100,000 coastal residents, 2019-2025. Engagement is the count of distinct Spanish GKG articles that name the Gulf of California / Sea of Cortez and also use ocean, coast, protest, or megaproject language, clipped to marine waters, islands, and 50 km inland. The dashed line is the mean of the 2019-2022 annual values (the historical reference)."
+if (nrow(engagement_status) > 0) {
+  gulf_line <- engagement_status %>% filter(rgn_id == "Gulf")
+  ref_val <- unique(stats::na.omit(gulf_line$engagement_ref))[1]
+  ggplot(gulf_line, aes(year, engagement_per_100k)) +
+    geom_hline(yintercept = ref_val, linetype = "dashed", color = "gray40") +
+    geom_line() +
+    geom_point() +
+    scale_x_continuous(breaks = series_years) +
+    labs(
+      x = "Year",
+      y = "Articles per 100,000 coastal residents",
+      title = "Gulf-wide engagement per capita vs 2019-2022 mean"
+    ) +
+    theme_minimal()
+}
+```
+
+```{r}
+#| fig-cap: "Current-status style score for Gulf-wide engagement: 100 times that year's engagement per capita divided by the 2019-2022 mean of annual values. 100 means matching the historical average. Values above 100 mean engagement is higher than that average. Not capped."
+if (nrow(engagement_status) > 0) {
+  gulf_line <- engagement_status %>% filter(rgn_id == "Gulf")
+  ggplot(gulf_line, aes(year, engagement_status)) +
+    geom_hline(yintercept = 100, linetype = "dashed", color = "gray40") +
+    geom_line() +
+    geom_point() +
+    scale_x_continuous(breaks = series_years) +
+    labs(
+      x = "Year",
+      y = "Engagement status (100 = 2019-2022 mean)",
+      title = "Is Gulf news engagement rising relative to 2019-2022?"
+    ) +
+    theme_minimal()
+}
+```
+
+```{r}
+#| fig-cap: "Regional engagement status, 2019-2025. Each region is compared to its own 2019-2022 mean of annual engagement per 100,000 coastal residents. The dashed line at 100 is that region's historical average, not a Gulf-wide goal."
+if (nrow(engagement_status) > 0) {
+  rgn_line <- engagement_status %>% filter(rgn_id != "Gulf")
+  ggplot(rgn_line, aes(year, engagement_status, color = rgn_name)) +
+    geom_hline(yintercept = 100, linetype = "dashed", color = "gray40") +
+    geom_line() +
+    geom_point() +
+    scale_x_continuous(breaks = series_years) +
+    labs(
+      x = "Year",
+      y = "Engagement status (100 = that region's 2019-2022 mean)",
+      color = "Region"
+    ) +
+    theme_minimal()
+}
+```
+
+```{r}
+#| fig-cap: "Mean Spanish ANEW valence (sentiment) in the same Spanish Gulf articles, 2019-2025. The dashed line is the mean of the 2019-2022 annual mean-valence values. This is not per capita."
+if (nrow(engagement_status) > 0) {
+  gulf_line <- engagement_status %>% filter(rgn_id == "Gulf")
+  ref_val <- unique(stats::na.omit(gulf_line$valence_ref))[1]
+  ggplot(gulf_line, aes(year, mean_valence)) +
+    geom_hline(yintercept = ref_val, linetype = "dashed", color = "gray40") +
+    geom_line() +
+    geom_point() +
+    scale_x_continuous(breaks = series_years) +
+    coord_cartesian(ylim = c(1, 9)) +
+    labs(
+      x = "Year",
+      y = "Mean Spanish ANEW valence (1-9)",
+      title = "Gulf-wide news sentiment vs 2019-2022 mean"
+    ) +
+    theme_minimal()
+}
+```
+
+Optional protest-event count from the Events table (CAMEO root 14). This is a separate check, not the per-capita engagement indicator.
+
+```{r}
+if (isTRUE(use_bigquery) && isTRUE(query_events) && nzchar(bq_project)) {
+  events_sql <- paste0(
+    "SELECT GLOBALEVENTID, SQLDATE, EventRootCode, EventCode, ",
+    "ActionGeo_FullName, ActionGeo_ADM1Code, ActionGeo_Lat, ActionGeo_Long, ",
+    "SOURCEURL, NumMentions, NumSources, GoldsteinScale, AvgTone ",
+    "FROM `gdelt-bq.gdeltv2.events_partitioned` ",
+    "WHERE _PARTITIONTIME >= TIMESTAMP('", series_start, "') ",
+    "AND _PARTITIONTIME < TIMESTAMP('", series_end + 1, "') ",
+    "AND ActionGeo_CountryCode = 'MX' ",
+    "AND EventRootCode = '14' ",
+    "AND ActionGeo_Lat IS NOT NULL AND ActionGeo_Long IS NOT NULL ",
+    "AND ActionGeo_Lat BETWEEN ", bbox["ymin"], " AND ", bbox["ymax"], " ",
+    "AND ActionGeo_Long BETWEEN ", bbox["xmin"], " AND ", bbox["xmax"], " ",
+    "AND SQLDATE >= ", format(series_start, "%Y%m%d"), " ",
+    "AND SQLDATE <= ", format(series_end, "%Y%m%d"), " ",
+    "AND (REGEXP_CONTAINS(LOWER(IFNULL(ActionGeo_FullName, '')), r'", gulf_re_sql, "') ",
+    "OR REGEXP_CONTAINS(LOWER(IFNULL(SOURCEURL, '')), r'", gulf_re_sql, "'))"
+  )
+
+  events <- bigrquery::bq_project_query(bq_project, events_sql) %>%
+    bigrquery::bq_table_download()
+
+  if (nrow(events) > 0) {
+    events_sf <- events %>%
+      st_as_sf(coords = c("ActionGeo_Long", "ActionGeo_Lat"), crs = 4326, remove = FALSE)
+
+    events_in_goc <- st_join(
+      events_sf,
+      goc %>% dplyr::select(any_of("rgn_id")),
+      join = st_intersects,
+      left = FALSE
+    ) %>%
+      add_rgn_labels()
+
+    write_csv(
+      events_in_goc %>% st_drop_geometry(),
+      file.path(int_dir, "gdelt_bigquery_protest_events_in_goc.csv")
+    )
+
+    events_in_goc %>%
+      st_drop_geometry() %>%
+      mutate(year = as.integer(substr(as.character(SQLDATE), 1, 4))) %>%
+      count(year, rgn_name, name = "n_events")
+  }
+}
+```
+

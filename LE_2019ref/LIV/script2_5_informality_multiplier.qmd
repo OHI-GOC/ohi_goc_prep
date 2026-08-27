@@ -1,0 +1,2534 @@
+---
+title: 'OHI GoC 2025: LIV Informality Multiplier from ENOE'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# LIV: State Level Informality Multiplier from ENOE (2024 Q4)
+
+This script builds a **state level informality multiplier** for marine related employment using INEGI's Encuesta Nacional de Ocupacion y Empleo (ENOE), fourth quarter of 2024.
+
+Censos Economicos (CE) mostly covers jobs in registered establishments. ENOE covers people in households, including informal jobs. I use ENOE to estimate the share of marine related workers who are informal, then convert that share into a multiplier that can optionally inflate CE job counts.
+
+I keep the multiplier at the **state x marine category** level (and also a simpler state only version). I do **not** estimate informal rates for OHI regions or municipios from ENOE alone, because ENOE is designed to be representative at the state (and selected city) scale, not at finer geography. Thin samples at region or municipio scale would be noisy and hard to defend.
+
+I use INEGI's official derived flag `EMP_PPAL` for informal vs formal employment of the main job, rather than rebuilding the Hussmanns matrix by hand.
+
+*Outline of script:*
+
+1. Define the key ENOE variables and how each one is used later.
+2. Read ENOE Q4 2024 tables (COE1, COE2, SDEM) from Mazu.
+3. Build a person level unique id and join the tables.
+4. Limit to the six GoC states.
+5. Attach the curated marine occupation x industry classification from our earlier ENOE exploration.
+6. Clean marine categories (including the combined aquaculture/fisheries rows).
+7. Keep employed people with a valid `EMP_PPAL` flag.
+8. Estimate % informal (weighted by `fac_tri`) by state and by state x marine category.
+9. Convert % informal into a jobs multiplier: `1 / (1 - pct_informal)`.
+10. Flag categories with small unweighted sample sizes.
+11. Provide a suggested matching from ENOE marine categories to CE `specific_sector` labels.
+12. Save outputs for optional use in the LIV number of jobs pipeline.
+13. Explore results with `plotly`.
+14. Repeat the same logic across multiple ENOE quarters (2019 through 2025, as available).
+15. Combine quarters within each calendar year for yearly % informal by state and sector.
+
+```{r}
+library(tidyverse)
+library(here)
+library(plotly)
+
+## state colors for plots, matched loosely to the GoC LE palette feel
+state_colors <- c(
+  "Baja California" = "#C03729",
+  "Baja California Sur" = "#dcaa38",
+  "Sonora" = "#98a25a",
+  "Sinaloa" = "#627391",
+  "Nayarit" = "#baa0cb",
+  "Jalisco" = "#8d61a9"
+)
+
+goc_states <- c(
+  "Baja California",
+  "Baja California Sur",
+  "Sonora",
+  "Sinaloa",
+  "Nayarit",
+  "Jalisco"
+)
+
+## minimum unweighted sample size before i trust a state x category rate.
+## below this, i still report the estimate but flag it as low_n.
+min_n_unweighted <- 30
+
+## base folder for all enoe quarter downloads on mazu
+enoe_base_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/inegi_enoe_employment"
+```
+
+## Variable dictionary (what each field is, and how i use it)
+
+This table is based on the ENOE exploration in `inegi_explore.Rmd` and on INEGI's SDEM derived classifications. I list only the fields this script relies on.
+
+| Variable | Table | What it is | How i use it later |
+|---|---|---|---|
+| `con`, `upm`, `v_sel`, `n_ren`, `n_hog`, `n_pro_viv` | COE1, COE2, SDEM | Survey identifiers for control, primary sampling unit, dwelling, person, household, and dwelling progress | Combined into `unique_id` so i can join person records across tables |
+| `ent` | COE1 / SDEM | State code (1 to 32) | Match to state name and filter to the six GoC states |
+| `mun` | SDEM | Municipality code within each state | Kept for checks only. Not used for multipliers, because municipio samples are too thin |
+| `fac_tri` | COE1 / SDEM | Quarterly expansion factor. Each respondent stands for about `fac_tri` people in the population | Always sum `fac_tri` for employment and informal counts. Never use raw row counts as population estimates |
+| `r_def` | COE1 | Interview result code | Prefer complete interviews when available (`r_def == 1`) |
+| `p3` | COE1 | Occupation code of the main job | Join to occupation labels and help identify marine related workers |
+| `p4a` | COE1 | North American industry code of the main job | Join to industry labels. Often better than occupation alone for marine industry coverage |
+| `p1`, `p1e` | COE1 | Worked last week / temporary absence | Explored earlier. In practice i treat people with occupation/industry codes as employed, matching our prior ENOE notes |
+| `clase2` | SDEM | Employment condition. `1` = occupied | Keep occupied people when the field is available |
+| `seg_soc` | SDEM | Access to health institutions through work. `1` with access, `2` without, `3` unspecified | Diagnostic only. Helps interpret informal status. Not the primary flag |
+| `tue2` | SDEM | Type of economic unit (includes informal sector, domestic work, subsistence agriculture, etc.) | Diagnostic only. Useful to see whether informal jobs are in informal units |
+| `tue_ppal` / `TUE_PPAL` | SDEM | Main job in informal sector (`1`) or outside it (`2`) | Optional split: informal sector vs informal job in a formal unit |
+| `emp_ppal` / `EMP_PPAL` | SDEM | Official INEGI flag for main job. `1` informal employment, `2` formal employment | **Primary outcome.** This defines informal vs formal for the multiplier |
+| `occ_ind_id` | created | `p3` pasted with `p4a` | Join key to our curated marine classification file |
+| `tourism` | occupations_industry.csv | Inclusion flag from earlier curation (`x` = keep) | Filter to curated marine related occ x industry pairs |
+| `marine` | occupations_industry.csv | Stricter fully marine flag (`x`) | Optional sensitivity: stricter marine subset |
+| `category1`, `category2`, `category3` | occupations_industry.csv | Our marine grouping labels (fisheries, aquaculture, food services, etc.) | Estimate informal shares by marine category, then match toward CE sectors |
+
+Important conceptual note: `EMP_PPAL == 1` means the **job** is informal under INEGI rules. That includes (a) work in informal sector units and (b) unprotected work outside the informal sector. So ENOE informal is related to, but not identical to, "missing from CE."
+
+
+## 1. Read ENOE Q4 2024 data
+
+Data source: INEGI ENOE microdata, population aged 15 years and over, fourth quarter 2024 (basic questionnaire).  
+Paths follow the Mazu folder layout: `enoe_YYYY_trimN_csv/` (for example `enoe_2024_trim4_csv/`).
+
+```{r}
+enoe_q4_2024_dir <- here::here(enoe_base_dir, "enoe_2024_trim4_csv")
+
+## coe1 has occupation/industry of the main job plus the expansion factor
+coe1_raw <- read_csv(
+  here::here(enoe_q4_2024_dir, "ENOE_COE1T424.csv"),
+  show_col_types = FALSE
+)
+
+## coe2 has additional job condition questions. i keep a few for later checks
+coe2_raw <- read_csv(
+  here::here(enoe_q4_2024_dir, "ENOE_COE2T424.csv"),
+  show_col_types = FALSE
+)
+
+## sdem has sociodemographics and the derived informality classifications
+sdem_raw <- read_csv(
+  here::here(enoe_q4_2024_dir, "ENOE_SDEMT424.csv"),
+  show_col_types = FALSE
+)
+```
+
+Standardize names to lowercase so `EMP_PPAL` vs `emp_ppal` does not break joins.
+
+```{r}
+## inegi csvs sometimes arrive with mixed case column names
+coe1 <- coe1_raw %>% rename_with(tolower)
+coe2 <- coe2_raw %>% rename_with(tolower)
+sdem <- sdem_raw %>% rename_with(tolower)
+
+## quick check that the official informal flag exists in this extract
+informal_cols <- c("emp_ppal", "tue_ppal", "tue2", "seg_soc", "clase2", "fac_tri", "ent", "mun")
+missing_informal_cols <- setdiff(informal_cols, names(sdem))
+missing_informal_cols # v2026: character(0)
+```
+
+
+## 2. Build unique ids and join tables
+
+I follow the same person id construction used in `inegi_explore.Rmd`: paste `con`, `upm`, `v_sel`, `n_ren`, `n_hog`, and `n_pro_viv`.
+
+```{r}
+make_unique_id <- function(df) {
+  df %>%
+    mutate(
+      unique_id = paste(con, upm, v_sel, n_ren, n_hog, n_pro_viv, sep = "_")
+    )
+}
+
+coe1_id <- coe1 %>%
+  make_unique_id() %>%
+  dplyr::select(
+    unique_id, r_def, ent, p1, p1e, p3, p4a, fac_tri
+  )
+
+## should be one row per person in coe1
+sum(duplicated(coe1_id$unique_id)) # v2026: 0
+
+coe2_id <- coe2 %>%
+  make_unique_id() %>%
+  dplyr::select(
+    unique_id, p6c, p6d, p6e, p6e_c, p6f, p7a, p7c
+  )
+
+sum(duplicated(coe2_id$unique_id)) # v2026: 0
+
+sdem_id <- sdem %>%
+  make_unique_id() %>%
+  dplyr::select(
+    any_of(c(
+      "unique_id", "ent", "mun", "sex", "eda", "clase2",
+      "seg_soc", "tue2", "tue_ppal", "emp_ppal", "fac_tri",
+      "medica5c", "ingocup", "anios_esc"
+    ))
+  )
+
+sum(duplicated(sdem_id$unique_id)) # v2026: 0
+```
+
+Join COE1 + COE2 + SDEM.
+
+```{r}
+## start from coe1 because that is where p3/p4a and fac_tri for the job interview live
+jobs <- coe1_id %>%
+  left_join(coe2_id, by = "unique_id") %>%
+  left_join(
+    sdem_id %>% dplyr::select(-any_of(c("ent", "fac_tri"))),
+    by = "unique_id"
+  )
+
+## confirm join coverage
+nrow(jobs) # 345680
+sum(!is.na(jobs$emp_ppal)) # 345680
+sum(is.na(jobs$emp_ppal)) # 0
+```
+
+
+## 3. Limit to GoC states
+
+```{r}
+state_names <- tibble(
+  ent = 1:32,
+  state = c(
+    "Aguascalientes", "Baja California", "Baja California Sur", "Campeche", "Coahuila",
+    "Colima", "Chiapas", "Chihuahua", "CDMX", "Durango",
+    "Guanajuato", "Guerrero", "Hidalgo", "Jalisco", "Mexico State",
+    "Michoacan", "Morelos", "Nayarit", "Nuevo Leon", "Oaxaca",
+    "Puebla", "Queretaro", "Quintana Roo", "San Luis Potosi", "Sinaloa",
+    "Sonora", "Tabasco", "Tamaulipas", "Tlaxcala", "Veracruz",
+    "Yucatan", "Zacatecas"
+  )
+)
+
+jobs_goc <- jobs %>%
+  mutate(ent = as.numeric(ent)) %>%
+  left_join(state_names, by = "ent") %>%
+  filter(state %in% goc_states)
+
+## weighted population represented in these six states (all respondents in coe1 join)
+sum(jobs_goc$fac_tri, na.rm = TRUE) # 17407179
+nrow(jobs_goc) # 58936
+table(jobs_goc$state)
+    # Baja California Baja California Sur             Jalisco             Nayarit             Sinaloa              Sonora 
+    #           12761                7080               11489                9881                8728                8997 
+```
+
+
+## 4. Attach marine related occupation x industry classification
+
+I use the curated file from the earlier ENOE exploration. That file flags occ x industry pairs we consider marine related (`tourism == "x"` in the file is the inclusion flag from that earlier workflow, not "tourism only").
+
+```{r}
+occu_cats <- read_csv(
+  here::here("LE/LIV/enoe/data/occupations_industry.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    ## standardize ids as character so joins do not fail on 5111 vs "5111"
+    occ_ind_id = as.character(occ_ind_id),
+    tourism = str_trim(as.character(tourism)),
+    marine = str_trim(as.character(marine)),
+    category1 = str_trim(as.character(category1)),
+    category2 = str_trim(as.character(category2)),
+    category3 = str_trim(as.character(category3))
+  )
+
+jobs_marine <- jobs_goc %>%
+  mutate(
+    p3 = as.character(p3),
+    p4a = as.character(p4a),
+    occ_ind_id = paste(p3, p4a, sep = "---")
+  ) %>%
+  left_join(occu_cats, by = "occ_ind_id") %>%
+  ## keep curated marine related pairs from the earlier classification
+  filter(tourism == "x")
+
+nrow(jobs_marine) # 5250
+table(jobs_marine$category1, useNA = "ifany")
+              #    aquaculture        aquaculture-fisheries        culture-entertainment culture-entertainment-marine 
+              #             50                            7                          377                            5 
+              #      fisheries                food_services                     research      temporary-accomodations 
+              #            189                         3298                           29                          495 
+              # transportation        transportation-marine 
+              #            778                           22 
+```
+
+### Manual review: unique `occ_ind` by `category1`
+
+I wrote one chunk per `category1` so i can read through the occupation x industry pairs that land in each group. These use `jobs_marine` **before** the aquaculture/fisheries split.
+
+```{r}
+food_services_jobs <- jobs_marine %>%
+  filter(category1 == "food_services")
+
+sort(unique(food_services_jobs$occ_ind))
+length(unique(food_services_jobs$occ_ind)) # 128
+```
+
+```{r}
+culture_entertainment_jobs <- jobs_marine %>%
+  filter(category1 == "culture-entertainment")
+
+sort(unique(culture_entertainment_jobs$occ_ind))
+length(unique(culture_entertainment_jobs$occ_ind)) # 113
+```
+
+```{r}
+transportation_jobs <- jobs_marine %>%
+  filter(category1 == "transportation")
+
+sort(unique(transportation_jobs$occ_ind))
+length(unique(transportation_jobs$occ_ind)) #126
+```
+
+```{r}
+temporary_accomodations_jobs <- jobs_marine %>%
+  filter(category1 == "temporary-accomodations")
+
+sort(unique(temporary_accomodations_jobs$occ_ind))
+length(unique(temporary_accomodations_jobs$occ_ind)) #87
+```
+
+```{r}
+aquaculture_jobs <- jobs_marine %>%
+  filter(category1 == "aquaculture")
+
+sort(unique(aquaculture_jobs$occ_ind))
+#  [1] "Accountants and auditors --- Aquaculture"                                                                             
+#  [2] "Aquaculture workers --- Aquaculture"                                                                                  
+#  [3] "Aquaculture workers --- Food and beverage preparation services"                                                       
+#  [4] "Aquaculture workers --- Food manufacturing"                                                                           
+#  [5] "Assistants and technicians in veterinary science, fisheries, and forestry --- Aquaculture"                            
+#  [6] "Biologists, marine scientists, and oceanographers --- Aquaculture"                                                    
+#  [7] "Cooks --- Aquaculture"                                                                                                
+#  [8] "Directors and managers in accounting, financial services, banking, and insurance --- Aquaculture"                     
+#  [9] "Directors and managers in agricultural, forestry, and fishing production --- Aquaculture"                             
+# [10] "Fishermen and fishing workers --- Aquaculture"                                                                        
+# [11] "Guards and security personnel in establishments --- Aquaculture"                                                      
+# [12] "Operators of machines for food, oil, fat, salt, and spice production --- Aquaculture"                                 
+# [13] "Software and multimedia developers and analysts --- Aquaculture"                                                      
+# [14] "Supervisors, foremen, and managers in agricultural activities --- Aquaculture"                                        
+# [15] "Supervisors, foremen, and managers in fishing, aquaculture, forestry, hunting, and related activities --- Aquaculture"
+# [16] "Support workers in the food, beverage, and tobacco industries --- Aquaculture"                                        
+# [17] "Sweepers and cleaning workers (except in hotels and restaurants) --- Aquaculture"                                     
+# [18] "Workers who combine agricultural and livestock activities --- Aquaculture"  
+
+length(unique(aquaculture_jobs$occ_ind)) # 18
+```
+
+```{r}
+fisheries_jobs <- jobs_marine %>%
+  filter(category1 == "fisheries")
+
+sort(unique(fisheries_jobs$occ_ind))
+#  [1] "Administrators and professionals in human resources and management systems --- Fishing"        
+#  [2] "Captains and operators of maritime transport --- Fishing"                                      
+#  [3] "Deck officers, mates, and pilots --- Fishing"                                                  
+#  [4] "Fisheries and aquaculture professionals --- Fishing"                                           
+#  [5] "Fishermen and fishing workers --- Fishing"                                                     
+#  [6] "Fishermen and fishing workers --- Retail trade of groceries, food, beverages, ice, and tobacco"
+#  [7] "Fishermen and fishing workers --- Street vending of groceries, food, beverages, and tobacco"   
+#  [8] "Guards and security personnel in establishments --- Fishing"                                   
+#  [9] "Mechanical engineers --- Fishing"                                                              
+# [10] "Mobile machinery operators for moving goods in factories, ports, commerce, etc. --- Fishing"   
+# [11] "Motor vehicle mechanics --- Fishing"                                                           
+# [12] "Operators of small vessels (boats, skiffs, trajineras, etc.) --- Fishing"                      
+# [13] "Support workers in aquaculture and fishing --- Fishing"                                        
+# [14] "Support workers in the textile and footwear industries --- Fishing"                            
+# [15] "Sweepers and cleaning workers (except in hotels and restaurants) --- Fishing"                  
+# [16] "Truck, van, and freight vehicle drivers --- Fishing"                                           
+# [17] "Warehouse and stock control workers --- Fishing"                                               
+# [18] "Workers in processing fish and aquaculture products --- Fishing"                               
+# [19] "Workers in the processing of meat, fish, and related products --- Fishing"  
+
+length(unique(fisheries_jobs$occ_ind))
+```
+
+```{r}
+research_jobs <- jobs_marine %>%
+  filter(category1 == "research")
+
+sort(unique(research_jobs$occ_ind))
+length(unique(research_jobs$occ_ind))
+```
+
+```{r}
+culture_entertainment_marine_jobs <- jobs_marine %>%
+  filter(category1 == "culture-entertainment-marine")
+
+sort(unique(culture_entertainment_marine_jobs$occ_ind))
+# [1] "Captains and operators of maritime transport --- Travel agencies and reservation services"        
+# [2] "Fishermen and fishing workers --- Tourist transportation"                                         
+# [3] "Operators of small vessels (boats, skiffs, trajineras, etc.) --- Temporary accommodation services"
+# [4] "Tour guides in museums, casinos, parks, theaters, and other recreational centers --- Fishing"
+
+length(unique(culture_entertainment_marine_jobs$occ_ind)) # 4 
+```
+
+```{r}
+transportation_marine_jobs <- jobs_marine %>%
+  filter(category1 == "transportation-marine")
+
+sort(unique(transportation_marine_jobs$occ_ind))
+length(unique(transportation_marine_jobs$occ_ind)) # 14
+```
+
+```{r}
+aquaculture_fisheries_jobs <- jobs_marine %>%
+  filter(category1 == "aquaculture-fisheries")
+
+sort(unique(aquaculture_fisheries_jobs$occ_ind))
+# [1] "Workers in processing fish and aquaculture products --- Food manufacturing"                                       
+# [2] "Workers in processing fish and aquaculture products --- Street vending of groceries, food, beverages, and tobacco"
+# [3] "Workers in the processing of meat, fish, and related products --- Aquaculture" 
+
+length(unique(aquaculture_fisheries_jobs$occ_ind)) # 3
+```
+
+Optional: print all categories in one table with counts for a quick scan.
+
+```{r}
+occ_ind_by_category1 <- jobs_marine %>%
+  filter(!is.na(category1), category1 != "") %>%
+  distinct(category1, occ_ind, occ_ind_id, category2, category3, marine) %>%
+  arrange(category1, occ_ind)
+
+occ_ind_by_category1 %>%
+  count(category1, name = "n_occ_ind") %>%
+  arrange(category1)
+
+## uncomment to view the full long table in the output
+# occ_ind_by_category1
+```
+
+### End of review! cont.
+
+Okay.  So some occupation and industry combinations in ENOE sit on the boundary between aquaculture and fisheries, especially fish and seafood processing. We labeled those rows as `aquaculture-fisheries` in our classification file. There are only three distinct job types in that bucket, but in the survey each type can stand for many people once we apply the expansion weights, so it is not a negligible group.
+
+For charts and multipliers broken out by sector, we did not want a third odd category sitting beside "aquaculture" and "fisheries," especially when those jobs are really a mix of both. So we split each aquaculture-fisheries person into two fractional rows: part aquaculture, part fisheries, with shares that add up to 100%. That way every worker is still counted once in the total, but their weight is shared across the two main food sectors we care about instead of living in a separate catch all group.
+
+We will handle them the same way as in `inegi_explore.Rmd`: split them and downweight so they are not double counted.
+
+```{r}
+## base weights start at 1
+jobs_marine <- jobs_marine %>%
+  mutate(fac_tri_correct = 1)
+
+aqua <- jobs_marine %>% filter(category1 == "aquaculture")
+fish <- jobs_marine %>% filter(category1 == "fisheries")
+
+## if both exist, use their relative weighted size to split the mixed rows.
+## if one is missing, fall back to 0.2 aquaculture / 0.8 fisheries as in the explore script.
+if (nrow(aqua) > 0 && nrow(fish) > 0) {
+  aqua_share <- sum(aqua$fac_tri, na.rm = TRUE) /
+    (sum(aqua$fac_tri, na.rm = TRUE) + sum(fish$fac_tri, na.rm = TRUE))
+} else {
+  aqua_share <- 0.2
+}
+fish_share <- 1 - aqua_share
+aqua_share
+fish_share
+
+fish_aqua <- jobs_marine %>% filter(category1 == "aquaculture-fisheries")
+
+if (nrow(fish_aqua) > 0) {
+  fish_aqua_split <- bind_rows(
+    fish_aqua %>% mutate(category1 = "aquaculture", fac_tri_correct = aqua_share),
+    fish_aqua %>% mutate(category1 = "fisheries", fac_tri_correct = fish_share)
+  )
+  
+  jobs_marine_clean <- jobs_marine %>%
+    filter(category1 != "aquaculture-fisheries") %>%
+    bind_rows(fish_aqua_split)
+} else {
+  jobs_marine_clean <- jobs_marine
+}
+
+## effective expansion weight after the aquaculture/fisheries split
+jobs_marine_clean <- jobs_marine_clean %>%
+  mutate(fac_tri_eff = fac_tri * fac_tri_correct)
+
+table(jobs_marine_clean$category1, useNA = "ifany")
+     #             aquaculture        culture-entertainment culture-entertainment-marine 
+     #                      57                          377                            5 
+     #               fisheries                food_services                     research 
+     #                     196                         3298                           29 
+     # temporary-accomodations               transportation        transportation-marine 
+     #                     495                          778                           22 
+```
+
+
+## 5. Keep employed people with a valid informal/formal flag
+
+```{r}
+## emp_ppal: 1 = informal employment, 2 = formal employment
+## clase2: 1 = occupied (when present)
+marine_employed <- jobs_marine_clean %>%
+  mutate(
+    emp_ppal = as.numeric(emp_ppal),
+    clase2 = suppressWarnings(as.numeric(clase2)),
+    tue_ppal = suppressWarnings(as.numeric(tue_ppal)),
+    seg_soc = suppressWarnings(as.numeric(seg_soc))
+  ) %>%
+  filter(emp_ppal %in% c(1, 2)) %>%
+  ## if clase2 exists, keep occupied people. if it is missing for a row, keep the row
+  ## because having p3/p4a already indicated employment in our earlier exploration.
+  filter(is.na(clase2) | clase2 == 1) %>%
+  mutate(
+    is_informal = emp_ppal == 1,
+    is_formal = emp_ppal == 2,
+    ## optional: informal sector unit vs informal conditions outside that sector
+    in_informal_sector = tue_ppal == 1
+  )
+
+nrow(marine_employed) # 5257
+sum(marine_employed$fac_tri_eff, na.rm = TRUE) # 1477453
+table(marine_employed$emp_ppal)
+#    1    2 
+# 2878 2379 
+```
+
+
+## 6. Estimate % informal and the jobs multiplier
+
+Formula:
+
+- `pct_informal = sum(fac_tri_eff for informal) / sum(fac_tri_eff for informal + formal)`
+- `jobs_multiplier = 1 / (1 - pct_informal)`
+
+Interpretation: if 40% of marine related workers in a state are informal, the multiplier is `1 / 0.6 ≈ 1.67`. Applying that to CE formal establishment jobs is a sensitivity style inflation toward total marine livelihoods. It is not a perfect CE gap fill, because some ENOE informal workers can already appear inside registered establishments.
+
+### 6a. State only multipliers (all curated marine related workers)
+
+```{r}
+informality_by_state <- marine_employed %>%
+  group_by(state, ent) %>%
+  summarize(
+    n_unweighted = n(),
+    employed_weighted = sum(fac_tri_eff, na.rm = TRUE),
+    informal_weighted = sum(fac_tri_eff[is_informal], na.rm = TRUE),
+    formal_weighted = sum(fac_tri_eff[is_formal], na.rm = TRUE),
+    informal_sector_weighted = sum(fac_tri_eff[in_informal_sector %in% TRUE], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_informal = informal_weighted / employed_weighted,
+    pct_formal = formal_weighted / employed_weighted,
+    pct_in_informal_sector = informal_sector_weighted / employed_weighted,
+    jobs_multiplier = ifelse(pct_informal < 1, 1 / (1 - pct_informal), NA_real_),
+    low_n = n_unweighted < min_n_unweighted,
+    enoe_quarter = "2024_Q4",
+    scope = "all_curated_marine_related"
+  ) %>%
+  arrange(state)
+
+informality_by_state
+```
+
+### 6b. State x marine category multipliers (preferred for sector aware adjustment)
+
+```{r}
+informality_by_state_category <- marine_employed %>%
+  filter(!is.na(category1), category1 != "") %>%
+  group_by(state, ent, category1, category3) %>%
+  summarize(
+    n_unweighted = n(),
+    employed_weighted = sum(fac_tri_eff, na.rm = TRUE),
+    informal_weighted = sum(fac_tri_eff[is_informal], na.rm = TRUE),
+    formal_weighted = sum(fac_tri_eff[is_formal], na.rm = TRUE),
+    informal_sector_weighted = sum(fac_tri_eff[in_informal_sector %in% TRUE], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_informal = informal_weighted / employed_weighted,
+    pct_formal = formal_weighted / employed_weighted,
+    pct_in_informal_sector = informal_sector_weighted / employed_weighted,
+    jobs_multiplier = ifelse(pct_informal < 1, 1 / (1 - pct_informal), NA_real_),
+    low_n = n_unweighted < min_n_unweighted,
+    enoe_quarter = "2024_Q4",
+    scope = "state_x_category1"
+  ) %>%
+  arrange(state, category1)
+
+informality_by_state_category
+```
+
+### 6c. Optional stricter marine subset (`marine == "x"`)
+
+```{r}
+## this is a sensitivity check using only rows flagged as fully marine in the curated file
+informality_by_state_strict_marine <- marine_employed %>%
+  filter(marine == "x") %>%
+  group_by(state, ent) %>%
+  summarize(
+    n_unweighted = n(),
+    employed_weighted = sum(fac_tri_eff, na.rm = TRUE),
+    informal_weighted = sum(fac_tri_eff[is_informal], na.rm = TRUE),
+    formal_weighted = sum(fac_tri_eff[is_formal], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_informal = informal_weighted / employed_weighted,
+    jobs_multiplier = ifelse(pct_informal < 1, 1 / (1 - pct_informal), NA_real_),
+    low_n = n_unweighted < min_n_unweighted,
+    enoe_quarter = "2024_Q4",
+    scope = "strict_marine_flag"
+  ) %>%
+  arrange(state)
+
+informality_by_state_strict_marine
+```
+
+
+## 7. Suggested matching from ENOE categories to CE specific sectors
+
+This is a bridge for later use in `script2_ce_number_jobs.qmd`. It is approximate on purpose. Tourism style ENOE categories are broader than Gulf only CE coastal adjustments.
+
+```{r}
+enoe_to_ce_crosswalk <- tribble(
+  ~category1, ~suggested_ce_specific_sector, ~notes,
+  "fisheries", "fishing", "closest match to CE fishing codes",
+  "aquaculture", "mariculture", "closest match to CE aquaculture aggregate",
+  "food_services", "accommodations_food_drink", "broad; includes non gulf tourism exposure",
+  "temporary-accomodations", "accommodations_food_drink", "spelling follows the curated ENOE file",
+  "transportation-marine", "marine_tourist_transport", "also related to cargo/port support depending on industry code",
+  "transportation", "cargo_goods_maritime_transport", "noisy; inspect before applying",
+  "culture-entertainment-marine", "coastal_recreation", "small sample expected",
+  "culture-entertainment", "coastal_recreation", "broad recreation and culture",
+  "research", "environmental_research_consulting", "may include non coastal research jobs"
+)
+
+kableExtra::kable(enoe_to_ce_crosswalk)
+```
+
+Join the crosswalk onto the state x category multipliers for easier downstream use.
+
+```{r}
+informality_by_state_category_ce <- informality_by_state_category %>%
+  left_join(enoe_to_ce_crosswalk, by = "category1")
+
+informality_by_state_category_ce %>%
+  dplyr::select(
+    state, category1, suggested_ce_specific_sector,
+    n_unweighted, pct_informal, jobs_multiplier, low_n, notes
+  )
+```
+
+#### Summary statistics
+
+```{r}
+explore_survey_vs_weighted <- marine_employed %>%
+  filter(!is.na(category1), category1 != "") %>%
+  group_by(state, category1, category3) %>%
+  summarize(
+    n_surveys = n(),
+    n_informal_surveys = sum(is_informal),
+    n_formal_surveys = sum(is_formal),
+    employed_weighted = sum(fac_tri_eff, na.rm = TRUE),
+    informal_weighted = sum(fac_tri_eff[is_informal], na.rm = TRUE),
+    formal_weighted = sum(fac_tri_eff[is_formal], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_informal_surveys = n_informal_surveys / n_surveys,
+    pct_informal_weighted = informal_weighted / employed_weighted,
+    avg_fac_tri = employed_weighted / n_surveys,
+    low_n = n_surveys < 30
+  ) %>%
+  left_join(
+    enoe_to_ce_crosswalk %>% dplyr::select(category1, suggested_ce_specific_sector, notes),
+    by = "category1"
+  ) %>%
+  arrange(category1, state)
+
+explore_survey_vs_weighted
+```
+
+
+## 8. How i would apply this to CE jobs (not run here)
+
+For a Tier 2 sensitivity on LIV number of jobs:
+
+1. Take CE coastal adjusted jobs by state (or by municipio rolled to state) and CE `specific_sector`.
+2. Join the matching `jobs_multiplier` from `informality_by_state_category_ce`.
+3. Prefer rows with `low_n == FALSE`.
+4. If `low_n == TRUE`, fall back to the state only multiplier from `informality_by_state`, or leave unadjusted and document it.
+5. Compute `jobs_adjusted = jobs_ce * jobs_multiplier`.
+6. Then continue with population scaling and current status as in script 2.
+
+I would **not** use the same multiplier one for one on ECO revenue without a separate justification. Informal jobs usually produce less reported revenue per worker than formal establishment jobs.
+
+
+## 9. Save outputs
+
+```{r}
+## local copies inside the enoe folder for now
+out_dir <- here::here("/home/shares/ohi/OHI_GOC/goal_prep/le/liv")
+# dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+write_csv(
+  informality_by_state,
+  here::here(out_dir, "enoe_2024q4_informality_multiplier_by_state.csv")
+)
+
+write_csv(
+  informality_by_state_category_ce,
+  here::here(out_dir, "enoe_2024q4_informality_multiplier_by_state_category.csv")
+)
+
+write_csv(
+  informality_by_state_strict_marine,
+  here::here(out_dir, "enoe_2024q4_informality_multiplier_by_state_strict_marine.csv")
+)
+
+## optional mazu export path (uncomment when ready to publish into goal_prep)
+# write_csv(
+#   informality_by_state_category_ce,
+#   here::here(
+#     "/home/shares/ohi/OHI_GOC/goal_prep/le/liv",
+#     "enoe_2024q4_informality_multiplier_by_state_category.csv"
+#   )
+# )
+```
+
+
+## 10. Explore with plotly
+
+### % informal by state (all curated marine related)
+
+```{r}
+informality_by_state_plot <- informality_by_state %>%
+  mutate(state = factor(state, levels = goc_states))
+
+plotly_state <- plot_ly(
+  informality_by_state_plot,
+  x = ~state,
+  y = ~pct_informal,
+  type = "bar",
+  text = ~paste0(
+    "n=", n_unweighted,
+    "<br>multiplier=", round(jobs_multiplier, 2),
+    "<br>low_n=", low_n
+  ),
+  hoverinfo = "text+y",
+  marker = list(color = unname(state_colors[as.character(informality_by_state_plot$state)]))
+) %>%
+  layout(
+    title = "ENOE 2024 Q4: % informal among curated marine related workers by state",
+    xaxis = list(title = "State"),
+    yaxis = list(title = "Percent informal (EMP_PPAL = 1)", tickformat = ".0%"),
+    margin = list(b = 100)
+  )
+
+plotly_state
+```
+
+### Jobs multiplier by state
+
+```{r}
+plotly_mult <- plot_ly(
+  informality_by_state_plot,
+  x = ~state,
+  y = ~jobs_multiplier,
+  type = "bar",
+  text = ~paste0(
+    "% informal=", scales::percent(pct_informal, accuracy = 0.1),
+    "<br>n=", n_unweighted
+  ),
+  hoverinfo = "text+y",
+  marker = list(color = unname(state_colors[as.character(informality_by_state_plot$state)]))
+) %>%
+  layout(
+    title = "ENOE 2024 Q4: jobs multiplier by state (1 / (1 - % informal))",
+    xaxis = list(title = "State"),
+    yaxis = list(title = "Jobs multiplier"),
+    margin = list(b = 100)
+  )
+
+plotly_mult
+```
+
+### % informal by state and category1
+
+```{r}
+plotly_state_cat <- informality_by_state_category %>%
+  mutate(state = factor(state, levels = goc_states)) %>%
+  plot_ly(
+    x = ~category1,
+    y = ~pct_informal,
+    color = ~state,
+    colors = state_colors,
+    type = "bar",
+    text = ~paste0(
+      "state=", state,
+      "<br>n=", n_unweighted,
+      "<br>multiplier=", round(jobs_multiplier, 2),
+      "<br>low_n=", low_n
+    ),
+    hoverinfo = "text+y"
+  ) %>%
+  layout(
+    barmode = "group",
+    title = "ENOE 2024 Q4: % informal by state and marine category",
+    xaxis = list(title = "Marine category1", tickangle = -35),
+    yaxis = list(title = "Percent informal", tickformat = ".0%"),
+    legend = list(title = list(text = "State")),
+    margin = list(b = 140)
+  )
+
+plotly_state_cat
+```
+
+
+## Notes and caveats for 2024 Q4 only (for methods / coworker discussion)
+
+- The main section above is based on **one quarter** (2024 Q4). It is a static adjustment, not a time series aligned to every CE year.
+- Always weight with `fac_tri` (here `fac_tri_eff` after the aquaculture/fisheries split).
+- Prefer `EMP_PPAL` over homemade informal rules.
+- Trust state x category estimates more when `low_n == FALSE`.
+- Do not treat municipio or OHI region informal rates from this quarter as primary products.
+- ENOE informal is about job conditions in a household survey. CE mostly counts jobs in registered businesses. Those are related, but not the same as "jobs missing from CE."
+- Best use: keep CE as the main LIV jobs estimate, and use the ENOE multiplier as a Tier 2 sensitivity ("how much larger might livelihoods look if informality is this high?"). See the longer plain-language note at the end of Section 11.
+
+
+## 11. Yearly informality by state and sector (2019 through 2025)
+
+Everything above that was used for exploration stays as the single quarter baseline (2024 Q4)!! This section loads additional ENOE quarters from Mazu, 2019-2025, then **aggregates the available quarters within each calendar year** so that for each year × state × sector we get one `pct_informal` (and jobs multiplier).
+
+Quarters currently expected on Mazu:
+
+- 2019: `2019trim1_csv` to `2019trim4_csv` (older lowercase files: `coe1t119.csv`, `sdemt119.csv`, weight column `fac`)
+- 2020 Q1: `2020trim1_csv` (weight column `fac`). **2020 Q2 does not exist** in ENOE; INEGI recommends ETOE for Apr-Jun 2020, which we do not use here
+- 2020 Q3 to 2022: `enoe_n_YYYY_trimN_csv` (ENOE-N files: `ENOEN_*T[Q]YY.csv`)
+- 2023 to 2025: `enoe_YYYY_trimN_csv` (standard files: `ENOE_*T[Q]YY.csv`)
+
+The column `n_quarters` tells us how many went into that year. For most years a complete year has 4 quarters; for 2020 a complete year has 3 (`n_quarters_expected`).
+
+Important note: ENOE is a rotating panel, so some people can appear in more than one quarter of the same year. Within a year we stack microdata and sum `fac_tri`. That can overcount employment *levels*, but **`pct_informal` is the yearly informal share** we want for the multiplier. That should be consistent.
+
+```{r}
+## inegi file tags look like T + trimester + last two digits of year
+## examples: 2024 Q4 -> T424, 2025 Q1 -> T125, 2019 Q1 -> T119
+enoe_file_tag <- function(year, trimester) {
+  paste0("T", trimester, substr(as.character(year), 3, 4))
+}
+
+## folder naming varies by era:
+##   2019trim1_csv / 2020trim1_csv
+##   enoe_n_2020_trim3_csv (ENOE-N)
+##   enoe_2024_trim4_csv (standard)
+enoe_folder_candidates <- function(year, trimester, base_dir = enoe_base_dir) {
+  stubs <- c(
+    paste0(year, "trim", trimester, "_csv"),
+    paste0("enoe_n_", year, "_trim", trimester, "_csv"),
+    paste0("enoe_", year, "_trim", trimester, "_csv")
+  )
+
+  ## prefer ENOE-N folder names for the 2020-2022 nueva series when both exist
+  if (year %in% 2020:2022) {
+    stubs <- c(
+      paste0("enoe_n_", year, "_trim", trimester, "_csv"),
+      paste0(year, "trim", trimester, "_csv"),
+      paste0("enoe_", year, "_trim", trimester, "_csv")
+    )
+  }
+
+  here::here(base_dir, stubs)
+}
+
+enoe_folder_name <- function(year, trimester, base_dir = enoe_base_dir) {
+  candidates <- enoe_folder_candidates(year, trimester, base_dir)
+  existing <- candidates[dir.exists(candidates)]
+  if (length(existing) == 0) {
+    return(candidates[[1]])
+  }
+  existing[[1]]
+}
+
+## 2020 Q2 was not published as ENOE (ETOE months instead)
+quarter_catalog <- tidyr::expand_grid(
+  year = 2019:2025,
+  trim = 1:4
+) %>%
+  filter(!(year == 2020 & trim == 2)) %>%
+  mutate(enoe_label = paste0(year, "_Q", trim)) %>%
+  arrange(year, trim)
+
+quarters_expected_by_year <- quarter_catalog %>%
+  count(year, name = "n_quarters_expected")
+
+## find ENOE / ENOE-N / older lowercase csvs inside a folder
+find_enoe_csv <- function(folder, table, tag = NULL) {
+  if (!dir.exists(folder)) {
+    return(NA_character_)
+  }
+
+  prefixes <- c("ENOE_", "ENOEN_", "")
+
+  if (!is.null(tag)) {
+    for (prefix in prefixes) {
+      expected_names <- c(
+        paste0(prefix, table, tag, ".csv"),
+        paste0(prefix, tolower(table), tolower(tag), ".csv"),
+        paste0(prefix, toupper(table), toupper(tag), ".csv")
+      )
+      for (nm in unique(expected_names)) {
+        expected <- here::here(folder, nm)
+        if (file.exists(expected)) {
+          return(expected)
+        }
+      }
+    }
+  }
+
+  hits <- list.files(
+    folder,
+    pattern = paste0("^(ENOE_|ENOEN_)?", table, "T[0-9]{3}\\.csv$"),
+    full.names = TRUE,
+    ignore.case = TRUE
+  )
+
+  if (length(hits) == 0) {
+    return(NA_character_)
+  }
+
+  if (length(hits) > 1) {
+    warning("multiple ", table, " files in ", folder, "; using ", basename(hits[[1]]))
+  }
+
+  hits[[1]]
+}
+
+## starting 2025 Q3, INEGI renamed ent/mun to cve_ent/cve_mun in some extracts
+normalize_enoe_geo_names <- function(df) {
+  if ("cve_ent" %in% names(df) && !"ent" %in% names(df)) {
+    df <- df %>% rename(ent = cve_ent)
+  }
+  if ("cve_mun" %in% names(df) && !"mun" %in% names(df)) {
+    df <- df %>% rename(mun = cve_mun)
+  }
+  df
+}
+
+## older extracts (2019, 2020 Q1) use fac instead of fac_tri
+normalize_enoe_weight_names <- function(df) {
+  if ("fac" %in% names(df) && !"fac_tri" %in% names(df)) {
+    df <- df %>% rename(fac_tri = fac)
+  }
+  df
+}
+
+read_enoe_quarter <- function(year, trimester, base_dir = enoe_base_dir) {
+  folder <- enoe_folder_name(year, trimester, base_dir)
+  tag <- enoe_file_tag(year, trimester)
+
+  if (!dir.exists(folder)) {
+    warning("missing enoe folder for ", year, " trim ", trimester,
+            ". tried: ", paste(basename(enoe_folder_candidates(year, trimester, base_dir)), collapse = ", "))
+    return(NULL)
+  }
+
+  coe1_path <- find_enoe_csv(folder, "COE1", tag)
+  coe2_path <- find_enoe_csv(folder, "COE2", tag)
+  sdem_path <- find_enoe_csv(folder, "SDEM", tag)
+
+  ## fallback for quarters still sitting in the flat base_dir layout
+  if (is.na(coe1_path)) {
+    flat_hits <- list.files(
+      base_dir,
+      pattern = paste0("^(ENOE|ENOEN)_COE1", tag, "\\.csv$"),
+      full.names = TRUE,
+      ignore.case = TRUE
+    )
+    coe1_path <- if (length(flat_hits) > 0) flat_hits[[1]] else NA_character_
+  }
+  if (is.na(coe2_path)) {
+    flat_hits <- list.files(
+      base_dir,
+      pattern = paste0("^(ENOE|ENOEN)_COE2", tag, "\\.csv$"),
+      full.names = TRUE,
+      ignore.case = TRUE
+    )
+    coe2_path <- if (length(flat_hits) > 0) flat_hits[[1]] else NA_character_
+  }
+  if (is.na(sdem_path)) {
+    flat_hits <- list.files(
+      base_dir,
+      pattern = paste0("^(ENOE|ENOEN)_SDEM", tag, "\\.csv$"),
+      full.names = TRUE,
+      ignore.case = TRUE
+    )
+    sdem_path <- if (length(flat_hits) > 0) flat_hits[[1]] else NA_character_
+  }
+
+  missing_tables <- c(
+    if (is.na(coe1_path)) "COE1",
+    if (is.na(coe2_path)) "COE2",
+    if (is.na(sdem_path)) "SDEM"
+  )
+
+  if (length(missing_tables) > 0) {
+    available <- list.files(folder, pattern = "\\.csv$", ignore.case = TRUE)
+    warning(
+      "missing ", paste(missing_tables, collapse = ", "),
+      " for ", year, " trim ", trimester, " in ", folder,
+      if (length(available) > 0) {
+        paste0("\n  csv files present: ", paste(available, collapse = ", "))
+      } else {
+        "\n  folder exists but no csv files found"
+      }
+    )
+    return(NULL)
+  }
+
+  coe1 <- read_csv(
+    coe1_path,
+    col_types = cols(.default = col_character()),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(tolower) %>%
+    normalize_enoe_geo_names() %>%
+    normalize_enoe_weight_names()
+  coe2 <- read_csv(
+    coe2_path,
+    col_types = cols(.default = col_character()),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(tolower) %>%
+    normalize_enoe_geo_names() %>%
+    normalize_enoe_weight_names()
+  sdem <- read_csv(
+    sdem_path,
+    col_types = cols(.default = col_character()),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(tolower) %>%
+    normalize_enoe_geo_names() %>%
+    normalize_enoe_weight_names()
+
+  if (!"emp_ppal" %in% names(sdem)) {
+    warning("emp_ppal missing in sdem for ", year, " trim ", trimester)
+    return(NULL)
+  }
+
+  if (!"ent" %in% names(coe1) && !"ent" %in% names(sdem)) {
+    warning("ent/cve_ent missing for ", year, " trim ", trimester)
+    return(NULL)
+  }
+
+  if (!"fac_tri" %in% names(coe1) && !"fac_tri" %in% names(sdem)) {
+    warning("fac_tri/fac missing for ", year, " trim ", trimester)
+    return(NULL)
+  }
+
+  coe1_id <- coe1 %>%
+    make_unique_id() %>%
+    dplyr::select(any_of(c(
+      "unique_id", "r_def", "ent", "p1", "p1e", "p3", "p4a", "fac_tri"
+    ))) %>%
+    mutate(
+      across(any_of(c("r_def", "ent", "p1", "p1e", "fac_tri")), ~ suppressWarnings(as.numeric(.x))),
+      across(any_of(c("p3", "p4a")), as.character)
+    )
+
+  coe2_id <- coe2 %>%
+    make_unique_id() %>%
+    dplyr::select(any_of(c(
+      "unique_id", "p6c", "p6d", "p6e", "p6e_c", "p6f", "p7a", "p7c"
+    ))) %>%
+    mutate(across(-unique_id, as.character))
+
+  sdem_id <- sdem %>%
+    make_unique_id() %>%
+    dplyr::select(
+      any_of(c(
+        "unique_id", "ent", "mun", "sex", "eda", "clase2",
+        "seg_soc", "tue2", "tue_ppal", "emp_ppal", "fac_tri",
+        "medica5c", "ingocup", "anios_esc"
+      ))
+    ) %>%
+    mutate(
+      across(
+        any_of(c(
+          "ent", "mun", "sex", "eda", "clase2", "seg_soc", "tue2",
+          "tue_ppal", "emp_ppal", "fac_tri", "medica5c", "ingocup", "anios_esc"
+        )),
+        ~ suppressWarnings(as.numeric(.x))
+      )
+    )
+
+  ## if COE1 lacks fac_tri (rare), bring weight from SDEM too
+  jobs_q <- coe1_id %>%
+    left_join(coe2_id, by = "unique_id")
+
+  drop_from_sdem <- c("ent", "fac_tri")
+  if (!"ent" %in% names(jobs_q)) {
+    drop_from_sdem <- setdiff(drop_from_sdem, "ent")
+  }
+  if (!"fac_tri" %in% names(jobs_q)) {
+    drop_from_sdem <- setdiff(drop_from_sdem, "fac_tri")
+  }
+
+  jobs_q <- jobs_q %>%
+    left_join(
+      sdem_id %>% dplyr::select(-any_of(drop_from_sdem)),
+      by = "unique_id"
+    )
+
+  jobs_q
+}
+
+split_aquaculture_fisheries <- function(jobs_marine) {
+  jobs_marine <- jobs_marine %>% mutate(fac_tri_correct = 1)
+
+  aqua <- jobs_marine %>% filter(category1 == "aquaculture")
+  fish <- jobs_marine %>% filter(category1 == "fisheries")
+
+  if (nrow(aqua) > 0 && nrow(fish) > 0) {
+    aqua_share <- sum(aqua$fac_tri, na.rm = TRUE) /
+      (sum(aqua$fac_tri, na.rm = TRUE) + sum(fish$fac_tri, na.rm = TRUE))
+  } else {
+    aqua_share <- 0.2
+  }
+  fish_share <- 1 - aqua_share
+
+  fish_aqua <- jobs_marine %>% filter(category1 == "aquaculture-fisheries")
+
+  if (nrow(fish_aqua) > 0) {
+    fish_aqua_split <- bind_rows(
+      fish_aqua %>% mutate(category1 = "aquaculture", fac_tri_correct = aqua_share),
+      fish_aqua %>% mutate(category1 = "fisheries", fac_tri_correct = fish_share)
+    )
+
+    jobs_marine_clean <- jobs_marine %>%
+      filter(category1 != "aquaculture-fisheries") %>%
+      bind_rows(fish_aqua_split)
+  } else {
+    jobs_marine_clean <- jobs_marine
+  }
+
+  jobs_marine_clean %>%
+    mutate(fac_tri_eff = fac_tri * fac_tri_correct)
+}
+
+build_marine_employed_quarter <- function(
+    jobs_q,
+    occu_cats,
+    state_names,
+    goc_states,
+    year,
+    trimester,
+    enoe_label) {
+
+  jobs_goc_q <- jobs_q %>%
+    mutate(ent = as.numeric(ent)) %>%
+    left_join(state_names, by = "ent") %>%
+    filter(state %in% goc_states)
+
+  jobs_marine_q <- jobs_goc_q %>%
+    mutate(
+      p3 = as.character(p3),
+      p4a = as.character(p4a),
+      occ_ind_id = paste(p3, p4a, sep = "---")
+    ) %>%
+    left_join(occu_cats, by = "occ_ind_id") %>%
+    filter(tourism == "x")
+
+  jobs_marine_clean_q <- split_aquaculture_fisheries(jobs_marine_q)
+
+  marine_employed_q <- jobs_marine_clean_q %>%
+    mutate(
+      emp_ppal = suppressWarnings(as.numeric(emp_ppal)),
+      clase2 = suppressWarnings(as.numeric(clase2)),
+      tue_ppal = suppressWarnings(as.numeric(tue_ppal)),
+      seg_soc = suppressWarnings(as.numeric(seg_soc)),
+      fac_tri = suppressWarnings(as.numeric(fac_tri)),
+      fac_tri_eff = suppressWarnings(as.numeric(fac_tri_eff))
+    ) %>%
+    filter(emp_ppal %in% c(1, 2)) %>%
+    filter(is.na(clase2) | clase2 == 1) %>%
+    mutate(
+      is_informal = emp_ppal == 1,
+      is_formal = emp_ppal == 2,
+      in_informal_sector = tue_ppal == 1,
+      enoe_year = as.integer(year),
+      enoe_trim = as.integer(trimester),
+      enoe_label = as.character(enoe_label)
+    ) %>%
+    ## keep a stable, typed column set so bind_rows across quarters does not fail
+    dplyr::select(
+      any_of(c(
+        "unique_id", "ent", "state", "mun",
+        "p3", "p4a", "occ_ind_id", "occ_ind",
+        "tourism", "marine", "category1", "category2", "category3",
+        "fac_tri", "fac_tri_correct", "fac_tri_eff",
+        "emp_ppal", "clase2", "tue_ppal", "seg_soc",
+        "is_informal", "is_formal", "in_informal_sector",
+        "enoe_year", "enoe_trim", "enoe_label"
+      ))
+    )
+
+  marine_employed_q
+}
+
+summarize_informality <- function(
+    marine_employed_df,
+    group_vars,
+    scope_label,
+    enoe_period_label = NA_character_,
+    require_category1 = TRUE) {
+
+  df <- marine_employed_df
+  if (require_category1) {
+    df <- df %>% filter(!is.na(category1), category1 != "")
+  }
+
+  out <- df %>%
+    group_by(across(all_of(group_vars))) %>%
+    summarize(
+      n_unweighted = n(),
+      n_informal_surveys = sum(is_informal),
+      n_formal_surveys = sum(is_formal),
+      n_quarters = n_distinct(enoe_label),
+      employed_weighted = sum(fac_tri_eff, na.rm = TRUE),
+      informal_weighted = sum(fac_tri_eff[is_informal], na.rm = TRUE),
+      formal_weighted = sum(fac_tri_eff[is_formal], na.rm = TRUE),
+      informal_sector_weighted = sum(fac_tri_eff[in_informal_sector %in% TRUE], na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      pct_informal_surveys = n_informal_surveys / n_unweighted,
+      pct_informal = informal_weighted / employed_weighted,
+      pct_formal = formal_weighted / employed_weighted,
+      pct_in_informal_sector = informal_sector_weighted / employed_weighted,
+      avg_fac_tri_per_person = employed_weighted / n_unweighted,
+      jobs_multiplier = ifelse(pct_informal < 1, 1 / (1 - pct_informal), NA_real_),
+      low_n = n_unweighted < min_n_unweighted,
+      scope = scope_label,
+      enoe_period = enoe_period_label
+    )
+
+  ## 2020 has only 3 ENOE quarters (no Q2); other years expect 4
+  if ("enoe_year" %in% names(out)) {
+    out <- out %>%
+      left_join(quarters_expected_by_year, by = c("enoe_year" = "year")) %>%
+      mutate(
+        n_quarters_expected = dplyr::coalesce(n_quarters_expected, 4L),
+        incomplete_year = n_quarters < n_quarters_expected
+      )
+  } else {
+    out <- out %>%
+      mutate(
+        n_quarters_expected = NA_integer_,
+        incomplete_year = NA
+      )
+  }
+
+  out
+}
+```
+
+### Quarter availability check
+
+```{r}
+quarter_availability <- quarter_catalog %>%
+  mutate(
+    folder = map2_chr(year, trim, ~ enoe_folder_name(.x, .y)),
+    tag = map2_chr(year, trim, enoe_file_tag),
+    folder_exists = map_lgl(folder, dir.exists),
+    coe1_found = map2_lgl(folder, tag, ~ !is.na(find_enoe_csv(.x, "COE1", .y))),
+    coe2_found = map2_lgl(folder, tag, ~ !is.na(find_enoe_csv(.x, "COE2", .y))),
+    sdem_found = map2_lgl(folder, tag, ~ !is.na(find_enoe_csv(.x, "SDEM", .y))),
+    csv_in_folder = map_chr(folder, ~ {
+      if (!dir.exists(.x)) {
+        return("")
+      }
+      paste(list.files(.x, pattern = "\\.csv$", ignore.case = TRUE), collapse = ", ")
+    })
+  ) %>%
+  mutate(
+    ready = folder_exists & coe1_found & coe2_found & sdem_found
+  )
+
+quarter_availability %>%
+  dplyr::select(enoe_label, folder_exists, coe1_found, coe2_found, sdem_found, ready, csv_in_folder)
+
+quarter_availability %>%
+  count(year, ready) %>%
+  arrange(year)
+```
+
+### Read and stack all available quarters
+
+```{r}
+marine_employed_all_quarters <- quarter_catalog %>%
+  pmap(function(year, trim, enoe_label) {
+    jobs_q <- read_enoe_quarter(year, trim)
+    if (is.null(jobs_q)) {
+      return(NULL)
+    }
+    build_marine_employed_quarter(
+      jobs_q = jobs_q,
+      occu_cats = occu_cats,
+      state_names = state_names,
+      goc_states = goc_states,
+      year = year,
+      trimester = trim,
+      enoe_label = enoe_label
+    )
+  }) %>%
+  compact() %>%
+  bind_rows()
+
+if (nrow(marine_employed_all_quarters) == 0) {
+  stop(
+    "No ENOE quarters loaded from ", enoe_base_dir,
+    ". See quarter_availability above."
+  )
+}
+
+marine_employed_all_quarters %>%
+  count(enoe_year, enoe_label, name = "n_marine_employed_rows") %>%
+  arrange(enoe_year, enoe_label)
+
+quarters_loaded_by_year <- marine_employed_all_quarters %>%
+  distinct(enoe_year, enoe_label) %>%
+  count(enoe_year, name = "n_quarters_loaded") %>%
+  arrange(enoe_year)
+
+quarters_loaded_by_year # all 4, amazing!!
+```
+
+
+### Yearly % informal by state and sector (main product)
+
+Combine the available quarters **within each calendar year**. `pct_informal` is the yearly informal share for that state × sector. `employed_weighted` is the sum of quarterly weights in that year (about 4× a single-quarter employment level when all four quarters are present), so use it for shares, not as a one-quarter headcount.
+
+```{r}
+informality_by_year_state_category <- summarize_informality(
+  marine_employed_df = marine_employed_all_quarters,
+  group_vars = c("enoe_year", "state", "ent", "category1", "category3"),
+  scope_label = "yearly_state_x_category1",
+  enoe_period_label = "calendar_year_all_quarters"
+) %>%
+  left_join(enoe_to_ce_crosswalk, by = "category1") %>%
+  arrange(enoe_year, category1, state)
+
+informality_by_year_state_category %>%
+  dplyr::select(
+    enoe_year,
+    state,
+    category1,
+    suggested_ce_specific_sector,
+    n_quarters,
+    n_unweighted,
+    n_informal_surveys,
+    n_formal_surveys,
+    pct_informal,
+    jobs_multiplier,
+    low_n,
+    incomplete_year,
+    notes
+  )
+
+summary(informality_by_year_state_category)
+```
+
+
+### Yearly % informal by state only
+
+```{r}
+informality_by_year_state <- summarize_informality(
+  marine_employed_df = marine_employed_all_quarters,
+  group_vars = c("enoe_year", "state", "ent"),
+  scope_label = "yearly_state_only",
+  enoe_period_label = "calendar_year_all_quarters",
+  require_category1 = FALSE
+) %>%
+  arrange(enoe_year, state)
+
+informality_by_year_state_clean <- informality_by_year_state %>%
+  dplyr::select(
+    enoe_year,
+    state,
+    n_quarters,
+    n_unweighted,
+    pct_informal,
+    jobs_multiplier,
+    low_n,
+    incomplete_year
+  )
+kableExtra::kable(informality_by_year_state_clean)
+```
+
+
+### Wide view: yearly % informal for fisheries by state
+
+```{r}
+fisheries_pct_informal_wide <- informality_by_year_state_category %>%
+  filter(category1 == "fisheries") %>%
+  dplyr::select(enoe_year, state, pct_informal) %>%
+  pivot_wider(
+    names_from = state,
+    values_from = pct_informal
+  ) %>%
+  arrange(enoe_year)
+
+fisheries_pct_informal_wide
+```
+
+
+### Diagnostic: one row per quarter (optional time slices)
+
+```{r}
+explore_survey_vs_weighted_by_quarter <- summarize_informality(
+  marine_employed_df = marine_employed_all_quarters,
+  group_vars = c("enoe_label", "enoe_year", "enoe_trim", "state", "ent", "category1", "category3"),
+  scope_label = "by_quarter_state_x_category1",
+  enoe_period_label = "single_quarter"
+) %>%
+  left_join(enoe_to_ce_crosswalk, by = "category1") %>%
+  arrange(category1, state, enoe_label)
+
+explore_survey_vs_weighted_by_quarter %>%
+  dplyr::select(
+    enoe_label,
+    state,
+    category1,
+    n_unweighted,
+    pct_informal,
+    jobs_multiplier,
+    low_n
+  )
+```
+
+
+### Example check: Jalisco fisheries by year vs by quarter
+
+```{r}
+jalisco_fisheries_by_year <- informality_by_year_state_category %>%
+  filter(state == "Jalisco", category1 == "fisheries") %>%
+  dplyr::select(
+    enoe_year,
+    n_quarters,
+    n_unweighted,
+    n_informal_surveys,
+    n_formal_surveys,
+    pct_informal,
+    jobs_multiplier,
+    low_n,
+    incomplete_year
+  )
+
+jalisco_fisheries_by_year
+
+jalisco_fisheries_by_quarter <- explore_survey_vs_weighted_by_quarter %>%
+  filter(state == "Jalisco", category1 == "fisheries") %>%
+  dplyr::select(
+    enoe_label,
+    n_unweighted,
+    pct_informal,
+    jobs_multiplier,
+    low_n
+  )
+
+jalisco_fisheries_by_quarter
+```
+
+
+### Compare 2024 Q4 vs 2024 yearly for key observations
+
+```{r}
+compare_q4_vs_year_2024 <- informality_by_state_category %>%
+  dplyr::select(state, category1, n_unweighted, pct_informal, jobs_multiplier, low_n) %>%
+  rename(
+    n_q4 = n_unweighted,
+    pct_informal_q4 = pct_informal,
+    jobs_multiplier_q4 = jobs_multiplier,
+    low_n_q4 = low_n
+  ) %>%
+  left_join(
+    informality_by_year_state_category %>%
+      filter(enoe_year == 2024) %>%
+      dplyr::select(
+        state, category1, n_quarters, n_unweighted, pct_informal, jobs_multiplier, low_n
+      ) %>%
+      rename(
+        n_year = n_unweighted,
+        pct_informal_year = pct_informal,
+        jobs_multiplier_year = jobs_multiplier,
+        low_n_year = low_n
+      ),
+    by = c("state", "category1")
+  ) %>%
+  mutate(
+    n_gain = n_year - n_q4,
+    pct_informal_change = pct_informal_year - pct_informal_q4
+  ) %>%
+  arrange(category1, state)
+
+compare_q4_vs_year_2024
+```
+
+
+### Diagnostic: which yearly state × sector rates are trustworthy?
+
+Yearly lines can look meaningful even when the underlying survey count is tiny. This section flags observations that should **not** be used as CE multipliers without a fallback.
+
+A yearly state × category observation is treated as **trustworthy** only if all of these hold:
+
+- `low_n == FALSE` (`n_unweighted >= 30`)
+- `incomplete_year == FALSE` (all expected quarters present; 3 for 2020, else 4)
+- `pct_informal` is not exactly 0% or 100% (those almost always mean an extreme thin sample)
+
+```{r}
+trust_flags_year_state_category <- informality_by_year_state_category %>%
+  mutate(
+    extreme_rate = pct_informal %in% c(0, 1) | is.na(jobs_multiplier),
+    trustworthy = !low_n & !incomplete_year & !extreme_rate,
+    trust_label = case_when(
+      trustworthy ~ "trustworthy",
+      low_n & extreme_rate ~ "low_n + extreme rate",
+      low_n ~ "low_n (<30 surveys)",
+      incomplete_year ~ "incomplete year",
+      extreme_rate ~ "extreme rate (0% or 100%)",
+      TRUE ~ "review"
+    )
+  )
+
+## fisheries focus: the volatile plot from above
+fisheries_trust_by_year_state <- trust_flags_year_state_category %>%
+  filter(category1 == "fisheries") %>%
+  dplyr::select(
+    enoe_year,
+    state,
+    n_quarters,
+    n_quarters_expected,
+    n_unweighted,
+    n_informal_surveys,
+    n_formal_surveys,
+    pct_informal,
+    jobs_multiplier,
+    low_n,
+    incomplete_year,
+    extreme_rate,
+    trustworthy,
+    trust_label
+  ) %>%
+  arrange(state, enoe_year)
+
+fisheries_trust_by_year_state
+```
+
+```{r}
+## quick counts: how many fisheries year x state observations pass?
+kableExtra::kable(fisheries_trust_by_year_state %>%
+  count(trust_label, sort = TRUE))
+
+kableExtra::kable(fisheries_trust_by_year_state %>%
+  count(state, trustworthy) %>%
+  pivot_wider(names_from = trustworthy, values_from = n, values_fill = 0) %>%
+  arrange(state))
+```
+
+```{r}
+## wide view of fisheries survey counts (the main thing that drives volatility)
+fisheries_n_surveys_wide <- fisheries_trust_by_year_state %>%
+  dplyr::select(enoe_year, state, n_unweighted) %>%
+  pivot_wider(
+    names_from = state,
+    values_from = n_unweighted,
+    values_fill = 0
+  ) %>%
+  arrange(enoe_year)
+
+fisheries_n_surveys_wide
+```
+
+```{r}
+## same wide view for pct_informal, but only show trustworthy observations;
+## untrustworthy observations become NA so they do not look like real trends
+fisheries_pct_informal_trustworthy_wide <- fisheries_trust_by_year_state %>%
+  mutate(pct_show = ifelse(trustworthy, pct_informal, NA_real_)) %>%
+  dplyr::select(enoe_year, state, pct_show) %>%
+  pivot_wider(
+    names_from = state,
+    values_from = pct_show
+  ) %>%
+  arrange(enoe_year)
+
+fisheries_pct_informal_trustworthy_wide
+```
+
+Optional all-years (2019-2025) fisheries rates (often the usable alternative when yearly observations fail):
+
+```{r}
+fisheries_all_years_2019_2025 <- summarize_informality(
+  marine_employed_df = marine_employed_all_quarters %>%
+    filter(category1 == "fisheries"),
+  group_vars = c("state", "ent", "category1", "category3"),
+  scope_label = "all_years_2019_2025_fisheries",
+  enoe_period_label = "2019_2025_all_years",
+  require_category1 = FALSE
+) %>%
+  mutate(
+    extreme_rate = pct_informal %in% c(0, 1) | is.na(jobs_multiplier),
+    trustworthy = !low_n & !extreme_rate
+  ) %>%
+  arrange(state)
+
+fisheries_all_years_2019_2025 %>%
+  dplyr::select(
+    state,
+    n_quarters,
+    n_unweighted,
+    n_informal_surveys,
+    n_formal_surveys,
+    pct_informal,
+    jobs_multiplier,
+    low_n,
+    trustworthy
+  )
+```
+
+
+### Save yearly and by-quarter outputs
+
+```{r}
+write_csv(
+  informality_by_year_state_category,
+  here::here(out_dir, "enoe_yearly_informality_multiplier_by_state_category.csv")
+)
+
+write_csv(
+  informality_by_year_state,
+  here::here(out_dir, "enoe_yearly_informality_multiplier_by_state.csv")
+)
+
+write_csv(
+  explore_survey_vs_weighted_by_quarter,
+  here::here(out_dir, "enoe_by_quarter_explore_survey_vs_weighted_by_state_category.csv")
+)
+
+write_csv(
+  compare_q4_vs_year_2024,
+  here::here(out_dir, "enoe_compare_2024q4_vs_2024year_by_state_category.csv")
+)
+
+write_csv(
+  quarters_loaded_by_year,
+  here::here(out_dir, "enoe_quarters_loaded_by_year.csv")
+)
+
+write_csv(
+  trust_flags_year_state_category,
+  here::here(out_dir, "enoe_yearly_trust_flags_by_state_category.csv")
+)
+
+write_csv(
+  fisheries_trust_by_year_state,
+  here::here(out_dir, "enoe_fisheries_yearly_trust_by_state.csv")
+)
+
+write_csv(
+  fisheries_all_years_2019_2025,
+  here::here(out_dir, "enoe_fisheries_all_years_2019_2025_by_state.csv")
+)
+```
+
+
+### Plotly: Jalisco fisheries % informal by year
+
+```{r}
+jalisco_fisheries_year_ts <- informality_by_year_state_category %>%
+  filter(state == "Jalisco", category1 == "fisheries")
+
+plot_ly(
+    jalisco_fisheries_year_ts,
+    x = ~enoe_year,
+    y = ~pct_informal,
+    type = "scatter",
+    mode = "lines+markers",
+    text = ~paste0(
+      "surveys=", n_unweighted,
+      "<br>quarters=", n_quarters,
+      "<br>multiplier=", round(jobs_multiplier, 2),
+      "<br>low_n=", low_n
+    ),
+    hoverinfo = "text+y"
+  ) %>%
+    layout(
+      title = "Jalisco fisheries: yearly % informal",
+      xaxis = list(title = "Year", dtick = 1),
+      yaxis = list(title = "Percent informal", tickformat = ".0%")
+    )
+```
+
+
+### Plotly: yearly % informal by state, one plot per category1
+
+```{r}
+plot_yearly_pct_informal_by_category <- function(cat) {
+  dat <- informality_by_year_state_category %>%
+    filter(category1 == cat) %>%
+    mutate(state = factor(state, levels = goc_states))
+
+  if (nrow(dat) == 0) {
+    message("no yearly rows for category1 = ", cat)
+    return(invisible(NULL))
+  }
+
+  title_lab <- gsub("-", " ", cat)
+  title_lab <- gsub("_", " ", title_lab)
+
+  plot_ly(
+    dat,
+    x = ~enoe_year,
+    y = ~pct_informal,
+    color = ~state,
+    colors = state_colors,
+    type = "scatter",
+    mode = "lines+markers",
+    text = ~paste0(
+      "state=", state,
+      "<br>surveys=", n_unweighted,
+      "<br>quarters=", n_quarters,
+      "<br>multiplier=", round(jobs_multiplier, 2),
+      "<br>low_n=", low_n
+    ),
+    hoverinfo = "text+y"
+  ) %>%
+    layout(
+      title = paste0(title_lab, ": yearly % informal by state"),
+      xaxis = list(title = "Year", dtick = 1),
+      yaxis = list(title = "Percent informal", tickformat = ".0%"),
+      legend = list(title = list(text = "State"))
+    )
+}
+
+category1_for_plots <- informality_by_year_state_category %>%
+  distinct(category1) %>%
+  arrange(category1) %>%
+  pull(category1)
+
+category1_for_plots
+
+yearly_pct_informal_plots <- map(category1_for_plots, plot_yearly_pct_informal_by_category)
+yearly_pct_informal_plots[1] # aquaculture
+yearly_pct_informal_plots[2] # culture entertainment
+yearly_pct_informal_plots[3] # culture entertainment marine
+yearly_pct_informal_plots[4] # fisheries
+yearly_pct_informal_plots[5] # food services
+yearly_pct_informal_plots[6] # research
+yearly_pct_informal_plots[7] # temporary accommodations
+yearly_pct_informal_plots[8] # transportation
+yearly_pct_informal_plots[9] # transportation marine
+
+yearly_pct_informal_avg_n_plots[1] # aquaculture
+yearly_pct_informal_avg_n_plots[2] # culture entertainment
+yearly_pct_informal_avg_n_plots[3] # culture entertainment marine
+yearly_pct_informal_avg_n_plots[4] # fisheries
+yearly_pct_informal_avg_n_plots[5] # food services
+yearly_pct_informal_avg_n_plots[6] # research
+yearly_pct_informal_avg_n_plots[7] # temporary accommodations
+yearly_pct_informal_avg_n_plots[8] # transportation
+yearly_pct_informal_avg_n_plots[9] # transportation marine
+```
+
+
+### Plotly: fisheries survey counts by year (diagnose thin observations)
+
+```{r}
+fisheries_year_ts <- trust_flags_year_state_category %>%
+  filter(category1 == "fisheries") %>%
+  mutate(state = factor(state, levels = goc_states))
+
+min_n_line <- tibble(
+  enoe_year = range(fisheries_year_ts$enoe_year, na.rm = TRUE),
+  n_unweighted = min_n_unweighted
+)
+
+plot_ly(
+  fisheries_year_ts,
+  x = ~enoe_year,
+  y = ~n_unweighted,
+  color = ~state,
+  colors = state_colors,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    "state=", state,
+    "<br>% informal=", scales::percent(pct_informal, accuracy = 0.1),
+    "<br>trust=", trust_label
+  ),
+  hoverinfo = "text+y"
+) %>%
+  add_trace(
+    data = min_n_line,
+    x = ~enoe_year,
+    y = ~n_unweighted,
+    type = "scatter",
+    mode = "lines",
+    line = list(dash = "dash", color = "gray", width = 1),
+    name = "min_n = 30",
+    showlegend = TRUE,
+    hoverinfo = "skip",
+    inherit = FALSE
+  ) %>%
+  layout(
+    title = "Fisheries: yearly survey counts by state (below 30 = low_n)",
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "Number of surveys (unweighted)"),
+    legend = list(title = list(text = "State"))
+  )
+```
+
+
+### Plotly: fisheries % informal, trustworthy observations only
+
+Untrustworthy year × state points are dropped so the line does not invent a trend from thin samples.
+
+```{r}
+fisheries_year_ts_trust <- fisheries_year_ts %>%
+  filter(trustworthy)
+
+if (nrow(fisheries_year_ts_trust) > 0) {
+  plot_ly(
+    fisheries_year_ts_trust,
+    x = ~enoe_year,
+    y = ~pct_informal,
+    color = ~state,
+    colors = state_colors,
+    type = "scatter",
+    mode = "lines+markers",
+    text = ~paste0(
+      "state=", state,
+      "<br>surveys=", n_unweighted,
+      "<br>multiplier=", round(jobs_multiplier, 2)
+    ),
+    hoverinfo = "text+y"
+  ) %>%
+    layout(
+      title = "Fisheries: yearly % informal (trustworthy observations only)",
+      xaxis = list(title = "Year", dtick = 1),
+      yaxis = list(title = "Percent informal", tickformat = ".0%"),
+      legend = list(title = list(text = "State"))
+    )
+} else {
+  message("no trustworthy yearly fisheries state observations under current rules")
+}
+```
+
+
+### Plotly: 2024 Q4 vs 2024 yearly survey counts for fisheries
+
+```{r}
+fisheries_n_compare <- compare_q4_vs_year_2024 %>%
+  filter(category1 == "fisheries") %>%
+  mutate(state = factor(state, levels = goc_states))
+
+plot_ly(
+  fisheries_n_compare,
+  x = ~state,
+  y = ~n_q4,
+  type = "bar",
+  name = "2024 Q4 surveys",
+  marker = list(color = "#d1bfdc")
+) %>%
+  add_trace(
+    y = ~n_year,
+    name = "2024 yearly surveys",
+    marker = list(color = "#8d61a9")
+  ) %>%
+  layout(
+    barmode = "group",
+    title = "Fisheries: survey count by state (2024 Q4 vs 2024 yearly)",
+    xaxis = list(title = "State"),
+    yaxis = list(title = "Number of surveys (unweighted)")
+  )
+```
+
+
+## Notes and caveats for combining quarters into yearly rates
+
+- Within each year, quarters are stacked and `fac_tri` is summed. **`pct_informal` is the yearly informal share** by state × sector; do not treat `employed_weighted` as a one-quarter employment headcount.
+- Prefer years with `incomplete_year == FALSE`. For most years that means `n_quarters == 4`. For **2020**, ENOE Q2 was not published (ETOE covered Apr-Jun instead), so a complete 2020 year here means **3 quarters** (Q1, Q3, Q4).
+- Older extracts (2019, 2020 Q1) use the weight column `fac`; the script renames it to `fac_tri` for consistency.
+- 2020 Q3 to 2022 use ENOE-N folders/files (`enoe_n_...` / `ENOEN_...`). 2019 uses `2019trimN_csv` with lowercase filenames. Later years use standard `ENOE_...` names.
+- Trust yearly state × sector estimates more when `trustworthy == TRUE` in the diagnostic tables. If still thin, use the all-years 2019-2025 fisheries rate or yearly state-only multipliers.
+
+## 12. Yearly informality: n weighted average of quarterly rates (2019 through 2025)
+
+Section 11 stacks all quarter rows within a calendar year and sums `fac_tri` to get one yearly `pct_informal`. Because ENOE is a rotating panel, the same person can appear in more than one quarter, so that pooled method can double count people when you sum weights.
+
+This section uses a different yearly rule:
+
+1. Compute `pct_informal` **within each quarter** (same as the by quarter table in Section 11; each quarter uses only its own rows and `fac_tri_eff`).
+2. For each year × state × sector, take the **n weighted average** of those quarterly rates:
+
+`pct_informal_year = sum(pct_informal_q * n_q) / sum(n_q)`
+
+where `n_q` is the unweighted survey count in quarter `q`.
+
+This avoids stacking expansion factors across quarters. Survey counts (`n_unweighted`) are still summed across quarters for diagnostics, so a person in Q1 and Q2 still counts twice in `n_unweighted`. The yearly rate itself is an average of quarter specific rates, not a ratio of summed weights.
+
+```{r}
+summarize_informality_n_weighted_avg <- function(
+    quarterly_df,
+    group_vars,
+    scope_label,
+    enoe_period_label = NA_character_,
+    require_category1 = TRUE) {
+
+  df <- quarterly_df
+  if (require_category1) {
+    df <- df %>% filter(!is.na(category1), category1 != "")
+  }
+
+  out <- df %>%
+    group_by(across(all_of(group_vars))) %>%
+    summarize(
+      ## compute pct_informal first: dplyr evaluates summarize left to right,
+      ## so n_unweighted below must not shadow the column used as weights here
+      pct_informal = stats::weighted.mean(
+        pct_informal, n_unweighted, na.rm = TRUE
+      ),
+      n_unweighted = sum(n_unweighted, na.rm = TRUE),
+      n_informal_surveys = sum(n_informal_surveys, na.rm = TRUE),
+      n_formal_surveys = sum(n_formal_surveys, na.rm = TRUE),
+      n_quarters = n_distinct(enoe_label),
+      employed_weighted = sum(employed_weighted, na.rm = TRUE),
+      informal_weighted = sum(informal_weighted, na.rm = TRUE),
+      formal_weighted = sum(formal_weighted, na.rm = TRUE),
+      informal_sector_weighted = sum(informal_sector_weighted, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      pct_informal_surveys = n_informal_surveys / n_unweighted,
+      pct_formal = ifelse(
+        !is.na(pct_informal),
+        1 - pct_informal,
+        NA_real_
+      ),
+      pct_in_informal_sector = informal_sector_weighted / employed_weighted,
+      avg_fac_tri_per_person = employed_weighted / n_unweighted,
+      jobs_multiplier = ifelse(
+        !is.na(pct_informal) & pct_informal < 1,
+        1 / (1 - pct_informal),
+        NA_real_
+      ),
+      low_n = n_unweighted < min_n_unweighted,
+      scope = scope_label,
+      enoe_period = enoe_period_label,
+      aggregation_method = "n_weighted_quarterly_avg"
+    )
+
+  if ("enoe_year" %in% names(out)) {
+    out <- out %>%
+      left_join(quarters_expected_by_year, by = c("enoe_year" = "year")) %>%
+      mutate(
+        n_quarters_expected = dplyr::coalesce(n_quarters_expected, 4L),
+        incomplete_year = n_quarters < n_quarters_expected
+      )
+  } else {
+    out <- out %>%
+      mutate(
+        n_quarters_expected = NA_integer_,
+        incomplete_year = NA
+      )
+  }
+
+  out
+}
+```
+
+
+### Yearly % informal by state and sector (n weighted quarterly average)
+
+```{r}
+informality_avg_n_by_year_state_category <- summarize_informality_n_weighted_avg(
+  quarterly_df = explore_survey_vs_weighted_by_quarter,
+  group_vars = c("enoe_year", "state", "ent", "category1", "category3"),
+  scope_label = "yearly_state_x_category1_avg_n",
+  enoe_period_label = "calendar_year_n_weighted_quarterly_avg"
+) %>%
+  left_join(enoe_to_ce_crosswalk, by = "category1") %>%
+  arrange(enoe_year, category1, state)
+
+informality_avg_n_by_year_state_category %>%
+  dplyr::select(
+    enoe_year,
+    state,
+    category1,
+    suggested_ce_specific_sector,
+    n_quarters,
+    n_unweighted,
+    n_informal_surveys,
+    n_formal_surveys,
+    pct_informal,
+    jobs_multiplier,
+    low_n,
+    incomplete_year,
+    notes
+  )
+```
+
+
+### Yearly % informal by state only (n weighted quarterly average)
+
+```{r}
+explore_by_quarter_state <- summarize_informality(
+  marine_employed_df = marine_employed_all_quarters,
+  group_vars = c("enoe_label", "enoe_year", "enoe_trim", "state", "ent"),
+  scope_label = "by_quarter_state_only",
+  enoe_period_label = "single_quarter",
+  require_category1 = FALSE
+)
+
+informality_avg_n_by_year_state <- summarize_informality_n_weighted_avg(
+  quarterly_df = explore_by_quarter_state,
+  group_vars = c("enoe_year", "state", "ent"),
+  scope_label = "yearly_state_only_avg_n",
+  enoe_period_label = "calendar_year_n_weighted_quarterly_avg",
+  require_category1 = FALSE
+) %>%
+  arrange(enoe_year, state)
+
+informality_avg_n_by_year_state %>%
+  dplyr::select(
+    enoe_year,
+    state,
+    n_quarters,
+    n_unweighted,
+    pct_informal,
+    jobs_multiplier,
+    low_n,
+    incomplete_year
+  )
+```
+
+
+### Wide view: yearly % informal for fisheries by state (n weighted avg)
+
+```{r}
+fisheries_pct_informal_avg_n_wide <- informality_avg_n_by_year_state_category %>%
+  filter(category1 == "fisheries") %>%
+  dplyr::select(enoe_year, state, pct_informal) %>%
+  pivot_wider(
+    names_from = state,
+    values_from = pct_informal
+  ) %>%
+  arrange(enoe_year)
+
+fisheries_pct_informal_avg_n_wide
+```
+
+
+### Example check: Jalisco fisheries by year vs by quarter (n weighted avg)
+
+```{r}
+jalisco_fisheries_by_year_avg_n <- informality_avg_n_by_year_state_category %>%
+  filter(state == "Jalisco", category1 == "fisheries") %>%
+  dplyr::select(
+    enoe_year,
+    n_quarters,
+    n_unweighted,
+    n_informal_surveys,
+    n_formal_surveys,
+    pct_informal,
+    jobs_multiplier,
+    low_n,
+    incomplete_year
+  )
+
+jalisco_fisheries_by_year_avg_n
+
+jalisco_fisheries_by_quarter_avg_n <- explore_survey_vs_weighted_by_quarter %>%
+  filter(state == "Jalisco", category1 == "fisheries") %>%
+  dplyr::select(
+    enoe_label,
+    n_unweighted,
+    pct_informal,
+    jobs_multiplier,
+    low_n
+  )
+
+jalisco_fisheries_by_quarter_avg_n
+```
+
+
+### Compare 2024 Q4 vs 2024 yearly (n weighted avg)
+
+```{r}
+compare_q4_vs_year_2024_avg_n <- informality_by_state_category %>%
+  dplyr::select(state, category1, n_unweighted, pct_informal, jobs_multiplier, low_n) %>%
+  rename(
+    n_q4 = n_unweighted,
+    pct_informal_q4 = pct_informal,
+    jobs_multiplier_q4 = jobs_multiplier,
+    low_n_q4 = low_n
+  ) %>%
+  left_join(
+    informality_avg_n_by_year_state_category %>%
+      filter(enoe_year == 2024) %>%
+      dplyr::select(
+        state, category1, n_quarters, n_unweighted, pct_informal, jobs_multiplier, low_n
+      ) %>%
+      rename(
+        n_year = n_unweighted,
+        pct_informal_year = pct_informal,
+        jobs_multiplier_year = jobs_multiplier,
+        low_n_year = low_n
+      ),
+    by = c("state", "category1")
+  ) %>%
+  mutate(
+    n_gain = n_year - n_q4,
+    pct_informal_change = pct_informal_year - pct_informal_q4
+  ) %>%
+  arrange(category1, state)
+
+compare_q4_vs_year_2024_avg_n
+```
+
+
+### Diagnostic: trustworthy yearly rates (n weighted avg)
+
+Same rules as Section 11: `n_unweighted >= 30`, complete year, rate not exactly 0% or 100%.
+
+```{r}
+trust_flags_avg_n_year_state_category <- informality_avg_n_by_year_state_category %>%
+  mutate(
+    extreme_rate = pct_informal %in% c(0, 1) | is.na(jobs_multiplier),
+    trustworthy = !low_n & !incomplete_year & !extreme_rate,
+    trust_label = case_when(
+      trustworthy ~ "trustworthy",
+      low_n & extreme_rate ~ "low_n + extreme rate",
+      low_n ~ "low_n (<30 surveys)",
+      incomplete_year ~ "incomplete year",
+      extreme_rate ~ "extreme rate (0% or 100%)",
+      TRUE ~ "review"
+    )
+  )
+
+fisheries_trust_avg_n_by_year_state <- trust_flags_avg_n_year_state_category %>%
+  filter(category1 == "fisheries") %>%
+  dplyr::select(
+    enoe_year,
+    state,
+    n_quarters,
+    n_quarters_expected,
+    n_unweighted,
+    n_informal_surveys,
+    n_formal_surveys,
+    pct_informal,
+    jobs_multiplier,
+    low_n,
+    incomplete_year,
+    extreme_rate,
+    trustworthy,
+    trust_label
+  ) %>%
+  arrange(state, enoe_year)
+
+fisheries_trust_avg_n_by_year_state
+
+fisheries_trust_avg_n_by_year_state %>%
+  count(trust_label, sort = TRUE)
+
+fisheries_n_surveys_avg_n_wide <- fisheries_trust_avg_n_by_year_state %>%
+  dplyr::select(enoe_year, state, n_unweighted) %>%
+  pivot_wider(
+    names_from = state,
+    values_from = n_unweighted,
+    values_fill = 0
+  ) %>%
+  arrange(enoe_year)
+
+fisheries_n_surveys_avg_n_wide
+
+fisheries_pct_informal_avg_n_trustworthy_wide <- fisheries_trust_avg_n_by_year_state %>%
+  mutate(pct_show = ifelse(trustworthy, pct_informal, NA_real_)) %>%
+  dplyr::select(enoe_year, state, pct_show) %>%
+  pivot_wider(
+    names_from = state,
+    values_from = pct_show
+  ) %>%
+  arrange(enoe_year)
+
+fisheries_pct_informal_avg_n_trustworthy_wide
+```
+
+
+### All years fisheries rates (n weighted quarterly average)
+
+```{r}
+explore_by_quarter_fisheries <- summarize_informality(
+  marine_employed_df = marine_employed_all_quarters %>%
+    filter(category1 == "fisheries"),
+  group_vars = c("enoe_label", "enoe_year", "enoe_trim", "state", "ent", "category1", "category3"),
+  scope_label = "by_quarter_fisheries",
+  enoe_period_label = "single_quarter",
+  require_category1 = FALSE
+)
+
+fisheries_all_years_2019_2025_avg_n <- summarize_informality_n_weighted_avg(
+  quarterly_df = explore_by_quarter_fisheries,
+  group_vars = c("state", "ent", "category1", "category3"),
+  scope_label = "all_years_2019_2025_fisheries_avg_n",
+  enoe_period_label = "2019_2025_all_quarters_avg_n",
+  require_category1 = FALSE
+) %>%
+  mutate(
+    extreme_rate = pct_informal %in% c(0, 1) | is.na(jobs_multiplier),
+    trustworthy = !low_n & !extreme_rate
+  ) %>%
+  arrange(state)
+
+fisheries_all_years_2019_2025_avg_n %>%
+  dplyr::select(
+    state,
+    n_quarters,
+    n_unweighted,
+    n_informal_surveys,
+    n_formal_surveys,
+    pct_informal,
+    jobs_multiplier,
+    low_n,
+    trustworthy
+  )
+```
+
+
+### Compare Section 11 (stacked) vs Section 12 (n weighted avg)
+
+```{r}
+compare_stacked_vs_avg_n_year_state_category <- informality_by_year_state_category %>%
+  dplyr::select(
+    enoe_year, state, ent, category1, category3,
+    n_quarters, n_unweighted,
+    pct_informal, jobs_multiplier, low_n, incomplete_year
+  ) %>%
+  rename(
+    pct_informal_stacked = pct_informal,
+    jobs_multiplier_stacked = jobs_multiplier,
+    low_n_stacked = low_n
+  ) %>%
+  left_join(
+    informality_avg_n_by_year_state_category %>%
+      dplyr::select(
+        enoe_year, state, ent, category1, category3,
+        pct_informal, jobs_multiplier, low_n
+      ) %>%
+      rename(
+        pct_informal_avg_n = pct_informal,
+        jobs_multiplier_avg_n = jobs_multiplier,
+        low_n_avg_n = low_n
+      ),
+    by = c("enoe_year", "state", "ent", "category1", "category3")
+  ) %>%
+  mutate(
+    pct_informal_diff = pct_informal_avg_n - pct_informal_stacked,
+    jobs_multiplier_diff = jobs_multiplier_avg_n - jobs_multiplier_stacked,
+    abs_pct_diff = abs(pct_informal_diff)
+  ) %>%
+  arrange(desc(abs_pct_diff))
+
+compare_stacked_vs_avg_n_year_state_category %>%
+  dplyr::select(
+    enoe_year, state, category1,
+    n_unweighted, n_quarters,
+    pct_informal_stacked, pct_informal_avg_n, pct_informal_diff,
+    jobs_multiplier_stacked, jobs_multiplier_avg_n,
+    low_n_stacked, low_n_avg_n, incomplete_year
+  ) %>%
+  head(30)
+
+compare_stacked_vs_avg_n_year_state <- informality_by_year_state %>%
+  dplyr::select(
+    enoe_year, state, ent,
+    n_quarters, n_unweighted,
+    pct_informal, jobs_multiplier, low_n, incomplete_year
+  ) %>%
+  rename(
+    pct_informal_stacked = pct_informal,
+    jobs_multiplier_stacked = jobs_multiplier
+  ) %>%
+  left_join(
+    informality_avg_n_by_year_state %>%
+      dplyr::select(
+        enoe_year, state, ent,
+        pct_informal, jobs_multiplier
+      ) %>%
+      rename(
+        pct_informal_avg_n = pct_informal,
+        jobs_multiplier_avg_n = jobs_multiplier
+      ),
+    by = c("enoe_year", "state", "ent")
+  ) %>%
+  mutate(
+    pct_informal_diff = pct_informal_avg_n - pct_informal_stacked,
+    jobs_multiplier_diff = jobs_multiplier_avg_n - jobs_multiplier_stacked
+  ) %>%
+  arrange(enoe_year, state)
+
+compare_stacked_vs_avg_n_year_state
+
+compare_stacked_vs_avg_n_fisheries <- compare_stacked_vs_avg_n_year_state_category %>%
+  filter(category1 == "fisheries") %>%
+  arrange(state, enoe_year)
+
+compare_stacked_vs_avg_n_fisheries %>%
+  dplyr::select(
+    enoe_year, state,
+    n_unweighted,
+    pct_informal_stacked, pct_informal_avg_n, pct_informal_diff,
+    jobs_multiplier_stacked, jobs_multiplier_avg_n
+  )
+```
+
+
+### Save Section 12 outputs
+
+```{r}
+write_csv(
+  informality_avg_n_by_year_state_category,
+  here::here(out_dir, "enoe_yearly_avg_n_informality_multiplier_by_state_category.csv")
+)
+
+write_csv(
+  informality_avg_n_by_year_state,
+  here::here(out_dir, "enoe_yearly_avg_n_informality_multiplier_by_state.csv")
+)
+
+write_csv(
+  compare_q4_vs_year_2024_avg_n,
+  here::here(out_dir, "enoe_compare_2024q4_vs_2024year_avg_n_by_state_category.csv")
+)
+
+write_csv(
+  trust_flags_avg_n_year_state_category,
+  here::here(out_dir, "enoe_yearly_avg_n_trust_flags_by_state_category.csv")
+)
+
+write_csv(
+  fisheries_trust_avg_n_by_year_state,
+  here::here(out_dir, "enoe_fisheries_yearly_avg_n_trust_by_state.csv")
+)
+
+write_csv(
+  fisheries_all_years_2019_2025_avg_n,
+  here::here(out_dir, "enoe_fisheries_all_years_2019_2025_avg_n_by_state.csv")
+)
+
+write_csv(
+  compare_stacked_vs_avg_n_year_state_category,
+  here::here(out_dir, "enoe_compare_stacked_vs_avg_n_by_state_category.csv")
+)
+
+write_csv(
+  compare_stacked_vs_avg_n_year_state,
+  here::here(out_dir, "enoe_compare_stacked_vs_avg_n_by_state.csv")
+)
+```
+
+
+### Plotly: yearly % informal by state, one plot per category1 (n weighted avg)
+
+```{r}
+plot_yearly_pct_informal_avg_n_by_category <- function(cat) {
+  dat <- informality_avg_n_by_year_state_category %>%
+    filter(category1 == cat) %>%
+    mutate(state = factor(state, levels = goc_states))
+
+  if (nrow(dat) == 0) {
+    message("no yearly avg_n rows for category1 = ", cat)
+    return(invisible(NULL))
+  }
+
+  title_lab <- gsub("-", " ", cat)
+  title_lab <- gsub("_", " ", title_lab)
+
+  plot_ly(
+    dat,
+    x = ~enoe_year,
+    y = ~pct_informal,
+    color = ~state,
+    colors = state_colors,
+    type = "scatter",
+    mode = "lines+markers",
+    text = ~paste0(
+      "state=", state,
+      "<br>surveys=", n_unweighted,
+      "<br>quarters=", n_quarters,
+      "<br>multiplier=", round(jobs_multiplier, 2),
+      "<br>low_n=", low_n,
+      "<br>method=n weighted quarterly avg"
+    ),
+    hoverinfo = "text+y"
+  ) %>%
+    layout(
+      title = paste0(title_lab, ": yearly % informal by state (n weighted quarterly avg)"),
+      xaxis = list(title = "Year", dtick = 1),
+      yaxis = list(title = "Percent informal", tickformat = ".0%"),
+      legend = list(title = list(text = "State"))
+    )
+}
+
+yearly_pct_informal_avg_n_plots <- map(
+  category1_for_plots,
+  plot_yearly_pct_informal_avg_n_by_category
+)
+yearly_pct_informal_avg_n_plots
+yearly_pct_informal_avg_n_plots[1]
+```
+
+
+### Plotly: fisheries stacked vs n weighted avg side by side
+
+```{r}
+fisheries_compare_methods_long <- compare_stacked_vs_avg_n_fisheries %>%
+  dplyr::select(
+    enoe_year, state, n_unweighted,
+    pct_informal_stacked, pct_informal_avg_n
+  ) %>%
+  pivot_longer(
+    cols = c(pct_informal_stacked, pct_informal_avg_n),
+    names_to = "method",
+    values_to = "pct_informal"
+  ) %>%
+  mutate(
+    method = recode(
+      method,
+      pct_informal_stacked = "stacked (Sec 11)",
+      pct_informal_avg_n = "n weighted avg (Sec 12)"
+    ),
+    state = factor(state, levels = goc_states)
+  )
+
+plot_ly(
+  fisheries_compare_methods_long,
+  x = ~enoe_year,
+  y = ~pct_informal,
+  color = ~state,
+  colors = state_colors,
+  linetype = ~method,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    "state=", state,
+    "<br>method=", method,
+    "<br>surveys=", n_unweighted
+  ),
+  hoverinfo = "text+y"
+) %>%
+  layout(
+    title = "Fisheries: stacked vs n weighted quarterly avg % informal",
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "Percent informal", tickformat = ".0%"),
+    legend = list(title = list(text = "State / method"))
+  )
+```
+
+
+### Plotly: Jalisco fisheries stacked vs n weighted avg
+
+```{r}
+jalisco_fisheries_compare_methods <- compare_stacked_vs_avg_n_fisheries %>%
+  filter(state == "Jalisco") %>%
+  dplyr::select(
+    enoe_year, n_unweighted,
+    pct_informal_stacked, pct_informal_avg_n,
+    jobs_multiplier_stacked, jobs_multiplier_avg_n
+  )
+
+plot_ly(
+  jalisco_fisheries_compare_methods,
+  x = ~enoe_year,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  add_trace(
+    y = ~pct_informal_stacked,
+    name = "stacked (Sec 11)",
+    line = list(color = "#8d61a9"),
+    marker = list(color = "#8d61a9"),
+    text = ~paste0(
+      "surveys=", n_unweighted,
+      "<br>multiplier=", round(jobs_multiplier_stacked, 2)
+    ),
+    hoverinfo = "text+y"
+  ) %>%
+  add_trace(
+    y = ~pct_informal_avg_n,
+    name = "n weighted avg (Sec 12)",
+    line = list(color = "#d1bfdc", dash = "dash"),
+    marker = list(color = "#d1bfdc"),
+    text = ~paste0(
+      "surveys=", n_unweighted,
+      "<br>multiplier=", round(jobs_multiplier_avg_n, 2)
+    ),
+    hoverinfo = "text+y"
+  ) %>%
+  layout(
+    title = "Jalisco fisheries: stacked vs n weighted quarterly avg",
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "Percent informal", tickformat = ".0%")
+  )
+```
+
+
+### Notes for Section 12
+
+- Each quarter's `pct_informal` still uses `fac_tri_eff` within that quarter. The yearly number is the n weighted average of those quarter rates.
+- `n_unweighted` is still summed across quarters (person quarter rows), so it can exceed unique people. Use it for sample size diagnostics, not as a headcount.
+- `employed_weighted`, `informal_weighted`, and `formal_weighted` are summed across quarters for reference only; they are **not** used to compute `pct_informal` in this section.
+- For large samples (state only yearly), stacked and n weighted avg methods usually agree closely. Differences show up most in thin sector years (e.g. Jalisco fisheries).
+- Use `compare_stacked_vs_avg_n_*` tables and the fisheries comparison plot to decide which method to carry into Tier 2.
+
+
+## Notes and caveats for combining quarters into yearly rates
+
+- Within each year, quarters are stacked and `fac_tri` is summed. **`pct_informal` is the yearly informal share** by state × sector; do not treat `employed_weighted` as a one-quarter employment headcount. See **Section 12** for an alternative that averages quarterly rates weighted by `n` instead.
+- Prefer years with `incomplete_year == FALSE`. For most years that means `n_quarters == 4`. For **2020**, ENOE Q2 was not published (ETOE covered Apr-Jun instead), so a complete 2020 year here means **3 quarters** (Q1, Q3, Q4).
+- Older extracts (2019, 2020 Q1) use the weight column `fac`; the script renames it to `fac_tri` for consistency.
+- 2020 Q3 to 2022 use ENOE-N folders/files (`enoe_n_...` / `ENOEN_...`). 2019 uses `2019trimN_csv` with lowercase filenames. Later years use standard `ENOE_...` names.
+- Trust yearly state × sector estimates more when `trustworthy == TRUE` in the diagnostic tables. If still thin, use the all-years 2019-2025 fisheries rate or yearly state-only multipliers.
+
+### What ENOE informal means here vs what CE counts (plain language)
+
+CE (Censos Economicos) mostly counts jobs inside **registered businesses**. Many people who fish, sell food, or work in tourism informally never show up there.
+
+ENOE asks people in households about their main job and labels that job informal or formal. So ENOE informal is about the **person's job conditions**, not a direct list of "jobs CE forgot."
+
+That matters because:
+
+- Some ENOE informal workers really are missing from CE. Using the multiplier to inflate CE jobs can be a useful upper-bound style check.
+- But ENOE informal is not exactly the same thing as "missing from CE." Some informal situations do not match cleanly onto the census frame, and CE can also miss jobs for other reasons.
+- So I would **not** say the adjusted number is the true total of marine jobs. I would say: CE is the main estimate, and the ENOE multiplier is a **Tier 2 sensitivity** on LIV number of jobs. It asks, "If informality is this high, how much larger might livelihoods look than CE alone suggests?"
+- I would not apply the same multiplier to ECO revenue without a separate reason. Informal jobs often generate less reported revenue per worker than formal establishment jobs.
