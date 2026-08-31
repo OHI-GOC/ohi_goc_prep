@@ -1,0 +1,373 @@
+---
+title: "Script 2 — PP nearshore vs whole region by month"
+author: "OHI GoC"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    code_folding: hide
+    theme: flatly
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+# Overview
+
+**Copernicus Primary Production (PP)** — modeled phytoplankton carbon fixation
+(mg C m⁻² day⁻¹). Climate / declining-productivity pressure (not eutrophication).
+
+| Item | Path |
+|------|------|
+| Download | `_pressures/prs_npp/script1_download_pp.qmd` |
+| Monthly rasters | `/home/shares/ohi/OHI_GOC/_raw_data/npp_copernicus/monthly_rasters/` |
+| Zonal table | `/home/shares/ohi/OHI_GOC/goal_prep/pressures/npp/int/` |
+| **Standalone PP animations** | `_pressures/prs_npp/html_maps/` — run `script3_build_pp_monthly_maps.R` |
+
+This report compares **whole marine region** vs **5 km nearshore** PP for each
+OHI region, **one figure per calendar month** (12 sections × 9 region panels).
+
+Analysis window: **2000–2024**.
+
+---
+
+# Peak months vs annual average — which matters?
+
+Both can be biologically meaningful; they answer different questions.
+
+**Peak / high-production months** (often late spring–summer upwelling in the GoC):
+
+- Drive short-lived **blooms**, fishery recruitment windows, and episodic food supply  
+- Best if the pressure story is “are the **productive seasons** weakening?”  
+- Noisier year-to-year (ENSO, upwelling timing)
+
+**Annual mean (or annual sum / integral)**:
+
+- Approximates **total carbon fixed over the year** — closer to the food-web “base”  
+- Smoother, better for **long-term climate trend** detection  
+- Standard choice for basin-scale productivity change papers  
+
+**Practical recommendation for OHI:** start with **annual mean PP by region**
+for the pressure score, but use these **monthly nearshore vs whole** plots to
+see *which months* drive any decline and whether coastal strips differ. If one
+season (e.g. June–August) shows a clear downward trend everywhere, you may
+want a **growing-season mean** instead of calendar-year mean — but justify that
+from these plots, not upfront.
+
+---
+
+# Setup and data
+
+```{r paths}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(RColorBrewer)
+library(readr)
+library(here)
+
+year_start <- 2000L
+year_end   <- 2024L
+nearshore_km  <- 5L
+nearshore_tag <- sprintf("%dkm", nearshore_km)
+
+dir_int <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/npp/int"
+zonal_csv <- file.path(
+  dir_int,
+  sprintf("pp_zonal_mean_by_region_month_%d_%d.csv", year_start, year_end)
+)
+
+nearshore_label <- sprintf("Nearshore %s", nearshore_tag)
+series_colors <- c("Whole region" = "#2166ac")
+series_colors[nearshore_label] <- "#b2182b"
+
+stopifnot(file.exists(zonal_csv))
+zonal_long <- read.csv(zonal_csv, stringsAsFactors = FALSE) %>%
+  mutate(
+    month_lab = factor(month, levels = 1:12, labels = month.abb),
+    rgn_id = factor(rgn_id, levels = paste0("Region_", 1:9))
+  )
+
+z_whole <- filter(zonal_long, zone == "whole")
+z_near  <- filter(zonal_long, zone == sprintf("nearshore_%s", nearshore_tag))
+
+region_colors <- setNames(
+  brewer.pal(9, "Set1"),
+  paste0("Region_", 1:9)
+)
+
+# Annual mean PP = mean of all 12 monthly regional means within each year
+annual_region <- z_whole %>%
+  group_by(rgn_id, year) %>%
+  summarize(
+    pp_annual = mean(pp_mean, na.rm = TRUE),
+    n_months  = sum(!is.na(pp_mean)),
+    .groups   = "drop"
+  )
+
+fit_annual_trend <- function(df) {
+  fit <- lm(pp_annual ~ year, data = df)
+  co <- summary(fit)$coefficients
+  tibble(
+    slope_mg_yr   = unname(coef(fit)[2]),
+    intercept     = unname(coef(fit)[1]),
+    p_value       = co[2, 4],
+    r_squared     = summary(fit)$r.squared,
+    mean_2000_2004 = mean(df$pp_annual[df$year <= 2004], na.rm = TRUE),
+    mean_2019_2024 = mean(df$pp_annual[df$year >= 2019], na.rm = TRUE)
+  )
+}
+
+annual_trends <- annual_region %>%
+  group_by(rgn_id) %>%
+  group_modify(~ fit_annual_trend(.x)) %>%
+  ungroup() %>%
+  mutate(
+    change_recent_minus_early = mean_2019_2024 - mean_2000_2004,
+    pct_change_per_yr = 100 * slope_mg_yr / mean_2000_2004,
+    trend = case_when(
+      p_value < 0.05 & slope_mg_yr < 0 ~ "Declining (p < 0.05)",
+      p_value < 0.05 & slope_mg_yr > 0 ~ "Increasing (p < 0.05)",
+      TRUE ~ "Not significant"
+    )
+  )
+
+plot_nearshore_vs_whole <- function(month_num) {
+  compare <- bind_rows(
+    mutate(filter(z_whole, month == month_num), series = "Whole region"),
+    mutate(filter(z_near, month == month_num), series = nearshore_label)
+  )
+
+  ggplot(compare, aes(year, pp_mean, color = series)) +
+    geom_line(linewidth = 0.7) +
+    geom_point(size = 1.1, alpha = 0.85) +
+    facet_wrap(~ rgn_id, ncol = 3, scales = "free_y") +
+    scale_color_manual(values = series_colors, name = NULL) +
+    scale_x_continuous(breaks = seq(year_start, year_end, by = 5)) +
+    labs(
+      title = sprintf("%s — PP: whole region vs %d km nearshore", month.name[month_num], nearshore_km),
+      subtitle = sprintf("OHI marine regions, %d–%d", year_start, year_end),
+      x = "Year",
+      y = "Mean PP (mg C m⁻² day⁻¹)"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      legend.position = "bottom",
+      strip.text = element_text(face = "bold")
+    )
+}
+```
+
+---
+
+# Regional annual mean PP (whole marine zone)
+
+For each OHI region and year, **annual mean PP** is the average of that region’s
+12 monthly mean values (Jan–Dec). This smooths within-year seasonality and is
+the best first look at longer-term change.
+
+## Annual mean through time — all regions
+
+```{r annual-all-regions, fig.height = 5.5}
+ggplot(annual_region, aes(year, pp_annual, color = rgn_id)) +
+  geom_line(linewidth = 0.85) +
+  geom_point(size = 1.5, alpha = 0.85) +
+  scale_color_manual(values = region_colors, name = "OHI region") +
+  scale_x_continuous(breaks = seq(year_start, year_end, by = 5)) +
+  labs(
+    title = "Annual mean primary production by OHI marine region",
+    subtitle = sprintf(
+      "For each year: mean of 12 monthly regional means · %d–%d · whole region",
+      year_start, year_end
+    ),
+    x = "Year",
+    y = "Annual mean PP (mg C m⁻² day⁻¹)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+## One panel per region (with linear trend)
+
+Solid points/lines = annual means. Blue line = **ordinary least squares**
+regression of annual mean PP on year (2000–2024).
+
+```{r annual-by-region-lm, fig.height = 10}
+annual_trends_joined <- annual_region %>%
+  left_join(
+    annual_trends %>% select(rgn_id, slope_mg_yr, intercept, p_value, trend),
+    by = "rgn_id"
+  ) %>%
+  mutate(
+    label = sprintf(
+      "slope = %.1f mg m⁻² d⁻¹ yr⁻¹\np = %.3f · %s",
+      slope_mg_yr, p_value, trend
+    )
+  )
+
+ggplot(annual_trends_joined, aes(year, pp_annual)) +
+  geom_point(size = 1.8, color = "#333333") +
+  geom_line(linewidth = 0.6, color = "#666666") +
+  geom_smooth(
+    method = "lm",
+    se = TRUE,
+    linewidth = 0.9,
+    color = "#2166ac",
+    fill = "#2166ac",
+    alpha = 0.15
+  ) +
+  geom_text(
+    aes(label = label),
+    x = Inf, y = Inf,
+    hjust = 1.05, vjust = 1.2,
+    size = 2.8,
+    lineheight = 0.95,
+    color = "#2166ac"
+  ) +
+  facet_wrap(~ rgn_id, ncol = 3, scales = "free_y") +
+  scale_x_continuous(breaks = seq(year_start, year_end, by = 5)) +
+  labs(
+    title = "Annual mean PP with linear regression by region",
+    subtitle = "Whole marine zone · Copernicus PP · 2000–2024",
+    x = "Year",
+    y = "Annual mean PP (mg C m⁻² day⁻¹)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+## Regression summary table
+
+Linear model: `pp_annual ~ year` for each region (25 years).
+
+```{r annual-regression-table}
+knitr::kable(
+  annual_trends %>%
+    select(
+      rgn_id,
+      slope_mg_yr,
+      p_value,
+      r_squared,
+      mean_2000_2004,
+      mean_2019_2024,
+      change_recent_minus_early,
+      pct_change_per_yr,
+      trend
+    ) %>%
+    arrange(slope_mg_yr),
+  digits = 3,
+  col.names = c(
+    "Region",
+    "Slope (mg m⁻² d⁻¹ yr⁻¹)",
+    "p-value",
+    "R²",
+    "Mean 2000–2004",
+    "Mean 2019–2024",
+    "Recent − early",
+    "% change yr⁻¹ (vs early mean)",
+    "Trend"
+  ),
+  caption = "Regional regression of annual mean PP on year (2000–2024)"
+)
+```
+
+**Gulf-wide check** (unweighted mean of the 9 regional annual means each year):
+
+```{r gulf-annual-lm}
+gulf_annual <- annual_region %>%
+  group_by(year) %>%
+  summarize(pp_annual = mean(pp_annual), .groups = "drop")
+
+fit_gulf <- lm(pp_annual ~ year, data = gulf_annual)
+gulf_slope <- coef(fit_gulf)[2]
+gulf_p     <- summary(fit_gulf)$coefficients[2, 4]
+
+knitr::kable(
+  tibble(
+    Metric = c(
+      "Slope (mg m⁻² d⁻¹ yr⁻¹)",
+      "p-value",
+      "R²",
+      "Mean 2000–2004",
+      "Mean 2019–2024"
+    ),
+    Value = c(
+      sprintf("%.2f", gulf_slope),
+      sprintf("%.4f", gulf_p),
+      sprintf("%.3f", summary(fit_gulf)$r.squared),
+      sprintf("%.1f", mean(gulf_annual$pp_annual[gulf_annual$year <= 2004])),
+      sprintf("%.1f", mean(gulf_annual$pp_annual[gulf_annual$year >= 2019]))
+    )
+  ),
+  caption = "Gulf-wide annual mean PP regression (average of 9 regions per year)"
+)
+```
+
+---
+
+# Monthly comparisons (whole region vs 5 km nearshore)
+
+Solid blue = whole region. Red = 5 km nearshore band. Each panel is one OHI
+marine region. Open **year-by-year GIF animations** in
+`_pressures/prs_npp/html_maps/index.html` (run `script3_build_pp_monthly_maps.R`).
+
+```{r all-month-plots, results = "asis"}
+for (m in 1:12) {
+  cat("\n\n## ", month.name[m], "\n\n")
+  print(plot_nearshore_vs_whole(m))
+}
+```
+
+---
+
+# Decision: `climate_npp_loss` pressure (all regions = 0)
+
+After exploration of regional annual-mean patterns (2000–2024) and monthly comparisons we **do not believe NPP is declining** for any OHI marine region.
+
+**Why every region receives pressure = 0:**
+
+1. **No gulf-wide signal** — the mean of regional annual PP shows a slight
+   negative slope but **p ≈ 0.38** (not significant).
+2. **Only one borderline region** — Region_3 (Central Gulf, BCS) has the only
+   annual trend with **p < 0.05** (p ≈ 0.034), but that result is **fragile**
+   (not significant if the series starts in 2011) and is **not robust to
+   multiple comparisons** across nine regions (and many monthly tests).
+
+This pressure is **documented and scored as zero** for 2024. If future years
+or alternative PP products show robust declines, the rule can be revisited. Montly and yearly variation in NPP is high, making long term declines difficult to identify.
+
+```{r climate-npp-loss-output}
+library(readr)
+
+out_dir <- here("_pressures", "prs_npp", "output")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+climate_npp_loss <- tibble(
+  indicator = "climate_npp_loss",
+  year = 2024L,
+  rgn_id = paste0("Region_", 1:9),
+  pressure = 0
+)
+
+out_file <- file.path(out_dir, "climate_npp_loss.csv")
+write_csv(climate_npp_loss, out_file)
+
+knitr::kable(
+  climate_npp_loss,
+  caption = sprintf("Saved to %s", out_file)
+)
+```
+
+---

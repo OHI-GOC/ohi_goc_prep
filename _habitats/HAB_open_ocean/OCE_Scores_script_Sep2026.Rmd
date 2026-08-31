@@ -1,0 +1,623 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(colorspace)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/_habitats/")
+```
+
+```{r Load clean_names_lowercase function}
+clean_names_lowercase <- function(x) {
+
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+
+  x %>%
+    tolower() %>%
+    trimws()
+}
+```
+
+
+# STEP 0: Load in Region_Key
+```{r Region key}
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
+
+colnames(Region_Key0)
+
+Region_Key<- Region_Key0 %>%
+  select(OHI_region_est, OHI_region_name) %>%
+  distinct()
+```
+
+# STEP 1: Load in and summarize GOC_MarineLandings0
+
+```{r Load in GOC_MarineLandings0 as necessary}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+# NOTE TO SELF: This source file may change in later Summer / Fall run. - EMF, June 4 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+```
+
+
+# PATCH 1 - Assign groups that are unassigned to a Major_Functional_Group:
+NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+```{r Load in GenusFamilyGroup_Key as needed}
+GenusFamilyGroup_Key<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Taxonomic_Keys/GenusFamilyGroupKey_COMPLETE_Apr042026.csv")
+
+# NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+MajorFunctionalGroup_Key<- GenusFamilyGroup_Key %>%
+  select(estimated_genus_name, Major_Functional_Group)
+```
+
+```{r Major_Functional_Group patch for GOC_MarineLandings}
+# Fill in missing values based on MajorFunctionalGroup_Key:
+GOC_MarineLandings <- GOC_MarineLandings0 %>%
+  left_join(
+    MajorFunctionalGroup_Key %>%
+      select(estimated_genus_name, Major_Functional_Group),
+    by = "estimated_genus_name",
+    suffix = c("", ".lookup")
+  )
+
+GOC_MarineLandings <- GOC_MarineLandings %>%
+  mutate(
+    Major_Functional_Group = coalesce(
+      Major_Functional_Group,
+      Major_Functional_Group.lookup
+    )
+  ) %>%
+  select(-Major_Functional_Group.lookup)
+
+# 3246583 obs., 58 var.
+
+# SANITY CHECK:
+sum(is.na(GOC_MarineLandings$Major_Functional_Group))
+# Only 26 records unassigned. Looks good!
+```
+
+# PATCH 2 - Re-assign litopenaeus as paneus:
+NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+```{r Re-assign paneus as litopenaeus}
+GOC_MarineLandings <- GOC_MarineLandings %>%
+  mutate(
+    estimated_genus_name = case_when(
+      estimated_genus_name == "Litopenaeus" ~ "Penaeus",
+      TRUE ~ estimated_genus_name
+    )
+  )
+
+unique(GOC_MarineLandings$estimated_genus_name)
+```
+
+
+# **DECISION POINT: Selecting which sectors to include**
+```{r Select Sectors_of_Interest}
+table(GOC_MarineLandings$sector_estimate_draft)
+
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
+                          "marine: small-scale capture",
+                          "marine: large-scale capture")
+  
+PossibleMarineFishery_Sectors<- c("freshwater or marine: large-scale capture",
+                          "freshwater or marine: small-scale capture",
+                          "freshwater or marine: fishery sector yet to be classified")
+
+GOC_MarineFisheryLandings0<- GOC_MarineLandings %>%
+  filter(sector_estimate_draft %in% c(MarineFishery_Sectors, PossibleMarineFishery_Sectors))
+
+# 3137044 obs., 58 var.
+```
+
+```{r Re-level sector_estimate_draft and Major_Functional_Group}
+# Re-level sectors (mainly for plotting purposes):
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings0 %>%
+  filter(
+    sector_estimate_draft %in% c(
+      MarineFishery_Sectors,
+      PossibleMarineFishery_Sectors
+    )
+  ) %>%
+  mutate(
+    sector_estimate_draft = factor(
+      sector_estimate_draft,
+      levels = c(
+        "marine: large-scale capture",
+        "marine: small-scale capture",
+        "marine: fishery sector yet to be classified",
+        "freshwater or marine: large-scale capture",
+        "freshwater or marine: small-scale capture",
+        "freshwater or marine: fishery sector yet to be classified"
+      )
+    )
+  )
+
+# SANITY CHECK: How many Major_Functional_Group unassigned?
+sum(is.na(GOC_MarineFisheryLandings$Major_Functional_Group))
+# Only 18 records unassigned. Looks good!
+
+table(GOC_MarineFisheryLandings$Major_Functional_Group)
+
+GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings %>%
+  mutate(
+    Major_Functional_Group = factor(
+      Major_Functional_Group,
+      levels= c(
+        
+        # Crustaceans
+        "Shrimps, prawns",
+        "Crustaceans",
+        
+        # Molluscs
+        "Cephalopods",
+        "Molluscs excl. Cephalopods",
+        
+        # Other invertebrates
+        "Echinoderms",
+        "Jellies",
+        "Other marine invertebrates",
+        
+        # Fishes
+        "Anchovy & Sardine (small pelagics)",
+        "Pelagic marine fish (excl. anchovy & sardine)",
+        "Demersal marine fishes",
+        "Marine fishes NEI",
+        "Marine or freshwater fishes NEI",
+        "Diadromous fishes",
+        
+        # Elasmobranchs
+        "Sharks",
+        
+        # Miscellaneous / unresolved
+        "Marine algae",
+        "Marine species NEI",
+        "unknown",
+        NA_character_
+      )
+    )
+  )
+
+# SANITY CHECK:
+sum(is.na(GOC_MarineFisheryLandings$Major_Functional_Group))
+# Only 18 records unassigned. Looks good!
+```
+
+# Strategy 1 - Track changes in landings of major functional groups relative to mean landings  ------------------------------
+
+## Open Ocean Taxa (OCE)
+
+```{r Isolate Open-Ocean taxa and create OCE_Landings0}
+unique(GOC_MarineFisheryLandings$Major_Functional_Group)
+
+Open_Ocean_Taxa<- c("Pelagic marine fish (excl. anchovy & sardine)",
+"Anchovy & Sardine (small pelagics)",
+"Sharks",
+"Cephalopods"
+)
+
+colnames(GOC_MarineFisheryLandings)
+
+OpenOcean_Landings0<- GOC_MarineFisheryLandings %>%
+  filter(Major_Functional_Group %in% Open_Ocean_Taxa) %>%
+    select(state, OHI_region_est,
+         office_name_clean, landing_site_clean, 
+         year,
+         est_aquaculture_production, reported_fleet, 
+         sector_estimate_reported, sector_estimate_draft,
+         recorded_taxa_name, recorded_taxa_name_clean, common_name_clean, 
+         recorded_taxa_group, estimated_taxa_group, Major_Functional_Group,
+         estimated_species_name, estimated_genus_name, estimated_family_name,
+         landed_weight, live_weight, weight_kg_corrected, value
+         )
+
+# 653887 obs., 22 vars.
+```
+
+```{r Summarize OCE landings}
+OpenOcean_Landings_summary<- OpenOcean_Landings0 %>%
+  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+  summarize(
+    total_landings_mt = sum(weight_kg_corrected, na.rm = TRUE)/1000,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Major_Functional_Group= clean_names_lowercase(Major_Functional_Group),
+    OHI_region_est= clean_names_lowercase(OHI_region_est)
+  )
+# 853 obs.
+```
+
+# Join in region names:
+
+```{r Merge Region_Key to OCE_Scores}
+OpenOcean_Landings_summary<- OpenOcean_Landings_summary %>%
+  left_join(Region_Key, 
+            by = "OHI_region_est")
+
+# Make sure to order the regions:
+Region_order <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
+OpenOcean_Landings_summary <- OpenOcean_Landings_summary %>%
+  mutate(
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = Region_order
+    )
+  )
+```
+
+```{r Plot OCE landings over time}
+colnames(OpenOcean_Landings_summary)
+unique(OpenOcean_Landings_summary$OHI_region_name)
+
+# Plot 1, panel per region:
+
+OCE_Landings_perRegion_plot<- OpenOcean_Landings_summary %>%
+  filter(year >= 2014, year <= 2024) %>%
+  ggplot(
+    aes(
+      x = year,
+      y = log10(total_landings_mt),
+      color = Major_Functional_Group,
+      group = Major_Functional_Group
+    )
+  ) +
+  geom_line() +
+  
+  theme_bw() +
+  
+  facet_wrap(~ OHI_region_name)
+
+OCE_Landings_perRegion_plot
+
+
+# Plot 2, panel per group:
+
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
+OCE_Landings_perGroup_plot<- OpenOcean_Landings_summary %>%
+  filter(year >= 2014, year <= 2024) %>%
+  ggplot(
+    aes(
+      x = year,
+      y = total_landings_mt,
+      color = OHI_region_name,
+      group = OHI_region_name
+    )
+  ) +
+  geom_line() +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw() +
+  
+  facet_wrap(~ Major_Functional_Group)
+
+OCE_Landings_perGroup_plot
+```
+
+```{r Save plot as PNG}
+ggsave(
+  plot = OCE_Landings_perGroup_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/OCE_Landings_perGroup_plot_Aug312026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+```
+
+```{r New set of plots August 31 2026}
+
+# Calculate pre- and post-2018 means:
+mean_df <- OpenOcean_Landings_summary %>%
+  mutate(
+    period = if_else(year < 2018, "Pre-2018", "Post-2018")
+  ) %>%
+  group_by(
+    Major_Functional_Group,
+    OHI_region_name,
+    period
+  ) %>%
+  summarise(
+    mean_catch = mean(total_landings_mt, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    xmin = if_else(period == "Pre-2018",  min(OpenOcean_Landings_summary$year), 2018),
+    xmax = if_else(period == "Pre-2018",  2017, max(OpenOcean_Landings_summary$year))
+  )
+
+# Create separate plots for each functional group
+plots <- OpenOcean_Landings_summary %>%
+  split(.$Major_Functional_Group) %>%
+  lapply(function(dat) {
+    
+    group_name <- unique(dat$Major_Functional_Group)
+    
+    means <- mean_df %>%
+      filter(Major_Functional_Group == group_name)
+    
+    ggplot(dat, aes(x = year, y = total_landings_mt)) +
+      
+      # Annual time series
+      geom_line(
+        color = "grey40",
+        linewidth = 0.7
+      ) +
+      
+      # Pre/post mean lines
+      geom_segment(
+        data = means,
+        aes(
+          x = xmin,
+          xend = xmax,
+          y = mean_catch,
+          yend = mean_catch,
+          color = period
+        ),
+        linewidth = 1.2
+      ) +
+      
+      # 2018 reference line
+      geom_vline(
+        xintercept = 2018,
+        linetype = "dashed",
+        color = "black"
+      ) +
+      
+      # Region facets
+      facet_wrap(
+        ~ OHI_region_name,
+        scales = "free_y"
+      ) +
+      
+      scale_x_continuous(
+        limits = range(OpenOcean_Landings_summary$year),
+        breaks = seq(
+          min(OpenOcean_Landings_summary$year),
+          max(OpenOcean_Landings_summary$year),
+          by = 5
+        )
+      ) +
+      
+      scale_color_manual(
+        values = c(
+          "Pre-2018" = "steelblue",
+          "Post-2018" = "firebrick"
+        )
+      ) +
+      
+      labs(
+        title = group_name,
+        x = "Year",
+        y = "Total landings (mt)",
+        color = "Mean period"
+      ) +
+      
+      theme_bw()
+  })
+
+
+SmallPelagics_plot<- plots$`anchovy & sardine (small pelagics)`
+LargePelagics_plot<- plots$`pelagic marine fish (excl. anchovy & sardine)`
+Sharks_plot<- plots$sharks
+Cephalopods_plot<- plots$cephalopods
+```
+
+```{r Save plots as PNGs}
+# Small Pelagics
+ggsave(
+  plot = SmallPelagics_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/SmallPelagics_plot_Aug312026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+
+# Large Pelagics
+ggsave(
+  plot = LargePelagics_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/LargePelagics_plot_Aug312026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+
+# Sharks
+ggsave(
+  plot = Sharks_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/Sharks_plot_Aug312026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+
+# Cephalopods
+ggsave(
+  plot = Cephalopods_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/Cephalopods_plot_Aug312026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+```
+
+# Calculate final OCE_Scores:
+
+```{r Calculate OCE_Scores}
+colnames(OCE_StockStatus_summarized)
+
+OCE_Scores0 <- OCE_StockStatus_summarized %>%
+  select(year, OHI_region_est, OHI_region_name, mean_StockStatus) %>%
+  group_by(year, OHI_region_est, OHI_region_name) %>%
+  summarize(
+    OCE_Score = mean(mean_StockStatus, na.rm = TRUE) * 100,
+    n_groups = n(),
+    .groups = "drop"
+  )
+# 69 obs., 5 vars.
+
+OCE_Scores<- OCE_Scores0 %>%
+  filter(!is.na(OHI_region_est)) %>%
+  rename(OHI_region= OHI_region_est)
+# 63 obs., 5 vars.
+```
+
+```{r Sanity check final OCE_Scores}
+colnames(OCE_Scores)
+
+summary(OCE_Scores$OCE_Score)
+  #  Min. 1st Qu.  Median    Mean 3rd Qu.    Max.
+  # 49.22   71.61   77.69   76.10   82.26   94.57
+
+# Year 2024 mean for OCE scores:
+mean(OCE_Scores$OCE_Score[OCE_Scores$year == 2024], na.rm = TRUE)
+# 66
+```
+
+# SAVE OCE_Scores ------------------------------
+
+```{r Save OCE_Scores as csv}
+write.csv(OCE_Scores, 
+          "/home/ferrer/ohi_goc_prep/BD/BD_Scores/OCE_Scores/OCE_Scores_df_Jul222026.csv", 
+          row.names = FALSE)
+# 63 obs., 5 vars.
+```
+
+
+# PLOT OCE_Scores  ------------------------------
+
+```{r Level region_order for plotting purposes}
+# Make sure to order the regions:
+region_order <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
+OCE_Scores <- OCE_Scores %>%
+  mutate(
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = region_order
+    )
+  )
+```
+
+```{r Plot OCE_Scores}
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
+OCE_Scores_overTime<- OCE_Scores %>%
+  
+  filter(!is.na(OHI_region_name)) %>%
+  
+  ggplot(aes(x = year, y = OCE_Score, color = OHI_region_name)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ OHI_region_name, scales = "fixed") +
+  
+  labs(
+    title = "OCE Scores by Region",
+    subtitle= "updated: Jul 22 2026",
+    y = "FIS Score (from 0 to 100)",
+    x = "Year"
+  ) +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  ylim(0, 101) +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+OCE_Scores_overTime
+```
+
+```{r Save as PNG}
+  ggsave(
+    plot = OCE_Scores_overTime,
+    filename = sprintf("/home/ferrer/ohi_goc_prep/BD/BD_Scores/OCE_Scores/OCE_Scores_plot_Jul222026.png"),
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+```

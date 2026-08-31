@@ -1,0 +1,229 @@
+---
+title: 'Script 1 — Download Copernicus Primary Production (PP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+editor_options:
+  chunk_output_type: console
+---
+
+# Purpose
+
+This script downloads Copernicus GlobColour **Primary Production (PP)** for the
+Gulf of California — a modeled satellite estimate of phytoplankton carbon
+fixation (closer to **NPP** than raw Chl-a alone).
+
+PP is estimated from ocean-color Chl plus light (PAR), temperature, and related
+inputs (Antoine & Morel–type algorithm in the GlobColour / CMEMS product).
+
+**This is for a climate / declining-productivity pressure**, not eutrophication.
+
+| Role | Path |
+|------|------|
+| This script | `_pressures/prs_npp/script1_download_pp.qmd` |
+| Raw NetCDF (Mazu) | `/home/shares/ohi/OHI_GOC/_raw_data/npp_copernicus/` |
+| Monthly GeoTIFFs | `/home/shares/ohi/OHI_GOC/_raw_data/npp_copernicus/monthly_rasters/` |
+| Related Chl download | `_pressures/prs_npp/script1_download_chla.qmd` |
+
+---
+
+# Product information
+
+Same GlobColour BGC family as the Chl-a download, but the **primary production**
+dataset:
+
+*DOI (product):* https://doi.org/10.48670/moi-00281
+
+*Product identifier:* `OCEANCOLOUR_GLO_BGC_L4_MY_009_104`
+
+*Dataset:* Primary production, multi-sensor (4 km), monthly  
+`cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M`
+
+*Typical units:* mg C m⁻² day⁻¹
+
+Catalogue:  
+<https://data.marine.copernicus.eu/product/OCEANCOLOUR_GLO_BGC_L4_MY_009_104/description>
+
+---
+
+# Setup
+
+```{r}
+if (!require(librarian)) {
+  install.packages("librarian")
+  library(librarian)
+}
+
+librarian::shelf(
+  here,
+  terra,
+  tictoc,
+  RColorBrewer,
+  tidyverse,
+  reticulate
+)
+
+current_year <- 2025L
+data_dir_version_year <- paste0("d", current_year)
+
+# Raw download home (user-requested location on Mazu)
+raw_npp_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/npp_copernicus"
+raw_nc_dir  <- file.path(raw_npp_dir, data_dir_version_year)
+monthly_dir <- file.path(raw_npp_dir, "monthly_rasters")
+
+dir.create(raw_nc_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(monthly_dir, showWarnings = FALSE, recursive = TRUE)
+
+nc_filename <- "goc_globcolour_pp_monthly.nc"
+
+message("NetCDF directory: ", raw_nc_dir)
+message("Monthly GeoTIFF directory: ", monthly_dir)
+
+cols <- rev(colorRampPalette(brewer.pal(9, "Spectral"))(255))
+```
+
+## Install / check `copernicusmarine` (Python)
+
+```{python}
+import sys
+import subprocess
+
+def install(package):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+try:
+    import copernicusmarine
+except ImportError:
+    install("copernicusmarine")
+    import copernicusmarine
+
+print(f"copernicusmarine version: {copernicusmarine.__version__}")
+```
+
+If the import fails from R/Quarto, restart R and try:
+
+```{r}
+# library(reticulate)
+# use_virtualenv("~/.virtualenvs/r-reticulate", required = TRUE)
+# py_install("copernicusmarine", pip = TRUE, upgrade = TRUE)
+# py_run_string("import copernicusmarine; print(copernicusmarine.__version__)")
+```
+
+---
+
+# Download Primary Production (GoC subset)
+
+Same Gulf bounding box as the Chl-a Script 1 download. Update the end date when
+refreshing in future years.
+
+**Credentials:** use `copernicusmarine.login()` once on this machine (do **not**
+hard-code passwords in the script). Saved credentials are reused afterward.
+
+```{python}
+import os
+import copernicusmarine
+
+# Uses saved credentials if present; otherwise prompts / opens login flow
+copernicusmarine.login()
+
+raw_nc_dir = "/home/shares/ohi/OHI_GOC/_raw_data/npp_copernicus/d2025"
+os.makedirs(raw_nc_dir, exist_ok=True)
+out_nc = os.path.join(raw_nc_dir, "goc_globcolour_pp_monthly.nc")
+
+# ============== Update end_datetime when refreshing !!!! ==============
+copernicusmarine.subset(
+  dataset_id="cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M",
+  variables=["PP"],
+  minimum_longitude=-118.52665401785711,
+  maximum_longitude=-98.83917589285713,
+  minimum_latitude=16.492029666573647,
+  maximum_latitude=34.17058145228793,
+  start_datetime="1997-09-01T00:00:00",
+  end_datetime="2025-09-01T00:00:00",
+  output_filename=out_nc
+)
+
+print(f"Data downloaded to: {out_nc}")
+print(f"File size MB: {os.path.getsize(out_nc) / 1e6:.1f}")
+```
+
+---
+
+# Open as SpatRaster and check
+
+```{r}
+nc_path <- file.path(raw_nc_dir, nc_filename)
+pp_raster <- terra::rast(nc_path)
+
+print(pp_raster)
+cat("CRS:\n")
+print(crs(pp_raster))
+
+num_layers <- terra::nlyr(pp_raster)
+cat("Number of layers:", num_layers, "\n")
+
+time_attribute <- terra::time(pp_raster)
+cat("First time:", as.character(time_attribute[1]), "\n")
+cat("Last time: ", as.character(time_attribute[num_layers]), "\n")
+```
+
+```{r}
+# Quick look at one month (log10 helps visualization)
+i_ex <- which(format(time_attribute, "%Y-%m") == "2020-06")[1]
+if (is.na(i_ex)) i_ex <- 1
+plot(
+  log10(pp_raster[[i_ex]] + 1),
+  main = paste("log10(PP + 1) —", format(time_attribute[i_ex], "%Y-%m")),
+  col = cols
+)
+```
+
+---
+
+# Save individual monthly GeoTIFFs
+
+One file per month: `YYYY-MM-DD.tif` under `monthly_rasters/`.
+
+```{r}
+tic()
+for (i in seq_len(num_layers)) {
+  layer <- pp_raster[[i]]
+  date  <- time_attribute[i]
+  layer_name <- format(date, "%Y-%m-%d")
+  output_file <- file.path(monthly_dir, paste0(layer_name, ".tif"))
+  writeRaster(layer, filename = output_file, overwrite = TRUE)
+  if (i %% 50 == 0 || i == num_layers) {
+    message("Saved ", i, "/", num_layers, ": ", basename(output_file))
+  }
+}
+toc()
+
+cat("Monthly GeoTIFFs written to:\n ", monthly_dir, "\n")
+cat("Count:", length(list.files(monthly_dir, pattern = "\\.tif$")), "\n")
+```
+
+```{r}
+ex <- rast(file.path(monthly_dir, "2001-10-01.tif"))
+plot(
+  log10(ex + 1),
+  main = "Primary production — October 2001 (log10)",
+  xlab = "Longitude",
+  ylab = "Latitude",
+  col = cols
+)
+print(ex)
+```
+
+---
+
+# Done
+
+Raw NetCDF and monthly GeoTIFFs are ready for a PP version of the regional
+monthly exploration (analogous to `script2_chla_regional_monthly_explore.Rmd`).
