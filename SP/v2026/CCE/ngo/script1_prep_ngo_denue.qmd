@@ -1,0 +1,474 @@
+---
+title: "OHI GoC CCE: DENUE marine NGO prep (10 km and 50 km)"
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    theme: cerulean
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# 0. Workflow
+
+This script follows the same DENUE download pattern as `tr_quantity_forexample/script1_denue_prep.qmd`:
+
+1. Read **annual DENUE CSV snapshots** (November for 2019-2024; May for 2025-2026).
+2. Filter to the six GoC states.
+3. Keep **nonprofit / civic organization** SCIAN classes (see below).
+4. Optionally require **marine / coastal keywords** in establishment names.
+5. Clip to **10 km** and **50 km** coastal buffers and write both geopackages.
+
+**Important:** DENUE does not have a field called "nonprofit." We use SCIAN activity codes under **sector 81, subsector 813**. In Mexico the main civil-society class is **`813230` — Asociaciones y organizaciones civiles** (not NAICS `813410`, which is US/Canada only).
+
+Political (`813220`) and religious (`813210`) organizations are excluded. Professional (`813130`) and producer-chamber (`813110`) classes are optional and flagged in the exploration tables.
+
+**Currently downloaded:** May 2026 only, split like sector 72:
+
+- Otros servicios excepto actividades gubernamentales (**1 de 2**)
+- Otros servicios excepto actividades gubernamentales (**2 de 2**)
+
+Path on mazu:
+
+`/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025/otros_servicios_excepto_actividades_gubernamentales/`
+
+INEGI unzip names (no month suffix until renamed):
+
+- `denue_00_81_1_csv/conjunto_de_datos/denue_inegi_81_1.csv`
+- `denue_00_81_2_csv/conjunto_de_datos/denue_inegi_81_2.csv`
+
+If later years are renamed the TR way (`denue_00_81_1_0526_csv`, etc.), the helpers below will find those too.
+
+Run **Section 3** first: it lists every `nombre_act` in this sector 81 snapshot.
+
+```{r}
+library(tidyverse)
+library(sf)
+library(here)
+library(janitor)
+
+sf::sf_use_s2(FALSE)
+
+# Only May 2026 sector 81 is downloaded so far.
+series_years <- 2026L
+
+denue_base_path <- "/home/shares/ohi/OHI_GOC/_raw_data/inegi_denue/d2025"
+ngo_sector <- "otros_servicios_excepto_actividades_gubernamentales"
+
+if (!dir.exists(file.path(denue_base_path, ngo_sector))) {
+  local_copy <- here::here(ngo_sector)
+  if (dir.exists(local_copy)) {
+    message("Shares path missing; using local copy: ", local_copy)
+    denue_base_path <- here::here()
+  }
+}
+
+int_dir <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/int/marine_ngos"
+)
+dir.create(int_dir, recursive = TRUE, showWarnings = FALSE)
+
+out_10km_gpkg <- here::here(int_dir, "marine_ngos_2019_2026_goc_10km.gpkg")
+out_50km_gpkg <- here::here(int_dir, "marine_ngos_2019_2026_goc_50km.gpkg")
+out_explore_csv <- here::here(int_dir, "marine_ngo_denue_activity_exploration.csv")
+out_nombre_act_csv <- here::here(int_dir, "denue_81_2026may_nombre_act_inventory.csv")
+out_list_10km_csv <- here::here(int_dir, "marine_ngo_unit_list.csv")
+out_list_50km_csv <- here::here(int_dir, "marine_ngo_unit_list_50km.csv")
+
+# strict | medium | broad  (see filter section)
+ngo_filter_tier <- "medium"
+```
+
+# 1. Shared helpers (same conventions as script1_denue_prep.qmd)
+
+```{r}
+goc_states <- c(
+  "baja california", "baja california sur", "jalisco",
+  "nayarit", "sinaloa", "sonora"
+)
+
+get_folder_suffix <- function(year) {
+  suffixes <- list(
+    "2016" = "1016",
+    "2017" = "1117",
+    "2018" = "1118",
+    "2019" = "1119",
+    "2020" = "1120",
+    "2021" = "1121",
+    "2022" = "1122",
+    "2023" = "1123",
+    "2024" = "1124",
+    "2025" = "0525",
+    "2026" = "0526"
+  )
+  suffixes[[as.character(year)]]
+}
+
+fix_denue_text <- function(x) {
+  x %>%
+    as.character() %>%
+    str_replace_all("<fa>", "ú") %>%
+    str_replace_all("<e1>", "á") %>%
+    str_replace_all("<ed>", "í") %>%
+    str_replace_all("<f3>", "ó") %>%
+    str_replace_all("<f1>", "ñ") %>%
+    str_replace_all("<e9>", "é")
+}
+
+clean_municipio <- function(municipio_raw) {
+  municipio_fixed <- fix_denue_text(municipio_raw)
+  municipio_lower <- municipio_fixed %>%
+    str_to_lower() %>%
+    str_replace_all(" ", "_")
+  case_when(
+    municipio_fixed == "San Ignacio Río Muerto" ~ "cajeme",
+    municipio_fixed == "Bácum" ~ "cajeme",
+    municipio_fixed == "Mexicali" ~ "san_felipe",
+    municipio_fixed == "Sinaloa" ~ "guasave",
+    municipio_fixed == "Santa María del Oro" ~ "san_pedro_lagunillas",
+    TRUE ~ municipio_lower
+  )
+}
+
+employees_from_per_ocu <- function(per_ocu) {
+  case_when(
+    per_ocu == "0 a 5 personas" ~ 3,
+    per_ocu == "6 a 10 personas" ~ 8,
+    per_ocu == "11 a 30 personas" ~ 20.5,
+    per_ocu == "31 a 50 personas" ~ 40.5,
+    per_ocu == "51 a 100 personas" ~ 75.5,
+    per_ocu == "101 a 250 personas" ~ 175.5,
+    per_ocu %in% c("251 y m<e1>s personas", "251 y más personas") ~ 300,
+    TRUE ~ NA_real_
+  )
+}
+
+normalize_codigo_act <- function(x) {
+  str_pad(str_remove_all(as.character(x), "[^0-9]"), width = 6, side = "left", pad = "0")
+}
+
+# SCIAN 813 classes in Mexico (SCIAN 2018/2023 Mexico, not NAICS 813410)
+ngo_scian_strict <- c("813230") # Asociaciones y organizaciones civiles
+
+ngo_scian_medium <- c(
+  "813230", # civiles
+  "813130", # profesionistas (e.g. biologist / planner associations)
+  "813110"  # cámaras de productores (fishing chambers possible; review in exploration)
+)
+
+ngo_scian_broad <- c(
+  "813110", "813120", "813130", "813140",
+  "813230"
+  # exclude 813210 religious, 813220 political (also absent from DENUE)
+)
+
+ngo_scian_exclude <- c("813210", "813220")
+
+marine_ngo_regex <- regex(
+  paste(
+    "marin|oc[eé]an|cost(er|a|ero)|golfo|cort[eé]|mar de cort",
+    "pesca|pesquer|acu[ií]cul|manglar|tortug|vaquita|ballen|delfin",
+    "conserv|ambient|ecolog|biodivers|arrecif|humedal|playa",
+    "parque marino|área natural|area natural|anp|reserva",
+    "lobo marino|totoaba|comunidad.*pesqu|cooperativa.*pesqu",
+    "vaquita|totoaba|semarnat|conanp|conapesca",
+    sep = "|"
+  ),
+  ignore_case = TRUE
+)
+
+pick_ngo_scian <- function(tier = ngo_filter_tier) {
+  switch(
+    tier,
+    strict = ngo_scian_strict,
+    medium = ngo_scian_medium,
+    broad = ngo_scian_broad,
+    stop("ngo_filter_tier must be strict, medium, or broad")
+  )
+}
+
+# Sector 81 is two INEGI files (1 de 2 / 2 de 2), same pattern as sector 72.
+# Accept both unzipped names (denue_00_81_1_csv) and TR-style suffixes (denue_00_81_1_0526_csv).
+denue_81_part_path <- function(year, part, base_path = denue_base_path, sector = ngo_sector) {
+  suffix <- get_folder_suffix(year)
+  folder_candidates <- c(
+    paste0("denue_00_81_", part, "_", suffix, "_csv"),
+    paste0("denue_00_81_", part, "_csv")
+  )
+  file_candidates <- c(
+    paste0("denue_inegi_81_", part, ".csv"),
+    "denue_inegi_81_.csv"
+  )
+  for (folder in folder_candidates) {
+    for (fname in file_candidates) {
+      csv_path <- here::here(base_path, sector, folder, "conjunto_de_datos", fname)
+      if (file.exists(csv_path)) return(csv_path)
+    }
+  }
+  NA_character_
+}
+
+denue_81_paths <- function(year, base_path = denue_base_path, sector = ngo_sector) {
+  paths <- c(
+    denue_81_part_path(year, 1, base_path, sector),
+    denue_81_part_path(year, 2, base_path, sector)
+  )
+  paths <- paths[!is.na(paths)]
+  if (length(paths) == 0) {
+    stop(
+      "Missing DENUE sector 81 CSVs for ", year, " under ",
+      here::here(base_path, sector)
+    )
+  }
+  paths
+}
+
+read_denue_81_year <- function(year) {
+  csv_paths <- denue_81_paths(year)
+  map_dfr(csv_paths, function(csv_path) {
+    message("Reading ", year, ": ", csv_path)
+    # INEGI splits leave the same column as character in one file and numeric in the other.
+    read_csv(
+      csv_path,
+      locale = locale(encoding = "latin1"),
+      col_types = cols(.default = col_character()),
+      show_col_types = FALSE
+    ) %>%
+      select(-any_of(c("cod_postal", "edificio_e", "telefono")))
+  })
+}
+
+prepare_denue_goc <- function(dat, year) {
+  dat %>%
+    clean_names() %>%
+    mutate(entidad = str_to_lower(entidad)) %>%
+    select(-any_of(c("cod_postal", "edificio_e", "telefono"))) %>%
+    filter(entidad %in% goc_states) %>%
+    mutate(
+      data_year = as.integer(year),
+      codigo_act = normalize_codigo_act(codigo_act),
+      nom_estab = fix_denue_text(nom_estab),
+      raz_social = fix_denue_text(raz_social),
+      nombre_act = fix_denue_text(nombre_act),
+      municipio = fix_denue_text(municipio),
+      id = as.character(id),
+      latitud = as.numeric(latitud),
+      longitud = as.numeric(longitud)
+    ) %>%
+    filter(!is.na(longitud), !is.na(latitud), longitud != 0, latitud != 0)
+}
+
+label_ngo_scian <- function(codigo_act) {
+  case_when(
+    codigo_act == "813110" ~ "chamber_producer_commerce",
+    codigo_act == "813120" ~ "labor_union",
+    codigo_act == "813130" ~ "professional_association",
+    codigo_act == "813140" ~ "recreational_regulatory",
+    codigo_act == "813210" ~ "religious",
+    codigo_act == "813220" ~ "political",
+    codigo_act == "813230" ~ "civic_civil_association",
+    str_starts(codigo_act, "813") ~ "other_813",
+    TRUE ~ "not_813"
+  )
+}
+
+filter_ngo_rows <- function(df, tier = ngo_filter_tier, require_marine_text = TRUE) {
+  allowed <- pick_ngo_scian(tier)
+  df <- df %>%
+    mutate(
+      ngo_class = label_ngo_scian(codigo_act),
+      text_blob = paste(nom_estab, raz_social, nombre_act, sep = " "),
+      has_marine_text = str_detect(text_blob, marine_ngo_regex)
+    ) %>%
+    filter(
+      codigo_act %in% allowed,
+      !(codigo_act %in% ngo_scian_exclude)
+    )
+  if (require_marine_text) {
+    df <- df %>% filter(has_marine_text)
+  }
+  df
+}
+
+clip_to_study_area <- function(points_sf, study_layer, label) {
+  clipped <- st_intersection(
+    st_transform(points_sf, st_crs(study_layer)),
+    study_layer
+  )
+  message("Kept ", nrow(clipped), " rows inside ", label)
+  clipped
+}
+
+save_marine_ngo_outputs <- function(marine_ngo_goc, gpkg_path, list_csv_path) {
+  marine_ngo_goc %>%
+    st_drop_geometry() %>%
+    arrange(data_year, rgn_id, nom_estab) %>%
+    write_csv(list_csv_path)
+  st_write(marine_ngo_goc, gpkg_path, delete_dsn = TRUE, quiet = TRUE)
+  marine_ngo_goc %>%
+    st_drop_geometry() %>%
+    count(data_year, rgn_id, name = "n_units") %>%
+    arrange(data_year, rgn_id)
+}
+```
+
+# 2. Study areas (10 km and 50 km, same buffers as script1_denue_prep.qmd)
+
+```{r}
+inland_10 <- st_read(
+  here::here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer", "inland_10km_goc.shp"),
+  quiet = TRUE
+)
+inland_50 <- st_read(
+  here::here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer", "inland_50km_goc.shp"),
+  quiet = TRUE
+)
+regions_marine <- st_read(
+  here::here("spatial/ohi_regions/goc_ohi_rgns.shp"),
+  quiet = TRUE
+) %>%
+  filter(location == "marine")
+
+marine_and_inland10 <- bind_rows(
+  regions_marine %>% dplyr::select(rgn_id, geometry),
+  inland_10 %>% dplyr::select(rgn_id, geometry)
+) %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
+```
+
+# 3. Explore every `nombre_act` in the May 2026 sector 81 snapshot
+
+Sector 81 is not only NGOs. Most of it is auto repair, beauty salons, laundry, and churches. This chunk lists **all 43 SCIAN classes** in the two CSVs, then zooms in on subsector **813**.
+
+```{r}
+denue_81_2026 <- read_denue_81_year(2026) %>% prepare_denue_goc(2026)
+
+denue_81_nombre_act <- denue_81_2026 %>%
+  count(codigo_act, nombre_act, name = "n_goc_six_states") %>%
+  arrange(desc(n_goc_six_states)) %>%
+  mutate(
+    scian_3digit = str_sub(codigo_act, 1, 3),
+    is_813 = str_starts(codigo_act, "813"),
+    ngo_class = label_ngo_scian(codigo_act)
+  )
+
+write_csv(denue_81_nombre_act, out_nombre_act_csv)
+denue_81_nombre_act
+
+denue_81_nombre_act %>%
+  count(scian_3digit, wt = n_goc_six_states, name = "n_establishments") %>%
+  arrange(desc(n_establishments))
+```
+
+```{r}
+denue_813_explore <- denue_81_2026 %>%
+  filter(str_starts(codigo_act, "813")) %>%
+  mutate(ngo_class = label_ngo_scian(codigo_act))
+
+unique(denue_813_explore$ngo_class)
+# [1] "religious"                 "chamber_producer_commerce" "civic_civil_association"   "labor_union"               "professional_association" 
+# [6] "recreational_regulatory"  
+
+denue_813_activity_summary <- denue_813_explore %>%
+  count(data_year, codigo_act, nombre_act, ngo_class, name = "n_goc_statewide") %>%
+  arrange(desc(n_goc_statewide))
+
+write_csv(denue_813_activity_summary, out_explore_csv)
+denue_813_activity_summary
+
+# frequent civic-association names (813230), mostly ejidos, churches excluded already, etc.!
+denue_813_explore %>%
+  filter(codigo_act == "813230") %>%
+  count(nom_estab, nombre_act, sort = TRUE) %>%
+  slice_head(n = 40)
+
+# marine-keyword hits inside civic associations (many false positives!!!: Marina condos, Playas, Costa...check them)
+marine_keywords <- denue_813_explore %>%
+  filter(codigo_act == "813230") %>%
+  mutate(text_blob = paste(nom_estab, raz_social, nombre_act, sep = " ")) %>%
+  filter(str_detect(text_blob, marine_ngo_regex)) %>%
+  select(entidad, municipio, nom_estab, raz_social) %>%
+  arrange(entidad, municipio, nom_estab)
+```
+
+**How to read this**
+
+| SCIAN | `nombre_act` (expected) | NGO type | Keep for marine CCE? |
+|-------|-------------------------|----------|----------------------|
+| **813230** | Asociaciones y organizaciones civiles | AC / civil society | **Yes**, core tier, plus marine keyword |
+| **813130** | Asociaciones y organizaciones de profesionistas | Professional associations | Maybe, if marine keyword (medium tier) |
+| **813110** | Asociaciones, organizaciones y cámaras de productores... | Chambers / producer groups | Maybe for fishing chambers only (review names) |
+| **813120** | Asociaciones y organizaciones laborales y sindicales | Labor unions | Usually no (broad tier only if EWG wants) |
+| **813140** | Asociaciones regulatorias de actividades recreativas | Sports/fishing leagues | Review case by case |
+| **813210** | Asociaciones y organizaciones religiosas | Religious | **No** |
+| **813220** | Asociaciones y organizaciones políticas | Political | **No** (also excluded from DENUE) |
+
+DENUE also lists some **associations under sector 71** (for example sports teams). Those are not in sector 81 and are not included here.
+
+# 4. Process all years, filter NGOs, clip to 10 km and 50 km
+
+```{r}
+process_denue_ngo_year <- function(year, tier = ngo_filter_tier) {
+  dat <- read_denue_81_year(year) %>%
+    prepare_denue_goc(year) %>%
+    filter_ngo_rows(tier = tier, require_marine_text = TRUE) %>%
+    mutate(
+      municipio_clean = clean_municipio(municipio),
+      employees_estimated = employees_from_per_ocu(per_ocu),
+      filter_tier = tier
+    )
+  if (nrow(dat) == 0) return(dat)
+  dat %>%
+    st_as_sf(coords = c("longitud", "latitud"), crs = 4326, remove = FALSE)
+}
+
+marine_ngo_sf_list <- map(series_years, function(yr) {
+  tryCatch(
+    process_denue_ngo_year(yr, tier = ngo_filter_tier),
+    error = function(e) {
+      message("Skipping ", yr, ": ", conditionMessage(e))
+      tibble()
+    }
+  )
+})
+
+marine_ngo_sf <- bind_rows(marine_ngo_sf_list) %>%
+  distinct(id, data_year, .keep_all = TRUE)
+
+if (nrow(marine_ngo_sf) == 0) {
+  stop(
+    "No marine NGO rows found. Download DENUE sector 81 for 2019-2026 ",
+    "and check int/marine_ngo_denue_activity_exploration.csv."
+  )
+}
+
+message(
+  "Filtered to ", nrow(marine_ngo_sf),
+  " marine NGO unit-years (tier = ", ngo_filter_tier, ") before spatial clip."
+)
+
+marine_ngo_goc_10km <- clip_to_study_area(marine_ngo_sf, marine_and_inland10, "10 km")
+marine_ngo_goc_50km <- clip_to_study_area(marine_ngo_sf, inland_50, "50 km")
+```
+
+# 5. Save outputs
+
+```{r}
+save_marine_ngo_outputs(marine_ngo_goc_10km, out_10km_gpkg, out_list_10km_csv)
+save_marine_ngo_outputs(marine_ngo_goc_50km, out_50km_gpkg, out_list_50km_csv)
+```
+
+Then run:
+
+- `marine_ngo_per_capita.qmd` for 10 km scores
+- `marine_ngo_per_capita_50km.qmd` for 50 km scores
+
+Change `ngo_filter_tier` at the top (`strict`, `medium`, or `broad`) after reviewing `marine_ngo_denue_activity_exploration.csv`.
+

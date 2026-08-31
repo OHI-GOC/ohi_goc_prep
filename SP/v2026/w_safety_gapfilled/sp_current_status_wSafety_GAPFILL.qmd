@@ -1,0 +1,297 @@
+---
+title: 'OHI GoC 2026: Sense of Place (SP) with Security in CCE (GAPFILL)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    theme: cerulean
+    highlight-style: haddock
+editor_options:
+  chunk_output_type: console
+---
+
+# Sense of Place with Security in CCE — GAPFILL
+
+Same SP aggregation as `sp_current_status_wSafety.qmd`, but uses **gapfilled security** inside CCE:
+
+1. Prefer `cce_current_status_with_security_gapfill.csv` from `new_cce_integration_GAPFILL.qmd`
+2. Else rebuild CCE with the same security gapfill rules (temporal region mean; spatial GoC donors for Regions 2, 3, 5; no border cities)
+
+SP = equal-weight mean of CCE (with gapfilled security), LSP, and ICO.
+
+```{r}
+library(tidyverse)
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+region_levels <- paste0("Region_", 1:9)
+rgn_label_colors <- setNames(
+  unname(rgn_colors[region_levels]),
+  unname(rgn_labels[region_levels])
+)
+
+path_cce_out <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/output"
+path_viz <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/viz"
+path_lsp <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/lsp_current_status.csv"
+path_ico <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/output/ico_mean_risk_status_per_region_041326.csv"
+path_security <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/security_output/cs_security.csv"
+path_security_gapfill <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/security_output/cs_security_gapfill.csv"
+path_sp_out <- "/home/shares/ohi/OHI_GOC/goal_prep/sp"
+
+dir.create(path_viz, recursive = TRUE, showWarnings = FALSE)
+dir.create(path_sp_out, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Gapfill helper (fallback if CCE gapfill table is missing)
+
+```{r}
+spatial_donors <- list(
+  "Region_2" = c("Region_4"),
+  "Region_3" = c("Region_4"),
+  "Region_5" = c("Region_6", "Region_7")
+)
+
+gapfill_security <- function(security_raw, years, regions = region_levels) {
+  out <- tidyr::crossing(rgn_id = regions, year = years) %>%
+    dplyr::left_join(security_raw, by = c("rgn_id", "year")) %>%
+    dplyr::mutate(
+      security_observed = security_status,
+      gapfilled = FALSE,
+      gapfill_reason = NA_character_
+    )
+
+  rgn_means <- out %>%
+    dplyr::filter(!is.na(security_status)) %>%
+    dplyr::group_by(rgn_id) %>%
+    dplyr::summarize(rgn_mean = mean(security_status), .groups = "drop")
+
+  regions_with_data <- rgn_means$rgn_id
+
+  out <- out %>%
+    dplyr::left_join(rgn_means, by = "rgn_id") %>%
+    dplyr::mutate(
+      needs_temporal = is.na(security_status) & rgn_id %in% regions_with_data,
+      security_status = dplyr::if_else(needs_temporal, rgn_mean, security_status),
+      gapfilled = dplyr::if_else(needs_temporal, TRUE, gapfilled),
+      gapfill_reason = dplyr::if_else(
+        needs_temporal,
+        "temporal: mean of same region across available ENSU years",
+        gapfill_reason
+      )
+    ) %>%
+    dplyr::select(-rgn_mean, -needs_temporal)
+
+  for (target in names(spatial_donors)) {
+    donors <- spatial_donors[[target]]
+    for (yr in years) {
+      donor_vals <- out %>%
+        dplyr::filter(rgn_id %in% donors, year == yr, !is.na(security_status)) %>%
+        dplyr::pull(security_status)
+      if (length(donor_vals) == 0) {
+        donor_vals <- out %>%
+          dplyr::filter(rgn_id %in% donors, !is.na(security_status)) %>%
+          dplyr::pull(security_status)
+      }
+      if (length(donor_vals) == 0) next
+
+      fill_val <- mean(donor_vals)
+      idx <- which(out$rgn_id == target & out$year == yr & is.na(out$security_status))
+      if (length(idx) == 0) next
+
+      out$security_status[idx] <- fill_val
+      out$gapfilled[idx] <- TRUE
+      out$gapfill_reason[idx] <- paste0(
+        "spatial: GoC donor mean from ",
+        paste(donors, collapse = ", "),
+        " (excludes border cities)"
+      )
+    }
+  }
+
+  out
+}
+```
+
+# CCE with gapfilled security
+
+```{r}
+path_cce_w_sec <- file.path(
+  path_cce_out,
+  "cce_current_status_with_security_gapfill.csv"
+)
+
+if (file.exists(path_cce_w_sec)) {
+  cce_with_security <- read_csv(path_cce_w_sec, show_col_types = FALSE)
+} else {
+  message("cce_current_status_with_security_gapfill.csv not found; rebuilding.")
+
+  ama <- read_csv(
+    file.path(path_cce_out, "current_status_ama_tu_playa_progress_072326.csv"),
+    show_col_types = FALSE
+  ) %>%
+    select(rgn_id, year, ama_status = current_status)
+
+  if (!"year" %in% names(ama)) {
+    ama <- ama %>% mutate(year = 2025L)
+  }
+
+  cult <- read_csv(
+    file.path(
+      path_cce_out,
+      "cultural_places_employees_per_pop_current_status_75th_quantile.csv"
+    ),
+    show_col_types = FALSE
+  ) %>%
+    select(rgn_id, year = data_year, cult_status = score)
+
+  if (file.exists(path_security_gapfill)) {
+    security <- read_csv(path_security_gapfill, show_col_types = FALSE) %>%
+      select(rgn_id, year, security_status = current_status)
+  } else {
+    security_raw <- read_csv(path_security, show_col_types = FALSE) %>%
+      transmute(rgn_id, year = year_march, security_status = current_status)
+    years_tmp <- sort(unique(c(ama$year, cult$year, security_raw$year)))
+    security <- gapfill_security(security_raw, years = years_tmp) %>%
+      select(rgn_id, year, security_status)
+  }
+
+  cce_years <- sort(unique(c(ama$year, cult$year, security$year)))
+
+  cce_with_security <- crossing(rgn_id = region_levels, year = cce_years) %>%
+    left_join(ama, by = c("rgn_id", "year")) %>%
+    left_join(cult, by = c("rgn_id", "year")) %>%
+    left_join(security, by = c("rgn_id", "year")) %>%
+    mutate(
+      current_status = rowMeans(
+        cbind(ama_status, cult_status, security_status),
+        na.rm = TRUE
+      ),
+      current_status = if_else(is.nan(current_status), NA_real_, current_status)
+    ) %>%
+    select(rgn_id, year, current_status, ama_status, cult_status, security_status)
+}
+
+cce_status <- cce_with_security %>%
+  select(rgn_id, year, cce_status = current_status)
+
+cce_status
+```
+
+# LSP and ICO
+
+```{r}
+lsp <- read_csv(path_lsp, show_col_types = FALSE) %>%
+  select(rgn_id, lsp_status = current_status)
+
+ico <- read_csv(path_ico, show_col_types = FALSE) %>%
+  select(rgn_id, year, ico_status = current_status)
+
+cce_years <- sort(unique(cce_status$year))
+
+lsp_expanded <- crossing(
+  rgn_id = unique(lsp$rgn_id),
+  year = cce_years
+) %>%
+  left_join(lsp, by = "rgn_id")
+
+lsp_expanded
+ico
+```
+
+# SP = mean of CCE (gapfilled security), LSP, and ICO
+
+```{r}
+sp_with_safety <- cce_status %>%
+  full_join(lsp_expanded, by = c("rgn_id", "year")) %>%
+  full_join(ico, by = c("rgn_id", "year")) %>%
+  filter(year %in% cce_years) %>%
+  arrange(rgn_id, year) %>%
+  mutate(
+    current_status = rowMeans(
+      cbind(cce_status, lsp_status, ico_status),
+      na.rm = TRUE
+    ),
+    current_status = if_else(is.nan(current_status), NA_real_, current_status)
+  ) %>%
+  select(rgn_id, year, current_status, cce_status, lsp_status, ico_status)
+
+sp_with_safety
+
+write_csv(
+  sp_with_safety %>% select(rgn_id, year, current_status),
+  file.path(path_sp_out, "sp_current_status_with_security_gapfill.csv")
+)
+
+write_csv(
+  sp_with_safety,
+  file.path(path_sp_out, "sp_current_status_with_security_gapfill_detail.csv")
+)
+```
+
+# Plot overall SP current status (GAPFILL)
+
+```{r}
+sp_plot_df <- sp_with_safety %>%
+  mutate(
+    region_label = factor(
+      unname(rgn_labels[rgn_id]),
+      levels = unname(rgn_labels[region_levels])
+    )
+  ) %>% 
+  filter(year %in% c(2019:2025))
+
+p_sp <- ggplot(
+  sp_plot_df,
+  aes(x = year, y = current_status, color = region_label, group = rgn_id)
+) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "black", linewidth = 0.6) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_color_manual(values = rgn_label_colors, drop = FALSE) +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_x_continuous(breaks = sort(unique(sp_plot_df$year))) +
+  labs(
+    title = "CURRENT STATUS: Sense of Place (SP) with Security in CCE (GAPFILL)",
+    subtitle = "Mean of CCE (Ama + cultural + gapfilled security), LSP, and ICO",
+    x = "Year",
+    y = "Current status (0–100)",
+    color = "Region"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+p_sp
+
+ggsave(
+  filename = file.path(path_viz, "sp_current_status_with_security_gapfill.pdf"),
+  plot = p_sp,
+  width = 6,
+  height = 6,
+  device = cairo_pdf
+)
+```

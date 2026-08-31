@@ -1,0 +1,225 @@
+---
+title: 'OHI GoC 2026: Security current status plot (GAPFILL)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    theme: cerulean
+    highlight-style: haddock
+editor_options:
+  chunk_output_type: console
+---
+
+# Security current status (with gapfill)
+
+Same ENSU security current status plot as `security_current_status_plot.qmd`, but **gapfills NAs** before plotting:
+
+1. **Temporal** — if a region has ENSU data in some years but not others (e.g. Region 7 / Ciudad Obregón), fill missing years with that **region’s mean across available March years** (for single-city regions this equals the city mean).
+2. **Spatial** — if a region has **no** ENSU city, fill from **GoC-only** donor regions in the same state (border cities like Nogales excluded):
+   - Regions 2 & 3 ← Region 4 (La Paz / Los Cabos, BCS)
+   - Region 5 ← mean of Regions 6 & 7 (Hermosillo & Ciudad Obregón, Sonora)
+
+Gapfilled rows are flagged (`gapfilled`, `gapfill_reason`) and drawn with open points on the plot.
+
+```{r}
+library(tidyverse)
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+region_levels <- paste0("Region_", 1:9)
+rgn_label_colors <- setNames(
+  unname(rgn_colors[region_levels]),
+  unname(rgn_labels[region_levels])
+)
+
+path_security <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/security_output/cs_security.csv"
+path_security_out <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/security_output"
+path_viz <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/viz"
+
+dir.create(path_viz, recursive = TRUE, showWarnings = FALSE)
+dir.create(path_security_out, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Gapfill helper
+
+```{r}
+# Spatial donors: GoC ENSU cities only (no Nogales / border)
+spatial_donors <- list(
+  "Region_2" = c("Region_4"),           # BCS → La Paz / Los Cabos
+  "Region_3" = c("Region_4"),
+  "Region_5" = c("Region_6", "Region_7") # Sonora → Hermosillo / Cd. Obregón
+)
+
+gapfill_security <- function(security_raw, years, regions = region_levels) {
+  # security_raw: tibble with rgn_id, year, security_status
+
+  out <- tidyr::crossing(rgn_id = regions, year = years) %>%
+    dplyr::left_join(security_raw, by = c("rgn_id", "year")) %>%
+    dplyr::mutate(
+      security_observed = security_status,
+      gapfilled = FALSE,
+      gapfill_reason = NA_character_
+    )
+
+  # --- 1) Temporal: same-region mean across available years ---
+  rgn_means <- out %>%
+    dplyr::filter(!is.na(security_status)) %>%
+    dplyr::group_by(rgn_id) %>%
+    dplyr::summarize(rgn_mean = mean(security_status), .groups = "drop")
+
+  regions_with_data <- rgn_means$rgn_id
+
+  out <- out %>%
+    dplyr::left_join(rgn_means, by = "rgn_id") %>%
+    dplyr::mutate(
+      needs_temporal = is.na(security_status) & rgn_id %in% regions_with_data,
+      security_status = dplyr::if_else(needs_temporal, rgn_mean, security_status),
+      gapfilled = dplyr::if_else(needs_temporal, TRUE, gapfilled),
+      gapfill_reason = dplyr::if_else(
+        needs_temporal,
+        "temporal: mean of same region across available ENSU years",
+        gapfill_reason
+      )
+    ) %>%
+    dplyr::select(-rgn_mean, -needs_temporal)
+
+  # --- 2) Spatial: GoC donor regions (excludes border cities) ---
+  for (target in names(spatial_donors)) {
+    donors <- spatial_donors[[target]]
+
+    for (yr in years) {
+      donor_vals <- out %>%
+        dplyr::filter(rgn_id %in% donors, year == yr, !is.na(security_status)) %>%
+        dplyr::pull(security_status)
+
+      # if that year is missing for all donors, fall back to donor all-year mean
+      if (length(donor_vals) == 0) {
+        donor_vals <- out %>%
+          dplyr::filter(rgn_id %in% donors, !is.na(security_status)) %>%
+          dplyr::pull(security_status)
+      }
+      if (length(donor_vals) == 0) next
+
+      fill_val <- mean(donor_vals)
+      idx <- which(out$rgn_id == target & out$year == yr & is.na(out$security_status))
+      if (length(idx) == 0) next
+
+      out$security_status[idx] <- fill_val
+      out$gapfilled[idx] <- TRUE
+      out$gapfill_reason[idx] <- paste0(
+        "spatial: GoC donor mean from ",
+        paste(donors, collapse = ", "),
+        " (excludes border cities)"
+      )
+    }
+  }
+
+  out
+}
+```
+
+# Read, gapfill, and save
+
+```{r}
+cs_security_raw <- read_csv(path_security, show_col_types = FALSE) %>%
+  transmute(
+    rgn_id,
+    year = year_march,
+    security_status = current_status
+  )
+
+security_years <- sort(unique(cs_security_raw$year))
+
+cs_security <- gapfill_security(cs_security_raw, years = security_years) %>%
+  mutate(
+    rgn_id = factor(rgn_id, levels = region_levels),
+    region_label = factor(
+      unname(rgn_labels[as.character(rgn_id)]),
+      levels = unname(rgn_labels[region_levels])
+    ),
+    current_status = security_status
+  ) %>%
+  arrange(rgn_id, year)
+
+cs_security
+
+write_csv(
+  cs_security %>%
+    select(
+      rgn_id, year, current_status, security_observed,
+      gapfilled, gapfill_reason
+    ),
+  file.path(path_security_out, "cs_security_gapfill.csv")
+)
+
+# quick check of what was filled
+cs_security %>%
+  filter(gapfilled) %>%
+  count(rgn_id, gapfill_reason)
+```
+
+# Plot
+
+```{r}
+p_security <- ggplot(
+  cs_security,
+  aes(x = year, y = current_status, color = region_label, group = rgn_id)
+) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "black", linewidth = 0.6) +
+  geom_line(linewidth = 0.9) +
+  geom_point() +
+  # observed = solid; gapfilled = open
+  #geom_point(aes(shape = gapfilled), size = 2.2) +
+  #scale_shape_manual(
+    #values = c("FALSE" = 16, "TRUE" = 1),
+    #labels = c("FALSE" = "Observed", "TRUE" = "Gapfilled"),
+    #name = "Value"
+  #) +
+  scale_color_manual(values = rgn_label_colors, drop = FALSE) +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_x_continuous(breaks = sort(unique(cs_security$year))) +
+  labs(
+    title = "CURRENT STATUS: Security (GAPFILL)",
+    subtitle = "ENSU March; temporal = same-region year mean; spatial = GoC donors (no border cities). Dashed line = ideal (100).",
+    x = "Year",
+    y = "Current status (0-100)",
+    color = "Region"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+p_security
+
+ggsave(
+  filename = file.path(path_viz, "security_current_status_gapfill.pdf"),
+  plot = p_security,
+  width = 6,
+  height = 6,
+  device = cairo_pdf
+)
+```

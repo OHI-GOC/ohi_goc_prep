@@ -1,0 +1,169 @@
+---
+title: "Seagrass Habitat Condition and Trend - Gulf of California OHI"
+author: "Austin Martinez"
+date: 05/06/2026
+format: 
+  html:
+    code-fold: show
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+
+
+```{r}
+# Load in Libraries
+library(sf)
+library(dplyr)
+library(here)
+library(terra)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tmap)
+```
+
+```{r}
+# Read in OHI region boundaries
+ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |> st_make_valid()
+```
+
+
+```{r}
+seagrass <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/seagrass/Seagrass_merged.shp") |> st_zm()
+```
+
+
+```{r}
+# Match CRSs of OHI regions to seagrass data
+ohi_regions <- st_transform(ohi_regions, st_crs(seagrass))
+
+# Find the SEA area in each OHI region
+seagrass_ohi <- st_intersection(seagrass, ohi_regions) |>
+  group_by(rgn_id) |>
+  summarise(geometry = st_union(geometry), .groups = "drop") |>
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6) |>
+  st_drop_geometry()
+seagrass_ohi
+```
+```{r}
+# Make a table
+seagrass_ohi |>
+  mutate(
+    year = 2025,
+    rgn_id = gsub("_", " ", rgn_id)   # Region_1 → Region 1
+  ) |>
+  select(rgn_id, year, area_km2) |>
+  kable(
+    digits = 2,
+    col.names = c('Region ID', 'Year', 'Extent (km²)'),
+    align = c('c', 'c', 'r')
+  ) |>
+  kable_styling(
+    bootstrap_options = c('striped', 'bordered', 'hover')
+  ) |>
+  add_header_above(
+    c('Seagrass Extent' = 3)
+  )
+
+```
+
+
+```{r}
+# Create composite seagrass data frame
+seagrass_ohi <- seagrass_ohi |>
+  # Add condition scores
+  mutate(condition = case_when(
+    rgn_id %in% c("Region_1", "Region_2", "Region_3", "Region_5", "Region_7", "Region_8") ~ 0.54,
+    rgn_id == "Region_4" ~ 0.3063,
+    rgn_id == "Region_6" ~ 1,
+    rgn_id == "Region_9" ~ NA_real_,
+    TRUE ~ NA_real_
+  )) |>
+  
+  # Rename area_km2 → extent and add year
+  rename(extent = area_km2) |>
+  mutate(year = 2025) |>
+  
+  # Add trend + habitat columns
+  mutate(
+    trend = NA_real_,
+    habitat = "seagrass"
+  ) |>
+  
+  # Final column order
+  select(rgn_id, year, condition, extent, habitat)
+
+seagrass_ohi
+```
+
+```{r}
+# Condition table
+seagrass_condition <- seagrass_ohi %>%
+  select(rgn_id, year, condition)
+
+# Extent table
+seagrass_extent <- seagrass_ohi %>%
+  select(rgn_id, year, extent)
+
+```
+
+```{r}
+# Write CSVs to output_data directory
+write.csv(seagrass_condition,
+          "SEA_outputs/seagrass_condition.csv",
+          row.names = FALSE)
+write.csv(seagrass_extent,
+          "SEA_outputs/seagrass_extent.csv",
+          row.names = FALSE)
+```
+
+
+
+
+
+```{r}
+library(tmap)
+
+tmap_mode("plot")
+
+# 1. Add a dummy column so tmap can create a legend for seagrass
+seagrass$habitat <- "Seagrass"
+
+tm_shape(ohi_regions) +
+  tm_polygons(
+    col = "location",
+    palette = c(
+      "marine" = "#cceeff",   # light blue
+      "land"   = "#f5e6c8"    # light tan
+    ),
+    alpha = 0.5,
+    border.col = "gray",
+    border.lwd = 0.6,
+    legend.show = FALSE        # hide marine/land legend
+  ) +
+
+tm_shape(seagrass) +
+  tm_polygons(
+    col = "habitat",                     # use dummy column
+    palette = c("Seagrass" = "#228B22"), # blue seagrass
+    alpha = 1,
+    border.col = "#228B22",
+    border.lwd = 1000,
+    title = "Habitat"                    # legend label
+  ) +
+
+tm_layout(
+    title.size = 1.3,
+    title.fontface = "bold",
+    title.position = c(0.02, 0.98),
+    frame = FALSE
+  ) +
+
+tm_scale_bar(position = c("left", "bottom"))
+
+```
+
+

@@ -1,0 +1,730 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+library(sf) # for work on shape fines
+# Visualization
+library(ggplot2)
+library(colorspace)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+
+setwd("/home/ferrer/ohi_goc_prep/_habitats/")
+```
+
+```{r Load clean_names_lowercase function}
+clean_names_lowercase <- function(x) {
+
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+
+  x %>%
+    tolower() %>%
+    trimws()
+}
+```
+
+
+# STEP 0: Load in Region_Key
+```{r Region key}
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
+
+colnames(Region_Key0)
+
+Region_Key<- Region_Key0 %>%
+  select(OHI_region= OHI_region_est, OHI_region_name) %>%
+  distinct()
+```
+
+# STEP 1: Load in NRSI_data0
+
+```{r Load in NRSI_data0}
+NRSI_data0<- read.csv("/home/shares/ohi/OHI_GOC/_raw_data/dataMares/nrsi_per_reef_year_ALL_not_filtered.csv")
+
+NRSI_data<- NRSI_data0
+```
+
+```{r Looking for sites in Nayarit}
+unique(NRSI_data$reef)
+table(NRSI_data$reef)
+
+Fully_Protected_Reefs<- NRSI_data %>%
+  filter(protection== "Fully Protected")
+
+Not_Protected_Reefs<- NRSI_data %>%
+  filter(protection== "Not Protected")
+
+# Can't seem to find the sites near Nayarit... - Aug 5 2026
+# Reached out to Eduardo, now I found it - Aug 10 2026
+```
+
+# STEP 2: Add lat-long details to NRSI_data
+
+```{r Loading in OHI regions and buffer shape files}
+# OHI regions:
+OHI_regions_metadata <- readLines("/home/shares/ohi/OHI_GOC/spatial/OHI_regions/marine/ohi_goc_final_071025.prj")
+# CRS: EPSG:4326 in practice, poorly labeled in meta-data.
+
+OHI_regions_shape0 <- sf::st_read(
+  "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/marine/ohi_goc_final_071025.shp",
+  options = "ENCODING=LATIN1"
+)
+
+st_crs(OHI_regions_shape0)
+
+OHI_regions_shape0 <- st_make_valid(OHI_regions_shape0)
+
+# Quick plot:
+OHI_Region_plot<- ggplot(OHI_regions_shape0) +
+  geom_sf(aes(fill = rgn_id)) +
+  theme_bw()
+
+OHI_Region_plot
+
+# 50km buffer:
+OHI_buffer_metadata <- readLines("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer/inland_50km_goc.prj")
+# Projected CRS name: Mexico_ITRF2008_LCC
+
+OHI_buffer_shape0 <- sf::st_read(
+  "/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer/inland_50km_goc.shp",
+  options = "ENCODING=LATIN1"
+)
+
+st_crs(OHI_buffer_shape0)
+
+OHI_buffer_shape0 <- st_make_valid(OHI_buffer_shape0)
+
+# Quick plot:
+OHI_Buffer_plot<- ggplot(OHI_buffer_shape0) +
+  geom_sf(aes(fill = rgn_id)) +
+  theme_bw()
+
+OHI_Buffer_plot
+```
+
+```{r Some quick cleaning}
+# Let's use CRS 4326 for all projections now.
+crs_use = 4326
+
+# Change CRS on OHI_buffer_shape to match CRS on OHI_regions_shape
+OHI_regions_shape <- st_transform(OHI_regions_shape0, crs_use)
+
+# Change CRS on OHI_buffer_shape to match CRS on OHI_regions_shape
+OHI_buffer_shape <- st_transform(OHI_buffer_shape0, crs_use)
+
+# Remove columns and extract useful info:
+OHI_buffer_shape<- OHI_buffer_shape0 %>%
+  select(-c(estado))
+
+additional_info<- OHI_buffer_shape0 %>%
+  select(rgn_id, ecorgn) %>%
+  st_drop_geometry()
+
+# Add new columns to OHI_regions_shape
+OHI_regions_shape <- OHI_regions_shape %>%
+  left_join(
+    additional_info,
+    by = "rgn_id"
+  ) %>%
+  mutate(
+    location= c("sea")
+  ) %>%
+  relocate(location, .after= rgn_id)
+
+rm(additional_info)
+```
+
+```{r Join OHI geometric key to NRSI_data}
+# Step 0 — define a Coordinate Reference System (CRS) once and stick to it:
+crs_use <- 4326
+
+# Alternative could be: CRS 5070 is the USA Contiguous Albers Equal Area (good proxy for northern Mexico too). EPSG:5070 is centered on the U.S., so Baja / Sonora are near the edge of its optimal zone.
+
+# Step 1 — Convert master table to spatial points
+# Turn NRSI_data into an sf object
+colnames(NRSI_data)
+
+master_sf <- NRSI_data %>%
+  filter(!is.na(longitude), !is.na(latitude)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), 
+           crs = crs_use,
+           remove = FALSE) %>%
+  st_transform(crs_use)
+
+# Step 2 — Transform polygons ONCE
+buffer_sf <- OHI_buffer_shape %>%
+  st_transform(crs_use)
+
+sea_sf <- OHI_regions_shape %>%
+  st_transform(crs_use)
+
+# Step 3 — Spatial join to land buffer polygons
+# Join points → OHI_buffer_shape
+master_land <- st_join(
+  master_sf,
+  buffer_sf,
+  join = st_within,
+  left = TRUE
+)
+
+# Re-name columns to be safe:
+master_land <- master_land %>%
+  rename(
+    rgn_id_land = rgn_id,
+    ecorgn_land = ecorgn,
+    location_land = location
+  )
+
+# Step 5 — Spatial join to sea regions
+# Join same (or filtered) points → OHI_regions_shape
+master_all <- st_join(
+  master_land,
+  sea_sf,
+  join = st_within,
+  left = TRUE
+)
+
+# Step 6 — Fix duplicate column names cleanly
+master_all <- master_all %>%
+  rename(
+    rgn_id_sea = rgn_id,
+    ecorgn_sea = ecorgn,
+    location_sea = location
+  )
+```
+
+# NOTE TO SELF: This ^ is a pretty sloppy join. Perfect this later. - Aug 5 2026
+
+
+# STEP 3: Compute NRSI_Scores per region ------------------------------
+Scores = average NSRI score by OHI region
+
+```{r Summarize NRSI and join Region_Key}
+colnames(master_all)
+table(master_all$rgn_id_sea)
+
+# Region_2 Region_3 Region_4 Region_6 Region_7 Region_9 
+#       95       76     1391       18        2       53 
+
+NRSI_Scores_summarized<- master_all %>%
+  group_by(year, rgn_id_sea) %>%
+  summarize(
+    mean_NRSI = mean(nrsi_01, na.rm = TRUE),
+    n_reefs = n_distinct(reef, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    OHI_region = clean_names_lowercase(rgn_id_sea)
+  )
+# 55 obs., 6 vars.
+
+# Generate NRSI_Scores with region details merged in:
+NRSI_Scores0<- NRSI_Scores_summarized %>%
+  select(OHI_region, year, mean_NRSI, n_reefs)
+# 55 obs., 5 vars.
+
+NRSI_Scores0 <- sf::st_drop_geometry(NRSI_Scores0)
+# 55 obs., 4 vars.
+```
+
+```{r Gapfill NRSI_Scores0}
+
+# First, expand the NRSI dataframe to include one row per year per region, even if that region has no data: 
+NRSI_Scores <- NRSI_Scores0 %>%
+  complete(
+    OHI_region = c(paste0("region_", 1:9)),
+    year = full_seq(year, 1)
+  )  %>%
+  left_join(
+    Region_Key,
+    by= c("OHI_region")
+  )
+
+# 252 obs., 5 vars.
+
+# Gapfill missing years and NRSI scores using the zoo package:
+NRSI_Scores <- NRSI_Scores %>%
+
+  # Fill variables that don't change within a region
+  group_by(OHI_region) %>%
+  fill(OHI_region_name, .direction = "downup") %>%
+  mutate(
+    provenance = if_else(
+      is.na(mean_NRSI),
+      "gapfilled",
+      "observed"
+    ),
+    
+    # Interpolate the missing NRSI values
+    mean_NRSI = na.approx(
+      mean_NRSI,
+      x = year,
+      na.rm = FALSE
+    )
+  ) %>%
+  ungroup()
+# 252 obs., 6 vars.
+```
+
+## DECISION POINT: Take the global average across regions for which we have actual data:
+In this case, we have data from regions 2, 3, 4, 6, 7, and 9, but the reefs from 2-6 are best sampled.
+```{r Take the global average}
+unique(NRSI_Scores$OHI_region)
+
+# Regions_of_Interest<- c("region_2", "region_3", "region_4", "region_6")
+
+Regions_of_Interest <- NRSI_Scores %>%
+  filter(provenance == "observed") %>%
+  distinct(OHI_region) %>%
+  pull(OHI_region)
+
+NRSI_global_mean <- NRSI_Scores %>%
+  filter(OHI_region %in% Regions_of_Interest) %>%
+  group_by(year) %>%
+  summarise(
+    mean_NRSI = if (all(is.na(mean_NRSI))) {
+      NA_real_
+    } else {
+      mean(mean_NRSI, na.rm = TRUE)
+    },
+    n_reefs = if (all(is.na(n_reefs))) {
+      NA_integer_
+    } else {
+      sum(n_reefs, na.rm = TRUE)
+    },
+    
+    # n_regions = n_distinct(OHI_region, na.rm = TRUE),
+    
+    # n_regions_observed field counts the distinct OHI regions whose provenance is "observed" in each year:
+    n_regions_observed = n_distinct(
+      OHI_region[provenance == "observed"]
+    ),
+    
+    #Derive the global provenance from the provenance of the regional observations contributing to each year:
+    provenance = case_when(
+      all(provenance == "observed", na.rm = TRUE) ~ "observed",
+      all(provenance == "gapfilled", na.rm = TRUE) ~ "gapfilled",
+      TRUE ~ "partially_observed"
+    ),
+
+    .groups = "drop"
+  )
+
+
+NRSI_global_mean$OHI_region<- c("global average")
+NRSI_global_mean$OHI_region_name<- c("global average")
+
+
+NRSI_Scores_all <- bind_rows(NRSI_Scores, NRSI_global_mean)
+# 280 obs., 7 vars. 
+
+colnames(NRSI_Scores_all)
+unique(NRSI_Scores_all$provenance)
+
+# NA out provenance values for which mean_NRSI is = NA.
+NRSI_Scores_all <- NRSI_Scores_all %>%
+  mutate(
+    provenance = if_else(
+      is.na(mean_NRSI),
+      NA,
+      provenance
+    )
+  )
+# 280 obs., 7 vars. 
+```
+
+# SAVE NRSI_Scores_all ------------------------------
+
+```{r Save NRSI_Scores}
+write.csv(NRSI_Scores_all, 
+          "/home/ferrer/ohi_goc_prep/BD/HAB/HAB_rocky_reefs/NRSI_Scores_df_Aug312026.csv", 
+          row.names = FALSE)
+# 280 obs., 7 vars. 
+```
+
+# PLOT mean_NRSI over time ------------------------------
+
+```{r Plot mean_NRSI over time}
+colnames(NRSI_Scores_all)
+
+# Re-level a few things for plotting purposes:
+NRSI_Scores_all <- NRSI_Scores_all %>%
+  mutate(
+    OHI_region = factor(
+      OHI_region,
+      levels = c(
+        setdiff(unique(OHI_region), "global average"),
+        "global average"
+      )
+    ),
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = c(
+        setdiff(unique(OHI_region_name), "global average"),
+        "global average"
+      )
+    ),
+    provenance = factor(
+      provenance,
+      levels = c(
+        "observed",
+        "partially_observed",
+        "gapfilled"
+      )
+    )
+  )
+
+# Plot 1, panel per region:
+
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9",
+  "global average" = "darkgrey")
+
+
+NRSI_Scores_OverTime <- NRSI_Scores_all %>%
+  filter(!is.na(OHI_region)) %>%
+  
+  ggplot(
+    aes(
+      x = year,
+      y = mean_NRSI,
+      color = OHI_region_name
+    )
+  ) +
+  
+  geom_line() +
+  
+  geom_point(
+    aes(
+      shape = provenance,
+      fill = if_else(
+        provenance == "observed",
+        OHI_region_name,
+        NA_character_
+      )
+    ),
+    size = 2,
+    stroke = 1.2
+  ) +
+  
+  facet_wrap(~ OHI_region_name) +
+  
+  labs(
+    title = "NRSI scores per Region",
+    subtitle = "updated: Aug 31 2026",
+    caption = "global average equals mean NRSI scores across all observed regions",
+    y = "Normalized Reef Status Indicator (0 to 1)",
+    x = "Year",
+    color = "Region",
+    shape = "Data provenance"
+  ) +
+  
+  scale_color_manual(
+    values = Region_colors
+  ) +
+  
+  scale_fill_manual(
+    values = Region_colors,
+    na.value = "white",
+    guide = "none"
+  ) +
+  
+  scale_shape_manual(
+    values = c(
+      observed = 22,
+      partially_observed = 22,
+      gapfilled = 22
+    ),
+    labels = c(
+      observed = "Observed",
+      partially_observed = "Partially observed",
+      gapfilled = "Gap-filled"
+    )
+  ) +
+  
+  guides(
+    color = guide_legend(
+      override.aes = list(
+        shape = 0,
+        fill = NA
+      )
+    ),
+    shape = guide_legend(
+      override.aes = list(
+        color = "black",
+        fill = c("black", "white", "white", "white")
+      )
+    )
+  ) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  ) +
+  
+  ylim(c(0,1))
+
+NRSI_Scores_OverTime
+
+```
+
+
+```{r Save plot as PNGs}
+ggsave(
+  plot = NRSI_Scores_OverTime,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/BD/HAB/HAB_rocky_reefs/NRSI_Scores_plot_Aug312026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+```
+
+# Generate ROK_Scores ------------------------------
+
+DECISION POINT: Reference point is equal to the highest NRSI value ever observed
+
+```{r Calculate the Rocky Reef reference point}
+ROK_ref_point<- max(NRSI_Scores_all$mean_NRSI[NRSI_Scores_all$provenance=="observed"], na.rm= TRUE)
+# 0.6034904
+```
+
+```{r Calculate NRSI 3-year running mean}
+# Calculate ROK_Scores as the 3-year running mean of mean_NRSI per region.
+
+NRSI_Scores_all <- NRSI_Scores_all %>%
+  arrange(OHI_region, year) %>%
+  group_by(OHI_region) %>%
+  mutate(
+    mean_NRSI_3yr = rollapply(
+      mean_NRSI,
+      width = 3,
+      FUN = mean,
+      na.rm = TRUE,
+      fill = NA,
+      align = "right"
+    )
+  ) %>%
+  ungroup()
+# 280 obs., 8 vars. 
+```
+
+```{r Calculate original ROK_Scores}
+# Calculate the Rocky Reef (ROK) score as the 3-year running mean divided by the reference point x 100:
+ROK_Scores<- NRSI_Scores_all %>%
+  mutate(
+    ROK_score_raw = (mean_NRSI_3yr / ROK_ref_point) * 100
+  )
+# 280 obs., 9 vars.
+```
+
+```{r Calculate final ROK_Scores swapping out global mean as needed}
+ROK_Scores <- ROK_Scores %>%
+  group_by(year) %>%
+  mutate(
+    ROK_score_final = case_when(
+      OHI_region %in% c("region_2", "region_3", "region_4", "region_6") ~ ROK_score_raw,
+      OHI_region %in% c("region_1", "region_5", "region_7", "region_8", "region_9", "global average") ~
+        first(ROK_score_raw[OHI_region == "global average"]),
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  ungroup()
+# 280 obs., 10 vars.
+```
+
+
+
+# SAVE ROK_Scores ------------------------------
+
+```{r Save ROK_Scores}
+write.csv(ROK_Scores, 
+          "/home/ferrer/ohi_goc_prep/BD/HAB/HAB_rocky_reefs/ROK_Scores_1.0_df_Aug312026.csv", 
+          row.names = FALSE)
+# 280 obs., 10 vars. 
+```
+
+
+# PLOT ROK_Scores over time ------------------------------
+
+```{r Plot mean_NRSI over time}
+colnames(ROK_Scores)
+
+# Re-level a few things for plotting purposes:
+ROK_Scores <- ROK_Scores %>%
+  mutate(
+    OHI_region = factor(
+      OHI_region,
+      levels = c(
+        setdiff(unique(OHI_region), "global average"),
+        "global average"
+      )
+    ),
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = c(
+        setdiff(unique(OHI_region_name), "global average"),
+        "global average"
+      )
+    ),
+    provenance = factor(
+      provenance,
+      levels = c(
+        "observed",
+        "partially_observed",
+        "gapfilled"
+      )
+    )
+  )
+
+# Plot 1, panel per region:
+
+unique(ROK_Scores$OHI_region_name)
+
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9",
+  "global average" = "darkgrey")
+
+
+ROK_Scores_OverTime <- ROK_Scores %>%
+  filter(!is.na(OHI_region) & !OHI_region=="global average") %>%
+  
+  ggplot(
+    aes(
+      x = year,
+      y = ROK_score_final,
+      color = OHI_region_name
+    )
+  ) +
+  
+  geom_line() +
+  
+  geom_point(
+    shape = 16,       # filled circle
+    size = 2,
+    stroke = 1.2
+  ) +
+  
+  facet_wrap(~ OHI_region_name) +
+  
+  labs(
+    title = "Rocky Reefs Scores per Region",
+    subtitle = "updated: Aug 31 2026",
+    caption = "ROK score in regions 1, 5, 7, 8, and 9 are equal to the global average",
+    y = "ROK Score (0 to 100)",
+    x = "Year",
+    color = "Region"
+  ) +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  ylim(0, 101) +
+  
+  scale_color_manual(
+    values = Region_colors
+  ) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+ROK_Scores_OverTime
+
+```
+
+```{r Save plot as PNGs}
+ggsave(
+  plot = ROK_Scores_OverTime,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/BD/HAB/HAB_rocky_reefs/ROK_Scores_1.0_plot_Aug312026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+```
+
+
+# Current Spatial Extent of Rocky Reef (not needed for BD scoring but here if it's helpful):
+
+```{r Plot Rocky Reef Sargassum}
+RockyReef_shape <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/Arrecife rocoso/Arrecife rocoso.shp") |> st_zm()
+
+plot(st_geometry(RockyReef_shape))
+
+RockyReef_shape <- RockyReef_shape |>
+  st_transform(st_crs(OHI_regions))
+```
+
+```{r Explore rocky sargassum}
+# Read in Arrecife rocoso (rocky reef) data
+rocky_reef <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/Arrecife rocoso/Arrecife rocoso.shp")) |> 
+  st_make_valid()
+```
+
+
+```{r Read in OHI region boundaries}
+# Read in OHI region boundaries
+OHI_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |> st_make_valid()
+
+plot(st_geometry(OHI_regions))
+st_crs(OHI_regions)
+st_crs(RockyReef_shape)
+
+st_bbox(OHI_regions)
+st_bbox(RockyReef_shape)
+
+```
+
+```{r Plot}
+library(tmap)
+
+tmap_mode("view")
+
+tm_shape(OHI_regions) +
+  tm_polygons(col = "white", border.col = "gray", outline = 0.2) +
+tm_shape(RockyReef_shape) +
+  tm_polygons(col = "blue", border.col = "blue")
+```

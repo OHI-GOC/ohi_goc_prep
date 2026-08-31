@@ -50,7 +50,8 @@ especies_iconicas <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/
 ```{r}
 especies_iconicas_scinames <- especies_iconicas %>% 
   mutate(sci_nombre = str_replace_all(sci_nombre, "spp.",""),
-         sci_nombre = str_trim(sci_nombre, side = "both"))
+         sci_nombre = str_trim(sci_nombre, side = "both")) %>% 
+  left_join(key_for_general_groups, by = "sci_nombre")
 
 target_species <- unique(especies_iconicas_scinames$sci_nombre)
 
@@ -159,12 +160,20 @@ Now, let us re-run the filtering using the pattern:
 
 ```{r}
 target_species <- unique(especies_iconicas_scinames$sci_nombre)
+general_groupings <- especies_iconicas_scinames %>% 
+  select(sci_nombre, general_group)
 
 # making a regex pattern from the genus/species names
 pattern <- paste(target_species, collapse = "|")
 
 ico_clean_species_occurrence <- clean_species_occurrence  %>%
-  filter(str_detect(old_name, regex(pattern, ignore_case = TRUE)))
+  filter(str_detect(old_name, regex(pattern, ignore_case = TRUE))) %>% 
+  left_join(general_groupings, by = c("old_name" = "sci_nombre")) %>% 
+  mutate(general_group = case_when(
+    str_detect(old_name, "^Sphyrna") ~ "sharks", # ^ indicates it starts with Sphyrna.
+    is.na(general_group) ~ "fish",
+    TRUE ~ general_group
+  ))
 
 setdiff(unique(ico_clean_species_occurrence$old_name), target_species)
 
@@ -189,7 +198,7 @@ ico_clean_species_occurrence_sf <- ico_clean_species_occurrence %>%
            crs = 4326, # WGS84
            remove = FALSE)
 
-st_write(ico_clean_species_occurrence_sf, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","ico_clean_species_occurrence_sf.shp"))
+st_write(ico_clean_species_occurrence_sf, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","ico_clean_species_occurrence_w_groups_sf.gpkg"), append=FALSE)
 ```
 
 First, group by region and unite the polygons for inland 10km with the marine polygons.
@@ -216,7 +225,7 @@ Now, we can intersect with the `marine_and_inland10` so that each species occurr
 # intersect with GoC
 ico_clean_species_occurrence_goc_rgnid <- st_intersection(st_transform(ico_clean_species_occurrence_sf, st_crs(marine_and_inland10)), marine_and_inland10)
 
-st_write(ico_clean_species_occurrence_goc_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","ico_clean_species_occurrence_goc_rgnid.shp"))
+st_write(ico_clean_species_occurrence_goc_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","ico_clean_species_occurrence_goc_rgnid_w_groups.gpkg"), append=FALSE)
 ```
 
 
@@ -243,6 +252,44 @@ write_csv(ico_species_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/i
 
 
 
+## Making keys for pressures
+
+```{r}
+ico_clean_species_occurrence_goc_rgnid <- st_read(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/int","ico_clean_species_occurrence_goc_rgnid_w_groups.gpkg"))
+
+# key_for_general_groups <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/sp_ico_list_w_general_groups.csv")) %>% 
+#   mutate(sci_nombre = str_replace_all(sci_nombre, "spp.",""),
+#          sci_nombre = str_trim(sci_nombre, side = "both")) %>% 
+#   select(sci_nombre, general_group = "general_group\n\nfish, sharks, shellfish, coral, mammals, turtles, birds, other")
+
+ico_group_occurrence_total_per_rgn <- ico_clean_species_occurrence_goc_rgnid %>% 
+  group_by(rgn_id, general_group) %>% 
+  summarize(
+    n_occurrence = n()
+  ) %>% 
+  ungroup()
+
+# missing_general_group <- ico_clean_species_occurrence_goc_rgnid %>% 
+#   filter(is.na(general_group))
+# unique(missing_general_group$old_name)
+
+proportion_of_groups_occurrence <- ico_group_occurrence_total_per_rgn %>% 
+  group_by(rgn_id) %>% 
+  mutate(total_occurrence = sum(n_occurrence)) %>% 
+  ungroup() %>% 
+  group_by(rgn_id, general_group) %>% 
+  mutate(prop_of_rgn = n_occurrence / total_occurrence,
+         pct_of_rgn = prop_of_rgn * 100) %>% 
+  ungroup() %>% 
+  mutate(goal = "ICO") %>% 
+  select(rgn_id, general_group, prop_of_rgn, pct_of_rgn)
+
+# save to mazu for pressures
+st_write(proportion_of_groups_occurrence, here::here("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/for_pressures","proportion_of_groups_occurrence.gpkg"), append=FALSE)
+
+unique(proportion_of_groups_occurrence$general_group)
+unique(ico_clean_species_occurrence_goc_rgnid$source)
+```
 
 
 

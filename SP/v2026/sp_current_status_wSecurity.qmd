@@ -1,0 +1,227 @@
+---
+title: 'OHI GoC 2026: Sense of Place (SP) with Security in CCE'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    theme: cerulean
+    highlight-style: haddock
+editor_options:
+  chunk_output_type: console
+---
+
+# Sense of Place with Security incorporated into CCE
+
+Sense of Place (SP) remains the equal-weight arithmetic mean of three subgoals:
+
+1. **CCE** — Coastal Community Engagement (now including Security as a third subcomponent)  
+2. **LSP** — Lasting Special Places  
+3. **ICO** — Iconic Species  
+
+This script expects `cce_current_status_with_security.csv` from `new_cce_integration.qmd` (or rebuilds that three-way CCE mean if needed).
+
+```{r}
+library(tidyverse)
+
+# ---------------------------------------------------------------------------
+# Region labels and colors
+# ---------------------------------------------------------------------------
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+region_levels <- paste0("Region_", 1:9)
+rgn_label_colors <- setNames(
+  unname(rgn_colors[region_levels]),
+  unname(rgn_labels[region_levels])
+)
+
+# ---------------------------------------------------------------------------
+# Paths (Mazu)
+# ---------------------------------------------------------------------------
+path_cce_out  <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/output"
+path_viz      <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/viz"
+path_lsp      <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/output/lsp_current_status.csv"
+path_ico      <- "/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/output/ico_mean_risk_status_per_region_041326.csv"
+path_security <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/security_output/cs_security.csv"
+path_sp_out   <- "/home/shares/ohi/OHI_GOC/goal_prep/sp"
+
+dir.create(path_viz, recursive = TRUE, showWarnings = FALSE)
+dir.create(path_sp_out, recursive = TRUE, showWarnings = FALSE)
+```
+
+# CCE with Security
+
+Prefer the integrated CCE table from `new_cce_integration.qmd`. If it is missing, rebuild the three-way mean here.
+
+```{r}
+path_cce_w_sec <- file.path(path_cce_out, "cce_current_status_with_security.csv")
+
+if (file.exists(path_cce_w_sec)) {
+  cce_with_security <- read_csv(path_cce_w_sec, show_col_types = FALSE)
+} else {
+  message("cce_current_status_with_security.csv not found; rebuilding from subcomponents.")
+
+  ama <- read_csv(
+    file.path(path_cce_out, "current_status_ama_tu_playa_progress_072326.csv"),
+    show_col_types = FALSE
+  ) %>%
+    select(rgn_id, year, ama_status = current_status)
+
+  if (!"year" %in% names(ama)) {
+    ama <- ama %>% mutate(year = 2025L)
+  }
+
+  cult <- read_csv(
+    file.path(
+      path_cce_out,
+      "cultural_places_employees_per_pop_current_status_75th_quantile.csv"
+    ),
+    show_col_types = FALSE
+  ) %>%
+    select(rgn_id, year = data_year, cult_status = score)
+
+  security <- read_csv(path_security, show_col_types = FALSE) %>%
+    select(rgn_id, year = year_march, security_status = current_status)
+
+  cce_years <- sort(unique(c(ama$year, cult$year, security$year)))
+  cce_regions <- sort(unique(c(ama$rgn_id, cult$rgn_id, security$rgn_id)))
+
+  cce_with_security <- crossing(rgn_id = cce_regions, year = cce_years) %>%
+    left_join(ama, by = c("rgn_id", "year")) %>%
+    left_join(cult, by = c("rgn_id", "year")) %>%
+    left_join(security, by = c("rgn_id", "year")) %>%
+    mutate(
+      current_status = rowMeans(
+        cbind(ama_status, cult_status, security_status),
+        na.rm = TRUE
+      ),
+      current_status = if_else(is.nan(current_status), NA_real_, current_status)
+    ) %>%
+    select(rgn_id, year, current_status, ama_status, cult_status, security_status)
+}
+
+cce_status <- cce_with_security %>%
+  select(rgn_id, year, cce_status = current_status)
+
+cce_status
+```
+
+# LSP and ICO
+
+```{r}
+lsp <- read_csv(path_lsp, show_col_types = FALSE) %>%
+  select(rgn_id, lsp_status = current_status)
+
+ico <- read_csv(path_ico, show_col_types = FALSE) %>%
+  select(rgn_id, year, ico_status = current_status)
+
+# expand LSP snapshot across CCE years (same approach as sp_current_status.qmd)
+cce_years <- sort(unique(cce_status$year))
+
+lsp_expanded <- crossing(
+  rgn_id = unique(lsp$rgn_id),
+  year = cce_years
+) %>%
+  left_join(lsp, by = "rgn_id")
+
+lsp_expanded
+ico
+```
+
+# SP = mean of CCE (with security), LSP, and ICO
+
+```{r}
+sp_with_safety <- cce_status %>%
+  full_join(lsp_expanded, by = c("rgn_id", "year")) %>%
+  full_join(ico, by = c("rgn_id", "year")) %>%
+  filter(year %in% cce_years) %>%
+  arrange(rgn_id, year) %>%
+  mutate(
+    current_status = rowMeans(
+      cbind(cce_status, lsp_status, ico_status),
+      na.rm = TRUE
+    ),
+    current_status = if_else(is.nan(current_status), NA_real_, current_status)
+  ) %>%
+  select(rgn_id, year, current_status, cce_status, lsp_status, ico_status)
+
+sp_with_safety
+
+write_csv(
+  sp_with_safety %>% select(rgn_id, year, current_status),
+  file.path(path_sp_out, "sp_current_status_with_security.csv")
+)
+
+# optional fuller table with subgoal columns
+write_csv(
+  sp_with_safety,
+  file.path(path_sp_out, "sp_current_status_with_security_detail.csv")
+)
+```
+
+# Plot overall SP current status (with safety in CCE)
+
+```{r}
+sp_plot_df <- sp_with_safety %>%
+  mutate(
+    region_label = factor(
+      unname(rgn_labels[rgn_id]),
+      levels = unname(rgn_labels[region_levels])
+    )
+  ) %>% 
+  filter(year %in% c(2019:2025))
+
+p_sp <- ggplot(
+  sp_plot_df,
+  aes(x = year, y = current_status, color = region_label, group = rgn_id)
+) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "black", linewidth = 0.6) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_color_manual(values = rgn_label_colors, drop = FALSE) +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_x_continuous(breaks = sort(unique(sp_plot_df$year))) +
+  labs(
+    title = "CURRENT STATUS: Sense of Place (SP) with Security in CCE",
+    subtitle = "Arithmetic mean of CCE (Ama + cultural + security), LSP, and ICO",
+    x = "Year",
+    y = "Current status (0–100)",
+    color = "Region"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+p_sp
+
+ggsave(
+  filename = file.path(path_viz, "sp_current_status_with_security.pdf"),
+  plot = p_sp,
+  width = 10,
+  height = 6,
+  device = cairo_pdf
+)
+```
