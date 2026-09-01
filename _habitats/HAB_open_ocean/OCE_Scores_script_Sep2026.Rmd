@@ -49,6 +49,7 @@ clean_names_lowercase <- function(x) {
 }
 ```
 
+# Strategy: track changes in landings of major functional groups relative to mean landings  ------------------------------
 
 # STEP 0: Load in Region_Key
 ```{r Region key}
@@ -220,9 +221,7 @@ sum(is.na(GOC_MarineFisheryLandings$Major_Functional_Group))
 # Only 18 records unassigned. Looks good!
 ```
 
-# Strategy 1 - Track changes in landings of major functional groups relative to mean landings  ------------------------------
-
-## Open Ocean Taxa (OCE)
+# STEP 2: Isolate Open Ocean Taxa (OCE)
 
 ```{r Isolate Open-Ocean taxa and create OCE_Landings0}
 unique(GOC_MarineFisheryLandings$Major_Functional_Group)
@@ -251,8 +250,11 @@ OpenOcean_Landings0<- GOC_MarineFisheryLandings %>%
 # 653887 obs., 22 vars.
 ```
 
-```{r Summarize OCE landings}
-OpenOcean_Landings_summary<- OpenOcean_Landings0 %>%
+
+# METHOD 1 - STEP 3: Calculate mean condition values for small pelagics, large pelagics, sharks, and cephalopods across all OHI regions
+
+```{r Summarize OCE landings by region in OCE_RegionalLandings_summary}
+OCE_RegionalLandings_summary<- OpenOcean_Landings0 %>%
   group_by(year, OHI_region_est, Major_Functional_Group) %>%
   summarize(
     total_landings_mt = sum(weight_kg_corrected, na.rm = TRUE)/1000,
@@ -265,10 +267,11 @@ OpenOcean_Landings_summary<- OpenOcean_Landings0 %>%
 # 853 obs.
 ```
 
-# Join in region names:
 
-```{r Merge Region_Key to OCE_Scores}
-OpenOcean_Landings_summary<- OpenOcean_Landings_summary %>%
+## PLOT: regional open-ocean landings over time
+
+```{r Join in region names and re-level for plotting purposes}
+OCE_RegionalLandings_summary<- OCE_RegionalLandings_summary %>%
   left_join(Region_Key, 
             by = "OHI_region_est")
 
@@ -285,7 +288,7 @@ Region_order <- c(
   "Southeastern Gulf"
 )
 
-OpenOcean_Landings_summary <- OpenOcean_Landings_summary %>%
+OCE_RegionalLandings_summary <- OCE_RegionalLandings_summary %>%
   mutate(
     OHI_region_name = factor(
       OHI_region_name,
@@ -294,13 +297,13 @@ OpenOcean_Landings_summary <- OpenOcean_Landings_summary %>%
   )
 ```
 
-```{r Plot OCE landings over time}
-colnames(OpenOcean_Landings_summary)
-unique(OpenOcean_Landings_summary$OHI_region_name)
+```{r Plot regional open-ocean landings over time}
+colnames(OCE_RegionalLandings_summary)
+unique(OCE_RegionalLandings_summary$OHI_region_name)
 
 # Plot 1, panel per region:
 
-OCE_Landings_perRegion_plot<- OpenOcean_Landings_summary %>%
+OCE_Landings_perRegion_plot<- OCE_RegionalLandings_summary %>%
   filter(year >= 2014, year <= 2024) %>%
   ggplot(
     aes(
@@ -332,7 +335,7 @@ Region_colors<- c(
   "Sinaloa Coast" = "#627391",
   "Southeastern Gulf" = "#8d61a9")
 
-OCE_Landings_perGroup_plot<- OpenOcean_Landings_summary %>%
+OCE_Landings_perGroup_plot<- OCE_RegionalLandings_summary %>%
   filter(year >= 2014, year <= 2024) %>%
   ggplot(
     aes(
@@ -353,53 +356,74 @@ OCE_Landings_perGroup_plot<- OpenOcean_Landings_summary %>%
 OCE_Landings_perGroup_plot
 ```
 
-```{r Save plot as PNG}
-ggsave(
-  plot = OCE_Landings_perGroup_plot,
-  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/OCE_Landings_perGroup_plot_Aug312026.png"),
-  width = 12,
-  height = 12,
-  dpi = 300
-)
-```
 
-```{r New set of plots August 31 2026}
+## PLOT: mean condition values for small pelagics, large pelagics, sharks, and cephalopods across all OHI regions
 
+```{r First calculate OCE_taxa_regional_conditions}
 # Calculate pre- and post-2018 means:
-mean_df <- OpenOcean_Landings_summary %>%
+OCE_taxa_regional_conditions <- OCE_RegionalLandings_summary %>%
   mutate(
     period = if_else(year < 2018, "Pre-2018", "Post-2018")
   ) %>%
   group_by(
     Major_Functional_Group,
+    OHI_region_est,
     OHI_region_name,
     period
   ) %>%
   summarise(
     mean_catch = mean(total_landings_mt, na.rm = TRUE),
+    n_years = n_distinct(year),
+    period_start = min(year, na.rm = TRUE),
+    period_end = max(year, na.rm = TRUE),
     .groups = "drop"
-  ) %>%
-  mutate(
-    xmin = if_else(period == "Pre-2018",  min(OpenOcean_Landings_summary$year), 2018),
-    xmax = if_else(period == "Pre-2018",  2017, max(OpenOcean_Landings_summary$year))
   )
 
-# Create separate plots for each functional group
-plots <- OpenOcean_Landings_summary %>%
+# 80 obs., 8 vars.
+```
+
+```{r Evaluate data quality}
+colnames(OCE_taxa_regional_conditions)
+
+OCE_taxa_regional_conditions <- OCE_taxa_regional_conditions %>%
+  mutate(
+    n_years_data = case_when(
+      n_years < 3 ~ "less_than_3",
+      n_years < 5 ~ "between_3_and_5",
+      n_years >= 5 ~ "more_than_5"
+    ),
+    data_quality = case_when(
+      n_years < 3 ~ "poor",
+      n_years < 5 ~ "moderate",
+      n_years >= 5 ~ "high"
+    )
+  )
+# 80 obs., 10 vars.
+```
+
+```{r Create separate plots for each functional group per region}
+# Create separate plots for each functional group per region:
+plots <- OCE_RegionalLandings_summary %>%
   split(.$Major_Functional_Group) %>%
   lapply(function(dat) {
     
     group_name <- unique(dat$Major_Functional_Group)
     
-    means <- mean_df %>%
+    means <- OCE_taxa_regional_conditions %>%
       filter(Major_Functional_Group == group_name)
     
     ggplot(dat, aes(x = year, y = total_landings_mt)) +
       
-      # Annual time series
+      # Annual time series...
       geom_line(
         color = "grey40",
         linewidth = 0.7
+      ) +
+      
+      # ... with points:
+      geom_point(
+        color = "grey40",
+        size = 0.7
       ) +
       
       # Pre/post mean lines
@@ -412,7 +436,8 @@ plots <- OpenOcean_Landings_summary %>%
           yend = mean_catch,
           color = period
         ),
-        linewidth = 1.2
+        linewidth = 1,
+        alpha= 0.8
       ) +
       
       # 2018 reference line
@@ -429,10 +454,10 @@ plots <- OpenOcean_Landings_summary %>%
       ) +
       
       scale_x_continuous(
-        limits = range(OpenOcean_Landings_summary$year),
+        limits = range(OCE_RegionalLandings_summary$year),
         breaks = seq(
-          min(OpenOcean_Landings_summary$year),
-          max(OpenOcean_Landings_summary$year),
+          min(OCE_RegionalLandings_summary$year),
+          max(OCE_RegionalLandings_summary$year),
           by = 5
         )
       ) +
@@ -455,17 +480,17 @@ plots <- OpenOcean_Landings_summary %>%
   })
 
 
-SmallPelagics_plot<- plots$`anchovy & sardine (small pelagics)`
-LargePelagics_plot<- plots$`pelagic marine fish (excl. anchovy & sardine)`
-Sharks_plot<- plots$sharks
-Cephalopods_plot<- plots$cephalopods
+SmallPelagics_byRegion_plot<- plots$`anchovy & sardine (small pelagics)`
+LargePelagics_byRegion_plot<- plots$`pelagic marine fish (excl. anchovy & sardine)`
+Sharks_byRegion_plot<- plots$sharks
+Cephalopods_byRegion_plot<- plots$cephalopods
 ```
 
 ```{r Save plots as PNGs}
 # Small Pelagics
 ggsave(
-  plot = SmallPelagics_plot,
-  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/SmallPelagics_plot_Aug312026.png"),
+  plot = SmallPelagics_byRegion_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/SmallPelagics_byRegion_plot_Aug312026.png"),
   width = 12,
   height = 12,
   dpi = 300
@@ -473,8 +498,8 @@ ggsave(
 
 # Large Pelagics
 ggsave(
-  plot = LargePelagics_plot,
-  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/LargePelagics_plot_Aug312026.png"),
+  plot = LargePelagics_byRegion_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/LargePelagics_byRegion_plot_Aug312026.png"),
   width = 12,
   height = 12,
   dpi = 300
@@ -482,8 +507,8 @@ ggsave(
 
 # Sharks
 ggsave(
-  plot = Sharks_plot,
-  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/Sharks_plot_Aug312026.png"),
+  plot = Sharks_byRegion_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/Sharks_byRegion_plot_Aug312026.png"),
   width = 12,
   height = 12,
   dpi = 300
@@ -491,58 +516,375 @@ ggsave(
 
 # Cephalopods
 ggsave(
-  plot = Cephalopods_plot,
-  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/Cephalopods_plot_Aug312026.png"),
+  plot = Cephalopods_byRegion_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/Cephalopods_byRegion_plot_Aug312026.png"),
   width = 12,
   height = 12,
   dpi = 300
 )
 ```
 
-# Calculate final OCE_Scores:
+# STEP 4 - METHOD 1 - STEP 4: calculate OCE_Scores per region
 
-```{r Calculate OCE_Scores}
-colnames(OCE_StockStatus_summarized)
+```{r Calculate OCE_Scores per region}
+colnames(OCE_taxa_regional_conditions)
+table(OCE_taxa_regional_conditions$data_quality)
 
-OCE_Scores0 <- OCE_StockStatus_summarized %>%
-  select(year, OHI_region_est, OHI_region_name, mean_StockStatus) %>%
-  group_by(year, OHI_region_est, OHI_region_name) %>%
+OCE_Scores0 <- OCE_taxa_regional_conditions %>%
+  select(OHI_region_est, OHI_region_name, Major_Functional_Group, period, data_quality, mean_catch) %>%
+  group_by(
+    OHI_region_est,
+    OHI_region_name,
+    Major_Functional_Group
+  ) %>%
   summarize(
-    OCE_Score = mean(mean_StockStatus, na.rm = TRUE) * 100,
-    n_groups = n(),
+    OCE_Score_raw = mean_catch[period == "Post-2018"] /
+                mean_catch[period == "Pre-2018"] * 100,
+    OCE_Score_capped = pmin(OCE_Score_raw, 100),
+    data_quality = paste(unique(data_quality), collapse = ", "),
     .groups = "drop"
   )
-# 69 obs., 5 vars.
 
-OCE_Scores<- OCE_Scores0 %>%
+OCE_Scores_regional<- OCE_Scores0 %>%
   filter(!is.na(OHI_region_est)) %>%
   rename(OHI_region= OHI_region_est)
-# 63 obs., 5 vars.
+# 36 obs., 6 vars.
 ```
 
-```{r Sanity check final OCE_Scores}
-colnames(OCE_Scores)
+# SAVE OCE_Scores_regional ------------------------------
 
-summary(OCE_Scores$OCE_Score)
-  #  Min. 1st Qu.  Median    Mean 3rd Qu.    Max.
-  # 49.22   71.61   77.69   76.10   82.26   94.57
-
-# Year 2024 mean for OCE scores:
-mean(OCE_Scores$OCE_Score[OCE_Scores$year == 2024], na.rm = TRUE)
-# 66
-```
-
-# SAVE OCE_Scores ------------------------------
-
-```{r Save OCE_Scores as csv}
-write.csv(OCE_Scores, 
-          "/home/ferrer/ohi_goc_prep/BD/BD_Scores/OCE_Scores/OCE_Scores_df_Jul222026.csv", 
+```{r Save OCE_Scores_regional as csv}
+write.csv(OCE_Scores_regional, 
+          "/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/OCE_outputs/OCE_Scores_regional_Aug312026.csv", 
           row.names = FALSE)
-# 63 obs., 5 vars.
+# 36 obs., 6 vars.
+```
+
+# METHOD 2 - STEP 3: Calculate mean condition values for small pelagics, large pelagics, sharks, and cephalopods across the entire GOC:
+
+```{r Summarize OCE landings gulf-wide in OCE_GOCLandings_summary}
+OCE_GOCLandings_summary<- OpenOcean_Landings0 %>%
+  group_by(year, Major_Functional_Group) %>%
+  summarize(
+    total_landings_mt = sum(weight_kg_corrected, na.rm = TRUE)/1000,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Major_Functional_Group= clean_names_lowercase(Major_Functional_Group)
+  )
+# 104 obs., 3 vars.
+```
+
+## PLOT: gulf-wide open-ocean landings over time
+
+```{r Plot gulf-wide open-ocean landings over time}
+colnames(OCE_GOCLandings_summary)
+unique(OCE_GOCLandings_summary$OHI_region_name)
+
+# Plot 1, panel per region:
+
+OCE_Landings_gulfwide_plot <- OCE_GOCLandings_summary %>%
+  filter(year >= 2004, year <= 2024) %>%
+  
+  ggplot(
+    aes(
+      x = year,
+      y = total_landings_mt,
+      group = 1
+    )
+  ) +
+  
+  geom_line(
+    color = "#2C7FB8",
+    linewidth = 0.8
+  ) +
+  
+  geom_point(
+    shape = 16,
+    size = 2,
+    stroke = 1.2,
+    color = "#2C7FB8"
+  ) +
+  
+  geom_vline(
+    xintercept = 2018,
+    linetype = "dashed",
+    color = "grey50",
+    linewidth = 0.7
+  ) +
+  
+  facet_wrap(
+    ~ Major_Functional_Group,
+    scales = "free_y"
+  ) +
+  
+  labs(
+    title = "Open-Ocean Landings by Functional Group",
+    subtitle = "Gulf-wide annual landings, 2004–2024",
+    y = "Total landings (metric tonnes)",
+    x = "Year"
+  ) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    plot.title = element_text(
+      size = 16,
+      face = "bold"
+    ),
+    plot.subtitle = element_text(
+      size = 12
+    )
+  )
+
+OCE_Landings_gulfwide_plot
+
+```
+
+```{r Save plot as PNG}
+ggsave(
+  plot = OCE_Landings_gulfwide_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/OCE_Landings_gulfwide_plot_Aug312026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
 ```
 
 
-# PLOT OCE_Scores  ------------------------------
+```{r Calculate OCE_taxa_gulfwide_conditions}
+# Calculate pre- and post-2018 means gulf-wide:
+
+colnames(OCE_GOCLandings_summary)
+
+OCE_taxa_gulfwide_conditions <- OCE_GOCLandings_summary %>%
+
+# NOTE TO SELF: region has already been filtered to the GOC-level so there is no need to exclude values where region = NA.
+  # filter(!is.na(OHI_region_est)) %>% 
+  
+  mutate(
+    period = if_else(year < 2018, "Pre-2018", "Post-2018")
+  ) %>%
+  group_by(
+    Major_Functional_Group,
+    period
+  ) %>%
+  summarise(
+    mean_catch = mean(total_landings_mt, na.rm = TRUE),
+    n_years = n_distinct(year),
+    period_start = min(year, na.rm = TRUE),
+    period_end = max(year, na.rm = TRUE),
+    .groups = "drop"
+  )
+# 8 obs., 6 vars.
+```
+
+```{r Evaluate data quality}
+colnames(OCE_taxa_gulfwide_conditions)
+
+OCE_taxa_gulfwide_conditions <- OCE_taxa_gulfwide_conditions %>%
+  mutate(
+    n_years_data = case_when(
+      n_years < 3 ~ "less_than_3",
+      n_years < 5 ~ "between_3_and_5",
+      n_years >= 5 ~ "more_than_5"
+    ),
+    data_quality = case_when(
+      n_years < 3 ~ "poor",
+      n_years < 5 ~ "moderate",
+      n_years >= 5 ~ "high"
+    )
+  )
+# 8 obs., 8 vars.
+```
+
+## PLOT: mean condition values for small pelagics, large pelagics, sharks, and cephalopods gulf-wide
+
+```{r Plot pre- and post-2018 by functional group per region}
+mean_lines <- OCE_taxa_gulfwide_conditions %>%
+  filter(period %in% c("Pre-2018", "Post-2018")) %>%
+  mutate(
+    period_start_plot = if_else(period == "Pre-2018", 2004, period_start),
+    period_end_plot   = if_else(period == "Pre-2018", 2017, period_end)
+  )
+
+
+AllGroups_gulfwide_plot <- OCE_GOCLandings_summary %>%
+  filter(year >= 2004, year <= 2025) %>%
+  
+  ggplot(
+    aes(
+      x = year,
+      y = total_landings_mt
+    )
+  ) +
+  
+  geom_line(
+    aes(group = Major_Functional_Group),
+    color = "grey40",
+    linewidth = 0.7
+  ) +
+  
+  geom_point(
+    color = "grey40",
+    size = 0.7
+  ) +
+  
+  geom_segment(
+    data = mean_lines,
+    aes(
+      x = period_start_plot,
+      xend = period_end_plot,
+      y = mean_catch,
+      yend = mean_catch,
+      color = period,
+      group = period
+    ),
+    linewidth = 1.2,
+    alpha = 0.8
+  ) +
+  
+  geom_vline(
+    xintercept = 2018,
+    linetype = "dashed",
+    color = "black"
+  ) +
+  
+  facet_wrap(
+    ~ Major_Functional_Group,
+    scales = "free_y"
+  ) +
+  
+  scale_x_continuous(
+    limits = c(2004, 2025),
+    breaks = seq(2005, 2025, by = 5)
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Pre-2018" = "steelblue",
+      "Post-2018" = "firebrick"
+    )
+  ) +
+  
+  labs(
+    title = "Open-Ocean Landings by Functional Group",
+    subtitle = "Gulf-wide annual landings and pre-/post-2018 mean catch",
+    x = "Year",
+    y = "Total landings (mt)",
+    color = "Mean period"
+  ) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    plot.title = element_text(
+      size = 16,
+      face = "bold"
+    )
+  )
+
+AllGroups_gulfwide_plot
+
+```
+
+```{r Save plot as PNG}
+# All Groups
+ggsave(
+  plot = AllGroups_gulfwide_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/AllGroups_gulfwide_plot_Aug312026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+```
+
+
+# METHOD 2 - STEP 4: calculate OCE_Scores based on gulf-wide calculations:
+
+```{r Calculate OCE_Scores_gulfwide}
+colnames(OCE_taxa_gulfwide_conditions)
+table(OCE_taxa_gulfwide_conditions$data_quality)
+
+OCE_Scores_gulfwide <- OCE_taxa_gulfwide_conditions %>%
+  select(Major_Functional_Group, period, data_quality, mean_catch) %>%
+  group_by(
+    Major_Functional_Group
+  ) %>%
+  summarize(
+    OCE_Score_raw = mean_catch[period == "Post-2018"] /
+                mean_catch[period == "Pre-2018"] * 100,
+    OCE_Score_capped = pmin(OCE_Score_raw, 100),
+    data_quality = paste(unique(data_quality), collapse = ", "),
+    .groups = "drop"
+  )
+# 4 obs., 4 vars.
+```
+
+# SAVE OCE_Scores_gulfwide ------------------------------
+
+```{r Save OCE_Scores_gulfwide as csv}
+write.csv(OCE_Scores_gulfwide, 
+          "/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/OCE_outputs/OCE_Scores_gulfwide_Aug312026.csv", 
+          row.names = FALSE)
+# 4 obs., 4 vars.
+```
+
+
+# METHOD 3 (RECOMMENDED) - STEP 4: calculate OCE_Scores based on gulf-wide calculations time-varying:
+
+```{r Calculate OCE_Scores_gulfwide_timevarying}
+# Calculate gulf-wide condition per taxonomic group in all years 2018-2024 compared to pre-2018 reference point:
+
+colnames(OCE_GOCLandings_summary)
+
+OCE_taxa_gulfwide_references <- OCE_GOCLandings_summary %>%
+  filter(year < 2018) %>%
+  group_by(
+    Major_Functional_Group
+  ) %>%
+  summarise(
+    mean_catch_pre2018 = mean(total_landings_mt, na.rm = TRUE),
+    n_years_pre2018 = n_distinct(year[!is.na(total_landings_mt)]),
+    period_start = min(year[!is.na(total_landings_mt)], na.rm = TRUE),
+    period_end = max(year[!is.na(total_landings_mt)], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 4 obs., 5 vars.
+
+OCE_Scores_gulfwide_timevarying <- OCE_GOCLandings_summary %>%
+  filter(year >= 2018, year <= 2024) %>%
+  left_join(
+    OCE_taxa_gulfwide_references,
+    by = "Major_Functional_Group"
+  ) %>%
+  mutate(
+    OCE_Score_raw = (
+      total_landings_mt / mean_catch_pre2018
+    ) * 100,
+    OCE_Score_capped = pmin(OCE_Score_raw, 100),
+  )
+# 28 obs., 8 vars.
+```
+
+# SAVE OCE_Scores_gulfwide_timevarying ------------------------------
+
+```{r Save OCE_Scores_gulfwide_timevarying as csv}
+write.csv(OCE_Scores_gulfwide_timevarying, 
+          "/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/OCE_outputs/OCE_Scores_gulfwide_timevarying_Aug312026.csv", 
+          row.names = FALSE)
+# 28 obs., 8 vars.
+```
+
+
+# PLOT OCE_Scores ??? PENDING ??? ------------------------------
 
 ```{r Level region_order for plotting purposes}
 # Make sure to order the regions:
