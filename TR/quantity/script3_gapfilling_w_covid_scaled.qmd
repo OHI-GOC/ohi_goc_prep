@@ -1,5 +1,5 @@
 ---
-title: "Script 3: Gapfill arrivals using DENUE accommodation employees"
+title: "Script 3: Gapfill arrivals (frozen 2019-2024 + covid-scaled 2020)"
 author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
 format:
   html:
@@ -22,18 +22,18 @@ editor_options:
 
 # 0. Workflow for this script
 
-This is **Script 3** in the TR quantity update pipeline. Run it after Scripts 1 and 2.
+This is a **production gapfill** variant for TR quantity. Run it after Scripts 1 and 2.
 
 1. Bring in DENUE accommodations (employees) from Script 1 for 2019-2026.
 2. Bring in SECTUR total arrivals shapefiles from Script 2 (complete years through 2025).
 3. Harmonize municipio names, join employees and arrivals, and check coverage gaps.
-4. Explore the relationship and fit gapfilling models.
-5. Predict missing municipio-year arrivals (and handle 2020 carefully).
-6. Write the gapfilled output that Script 4 will read.
+4. Fit **model3.5** and **model1.5** on a **frozen 2019-2024** training panel (same freeze as the OG-model script).
+5. `predict()` missing municipio-years for **2019-2025** only. For **2020 gapfills**, use the **covid-scaled** approach (normal-year prediction times observed SECTUR 2019:2020 ratio) instead of the harsh 2020 year-factor intercept.
+6. Write `arrivals_filled_by_DENUE_accommodation_employees_2019_2026_covid_scaled.csv` for `script4_tr_quantity_both_methods.qmd`.
 
-I am checking whether DENUE accommodation employees help explain SECTUR tourist arrivals, and then using that relationship to fill gaps.
+**Training freeze:** coefficients come from **2019-2024** complete SECTUR + DENUE cases only. **2025** SECTUR is not used to re-estimate the model; it is only used for observed rows where SECTUR exists.
 
-**Update:** I am using DENUE accommodations for 2019-2026 (`update_alojamientos_2019_2026_goc_50km.shp`) and SECTUR annual arrivals for 2019-2025 (2026 SECTUR is incomplete / Enero only).
+**2020 gapfills:** predict as a normal year (`year_factor = 2`), then multiply by total SECTUR arrivals in 2020 / total in 2019 from the frozen training panel. Apply to **both** model3.5 and model1.5 fills so Guaymas-style municipios stay consistent with DENUE-only municipios.
 
 # 1. Bring in DENUE accommodations (employees)
 We will need to clean it up, because the number of employees for each business is binned.
@@ -676,11 +676,19 @@ employees_for_join %>%
   count(municipio_clean, data_year) %>%
   filter(n > 1)
 
+## Training panel: freeze on 2019-2024 complete cases only.
+## 2025+ SECTUR is kept for scoring / observed totals elsewhere, but does NOT
+## re-estimate gapfill coefficients.
 combined_arrivals_employees_data <- total_arrivals_aggregated_join %>%
   left_join(employees_for_join, by = c("municipio_clean", "year" = "data_year")) %>%
   mutate(estado = coalesce(estado, estado_denue)) %>%
   select(-estado_denue) %>%
-  filter(year %in% 2019:2025, is.finite(arrivals))
+  filter(year %in% 2019:2024, is.finite(arrivals))
+
+message(
+  "Frozen training years: ",
+  paste(sort(unique(combined_arrivals_employees_data$year)), collapse = ", ")
+)
 
 ## Municipios with no complete arrivals+employees rows cannot enter model3.
 ## If has_arrivals is FALSE, they are not in the GOC SECTUR shapefile panel
@@ -705,21 +713,15 @@ total_arrivals_aggregated_join %>%
 
 # 4. Visitor and accommodation employees relationship
 
-I re-fit these models after incorporating SECTUR 2025, renaming the newer SECTUR centers onto DENUE municipios (`mexicali` to `san_felipe`, `nuevo_nayarit` to `bahía_de_banderas`, `san_quintin` to `san_quintín`), and fixing the arrivals/employees join. The **ranking did not change**, so I am keeping the same gapfilling decision as before.
+Models below are fit on the **frozen 2019-2024** training panel (`combined_arrivals_employees_data`), after renaming newer SECTUR centers onto DENUE municipios (`mexicali` to `san_felipe`, `nuevo_nayarit` to `bahía_de_banderas`, `san_quintin` to `san_quintín`) and fixing the arrivals/employees join. SECTUR 2025 is **not** used to estimate coefficients.
 
-**What stayed the same**
+**Notes on model comparison (frozen 2019-2024 panel)**
 
-1. **model3.5** (employees + municipio + 2020 year factor) is still the best among the models I compared (lowest BIC; highest adjusted R-squared).
-2. **model1.5** (employees + 2020 year factor) is still better than plain model1 for municipios with no SECTUR history.
-3. **model4** (employees + estado) is still not worth using: estado coefficients are weak / not significant, and the model is heteroscedastic.
+1. **model3.5** (employees + municipio + 2020 year factor) ranks best among models compared (lowest BIC).
+2. **model1.5** (employees + 2020 year factor) beats plain model1 for DENUE-only municipios.
+3. **model4** (employees + estado) is still not preferred.
 
-**What changed with this re-fit**
-
-1. Absolute AIC/BIC values went up again (roughly ~2300s to ~2400–2600s) because the training sample is larger after the renames/merges. That does **not** mean the models got worse; I only compare AIC/BIC **within this run**, not against the old absolute numbers.
-2. In model3 / model3.5, `total_employees` is still not significant (and slightly negative). Most of the fit is municipio fixed effects (Los Cabos, Mazatlan, Puerto Vallarta, etc.) plus the 2020 shift in 3.5. That is okay for filling missing years **within** municipios that already appear in SECTUR. For never-observed municipios, employees still matter, which is why I keep model1 / model1.5 for that case.
-3. Breusch-Pagan on model3 is still borderline (p around 0.07; do not reject homoscedasticity at 0.05). I am not switching to a log / Poisson model for the same reasons as before.
-
-**Decision I am keeping:** use **model3.5** for tourist centers that have some SECTUR years but missing years; use **model1.5** for municipalities with DENUE employees but no SECTUR arrivals history. (The older notes below sometimes say model3 / model1; the fill code that accounts for 2020 uses the .5 versions.)
+**Decision for this script:** **model3.5** for tourist centers with some SECTUR history; **model1.5** for DENUE-only municipios. Coefficients from **2019-2024 only**; `predict()` onto **2019-2025**. **2020 gapfills** use covid-scaling (not the year-factor intercept).
 
 ## 4.1 Model 1
 ```{r}
@@ -813,27 +815,31 @@ BIC(model1)
 BIC(model1.5) # old: 1988.6 ; 2019-2025: ~2389.0 ; after renames: ~2602.2 (still better than model1)
 
 AIC(model3.5) # 2019-2025: ~2252.7 ; after renames: ~2441.2
+
+# MOST RECENT: [1] 2191.294
+# [1] 2091.056
+# [1] 2180.897
+# [1] 2198.247
+# [1] 2128.136
+# [1] 2199.437
+# [1] 2128.136
+# [1] 2103.056
+# [1] 2198.247
+# [1] 2196.748
+# [1] 2063.659
 ```
 
 
 
-# 5. Gapfilling tourist arrivals 
+# 5. Gapfilling tourist arrivals (frozen 2019-2024 + covid-scaled 2020)
 
-**Same decision as before (confirmed after adding 2025):**
-
-1. For tourist centers that have gaps in certain years, but at least have some SECTUR data, I use **model3.5** (municipio effects + 2020 year factor). Older notes said model3; the fill code below that accounts for 2020 uses model3.5.
-2. For municipalities that have DENUE hotel employee data but not any SECTUR arrivals / tourist-center history, I use **model1.5**. Older notes said model1; the 2020-aware fill uses model1.5.
-
-I am keeping that stack because the 2019-2025 re-fit still ranks model3.5 best and model1.5 over model1, and model4 still does not help.
-
-Use `predict()`.
+1. **model3.5** for tourist centers with some SECTUR history (municipio FE + employees).
+2. **model1.5** for DENUE-only municipios (employees).
+3. Fit on **2019-2024**; `predict()` missing rows in **2019-2025** only.
+4. For **2020 gapfills**: predict as a normal year (`year_factor = 2`), then multiply by the observed SECTUR total ratio (2020 / 2019 from the frozen training panel). Apply to **both** model3.5 and model1.5.
+5. Censor negative predictions at zero.
 
 ```{r}
-## prep the full municipio-year panel for predict() fills
-## same rule as 3.2: one row per municipio-year; do not join on estado
-## IMPORTANT: rgn_id must come from the DENUE inland_50 lookup for ALL municipios.
-## Taking rgn_id only from the SECTUR arrivals side left DENUE-only gapfills as NA
-## even when those municipios clearly fall in a region.
 rgn_lookup <- denue_municipios_rgn_fix %>%
   distinct(municipio_clean, .keep_all = TRUE) %>%
   select(municipio_clean, rgn_id)
@@ -848,360 +854,30 @@ combined_arrivals_employees_data_full <- full_join(
   select(-estado_denue, -estado_sectur) %>%
   left_join(rgn_lookup, by = "municipio_clean")
 
-# final safety check before fill/plot
 combined_arrivals_employees_data_full %>%
   count(municipio_clean, data_year) %>%
   filter(n > 1)
 
-## who still lacks a region?
 combined_arrivals_employees_data_full %>%
   distinct(municipio_clean, rgn_id) %>%
   filter(is.na(rgn_id) | rgn_id == "") %>%
   arrange(municipio_clean)
 ```
 
-```{r}
-# filled_combined_arrivals_employees_data <- combined_arrivals_employees_data_full %>%
-#   mutate(
-#     arrivals_filled = ifelse(
-#       is.na(arrivals) & !is.na(total_employees),
-#       predict(model1, newdata = combined_arrivals_employees_data),
-#       arrivals
-#     )
-#   )
-```
-
-## 5.1 Option B: prepare fills
+## 5.1 Diagnostics
 
 ```{r}
-plot(model1, which = 1) # residuals vs fitted
-plot(model1, which = 2) # QQ plot
-plot(model1, which = 3) # scale - location
-
 library(lmtest)
-bptest(model1) # old: BP = 19.161, p = 1.2e-05 ; 2019-2025: ~23.3 ; after renames: BP = 20.4, p = 6.3e-06, still hetero
-bptest(model3) # old: BP = 21.914, p = 0.057 ; 2019-2025: ~22.2, p ~0.074 ; after renames: BP = 23.5, df = 15, p = 0.074, still borderline
-# we will not use log() because it does not make sense here it is difficult to interpret.
-# bptest(model2) # old log check only; model2 not fit in this script
-bptest(model4) # old: BP = 22.289, p = 0.00046 ; 2019-2025: ~26.0 ; after renames: BP = 27.9, p = 9.7e-05, still hetero
+bptest(model1)
+bptest(model3)
+bptest(model3.5)
+bptest(model1.5)
+bptest(model4)
 ```
 
-## 5.2 Prep for fill
-```{r}
-# use predict() to fill arrivals by employees
-## IMPORTANT: use the factor levels that were actually fit in model3,
-## not unique(municipio_clean) from the join. Municipios with arrivals but no
-## complete arrivals+employees training rows must go to model1 / model1.5.
-munis_model3 <- model3$xlevels$municipio_clean
-
-setdiff(unique(combined_arrivals_employees_data$municipio_clean), munis_model3)
-# municipios in the SECTUR join but not in model3 -> filled with model1 / model1.5
-
-df_model3 <- combined_arrivals_employees_data_full %>%
-  filter(municipio_clean %in% munis_model3)
-
-df_model1 <- combined_arrivals_employees_data_full %>%
-  filter(!municipio_clean %in% munis_model3)
-```
-
-
-## 5.3 Use predict() to fill
-### 5.3.1 Model 3 fills
-```{r}
-## fill using model3
-## predict on the same filtered rows we mutate (avoids length / new-level issues)
-df_model3_yr <- df_model3 %>%
-  filter(data_year %in% 2019:2026)
-
-df_model3_filled <- df_model3_yr %>%
-  mutate(
-    arrivals_filled_model3 = ifelse(
-      is.na(arrivals) & !is.na(total_employees), # if there are no arrivals data but there are employees for that municipality, predict using model3 !!
-      predict(model3, newdata = df_model3_yr),
-      arrivals
-    )
-  )
-```
-
-### 5.3.2 Model 1 fills
-```{r}
-## fill using model 1
-df_model1_yr <- df_model1 %>%
-  filter(data_year %in% 2019:2026)
-
-df_model1_filled <- df_model1_yr %>%
-  mutate(
-    arrivals_filled_model1 = ifelse(
-      is.na(arrivals) & !is.na(total_employees),  # if, of the municipalities left, there are no arrivals data but there are employees for that municipality, predict using model1 !!
-      predict(model1, newdata = df_model1_yr),
-      arrivals
-    )
-  )
-```
+## 5.2 Covid ratio from frozen training panel
 
 ```{r}
-## combine the two datasets
-filled_combined <- bind_rows(
-  df_model3_filled,
-  df_model1_filled
-) %>% 
-  mutate(is_filled = ifelse(is.na(arrivals), "1", "0")) # so we can see what has been gapfilled
-```
-
-
-```{r}
-## now, lets make the column of arrivals contained of all that have been filled, and the OG data.
-arrivals_employees_filled <- filled_combined %>% 
-  mutate(arrivals_merged = case_when(
-    is.na(arrivals) & !is.na(arrivals_filled_model3) ~ arrivals_filled_model3,
-    is.na(arrivals) & is.na(arrivals_filled_model3) & !is.na(arrivals_filled_model1) ~ arrivals_filled_model1,
-    TRUE ~ arrivals
-  ))
-```
-
-
-## 5.4 Account for 2020
-```{r}
-# use predict() to fill arrivals by employees
-# both need year_factor so the .5 models can use it
-# same rule as 5.2: only municipios that appear in model3's factor levels
-
-munis_model3 <- model3$xlevels$municipio_clean
-
-df_model3 <- combined_arrivals_employees_data_full %>%
-  filter(municipio_clean %in% munis_model3) %>%
-  mutate(year_factor = ifelse(data_year == 2020, 1, 2))
-
-df_model1 <- combined_arrivals_employees_data_full %>%
-  filter(!municipio_clean %in% munis_model3) %>%
-  mutate(year_factor = ifelse(data_year == 2020, 1, 2))
-```
-
-
-### 5.4.1 Model 3.5
-```{r}
-df_model3_yr <- df_model3 %>%
-  filter(data_year %in% 2019:2026)
-
-df_model3_filled <- df_model3_yr %>%
-  mutate(
-    arrivals_filled_model3 = ifelse(
-      is.na(arrivals) & !is.na(total_employees),
-      predict(model3, newdata = df_model3_yr),
-      arrivals
-    ),
-    arrivals_filled_model3.5 = ifelse(
-      is.na(arrivals) & !is.na(total_employees),
-      predict(model3.5, newdata = df_model3_yr),
-      arrivals
-    )
-  )
-```
-
-
-### 5.4.2 Model 1.5
-```{r}
-df_model1_yr <- df_model1 %>%
-  filter(data_year %in% 2019:2026)
-
-df_model1_filled <- df_model1_yr %>%
-  mutate(
-    arrivals_filled_model1 = ifelse(
-      is.na(arrivals) & !is.na(total_employees),
-      predict(model1, newdata = df_model1_yr),
-      arrivals
-    ),
-    arrivals_filled_model1.5 = ifelse(
-      is.na(arrivals) & !is.na(total_employees),
-      predict(model1.5, newdata = df_model1_yr),
-      arrivals
-    )
-  )
-```
-
-### 5.4.3 Combine and merge
-```{r}
-filled_combined <- bind_rows(df_model3_filled, df_model1_filled) %>%
-  mutate(is_filled = ifelse(is.na(arrivals), "1", "0"))
-
-arrivals_employees_filled <- filled_combined %>%
-  mutate(arrivals_merged = case_when(
-    is.na(arrivals) & !is.na(arrivals_filled_model3.5) ~ arrivals_filled_model3.5,
-    is.na(arrivals) & is.na(arrivals_filled_model3.5) & !is.na(arrivals_filled_model1.5) ~ arrivals_filled_model1.5,
-    TRUE ~ arrivals
-  ))
-```
-
-### 5.4.4 Censor negative predictions at zero
-For small municipalities, we now see that the predicted arrivals dip below zero.  However, that would obviously never happen.  
-
-So, we will make any negative arrivals equal to zero, as there cannot be any negative arrivals conceptually.
-
-Because it would not make sense to log transform this data, nor to constrain the model itself with a log link (poisson/GLM which would assume mean = variance which is not true here, see `bptest`....), we will simply restrain the values after predicting.  
-
-This is fine for gapfilling.
-
-```{r}
-arrivals_employees_filled_negfix <- arrivals_employees_filled %>% 
-  mutate(arrivals_merged_no_neg = ifelse(arrivals_merged < 0, 0, arrivals_merged))
-```
-
-
-## 5.5 Plotly checks
-```{r}
-library(plotly)
-
-plot_data <- arrivals_employees_filled %>% 
-  arrange(municipio_clean, data_year)
-
-plot_data_plotly <- plot_ly(
-  data = plot_data,
-  x = ~data_year,
-  y = ~arrivals_merged,
-  color = ~municipio_clean,
-  type = 'scatter',
-  mode = 'lines+markers'
-) %>%
-  layout(
-    title = "Total arrivals (international + domestic) by municipio after gapfilling with model3.5 and model1.5",
-    xaxis = list(title = "Year"),
-    yaxis = list(title = "Arrivals")
-  )
-plot_data_plotly
-```
-
-
-```{r}
-#### after fixing negative predicted employees
-plot_data_noneg <- arrivals_employees_filled_negfix %>% 
-  arrange(municipio_clean, data_year)
-
-plot_data_noneg_plotly <- plot_ly(
-  data = plot_data_noneg,
-  x = ~data_year,
-  y = ~arrivals_merged_no_neg,
-  color = ~municipio_clean,
-  type = 'scatter',
-  mode = 'lines+markers'
-) %>%
-  layout(
-    title = "Total arrivals (international + domestic) by municipio after gapfilling with model3.5 and model1.5 + making negative arrivals zero",
-    xaxis = list(title = "Year"),
-    yaxis = list(title = "Arrivals")
-  )
-plot_data_noneg_plotly
-
-```
-
-
-
-### 5.5.1 Diagnostic checks
-```{r}
-## first, check that there are no negative predictions
-arrivals_employees_filled %>%
-  filter(arrivals_merged < 0) ## none!!
-```
-
-
-```{r}
-# ggplot(df_model3_filled, aes(x = arrivals, y = arrivals_filled_model3)) +
-#   geom_point(alpha = 0.6) +
-#   geom_abline(slope = 1, intercept = 0, color = "red") +
-#   theme_minimal() +
-#   labs(
-#     title = "Model3 Diagnostic: Actual vs Predicted Arrivals",
-#     x = "Actual arrivals",
-#     y = "Predicted arrivals (model3)"
-#   )
-```
-
-### 5.5.2 Histogram: model 3.5 filled
-```{r}
-hist(arrivals_employees_filled_negfix$arrivals_filled_model3.5, breaks = 30,
-     main = "Distribution of filled arrivals",
-     xlab = "arrivals")
-```
-
-### 5.5.3 Histogram: model 1.5 filled
-```{r}
-hist(arrivals_employees_filled_negfix$arrivals_filled_model1.5, breaks = 30,
-     main = "Distribution of filled arrivals",
-     xlab = "arrivals")
-```
-
-
-```{r}
-df_compare <- arrivals_employees_filled %>%
-  mutate(source = ifelse(is.na(arrivals), "predicted", "actual"))
-
-ggplot(df_compare, aes(x = arrivals_merged, fill = source)) +
-  geom_histogram(alpha = 0.5, position = "identity") +
-  theme_minimal()
-```
-
-```{r}
-# ggplot(arrivals_employees_filled,
-#        aes(x = data_year, y = arrivals_merged, color = is_filled)) +
-#   geom_line() +
-#   facet_wrap(~ municipio_clean, scales = "free_y") +
-#   theme_minimal() +
-#   labs(title = "Per-Municipio Time Series (Actual vs Filled)")
-
-# df_model3_filled %>%
-#   filter(!is.na(arrivals)) %>%
-#   summarize(
-#     RMSE = sqrt(mean((arrivals - predict(model3, newdata = .))^2)), # a lower RMSE indicates a better fit and more accurate predictions
-#     MAE  = mean(abs(arrivals - predict(model3, newdata = .)))
-#   )
-# 
-# df_model1_filled %>%
-#   filter(!is.na(arrivals)) %>%
-#   summarize(
-#     RMSE = sqrt(mean((arrivals - predict(model1, newdata = .))^2)),
-#     MAE  = mean(abs(arrivals - predict(model1, newdata = .)))
-#   )
-```
-
-### 5.5.4 Arrivals vs employees
-```{r}
-ggplot(arrivals_employees_filled_negfix,
-       aes(x = total_employees, y = arrivals_merged, color = is_filled)) +
-  geom_point() +
-  geom_smooth(method = "lm") +
-  theme_minimal()
-```
-
-# 6. Write gapfilled arrivals for Script 4
-```{r}
-## confirm regions are populated before writing
-arrivals_employees_filled_negfix %>%
-  distinct(municipio_clean, rgn_id) %>%
-  count(missing_rgn = is.na(rgn_id) | rgn_id == "")
-
-write_csv(arrivals_employees_filled, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","arrivals_filled_by_DENUE_accommodation_employees_2019_2026.csv"))
-
-write_csv(arrivals_employees_filled_negfix, here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","arrivals_filled_by_DENUE_accommodation_employees_2019_2026_UPDATED.csv"))
-
-# arrivals_employees_filled <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int","arrivals_filled_by_DENUE_accommodation_employees_2019_2026.csv"))
-```
-
-
-# 7. Alternative: scale DENUE-only 2020 fills by observed SECTUR COVID ratio
-This is a **sensitivity / alternative product**, not a replacement of Section 5-6.
-
-**Problem:** model1.5’s 2020 year factor was fit on SECTUR tourist centers. On never-observed
-DENUE-only municipios it often predicts ≤ 0 in 2020 (then censored to 0), so gapfilled
-regional totals collapsed (~96% drop) while observed SECTUR only fell ~40%.
-
-**Option A:** keep model3.5 as in Section 5. For model1.5 fills only, predict as a normal
-year (`year_factor = 2`), then multiply **2020 fills** by the observed SECTUR ratio
-\(A_{2020}/A_{2019}\). Negatives still censored at zero.
-
-Output file for Script 4 Section 7:
-`arrivals_filled_by_DENUE_accommodation_employees_2019_2026_covid_scaled.csv`
-
-```{r}
-## observed COVID shock from SECTUR training panel (total arrivals)
 covid_ratio_obs <- combined_arrivals_employees_data %>%
   filter(year %in% c(2019, 2020), is.finite(arrivals)) %>%
   group_by(year) %>%
@@ -1209,28 +885,74 @@ covid_ratio_obs <- combined_arrivals_employees_data %>%
   summarize(ratio = total[year == 2020] / total[year == 2019]) %>%
   pull(ratio)
 
-covid_ratio_obs # expect ~0.5-0.6
+covid_ratio_obs # expect ~0.5-0.6, was 0.5567995
+```
 
-## reuse the already-filled model3.5 block; rebuild only model1 / model1.5 fills
-df_model1_yr_covid <- df_model1 %>%
-  filter(data_year %in% 2019:2026)
+## 5.3 Predict with covid-scaled 2020 fills
 
-df_model1_yr_normal <- df_model1_yr_covid %>%
+```{r}
+munis_model3 <- model3$xlevels$municipio_clean
+
+df_model3 <- combined_arrivals_employees_data_full %>%
+  filter(municipio_clean %in% munis_model3)
+
+df_model1 <- combined_arrivals_employees_data_full %>%
+  filter(!municipio_clean %in% munis_model3)
+
+df_model3_yr <- df_model3 %>%
+  filter(data_year %in% 2019:2025) %>%
+  mutate(year_factor = ifelse(data_year == 2020, 1, 2))
+
+df_model3_yr_normal <- df_model3_yr %>%
+  mutate(year_factor = 2)
+
+pred_model3.5_normal <- predict(model3.5, newdata = df_model3_yr_normal)
+
+df_model3_filled <- df_model3_yr %>%
+  mutate(
+    arrivals_filled_model3 = ifelse(
+      is.na(arrivals) & !is.na(total_employees),
+      predict(model3, newdata = df_model3_yr),
+      arrivals
+    ),
+    arrivals_filled_model3.5_yearfactor = ifelse(
+      is.na(arrivals) & !is.na(total_employees),
+      predict(model3.5, newdata = df_model3_yr),
+      arrivals
+    ),
+    arrivals_filled_model3.5 = {
+      base <- ifelse(
+        is.na(arrivals) & !is.na(total_employees),
+        pred_model3.5_normal,
+        arrivals
+      )
+      ifelse(
+        is.na(arrivals) & !is.na(total_employees) & data_year == 2020,
+        base * covid_ratio_obs,
+        base
+      )
+    }
+  )
+
+df_model1_yr <- df_model1 %>%
+  filter(data_year %in% 2019:2025) %>%
+  mutate(year_factor = ifelse(data_year == 2020, 1, 2))
+
+df_model1_yr_normal <- df_model1_yr %>%
   mutate(year_factor = 2)
 
 pred_model1.5_normal <- predict(model1.5, newdata = df_model1_yr_normal)
 
-df_model1_filled_covid_scaled <- df_model1_yr_covid %>%
+df_model1_filled <- df_model1_yr %>%
   mutate(
     arrivals_filled_model1 = ifelse(
       is.na(arrivals) & !is.na(total_employees),
-      predict(model1, newdata = df_model1_yr_covid),
+      predict(model1, newdata = df_model1_yr),
       arrivals
     ),
-    ## raw year-factor prediction kept for comparison
     arrivals_filled_model1.5_yearfactor = ifelse(
       is.na(arrivals) & !is.na(total_employees),
-      predict(model1.5, newdata = df_model1_yr_covid),
+      predict(model1.5, newdata = df_model1_yr),
       arrivals
     ),
     arrivals_filled_model1.5 = {
@@ -1247,55 +969,32 @@ df_model1_filled_covid_scaled <- df_model1_yr_covid %>%
     }
   )
 
-## model3.5 block unchanged from Section 5.4.1
-filled_combined_covid_scaled <- bind_rows(df_model3_filled, df_model1_filled_covid_scaled) %>%
+filled_combined <- bind_rows(df_model3_filled, df_model1_filled) %>%
   mutate(is_filled = ifelse(is.na(arrivals), "1", "0"))
 
-arrivals_employees_filled_covid_scaled <- filled_combined_covid_scaled %>%
+arrivals_employees_filled <- filled_combined %>%
   mutate(arrivals_merged = case_when(
     is.na(arrivals) & !is.na(arrivals_filled_model3.5) ~ arrivals_filled_model3.5,
     is.na(arrivals) & is.na(arrivals_filled_model3.5) & !is.na(arrivals_filled_model1.5) ~ arrivals_filled_model1.5,
     TRUE ~ arrivals
-  )) %>%
+  ))
+
+stopifnot(max(arrivals_employees_filled$data_year, na.rm = TRUE) <= 2025)
+
+arrivals_employees_filled_negfix <- arrivals_employees_filled %>%
   mutate(arrivals_merged_no_neg = ifelse(arrivals_merged < 0, 0, arrivals_merged))
-
-## compare baseline vs covid-scaled gapfilled totals
-bind_rows(
-  arrivals_employees_filled_negfix %>%
-    mutate(version = "baseline_yearfactor") %>%
-    filter(data_year %in% c(2019, 2020, 2024)) %>%
-    group_by(version, data_year, is_filled) %>%
-    summarize(total = sum(arrivals_merged_no_neg, na.rm = TRUE), .groups = "drop"),
-  arrivals_employees_filled_covid_scaled %>%
-    mutate(version = "covid_scaled") %>%
-    filter(data_year %in% c(2019, 2020, 2024)) %>%
-    group_by(version, data_year, is_filled) %>%
-    summarize(total = sum(arrivals_merged_no_neg, na.rm = TRUE), .groups = "drop")
-)
-
-write_csv(
-  arrivals_employees_filled_covid_scaled,
-  here::here(
-    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int",
-    "arrivals_filled_by_DENUE_accommodation_employees_2019_2026_covid_scaled.csv"
-  )
-)
 ```
 
+## 5.4 Plotly check
+
 ```{r}
+library(plotly)
 
-arrivals_employees_filled_covid_scaled <- read_csv(here::here(
-    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int",
-    "arrivals_filled_by_DENUE_accommodation_employees_2019_2026_covid_scaled.csv"
-  )
-)
-
-## quick plot of the alternative fill
-plot_data_covid_scaled <- arrivals_employees_filled_covid_scaled %>%
+plot_data_noneg <- arrivals_employees_filled_negfix %>%
   arrange(municipio_clean, data_year)
 
 plot_ly(
-  data = plot_data_covid_scaled,
+  data = plot_data_noneg,
   x = ~data_year,
   y = ~arrivals_merged_no_neg,
   color = ~municipio_clean,
@@ -1303,9 +1002,25 @@ plot_ly(
   mode = "lines+markers"
 ) %>%
   layout(
-    title = "Gapfilled arrivals (covid-scaled DENUE-only 2020 fills)",
+    title = "Gapfilled arrivals (frozen 2019-2024 model + covid-scaled 2020 fills)",
     xaxis = list(title = "Year"),
     yaxis = list(title = "Arrivals")
   )
+```
+
+# 6. Write gapfilled arrivals for Script 4
+
+```{r}
+arrivals_employees_filled_negfix %>%
+  distinct(municipio_clean, rgn_id) %>%
+  count(missing_rgn = is.na(rgn_id) | rgn_id == "")
+
+write_csv(
+  arrivals_employees_filled_negfix,
+  here::here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/gapfilled_int",
+    "arrivals_filled_by_DENUE_accommodation_employees_2019_2026_covid_scaled.csv"
+  )
+)
 ```
 
