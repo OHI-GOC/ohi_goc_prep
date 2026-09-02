@@ -1,0 +1,738 @@
+---
+title: 'OHI GoC 2025: Clean Waters - Pathogens (2018-2025)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# Clean Waters: Pathogens
+
+The Clean Waters goal aims to capture the degree to which local waters are unpolluted by human-made causes based on the various contamination impacts it has on those that enjoy the Gulf.
+
+This was because experts agreed that pollution has negative impacts on the ecological health of the system, human health for those who enjoy swimming in the GoC, and also food quality, such as the levels of heavy metals in fish.
+
+In this subgoal, we will specifically be addressing the levels of enterococcus in coastal sites over time. The ideal state is that the waters are completely unpolluted and safe for both humans and organisms living in the ecosystem.
+
+$$current\ status\ _{pathogen} = 1 - \frac{NPM\ _{current} - NPM\ _{ideal}}{NPM\ _{maximum} - NPM\ _{ideal}}$$
+
+
+*The ideal reference point is zero pollution, meaning the status score = 1 when waters are completely clean, and approaches 0 as contamination increases to the legal maximum for beach suitability.*
+
+Note that NPM is an acronym for "Número más probable" per 100mL, which is how enterococcus is measured in water samples.
+
+|*NMP Enterococos / 100ml	| Clasificación de la playa |
+|-------------------------|---------------------------|
+| De 0 a 200              | 	Apta                    | 
+| Mayor de 200            | 	No Apta                 | 
+
+Where "apta" means "suitable."  
+
+---
+
+Therefore, these are the values for $$NPM\ _{ideal}$$ and $$NPM\ _{maximum}$$:
+
+$$NPM\ _{ideal} = 0 \ NPM\ _{100mL}$$
+
+$$NPM\ _{maximum} = 200\ NPM\ _{100mL}$$
+
+
+That being said, [according to the the California State Water Resources Control Board and BWTF:](https://sandiego.surfrider.org/news/diving-into-the-science-behind-blue-water-task-force)
+
+- “Low” Enterococcus counts (0-35 MPN/100mL) are safe for human contact. 
+- “Medium” Enterococcus counts (36-104 MPN/100mL) the beach is still considered safe but caution is still advised. If the 30-day average MPN results for a beach exceed 35 it is considered unsafe for recreation.
+- “High” Enterococcus counts (over 104 MPN/100mL) exceed the state safety standards and it is advised to avoid contact with the water. 
+
+
+So we could make NPM_max = 104 MPN per 100mL. 
+
+More information on enterococcus as FIB is available in this paper, [Byappanahalli et al. 2012](https://pmc.ncbi.nlm.nih.gov/articles/PMC3510518/).
+
+```{r}
+library(tidyverse) 
+library(sf)
+library(janitor)
+library(here)
+library(mapview)
+```
+
+## Read in the data
+
+Current monitoring (2022-2025) plus historical digitized tables (2018, 2019, 2021). There is no 2020 Playas Limpias sampling in this set (COVID pause), so that year is left missing rather than gap-filled.
+
+```{r}
+playas_limpias_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONAGUA_playas_limpias/d2026/Playas_Limpias_Digitized_Data_Current_2022_2025.csv")) %>% 
+  janitor::clean_names()
+
+playas_limpias_hist_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONAGUA_playas_limpias/d2026/Playas_Limpias_Digitized_Data_Historical_2021_2018.csv")) %>% 
+  janitor::clean_names()
+
+# same columns in both files; align types then stack
+playas_limpias_raw <- bind_rows(
+  playas_limpias_raw %>%
+    mutate(
+      ano = as.numeric(ano),
+      nmp_100ml = as.character(nmp_100ml)
+    ),
+  playas_limpias_hist_raw %>%
+    mutate(
+      ano = as.numeric(ano),
+      nmp_100ml = as.character(nmp_100ml)
+    )
+) %>%
+  filter(ano >= 2018, ano <= 2025)
+```
+
+### Clean coordinates
+
+```{r}
+dms_to_dd <- function(dms_string) {
+  # remove degree symbol, minutes, seconds markers and cardinal direction
+  dms_string %>%
+    str_trim() %>%
+    # extract the numeric components and direction
+    str_match("(\\d+)°(\\d+)'([\\d.]+)''\\s*(Norte|Sur|Este|Oeste)") %>%
+    as_tibble(.name_repair = "minimal") %>%
+    set_names(c("full", "deg", "min", "sec", "dir")) %>%
+    mutate(
+      across(c(deg, min, sec), as.numeric),
+      # convert to decimal degrees
+      dd = deg + min/60 + sec/3600,
+      # make negative if South or West
+      dd = if_else(dir %in% c("Sur", "Oeste"), -dd, dd)
+    ) %>%
+    pull(dd)
+}
+
+# apply it!! drop rows with missing coordinates (e.g. Camarones ND) so st_as_sf does not fail
+playas_limpias_coord <- playas_limpias_raw %>%
+  filter(
+    !is.na(latitud), latitud != "NA",
+    !is.na(longitud), longitud != "NA"
+  ) %>%
+  mutate(
+    lat = dms_to_dd(latitud),
+    lon = dms_to_dd(longitud)
+  ) %>%
+  filter(!is.na(lat), !is.na(lon)) %>%
+  st_as_sf(coords = c("lon", "lat"), # making sf object
+           crs = 4326, # WGS84
+           remove = FALSE)
+
+mapview(playas_limpias_coord)
+```
+
+
+
+### Assign OHI rgns
+
+First, group by region and unite the polygons for inland 10km with the marine polygons.
+```{r}
+## intersect with inland_10:
+inland_10 <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer","inland_10km_goc.shp"))
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp")) %>%
+  filter(location == "marine")
+
+st_crs(inland_10) == st_crs(regions_marine) # TRUE
+
+marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>% 
+  dplyr::select(rgn_id, geometry) %>% 
+  group_by(rgn_id) %>% 
+  summarize(
+    geometry = st_union(geometry)
+  )
+
+mapview(marine_and_inland10)
+```
+
+Now, we can intersect with the `marine_and_inland10` so that each playa is assigned an OHI GoC Region ID.
+```{r}
+# intersect with GoC
+playas_limpias_rgnid <- st_intersection(st_transform(playas_limpias_coord, st_crs(marine_and_inland10)), marine_and_inland10)
+
+mapview(playas_limpias_rgnid, zcol = "rgn_id")
+
+st_write(playas_limpias_rgnid, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pathogens/int","playas_limpias_rgnid_2018_2025.gpkg"))
+```
+
+
+### Clean up seasons
+
+```{r}
+playas_limpias_seasons <- playas_limpias_rgnid %>% 
+  mutate(season = case_when(
+    str_detect(fecha_muestro, "noviembre|diciembre") ~ "winter",
+    str_detect(fecha_muestro, "febrero|marzo") ~ "spring",
+    str_detect(fecha_muestro, "junio|julio") ~ "summer",
+    TRUE ~ NA)
+  ) %>% 
+  mutate(nmp_100ml = ifelse(nmp_100ml == "<10", "5", nmp_100ml),
+         nmp_100ml = as.numeric(nmp_100ml))
+```
+
+
+
+## Calculate current status
+
+### Confirm that all three seasons are sampled for each site
+
+```{r}
+multiple_obs_per_sitio <- playas_limpias_seasons %>% 
+  group_by(ano, fecha_muestro, season, destino, playa, sitio_de_muestro) %>% 
+  summarise(
+    n_observations = length(unique(nmp_100ml))
+  ) %>% 
+  ungroup()
+
+unique(multiple_obs_per_sitio$n_observations) # only 1. each individual sampling site (sitio_de_muestro) has exactly one unique measurement (nmp_100ml) per date/season/year. aka, no duplicates at the site level.
+
+multiple_obs_per_playa <- playas_limpias_seasons %>% 
+  group_by(ano, fecha_muestro, season, destino, playa) %>% 
+  summarise(
+    n_observations = length(unique(nmp_100ml))
+  ) %>% 
+  ungroup()
+
+unique(multiple_obs_per_playa$n_observations) # 2 1 4 3 5, yup, beaches have between 1 and 5 sampling sites within them.
+
+  
+all_three_seasons <- playas_limpias_seasons %>%
+  group_by(ano, playa) %>% 
+  mutate(
+    n_dates = length(unique(fecha_muestro)),
+    n_seasons_playa = length(unique(season)),
+    complete_year_playa = n_seasons_playa == 3
+  ) %>% 
+  ungroup() %>% 
+  group_by(ano, destino) %>%
+  mutate(
+    n_seasons_destino = length(unique(season)),
+    complete_year_destino = n_seasons_destino == 3
+  ) %>% 
+  ungroup()
+
+unique(all_three_seasons$n_dates) #  3 1 2 8 6 7 4
+
+## only mulege is missing some seasons in 2022.
+missing_seasons <- all_three_seasons %>% 
+  filter(complete_year_destino == "FALSE")
+
+## but, some beaches are missing mpn sampling across each season, so while the destino has data for all three seasons, the specific playa does not.
+missing_dates <- all_three_seasons %>% 
+  filter(n_dates %in% c("1","2")) # should be okay because each destino has multiple beaches.
+```
+
+### Average the MPN per 100mL for each OHI Region and season
+
+```{r}
+# within the same season, for each site
+seasonal_mpn_site <- playas_limpias_seasons %>%
+  mutate(nmp_100ml = as.numeric(nmp_100ml)) %>%
+  filter(!is.na(nmp_100ml)) %>%
+  group_by(ano, season, rgn_id, destino, playa, sitio_de_muestro) %>%
+  summarize(
+    n_visits = length(unique(fecha_muestro)),
+    arith_mean_nmp_site = mean(nmp_100ml)
+  ) %>%
+  ungroup()
+
+# average across sites within each playa
+seasonal_mpn_playa <- seasonal_mpn_site %>%
+  group_by(ano, season, rgn_id, destino, playa) %>%
+  summarize(
+    n_sites = n(),
+    arith_mean_nmp_playa = mean(arith_mean_nmp_site)
+  ) %>%
+  ungroup()
+
+# seasonal_mpn_playa_differences <- seasonal_mpn_playa %>% 
+#   mutate(same = ifelse(seasonal_mpn_playa$geom_mean_nmp_playa == seasonal_mpn_playa$arith_mean_nmp_playa, TRUE, FALSE))
+
+# average across playas within each destino
+seasonal_mpn_destino <- seasonal_mpn_playa %>%
+  group_by(ano, season, rgn_id, destino) %>%
+  summarize(
+    n_playas = n(),
+    arith_mean_nmp_destino = mean(arith_mean_nmp_playa)
+  ) %>%
+  ungroup()
+
+season_coverage <- seasonal_mpn_destino %>%
+  group_by(ano, destino) %>%
+  summarize(
+    n_seasons = n(),
+    complete = n_seasons == 3
+  ) %>%
+  ungroup()
+
+# look at incomplete ones
+# 2022-2025: mainly Huatabampo summer 2023 (and Mulegé 2022 at destino level).
+# 2018-2021: some destinos have only two seasons in the digitized tables.
+filter(season_coverage, !complete)
+```
+
+
+### Calculate the pressure score for each season, year, and region
+
+```{r}
+pressure_score_per_season <- seasonal_mpn_destino %>% 
+  mutate(npm_ideal = 0,
+         npm_max = 200,
+         npm_max_alt = 104) %>% 
+  group_by(ano, destino, season) %>% 
+  mutate(
+    pressure_score_200max = (1 - ((arith_mean_nmp_destino - npm_ideal)/(npm_max - npm_ideal)))*100,
+    pressure_score_104max = (1 - ((arith_mean_nmp_destino - npm_ideal)/(npm_max_alt - npm_ideal)))*100
+  ) %>% 
+  ungroup()
+```
+
+Several destinos have MPN values way above both thresholds, especially in summer and winter. The worst offender is Guaymas in winter 2025 with an average MPN of 608, nearly 3x the 200 max and 6x the 104 max. This makes me think that the 200 threshold is a good one.
+
+```{r}
+exceedances <- pressure_score_per_season %>%
+  filter(pressure_score_200max <= 0 | pressure_score_104max <= 0) %>%
+  dplyr::select(ano,rgn_id, destino, season, arith_mean_nmp_destino, 
+         pressure_score_200max, pressure_score_104max)
+
+pressure_score_per_season_fix <- pressure_score_per_season %>% 
+  mutate(pressure_score_200max = ifelse(pressure_score_200max < 0, 0, pressure_score_200max),
+         pressure_score_104max = ifelse(pressure_score_104max < 0, 0, pressure_score_104max)
+         )
+```
+
+### Take the geometric mean across seasons for each destino, to make sure the lower scores drag down the overall score for that destino and year
+
+```{r}
+pressure_score_overall_destino <- pressure_score_per_season_fix %>% 
+  group_by(ano, rgn_id, destino) %>% 
+  summarize(all_szns_pressure_score_200max = exp(mean(log(pressure_score_200max))),
+         all_szns_pressure_score_104max = exp(mean(log(pressure_score_104max)))
+         ) %>% 
+  ungroup()
+```
+
+
+### Average across the destinos for each region and year
+
+```{r}
+pathogen_score <- pressure_score_overall_destino %>% 
+  mutate(ano = as.character(ano)) %>% 
+  group_by(rgn_id, ano) %>% 
+  summarize(
+    current_status_104max = mean(all_szns_pressure_score_104max),
+    current_status_200max = mean(all_szns_pressure_score_200max)
+  ) %>% 
+  ungroup()
+```
+
+```{r}
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+pressure_score_overall_destino %>%
+  distinct(ano, rgn_id, destino, all_szns_pressure_score_200max) %>%
+  mutate(all_szns_pressure_score_200max = round(all_szns_pressure_score_200max, 1)) %>%
+  pivot_wider(
+    names_from = ano,
+    values_from = all_szns_pressure_score_200max
+  ) %>%
+  arrange(rgn_id, destino) %>%
+  rename(
+    `Region` = rgn_id,
+    `Destino` = destino
+  ) %>%
+  kable(format = "html", caption = "Pathogen Pressure Score by Destino and Year (200 MPN Max)") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+    full_width = FALSE
+  )
+```
+
+
+
+#### plotly
+
+```{r}
+library(plotly)
+
+rgn_colors <- c(
+  Region_1 = "#C03729",
+  Region_2 = "#E68C7C",
+  Region_3 = "#FC8F24",
+  Region_4 = "#dcaa38",
+  Region_5 = "#cbd2a0",
+  Region_6 = "#98a25a",
+  Region_7 = "#747428",
+  Region_8 = "#627391",
+  Region_9 = "#8d61a9"
+)
+
+## plot the pathogens cs over time
+pathogens_104_plotly <- plotly::plot_ly(
+  pathogen_score, 
+  x = ~ano, 
+  y = ~current_status_104max, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Clean Waters: Pathogens Current Status, maximum of 104 MPN per 100mL",
+    xaxis = list(title = "ano // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines( 
+    x = range(pathogen_score$ano), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+pathogens_104_plotly
+
+## plot the pathogens cs over time
+pathogens_200_plotly <- plotly::plot_ly(
+  pathogen_score, 
+  x = ~ano, 
+  y = ~current_status_200max, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Clean Waters: Pathogens Current Status, maximum of 200 MPN per 100mL",
+    xaxis = list(title = "ano // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines( 
+    x = range(pathogen_score$ano), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+pathogens_200_plotly
+
+```
+
+
+## Coastline weighted average across pressure scores to determine current status per OHI region
+
+```{r}
+ne_10m_coastline <- st_read(here::here("/home/shares/ohi/OHI_GOC/spatial/ne_10m_coastline/ne_10m_coastline.shp"))
+# mapview(ne_10m_coastline)
+```
+
+Buffer around playas:
+
+```{r}
+st_crs(playas_limpias_rgnid) # Mexico ITRF2008 / LCC, good!
+
+sitio_buffers <- st_buffer(playas_limpias_rgnid, dist = 1000)
+# mapview(sitio_buffers, zcol = "destino")
+
+sampled_coastline <- st_intersection(st_transform(ne_10m_coastline, st_crs(sitio_buffers)), sitio_buffers)
+# mapview(sampled_coastline, zcol = "destino")
+
+length_sampled_coastline <- sampled_coastline %>% 
+  group_by(ano, destino) %>% 
+  summarize(
+    sampled_playa = st_union(geometry),
+    length_sampled = st_length(sampled_playa)
+  ) %>% 
+  ungroup() %>% 
+  mutate(ano = as.character(ano),
+         length_sampled_meters = as.numeric(length_sampled)
+         )
+
+
+# mapview(length_sampled_coastline, zcol = "length_sampled", lwd = 5)
+```
+
+```{r}
+library(kableExtra)
+
+length_sampled_coastline %>%
+  st_drop_geometry() %>% 
+  mutate(length_sampled = round(as.numeric(length_sampled), 1)) %>%
+  select(ano, destino, length_sampled) %>%
+  pivot_wider(
+    names_from = ano,
+    values_from = length_sampled
+  ) %>%
+  arrange(destino) %>%
+  rename(`Destino` = destino) %>%
+  kable(
+    format = "html",
+    caption = "Sampled Coastline Length (m) by Destino and Year"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+    full_width = FALSE
+  )
+```
+
+
+### Weighted average by length of sampled beach each year:
+
+```{r}
+pathogen_score <- pressure_score_overall_destino %>%
+  mutate(ano = as.character(ano)) %>%
+  st_drop_geometry() %>% 
+  left_join(length_sampled_coastline, by = c("destino","ano")) %>%
+  group_by(rgn_id, ano) %>%
+  summarize(
+    current_status_104max = weighted.mean(all_szns_pressure_score_104max, w = length_sampled_meters), # no need to remove NAs because there are none
+    current_status_200max = weighted.mean(all_szns_pressure_score_200max, w = length_sampled_meters)
+  ) %>%
+  ungroup()
+```
+
+### Gapfill
+
+Complete the 2018-2025 year axis. Carry nearby years into missing region-years, except **2020**, which was not monitored and is left as `NA`.
+
+```{r}
+pathogen_score_gapfill <- pathogen_score %>% 
+  mutate(ano = as.numeric(ano)) %>% 
+  group_by(rgn_id) %>% 
+  complete(ano = 2018:2025) %>% 
+  mutate(
+    gapfilled = ifelse(is.na(current_status_200max) & ano != 2020, "y", "n"),
+    is_2020 = ano == 2020
+  ) %>% 
+  fill(current_status_200max, .direction = "up") %>% 
+  mutate(current_status_200max = ifelse(is_2020, NA_real_, current_status_200max)) %>% 
+  ungroup() %>% 
+  select(-is_2020)
+
+current_status <- pathogen_score_gapfill %>% 
+  dplyr::select(rgn_id, year = ano, current_status = current_status_200max, gapfilled)
+```
+
+#### Save to Mazu
+
+```{r}
+write_csv(current_status, here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pathogens/output","pathogen_cs_2018_2025.csv"))
+```
+
+
+```{r}
+pathogen_score_old <- read_csv(here::here("/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/pathogens/output/pathogen_cs.csv"))
+
+## plot the pathogens cs over time
+pathogens_200_plotly <- plotly::plot_ly(
+  current_status, 
+  x = ~year, 
+  y = ~current_status, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Clean Waters: Pathogens Current Status, maximum of 200 MPN per 100mL, weighted avg based on length of beaches sampled",
+    xaxis = list(title = "ano // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines( 
+    x = range(pathogen_score$ano), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+pathogens_200_plotly
+
+## plot the pathogens cs over time
+old_pathogens_200_plotly <- plotly::plot_ly(
+  pathogen_score_old, 
+  x = ~year, 
+  y = ~current_status, 
+  color = ~rgn_id, 
+  colors = rgn_colors,
+  type = "scatter", 
+  mode = "lines+markers"
+) %>% 
+  layout(
+    title = "Clean Waters: Pathogens Current Status, maximum of 200 MPN per 100mL, weighted avg based on length of beaches sampled",
+    xaxis = list(title = "ano // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines( 
+    x = range(pathogen_score$ano), 
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+old_pathogens_200_plotly
+```
+
+
+### Compare weighted vs un-weighted
+
+```{r}
+# unweighted version
+pathogen_score_unweighted <- pressure_score_overall_destino %>%
+  mutate(ano = as.character(ano)) %>%
+  st_drop_geometry() %>%
+  group_by(rgn_id, ano) %>%
+  summarize(
+    unweighted_200max = round(mean(all_szns_pressure_score_200max), 1),
+    .groups = "drop"
+  )
+
+# weighted version
+pathogen_score_weighted <- pressure_score_overall_destino %>%
+  mutate(ano = as.character(ano)) %>%
+  st_drop_geometry() %>%
+  left_join(length_sampled_coastline, by = c("destino", "ano")) %>%
+  group_by(rgn_id, ano) %>%
+  summarize(
+    weighted_200max = round(weighted.mean(all_szns_pressure_score_200max, w = length_sampled_meters), 1),
+    .groups = "drop"
+  )
+
+# join and view
+pathogen_score_unweighted %>%
+  left_join(pathogen_score_weighted, by = c("rgn_id", "ano")) %>%
+  mutate(difference = round(weighted_200max - unweighted_200max, 1)) %>%
+  arrange(rgn_id, ano) %>%
+  rename(
+    `Region` = rgn_id,
+    `Year` = ano,
+    `Unweighted Mean` = unweighted_200max,
+    `Weighted Mean` = weighted_200max,
+    `Difference` = difference
+  ) %>%
+  kable(
+    format = "html",
+    caption = "Pathogen Pressure Score (200 MPN Max): Unweighted vs. Coastline-Weighted Mean by Region and Year"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+    full_width = FALSE
+  ) %>%
+  column_spec(5, color = ifelse(
+    pathogen_score_unweighted %>%
+      left_join(pathogen_score_weighted, by = c("rgn_id", "ano")) %>%
+      mutate(difference = weighted_200max - unweighted_200max) %>%
+      pull(difference) > 0,
+    "green", "red"
+  ))
+
+pathogen_score_unweighted %>%
+  left_join(pathogen_score_weighted, by = c("rgn_id", "ano")) %>%
+  mutate(difference = round(weighted_200max - unweighted_200max, 1)) %>%
+  pivot_longer(
+    cols = c(unweighted_200max, weighted_200max, difference),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  mutate(metric = recode(metric,
+    "unweighted_200max" = "Unweighted Mean",
+    "weighted_200max" = "Weighted Mean",
+    "difference" = "Difference"
+  )) %>%
+  pivot_wider(
+    names_from = ano,
+    values_from = value
+  ) %>%
+  arrange(rgn_id, metric) %>%
+  rename(
+    `Region` = rgn_id,
+    `Metric` = metric
+  ) %>%
+  kable(
+    format = "html",
+    caption = "Pathogen Pressure Score (200 MPN Max): Unweighted vs. Weighted Mean by Region and Year"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+    full_width = FALSE
+  ) 
+```
+
+```{r}
+rgn_colors <- c(
+  Region_1 = "#C03729",
+  Region_2 = "#E68C7C",
+  Region_3 = "#FC8F24",
+  Region_4 = "#dcaa38",
+  Region_5 = "#cbd2a0",
+  Region_6 = "#98a25a",
+  Region_7 = "#747428",
+  Region_8 = "#627391",
+  Region_9 = "#8d61a9"
+)
+
+# build the table data first so we can extract region order
+table_data <- pathogen_score_unweighted %>%
+  left_join(pathogen_score_weighted, by = c("rgn_id", "ano")) %>%
+  mutate(difference = round(weighted_200max - unweighted_200max, 1)) %>%
+  pivot_longer(
+    cols = c(unweighted_200max, weighted_200max, difference),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  mutate(metric = recode(metric,
+    "unweighted_200max" = "Unweighted Mean",
+    "weighted_200max"   = "Weighted Mean",
+    "difference"        = "Difference"
+  )) %>%
+  pivot_wider(
+    names_from = ano,
+    values_from = value
+  ) %>%
+  arrange(rgn_id, metric)
+
+# map each row to its region color
+row_colors <- rgn_colors[table_data$rgn_id]
+
+# build kable and apply row colors
+table_data %>%
+  rename(
+    `Region` = rgn_id,
+    `Metric` = metric
+  ) %>%
+  kable(
+    format = "html",
+    caption = "Pathogen Pressure Score (200 MPN Max): Unweighted vs. Weighted Mean by Region and Year"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("hover", "condensed", "bordered"),
+    full_width = FALSE
+  ) %>%
+  # apply color to each row individually
+  (function(k) {
+    for (i in seq_along(row_colors)) {
+      k <- row_spec(k, i, background = row_colors[i], color = "white")
+    }
+    k
+  })()
+```
+
+
+
+
+
+
