@@ -366,6 +366,15 @@ pressure_df <- df_regions |>
   )
 
 pressure_df
+# SOF score per region per year
+write_csv(
+  pressure_df,
+  "SOF_outputs/sof_region_scores_per_year.csv",
+  row.names = FALSE
+)
+
+# pressure_df <- read_csv(here::here("_habitats/HAB_soft_bottom/SOF_outputs/sof_region_scores_per_year.csv"))
+
 ```
 
 ## Current Sof
@@ -425,6 +434,7 @@ tm_layout(
 )
 
 ```
+
 ```{r, fig.width=12, fig.height=7}
 # Define region colors
 rgn_colors <- c(
@@ -482,64 +492,68 @@ ggplot(
 ```{r}
 # Calculate condition score: SOF_2025 / SOF_2007 for each region
 condition_df <- pressure_df |>
-  filter(year %in% c(2007, 2025)) |>                     # keep only baseline and current year
-  select(region_id, year, SOF_score) |>                  # keep needed columns
-  pivot_wider(names_from = year, values_from = SOF_score) |>  # wide format: columns 2007 and 2025
+  select(region_id, year, condition = SOF_score) |>                  # keep needed columns
   mutate(
-    condition_score = (`2025` / `2007`) * 100,           # compute condition score
-    condition_score = pmin(condition_score, 100)         # cap at 100
+    condition = pmin(condition, 100)         # cap at 100
   )
 condition_df
+
+write_csv(condition_df, here::here("_habitats/HAB_soft_bottom/SOF_outputs/sof_status.csv"))
+
+condition_df <- condition_df |>
+  mutate(region_id = factor(region_id, levels = 1:9))
+ggplot(condition_df, aes(x = year, y = condition)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~ region_id, ncol = 3, labeller = labeller(region_id = function(x) paste("Region", x))) +
+  scale_x_continuous(breaks = pretty(condition_df$year)) +
+  labs(
+    x = "Year",
+    y = "Condition",
+    title = "Condition by region and year"
+  ) +
+  theme_bw()
+
 ```
 
 ## Trend Calculation
 
 ```{r}
-# Trend Calculation: annualized SOF trend from 2015 to 2025
-trend_df <- pressure_df |>
-  filter(year %in% c(2015, 2025)) |>                     # use baseline and current year
-  select(region_id, year, SOF_score) |>                  # keep needed columns
-  pivot_wider(names_from = year, values_from = SOF_score) |>  # wide format: columns 2015 and 2025
-  mutate(
-    trend = ((`2025` / `2015`)^(1/10) - 1) * 100,        # 10-year annualized % change
-    year  = 2025                                         # set trend year
-  ) |>
-  select(region_id, year, trend)
+# Trend Calculation: lm for most recent 5 years of data
+year_end <- max(condition_df$year, na.rm = TRUE)
+year_start <- year_end - 4
+calc_trends <- function(d) {
+  ys <- min(d$year)
+  ye <- max(d$year)
+  cs <- d$condition[d$year == ys][1]
+  fit_lin <- lm(condition ~ year, data = d)
+  fit_log <- lm(log(condition) ~ year, data = d)
+  slope_lin <- unname(coef(fit_lin)["year"])
+  slope_log <- unname(coef(fit_log)["year"])
+  tibble(
+    year = ye,
+    year_start = ys,
+    year_end = ye,
+    condition_start = cs,
+    trend_pct_linear = (slope_lin / cs) * 100,              # slope / start * 100
+    trend_pct_cagr   = (exp(slope_log) - 1) * 100           # slope from log model
+  )
+}
+trend_df <- condition_df |>
+  filter(year >= year_start, year <= year_end) |>
+  group_by(region_id) |>
+  group_modify(~ calc_trends(.x)) |>
+  ungroup()
 
 trend_df
 
+write_csv(trend_df, here::here("_habitats/HAB_soft_bottom/SOF_outputs/sof_trend.csv"))
 ```
 
 
+## Pressure
+
 ```{r}
-# Write SOF CSV outputs
 
-# Current SOF (2025)
-write.csv(
-  pressure_year,
-  "SOF_outputs/sof_current.csv",
-  row.names = FALSE
-)
-
-# Current Status (SOF_2025 / SOF_2007)
-write.csv(
-  condition_df,
-  "SOF_outputs/sof_current_status.csv",
-  row.names = FALSE
-)
-
-# Trend (SOF_2025 / SOF_2015)
-write.csv(
-  trend_df,
-  "SOF_outputs/sof_trend.csv",
-  row.names = FALSE
-)
-
-# SOF score per region per year
-write.csv(
-  pressure_df,
-  "SOF_outputs/sof_region_scores_per_year.csv",
-  row.names = FALSE
-)
 ```
 
