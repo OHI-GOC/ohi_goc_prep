@@ -6,12 +6,11 @@ For questions contact: Erica Ferrer, Ph.D. at emferrer@ucsd.edu - OR - ferrer@nc
 
 # PRE-WORK ------------------------------
 
-```{r Clear environment}
+```{r Clear environment & set working directory}
 rm(list=ls(all=T))
-```
 
-```{r Set working directory}
-setwd("/home/ferrer/ohi_goc_prep/NP/v2025/")
+# Set working directory:
+setwd("/home/ferrer/ohi_goc_prep/NP/v2026/")
 ```
 
 ```{r Load Libraries & Set WD}
@@ -37,255 +36,36 @@ library(htmlwidgets)
 library(htmltools)
 ```
 
-
-# >> SALT ------------------------------
-
-# Notes from Sophia on Salt production: 
-See .qmd file sal_epxloration.qmd (October, 2025)
-
-Unfortunately, none of the open data/massive download INEGI data are at the same scale (volume produced by municipios per year) as the annual statistical yearbooks for minerals.
-
-So, I started the process of manually making a clean dataset for us to use. I can continue to an earlier year as we go along, but in future years it should be easy to just add the observations for each municipio that is within the Gulf (as historical numbers do not seem to change retrospectively).
-
-Here is my manual inputs from the yearbooks, 2018 - 2023, though I could go further back than 2018:
-https://docs.google.com/spreadsheets/d/1kjUVqnsytcDZuImL5iyhxQsgdNujG4Y6A4uWS1KTTK8/edit?gid=0#gid=0
-
-And this is where I downloaded the yearbooks: https://www.sgm.gob.mx/Gobmx/productos/Anuarios-historicos.html
-
-Easier to manually input it into a google sheet.  
-
-```{r Load in the data}
-# Raw data
-Salt_Data0 <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/Anuario_Estadistico_de_la_Mineria_Mexicana","NP_Sal_Anuario_Estadistico_tidy_sal.csv"))
-# 54 obs., 5 vars.
-
-# Municipio key:
-MunicipioRegionKey<- read_csv("/home/ferrer/ohi_goc_prep/NP/v2025/NP_Keys/MunicipioRegionKey_Jun262026.csv")
-# 11 obs., 3 vars.
-```
-
-```{r Merge MunicipioRegionKey to Salt_Data0}
-colnames(Salt_Data0)
-
-Salt_Data_2018.2023<- Salt_Data0 %>%
-  left_join(MunicipioRegionKey,
-    by= c("estado", "municipio")
-    )
-# 54 obs., 6 vars.
-
-Salt_Data_2018.2023<- Salt_Data_2018.2023 %>%
-  select(year, state= estado, OHI_region= OHI_Region, municipality= municipio, 
-         reported_volume_mt= volume_tons, 
-         near_coast_= near_coast)
-```
-
-Extropolate salt data (at the site level) from 2018-2023 to 2024 and 2025
-```{r Extropolate Salt_Data_2018.2023 from 2018-2023 to 2024 and 2025}
-# First, take annual totals by region:
-Salt_Regional_totals <- Salt_Data_2018.2023 %>%
-  select(OHI_region, year, state, municipality, reported_volume_mt) %>%
-  group_by(state, municipality, year) %>%
-  summarise(
-    total_volume_mt = sum(reported_volume_mt, na.rm = TRUE),
-    OHI_region = first(OHI_region),
-    .groups = "drop"
-  )
-
-# Then, fit a linear trend for each region and predict 2024-2025:
-# Use the broom library for forecast.
-Salt_Regional_forecasts <- Salt_Regional_totals %>%
-  group_by(OHI_region, state, municipality) %>%
-  mutate(
-    valid_year_flag = !is.na(total_volume_mt) & total_volume_mt > 0
-  ) %>%
-  nest() %>%
-  mutate(
-    n_years_forecast_ = map_int(data, ~ sum(!is.na(.x$total_volume_mt) & .x$total_volume_mt > 0)),
-    
-    model = map(data, ~ lm(total_volume_mt ~ year, data = .x)),
-    
-    forecast = map(model, ~{
-      newdata <- tibble(year = c(2024, 2025))
-      newdata$predicted_volume_mt <- predict(.x, newdata = newdata)
-      newdata
-    })
-  ) %>%
-  select(OHI_region, state, municipality, forecast, n_years_forecast_) %>%
-  unnest(forecast)
-
-# Add a forecasted column:
-Salt_Regional_forecasts$forecasted_<- c("TRUE")
-```
-
-```{r Merge Salt_Regional_forecasts to Salt_Data_2018.2023}
-colnames(Salt_Data_2018.2023)
-colnames(Salt_Regional_forecasts)
-
-Salt_Data_2018.2023$forecasted_<- c("FALSE")
-
-Salt_Data_2018.2025 <- bind_rows(
-  Salt_Data_2018.2023,
-  Salt_Regional_forecasts
-)
-# 76 obs., 9 vars.
-```
-
-```{r Create cleaned Salt_Data_finalized}
-colnames(Salt_Data_2018.2025)
-
-Salt_Data_finalized <- Salt_Data_2018.2025 %>%
-  select(year, state, OHI_region, municipality, near_coast_,
-         reported_volume_mt, predicted_volume_mt,
-         forecasted_, n_years_forecast_) %>%
-  mutate(
-    volume_mt = coalesce(reported_volume_mt, predicted_volume_mt)
-  ) %>%
-  relocate(volume_mt, .after= predicted_volume_mt)
+```{r Load clean_names_lowercase function}
+clean_names_lowercase <- function(x) {
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+  x %>%
+    tolower() %>%
+    trimws()
+}
 ```
 
 
-# Calculate SALT reference point:
-Salt reference point: "Salt production from all mines roughly equals production from Hermosillio, a great example of a good, sustainable mine."
-Salt reference period: 2018-2022
+# Region key (important for plotting):
+```{r Region key}
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
 
-```{r Calculate salt reference point}
-table(Salt_Data_finalized$municipality)
-colnames(Salt_Data_finalized)
+colnames(Region_Key0)
 
-# Sum this year (by region) and compare to the mean annual regional volume over 2018–2023:
-Salt_ref_point <- Salt_Data_finalized %>%
-  filter(municipality == "hermosillo",
-         year >= 2018 & year <= 2022) %>%
-  summarise(mean_volume_2018_2022 = mean(volume_mt, na.rm = TRUE)) %>%
-  pull(mean_volume_2018_2022)
-```
-
-# Calculate SALT_SubScores:
-```{r Calculate SALT_SubScores}
-colnames(Salt_Data_finalized)
-
-# First, calculate the scores PER SALT MINE relative to the reference point:
-SALT_Scores_per_mine<- Salt_Data_finalized
-
-SALT_Scores_per_mine$ref_point_mt<- c(SALT_ref.point)
-
-SALT_Scores_per_mine <- SALT_Scores_per_mine %>%
-  mutate(
-    mine_SALT_score = (volume_mt / ref_point_mt)* 100,
-    mine_SALT_score_capped = pmin(mine_SALT_score, 100)
-  )
-
-# Next take mean across all mines in that region (weighted by total production):
-colnames(Salt_Scores_per_mine)
-
-SALT_SubScores <- Salt_Scores_per_mine %>%
-  group_by(OHI_region, year) %>%
-  summarise(
-    SALT_score_capped = weighted.mean(
-      mine_SALT_score_capped,
-      w = volume_mt,
-      na.rm = TRUE
-    ),
-    .groups = "drop"
-  )
-```
-
-```{r Plot salt scores!}
-SALT_SubScores_plot<- SALT_SubScores %>%
-  ggplot(aes(
-    x = year,
-    y = SALT_score_capped,
-    color = OHI_region
-  )) +
-  
-  geom_line(linewidth = 1) +
-  geom_point(size = 2) +
-  
-  facet_wrap(~ OHI_region, scales = "fixed") +
-  
-  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
-  
-  labs(
-    title = "NP: SALT Sub-Scores by Region [DRAFT - June 26 2026]",
-    y = "SALT Score (from 0 to 100)",
-    x = "Year"
-  ) +
-  
-  ylim(0, 101) +
-  
-  theme_bw(base_size = 14) +
-  theme(
-    legend.position = "none",
-    strip.text = element_text(size = 14, face = "bold")
-    # plot.title = element_text(size = 18, face = "bold")
-  )
-
-SALT_SubScores_plot
-```
-
-```{r Save as PNG}
-  ggsave(
-    filename = sprintf("/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/SALT_SubScores/SALT_SubScores_plot_Jun262026.png"),
-    plot = SALT_SubScores_plot,
-    width = 12,
-    height = 12,
-    dpi = 300
-  )
-```
-
-```{r Other salt plots}
-## heatmap
-p3 <- Salt_Data_2018.2023 %>%
-  drop_na(volume_tons) %>% 
-  filter(volume_tons != "0") %>% 
-  mutate(municipio_estado = paste(municipio, estado, sep = " - "),
-         log_volume = log10(volume_tons + 1)) %>% # log transform for better visualization
-  ggplot(aes(x = factor(year), y = reorder(municipio_estado, volume_tons), fill = log_volume)) +
-  geom_tile(color = "white", size = 0.1) +
-  scale_fill_viridis_c(name = "log10(volume + 1)", 
-                      guide = guide_colorbar(title.position = "top")) +
-  labs(title = "Production heatmap by municipality and year // Mapa de calor de la producción por municipio y año",
-       subtitle = "Color intensity represents log-transformed volume // La intensidad del color representa el volumen transformado logarítmicamente",
-       x = " ", y = " ") +
-  theme_minimal() +
-  theme(axis.text.y = element_text(size = 8),
-        legend.position = "right")
-
-print(p3)
-ggsave(here("NP","v2025","sal_anuario_estadistico","heatmap_municipio_log.png"), plot = p3, dpi = 400, width = 14, height = 8, units = "in")
-
-
-cat("\n=== DATA SUMMARY ===\n")
-cat("Years covered:", min(Salt_Data_2018.2023$year), "to", max(Salt_Data_2018.2023$year), "\n")
-cat("Number of municipalities:", length(unique(paste(Salt_Data_2018.2023$municipio, Salt_Data_2018.2023$estado))), "\n")
-cat("States:", paste(unique(Salt_Data_2018.2023$estado), collapse = ", "), "\n")
-
-
-library(kableExtra)
-total_by_year <- Salt_Data_2018.2023 %>%
-  group_by(year) %>%
-  summarise(total = sum(volume_tons, na.rm = TRUE))
-
-total_by_year %>%
-  kbl(caption = "Total Volume by Year") %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
-
-## plotly
-library(plotly)
-# preliminary plot of the index score with target reference line
-line_plot_score <- plotly::plot_ly(Salt_Data_2018.2023, x = ~year, y = ~volume_tons, color = ~municipio, type = "scatter", mode = "lines") %>% 
-  layout(title = "Salt production by municipality and year // Mapa de la producción de sal por municipio y año", 
-         xaxis = list(title = "Year"),
-         yaxis = list(title = "Volume (tons)")) 
-line_plot_score
+Region_Key<- Region_Key0 %>%
+  select(OHI_region_est, OHI_region_name) %>%
+  distinct()
+# 10 obs., 2 vars.
 ```
 
 
-# >> FOFM: FISH OIL, FISH MEAL ------------------------------
+# >> 1. FOFM: FISH OIL, FISH MEAL ------------------------------
 Assume that ~70% forage fish is used for fish oil fish meal
 
 ```{r Load in GenusFamilyGroup_lookup}
-GenusFamilyGroup_lookup<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Taxonomic_Keys/GenusFamilyGroupKey_COMPLETE_Apr042026.csv")
+GenusFamilyGroup_lookup<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Taxonomic_Keys/GenusFamilyGroupKey_COMPLETE_Apr042026.csv")
+# 193 obs., 7 vars.
 ```
 
 ```{r GenusGroup_lookup}
@@ -298,20 +78,23 @@ GenusGroup_lookup<- GenusFamilyGroup_lookup %>%
     Major_Functional_Group= clean_names_lowercase(Major_Functional_Group),
     estimated_genus_name= clean_names_lowercase(estimated_genus_name)
   )
+# 193 obs., 2 vars.
 ```
 
 
-# Pull matching FIS scores for FOFM reference point:
-Reference point: All fish oil fish meal stocks are sustainably harvested. (No penalization for under-utilization.)
+##Pull matching stock_status scores for FOFM taxa:
+Reference point: All fish oil fish meal stocks are sustainably harvested.
 Reference period: 2018-2024 (duration of stock status scores)
 
-```{r Load in FIS_StockStatus scores as necessary}
-StockStatus_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/FP_Scores/FIS_Scores/FIS_Stock_Status_SubScores/Stock_Statuses_Compiled_df_Jun072026.csv")
+```{r Load in FIS_StockStatus scores}
+StockStatus_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/FP_Scores_1.1/FIS_Scores_1.1/copy_Stock_Statuses_Compiled_df_Jun072026.csv")
+# 12696 obs., 18 vars.
 
-# Species x year x region; Stock_Status is used as-is.
+# Notice that several of the small pelagics (like cetengraulis) are not correctly assigned to a major_functional_group. Fix this below.
 ```
 
-```{r Prep FIS scores}
+## PATCH: Patch small pelagic genera.
+```{r Prep StockStatus_Scores}
 colnames(StockStatus_Scores)
 
 StockStatus_Scores <- StockStatus_Scores0 %>%
@@ -320,7 +103,7 @@ StockStatus_Scores <- StockStatus_Scores0 %>%
     OHI_region_est = clean_names_lowercase(OHI_region_est),
     estimated_genus_name = clean_names_lowercase(estimated_genus_name)
   )
-# 4130 obs.
+# 4130 obs., 18 vars.
 
 StockStatus_Scores<- StockStatus_Scores %>%
   select(-c(Major_Functional_Group))
@@ -330,17 +113,16 @@ StockStatus_Scores<- StockStatus_Scores %>%
     GenusGroup_lookup, 
     by= c("estimated_genus_name")
   )
+# 4130 obs., 18 vars. Good.
+# The patch worked. FOFM is fixed now.
 ```
 
 
-# Take Stock_Status of FOFM taxa (reference point):
+## Take Stock_Status of FOFM taxa (reference point):
 Reference point: the stock status (B/Bmsy) of taxa used for fish oil and fish meal (i.e., small pelagics) is close to 1 across regions x year
 Reference period: 2018-2024
 
-NOTE TO SELF:
-- I interpreted this to mean that i should calculate the the stock status of small pelagics (region x year), weighted by total catch per stock (region x year)...
-- But maybe this should change after core team review?
-- Jun 30 2026
+I interpreted this to mean that I should calculate the the stock status of small pelagics (region x year), geometrically weighted by total catch per stock (region x year).
 
 
 ```{r Create FOFM_StockStatus}
@@ -360,20 +142,24 @@ FOFM_StockStatus<- StockStatus_Scores %>%
            StockStatus_source
          )
 
-# 25 obs.
+# 80 obs., 8 vars.
+
+unique(FOFM_StockStatus$estimated_genus_name)
+# 7 unique genera of small pelagic fish.
 ```
 
-```{r Only 30% of all catch goes to Fish Oil Fish Meal}
-FOFM_PROPORTION<- 0.30
+```{r Only 70% of all catch goes to Fish Oil Fish Meal}
+FOFM_PROPORTION<- 0.70
 
 FOFM_StockStatus<- FOFM_StockStatus %>%
   mutate(
     FOFM_weight_mt= total_weight_mt * FOFM_PROPORTION
   )
+# 80 obs., 9 vars.
 ```
 
 
-# Calculate FOFM_SubScores (as the geo mean of Stock_Status * total landings):
+## Calculate FOFM_SubScores as the geometric mean of Stock_Status * FOFM_weight_mt:
 
 ```{r Weights and geometric mean}
 # Calculate the proportion of catch each "Stock" (i.e. genus) contributed to its regional total during the study period:
@@ -393,6 +179,8 @@ FOFM_weights <- FOFM_StockStatus %>%
   mutate(wprop_2018.24 = FOFM_stock_catch_mt / total_FOFM_catch_mt) %>% # proportion of catch each stock contributed to the total catch
   distinct(estimated_genus_name, OHI_region_est, wprop_2018.24)
 
+# NOTE TO SELF: see point about geometric weights. At present, the weights reflect the relative contribution per stock to total FOFM catch (per region) DURING the 2018–2024 period. Verify with Mel that this is correct. - EMF, Sep 5 2026.
+
 
 # SANITY CHECK: Do the weights add up to 1?
 TEST<- FOFM_weights %>%
@@ -409,63 +197,332 @@ FOFM_SubScores0 <- FOFM_StockStatus %>%
             by = c("OHI_region_est", "estimated_genus_name"))
 
 
+colnames(FOFM_SubScores0)
+
 # This is the geometric mean part:
-FOFM_SubScores <- FOFM_SubScores0 %>%
+FOFM_SubScores0 <- FOFM_SubScores0 %>%
   group_by(OHI_region_est, year) %>%
   summarize(
     StockStatus_geo.mean = prod(StockStatus_final ^ wprop_2018.24, na.rm = TRUE),
+    Stock_landed.biomass_mt = sum(FOFM_weight_mt, na.rm = TRUE),
     .groups = "drop"
   ) %>%
   mutate(FOFM_score= StockStatus_geo.mean * 100)
+
+# 31 obs., 5 vars.
 ```
 
+```{r Complete the FOFM_SubScores grid}
+FOFM_SubScores <- FOFM_SubScores0 %>%
+  complete(
+    OHI_region_est = paste0("region_", 1:9),
+    year = full_seq(year, 1),
+    fill = list(
+      StockStatus_geo.mean = NA_real_,
+      FOFM_score = NA_real_
+    )
+  ) %>%
+  arrange(OHI_region_est, year)
 
-# Save and plot FOFM_SubScores:
+# 64 obs., 5 vars.
 
-```{r Save the FOFM_SubScores dataframe as needed}
+# Exclusion criteria?
+summary(FOFM_SubScores$Stock_landed.biomass_mt) # median = 295.8, mean = 88314.0
+exclusion_threshold = median(FOFM_SubScores$Stock_landed.biomass_mt, na.rm= TRUE)
+
+FOFM_SubScores$region_exclude_include<- c(NA)
+
+FOFM_SubScores <- FOFM_SubScores %>%
+  group_by(OHI_region_est) %>%
+  mutate(
+    mean_regional_catch_mt = mean(Stock_landed.biomass_mt, na.rm = TRUE),
+    
+    region_exclude_include = case_when(
+      is.na(mean_regional_catch_mt) ~ "exclude",
+      mean_regional_catch_mt <= exclusion_threshold ~ "exclude",
+      mean_regional_catch_mt > exclusion_threshold ~ "include"
+    )
+  ) %>%
+  ungroup()
+# 64 obs., 7 vars.
+```
+
+```{r Sanity check final FOFM_SubScores}
+colnames(FOFM_SubScores)
+
+summary(FOFM_SubScores$FOFM_score)
+
+  #  Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+  # 24.13   55.86   85.73   74.42  100.00  100.00      33 
+
+# Year 2024 mean for FOFM_SubScores:
+mean(FOFM_SubScores$FOFM_score[FOFM_SubScores$year == 2024], na.rm = TRUE)
+# 75.5
+```
+
+# Save FOFM_SubScores:
+
+```{r Save FOFM_SubScores as needed}
 write.csv(FOFM_SubScores, 
-          "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/FOFM_SubScores/FOFM_SubScores_df_Jun282026.csv", 
+          "/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/FOFM_SubScores/FOFM_SubScores_df_Sep052026.csv", 
           row.names = FALSE)
 ```
 
-```{r Plot FOFM scores}
+# Plot FOFM_SubScores:
+
+```{r Load FOFM_SubScores as needed}
+FOFM_SubScores0<- read.csv("/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/FOFM_SubScores/FOFM_SubScores_df_Sep052026.csv")
+
+FOFM_SubScores<- FOFM_SubScores0
+```
+
+```{r Merge Region_Key to FOFM_SubScores}
+FOFM_SubScores<- FOFM_SubScores %>%
+  left_join(Region_Key, 
+            by = "OHI_region_est")
+
+# Make sure to order the regions:
+region_order <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
+FOFM_SubScores <- FOFM_SubScores %>%
+  mutate(
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = region_order
+    )
+  )
+```
+
+
+```{r Plot FOFM total landings over time}
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
+colnames(FOFM_SubScores)
+
 FOFM_SubScores_plot<- FOFM_SubScores %>%
-  filter(!is.na(OHI_region_est)) %>%
+  filter(!is.na(OHI_region_name)) %>%
   
   ggplot(aes(
     x = year,
     y = FOFM_score,
-    color = OHI_region_est
-  )) +
+    color = OHI_region_name
+    )) +
   
   geom_line(linewidth = 1) +
   geom_point(size = 2) +
   
-  facet_wrap(~ OHI_region_est, scales = "fixed") +
-  
-  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  facet_wrap(~ OHI_region_name, scales = "fixed") +
   
   labs(
-    title = "NP: FOFM Sub-Scores by Region [DRAFT - June 28 2026]",
-    y = "FOFM Score (from 0 to 100)",
+    title = "NP: FOFM Scores by Region",
+    subtitle= "summed FOFM genera", 
+    caption = "updated: Sep 5 2026",
+    y = "FOFM Current Status (0 to 1)",
     x = "Year"
   ) +
   
-  ylim(c(0, 101)) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  scale_color_manual(values = Region_colors) +
   
   theme_bw(base_size = 14) +
   theme(
     legend.position = "none",
-    strip.text = element_text(size = 14, face = "bold")
-    # plot.title = element_text(size = 18, face = "bold")
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
   )
 
 FOFM_SubScores_plot
 ```
-
+# Save FOFM_SubScores_plot:
 ```{r Save FOFM_SubScores_plot as a PNG}
 ggsave(plot = FOFM_SubScores_plot,
-       filename = "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/FOFM_SubScores/FOFM_SubScores_plot_Jun282026.png",
+       filename = "/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/FOFM_SubScores/FOFM_SubScores_plot_Sep052026.png",
+       width = 12,
+       height = 12,
+       dpi = 300
+       )
+```
+
+
+# Plot FOFM_Landings over time:
+```{r Plot FOFM total landings over time}
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
+colnames(FOFM_SubScores)
+
+FOFM_Landings_plot<- FOFM_SubScores %>%
+  filter(!is.na(OHI_region_name)) %>%
+  
+  ggplot(aes(
+    x = year,
+    y = Stock_landed.biomass_mt,
+    color = OHI_region_name
+    )) +
+  
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ OHI_region_name, scales = "fixed") +
+  
+  labs(
+    title = "FOFM Landed Biomass",
+    caption= "updated: Sep 5 2026",
+    y = "Estimated Landed Biomass (mt)",
+    x = "Year"
+  ) +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+FOFM_Landings_plot
+```
+
+# Should there be more landings from ANCHOVETA and SARDINA? 
+# Seems like no.
+
+```{r Evaluate small pelagics from GOC_MarineLandings0 directly}
+GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+colnames(GOC_MarineLandings0)
+unique(GOC_MarineLandings0$recorded_taxa_group)
+
+GOC_FOFM_Landings<- GOC_MarineLandings0 %>%
+  filter(recorded_taxa_group %in% c("ANCHOVETA", "SARDINA")) %>%
+  filter(year >= 2018, year <= 2024) %>%
+  select(year, OHI_region_est, weight_kg_corrected) %>%
+  group_by(year, OHI_region_est) %>%
+  summarize(
+    total_landings_mt = sum(weight_kg_corrected, na.rm= TRUE) / 1000,
+    FOFM_landings_mt = total_landings_mt * 0.70
+  ) %>%
+  mutate(
+    OHI_region_est= clean_names_lowercase(OHI_region_est)
+  )
+# 43 obs., 4 vars.
+# NOTE TO SELF: Based on this summary table, it does not seem like we are missing huge sums of FOFM. Seems like most small pelagic production comes from regions 7 and 8.
+```
+
+```{r Join Region_Key to GOC_FOFM_Landings}
+GOC_FOFM_Landings<- GOC_FOFM_Landings %>%
+  left_join(Region_Key, 
+            by = "OHI_region_est")
+
+# Make sure to order the regions:
+region_order <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
+GOC_FOFM_Landings <- GOC_FOFM_Landings %>%
+  mutate(
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = region_order
+    )
+  )
+```
+
+```{r Plot GOC_FOFM_Landings over time}
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
+colnames(GOC_FOFM_Landings)
+
+FOFM_Landings_plot2<- GOC_FOFM_Landings %>%
+  filter(!is.na(OHI_region_name)) %>%
+  
+  ggplot(aes(
+    x = year,
+    y = FOFM_landings_mt,
+    color = OHI_region_name
+    )) +
+  
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ OHI_region_name, scales = "fixed") +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  labs(
+    title = "FOFM Landings by Region",
+    subtitle= "summed SARDINA and ANCHOVETA",
+    caption= "updated: Sep 5 2026",
+    y = "Reported Landings (mt)",
+    x = "Year"
+  ) +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+FOFM_Landings_plot2
+```
+
+# Save FOFM_Landings_plot2:
+```{r Save FOFM_Landings_plot2 as a PNG}
+ggsave(plot = FOFM_Landings_plot2,
+       filename = "/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/FOFM_SubScores/FOFM_Landings_plot2_Sep052026.png",
        width = 12,
        height = 12,
        dpi = 300
@@ -681,6 +738,7 @@ NP_Landings <- NP_Landings %>%
       TRUE ~ "unknown"
     )
   )
+# 3136869 obs., 52 obs.
 
 #### FLAG 2 - Flag keywords that indicate animal was filleted (2 levels: YES, NO): ####
 
@@ -695,6 +753,7 @@ NP_Landings <- NP_Landings %>%
       TRUE ~ "unknown"
     )
   )
+# 3136869 obs., 53 obs.
 
 #### FLAG 3 - Flag keywords that indicate animal was sold as a residue (2 levels: YES, NO): ####
 
@@ -744,7 +803,8 @@ subset<- NP_Landings %>%
 
 table(subset$recorded_taxa_name_clean)
 # should be 0 length. It's not, there are 94 obs.
-# NOTE TO SELF: Here are some special edge cases, akin to blue fin tuna...
+# NOTE TO SELF: Here are some special edge cases, akin to blue fin tuna:
+# ALMEJA [CONCHA] ESPINA, [PULPO DE] DOS MANCHAS CAFE, TIBURON [ALETA] CARTON, TIBURON [ALETA] CARTON (CARCHARHINUS PLUMBEUS)
 
 subset<- NP_Landings %>%
   filter(SoldWhole_FLAG == "NO" &
@@ -752,8 +812,8 @@ subset<- NP_Landings %>%
            Residue_FLAG == "YES")
 
 table(subset$recorded_taxa_name_clean)
-# should be 0 length. It's not, there are 198 obs.
-# NOTE TO SELF: Here are some special edge cases, like spiny oyster, akin to blue fin tuna...
+# should be 0 length. It's not, there are 2566 obs.
+# NOTE TO SELF: Here are some special edge cases that MOSTLY work. Take "CALAMAR S/MANTO TENTACULOS DE" for example -- this record was correctly identified as a residue.
 
 # This flag system mostly works...
 
@@ -786,7 +846,7 @@ subset3<- NP_Landings %>%
 table(subset3$live.landed_discrepancy)
 ```
 
-What this tells me is that for most entries where landed weight is greater than live weight; likely error?, it's an animal part that is being sold.
+What this tells me is that for most entries where "landed weight is greater than live weight; likely error?", it's an animal part that is being sold.
 BUT, sometimes an animal part sold and live weight is still greater than landed weight...
 
 # Make a recorded_weightOFanimal_kg and recorded_weightOFfillet_kg columns:
@@ -1010,35 +1070,10 @@ table(NP_Landings_finalized$record_type)
       # 1302050         62933       1729682
 ```
 
-```{r PURG this?}
-# Now exclude any entries that don't have at least one YES flag.
-NP_Landings_finalized <- NP_Landings_finalized %>%
-  filter(
-    if_any(
-      starts_with("NP"),
-      ~ . == "YES"
-    )
-  )
 
-dim(NP_Landings_finalized)
-# 132557 obs. of 61 vars.
-```
-
-
-# >> AQRM: AQUARIUM TRADE SPECIES, LIVE ORNAMENTAL FISH AND INVERTS ------------------------------
+# >> 2. AQRM: AQUARIUM TRADE SPECIES, LIVE ORNAMENTAL FISH AND INVERTS ------------------------------
 Run list of species through AI and flag any species that are almost ALWAYS ornamentals.
-
-# Still need to pull in ornamentals list from Lilliana...
-```{r Check ornamentals flag}
-table(NP_Landings_finalized$ornamentalFLAG_1)
-      # NO POSSIBLY      YES 
-      #  1    19726     1602
-
-table(NP_Landings_finalized$NP.PreviousOrnamental_FLAG)
-# MAYBE    NO   YES 
-# 19726 85928  160
-# Looks good!
-```
+This list is also informed by the work from Lilliana.
 
 ```{r Pull out possible ornamentals}
 colnames(NP_Landings_finalized)
@@ -1046,27 +1081,28 @@ table(NP_Landings_finalized$Alive.Dead)
 
 AquariumTrade_Landings00<- NP_Landings_finalized %>%
   filter(
-    ( #NP.PreviousOrnamental_FLAG %in% c("YES", "MAYBE") |
-       NP.Group_FLAG %in% c("YES", "MAYBE") |
-       NP.TaxaName_FLAG %in% c("YES", "MAYBE")) &
+    (
+      NP.Group_FLAG %in% c("YES", "MAYBE") |
+      NP.TaxaName_FLAG %in% c("YES", "MAYBE")) &
       Alive.Dead %in% c("alive", "unknown, assumed dead")
   )
            
 # 21671 obs. of 67 vars.
 
-table(AquariumTrade_Landings0$Alive.Dead)
+table(AquariumTrade_Landings00$Alive.Dead)
                 # alive unknown, assumed dead 
-                #   349                 21322 
+                #   349                 31005
 ```
 
 ```{r Look into flagged ornamental taxa}
 # Taking the information I've gleaned here to refine my sector estimates above.
-table(AquariumTrade_Landings0$estimated_genus_name)
-table(AquariumTrade_Landings0$Major_Functional_Group)
-table(AquariumTrade_Landings0$recorded_taxa_name_clean)
+table(AquariumTrade_Landings00$estimated_genus_name)
+table(AquariumTrade_Landings00$Major_Functional_Group)
+table(AquariumTrade_Landings00$recorded_taxa_name_clean)
+unique(AquariumTrade_Landings00$recorded_taxa_name_clean)
 
 # Investigate Major_Taxonomic_Group unknown:
-subset <- AquariumTrade_Landings0 %>% 
+subset <- AquariumTrade_Landings00 %>% 
   filter(Major_Functional_Group %in% c("unknown"))
 # 1168 obs., 62 vars.
 
@@ -1096,17 +1132,59 @@ table(subset$common_name_clean)
 # HACHA CHINA / HACHA LARGA / CALLO HACHA → scallops or bivalves; occasionally live in holding systems but not typical aquarium pets
 # MADRE PERLA → pearl oyster; generally not an aquarium species
 
-AquariumTrade_LikelyTaxa<- c("CABALLITO MAR", "PAYASO", "PECES ORNATO")
-AquariumTrade_PossibleTaxa<- c("CARACOL CHINO", "CARACOL CHINO NEGRO", "CARACOL CHINO ROSA", "CARACOL CHINO ROSADO",
-                               "CARACOL TURBO FLUCTUOSO", "CARACOL OLIVO", "CARACOL MARGARITA",
-                               "CARACOL UÑA", "CARACOL CHILE", "CARACOL BURRO", "CARACOL PANOCHA",
-                               "ESTRELLA LIMPIADORA")
-AquariumTrade_UnlikelyTaxa<- c("ESTRELLA MAR", "GALLETA MAR",
-                               "HACHA CHINA", "HACHA LARGA", "CALLO HACHA",
-                               "MADRE PERLA")
+# NOTE TO SELF: List revised and expanded September 5 2026:
 
-# Assign ornamental likely or unlikely:
-AquariumTrade_Landings0 <- AquariumTrade_Landings0 %>%
+AquariumTrade_LikelyTaxa<- c(
+  "CARACOL TURBO FLUCTUOSO",
+  "CABALLITO MAR",
+  "CANGREJO ERMITAÑO",
+  "PECES ORNATO",
+  "ESTRELLA LIMPIADORA"
+)
+
+AquariumTrade_PossibleTaxa<- c(
+  "CARACOL CHINO",
+  "CARACOL PANOCHA",
+  "CARACOL",
+  "CARACOL BURRO",
+  "CARACOL OLIVO",
+  "CARACOL UÑA",
+  "CARACOL CHINO NEGRO",
+  "CARACOL CHINO ROSADO",
+  "CARACOL CHILE",
+  "CARACOL U�A",
+  "CARACOL CHINO ROSA",
+  "CARACOL MARGARITA",
+  "PAYASO",
+  "ESTRELLA MAR",
+  "MORENA",
+  "PEZ PIPA",
+  "CORAL",
+  "PEZ CORNETA",
+  "ABANDERADO",
+  "CORAL BLANCO",
+  "PEZ GLOBO",
+  "ALA ANGEL",
+  "CALLO HACHA",
+  "CALLO HACHA LARGO",
+  "CALLO MEDIA LUNA"
+)
+
+AquariumTrade_UnlikelyTaxa<- c(
+  "ALMEJA CALLO ARBOL",
+  "ALMEJA PATA MULA BANCO ALA ANGEL",
+  "BOTETE",
+  "BOTETE AMARILLO",
+  "BOTETE NEGRO",
+  "GALLETA MAR",
+  "HACHA CHINA",
+  "HACHA LARGA",
+  "MADRE PERLA",
+  "TOTOABA"
+)
+
+# Assign ornamental likely or possibly:
+AquariumTrade_Landings0 <- AquariumTrade_Landings00 %>%
   mutate(
     AquariumTradeLikely = case_when(
       recorded_taxa_name_clean %in% AquariumTrade_LikelyTaxa ~ "YES",
@@ -1115,11 +1193,11 @@ AquariumTrade_Landings0 <- AquariumTrade_Landings0 %>%
       TRUE ~ "unknown"
     )
   )
-# 21671 obs. of 67 vars.
+# 31354 obs. of 63 vars.
 
 AquariumTrade_Landings<- AquariumTrade_Landings0 %>%
   filter(AquariumTradeLikely %in% c("YES", "MAYBE"))
-# 15244 obs., 62 vars.
+# 19204 obs., 63 vars. (NOTE TO SELF: size went from ~15k to 19k following edits on Sep 5 2026)
 ```
 
 ```{r AQRM summary}
@@ -1127,102 +1205,184 @@ colnames(AquariumTrade_Landings)
 
 # Summary table by region and year, taxa:
 AquariumTrade_summary <- AquariumTrade_Landings %>%
-  group_by(OHI_region_est, year, recorded_taxa_name_clean) %>%
-  summarize(annual_prod_kg = sum(live_weight))
-# 477 obs., 4 vars.
+  group_by(OHI_region_est, year) %>%
+  summarize(tot_annual_prod_kg = sum(live_weight))
+# 195 obs., 3 vars.
 ```
 
-# Calculate AQRM reference point:
-Reference point: "Production stays steady." I have interpreted this as: production of aquarium trade taxa should be stable, at or near, the 2018-2022 mean production (in kg).
+## Calculate AQRM reference points:
+Reference point: "Production stays steady." I have interpreted this as: production of aquarium trade taxa should be stable, at or near, the 2018-2022 mean production (in kg). With no penalty for under harvest (added September 5 2026).
 Reference period: 2018-2022
 
 ```{r Calculate AQRM reference point}
 colnames(AquariumTrade_summary)
 
-# Sum this year (by region) and compare to the mean annual regional volume over 2018–2023:
+# Sum this year (by region) and compare to the mean annual regional volume over 2018–2022:
 AQRM_ref_points <- AquariumTrade_summary %>%
   filter(year >= 2018 & year <= 2022) %>%
   group_by(OHI_region_est) %>%
-  summarise(mean_prod_2018_2022 = mean(annual_prod_kg, na.rm = TRUE))
+  summarise(mean_prod_2018_2022 = mean(tot_annual_prod_kg, na.rm = TRUE))
+# 10 obs., 2 vars.
 ```
 
-# Calculate AQRM_SubScores:
-```{r Prep AQRM scores}
-# Summary table by region and year:
-AQRM_SubScores <- AquariumTrade_summary %>%
-  group_by(OHI_region_est, year) %>%
-  summarize(annual_prod_kg = sum(annual_prod_kg, na.rm= TRUE))
-# 175 obs., 3 vars.
+## Calculate AQRM_SubScores:
+```{r Calculate AQRM_SubScores}
 
-AQRM_SubScores<- AQRM_SubScores %>%
+# Prep AQRM_SubScores0:
+AQRM_SubScores0<- AquariumTrade_summary %>%
   left_join(AQRM_ref_points,
     by= c("OHI_region_est")
-  )
-```
+  ) %>%
+  filter(year >= 2018 & year <= 2024)
+# 61 obs., 4 vars.
 
-```{r Calculate AQRM_SubScores}
-colnames(AQRM_SubScores)
+colnames(AQRM_SubScores0)
 
 # Score = 1 when annual_prod_kg is within ±10% of mean_prod_2018_2022
+# If annual production is within ±10% of the 2018–2022 average (90%–110% of the average), the subscore is 1.
+# If annual production exceeds 110% of the 2018–2022 average, the subscore is 1 - ratio, with a minimum of 0.
 # If annual production is less than 90% of the 2018–2022 average, the subscore equals the production ratio.
 # For example, if production is 80% of the average (ratio = 0.8), the subscore is 0.8.
 # If production is 50% of the average (ratio = 0.5), the subscore is 0.5.
-# If annual production is within ±10% of the 2018–2022 average (90%–110% of the average), the subscore is 1.
-# If annual production exceeds 110% of the 2018–2022 average, the subscore is 1 - ratio, with a minimum of 0.
 
-AQRM_SubScores <- AQRM_SubScores %>%
-  filter(year >= 2018 & year <= 2022) %>%
+AQRM_SubScores <- AQRM_SubScores0 %>%
+  filter(year >= 2018 & year <= 2024) %>%
   mutate(
-    ratio = annual_prod_kg / mean_prod_2018_2022,
+    ratio = tot_annual_prod_kg / mean_prod_2018_2022,
 
-    AQRM_SubScore_prop = case_when(
+    AQRM_score_prop = case_when(
       ratio < 0.9 ~ ratio,
       ratio >= 0.9 & ratio <= 1.1 ~ 1,
-      ratio > 1.1  ~ pmax(0, 1 - ratio)
+      ratio > 1.1  ~ pmax(0, 1 - abs(1-ratio))
     ),
     
-    AQRM_SubScore= AQRM_SubScore_prop * 100
+    AQRM_score= AQRM_score_prop * 100
   )
+# 61 obs., 7 vars.
 ```
 
-# Save and plot AQRM_SubScores:
-```{r Save the AQRM_SubScores dataframe as needed}
+```{r Complete the AQRM_SubScore grid}
+colnames(AQRM_SubScores0)
+
+AQRM_SubScores <- AQRM_SubScores %>%
+  ungroup() %>%
+  complete(
+    OHI_region_est = paste0("region_", 1:9),
+    year = full_seq(year, 1),
+    fill = list(
+      AQRM_score = NA_real_
+    )
+  ) %>%
+  arrange(OHI_region_est, year)
+
+# 66 obs., 7 vars.
+
+# Exclusion criteria?
+summary(AQRM_SubScores$tot_annual_prod_kg) # median = 22443, mean = 249154
+sd(AQRM_SubScores$tot_annual_prod_kg, na.rm = TRUE) # sd = 348091
+exclusion_threshold = median(AQRM_SubScores$tot_annual_prod_kg, na.rm= TRUE)
+
+AQRM_SubScores$region_exclude_include<- c(NA)
+
+AQRM_SubScores <- AQRM_SubScores %>%
+  group_by(OHI_region_est) %>%
+  mutate(
+    median_regional_prod_kg = median(tot_annual_prod_kg, na.rm = TRUE),
+    
+    region_exclude_include = case_when(
+      is.na(median_regional_prod_kg) ~ "exclude",
+      median_regional_prod_kg <= exclusion_threshold ~ "exclude",
+      median_regional_prod_kg > exclusion_threshold ~ "include"
+    )
+  ) %>%
+  ungroup()
+# 66 obs., 9 vars.
+```
+
+# Save AQRM_SubScores:
+```{r Save AQRM_SubScores as needed}
 write.csv(AQRM_SubScores, 
-          "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/AQRM_SubScores//AQRM_SubScores_df_Jun282026.csv", 
+          "/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/AQRM_SubScores/AQRM_SubScores_df_Sep052026.csv", 
           row.names = FALSE)
 ```
 
-```{r Plot AQRM_SubScore}
-# Plot over time:
+# Plot AQRM_SubScores:
+```{r Load in AQRM_SubScores as needed}
+AQRM_SubScores0<- read.csv("/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/AQRM_SubScores/AQRM_SubScores_df_Sep052026.csv")
+
+AQRM_SubScores<- AQRM_SubScores0
+# 66 obs., 10 vars.
+```
+
+```{r Merge Region_Key to AQRM_SubScores}
+AQRM_SubScores<- AQRM_SubScores %>%
+  left_join(Region_Key, 
+            by = "OHI_region_est")
+
+# Make sure to order the regions:
+region_order <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
+AQRM_SubScores <- AQRM_SubScores %>%
+  mutate(
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = region_order
+    )
+  )
+```
+
+```{r Plot AQRM_SubScores}
+colnames(AQRM_SubScores)
+
 AQRM_SubScores_plot<- AQRM_SubScores %>%
-  filter(!is.na(OHI_region_est)) %>%
+  filter(!is.na(OHI_region_name)) %>%
   filter(year >= 2018 & year < 2025) %>%
   
-  ggplot(aes(x = year, y = AQRM_SubScore, color= OHI_region_est)) +
-  geom_line() +
+  ggplot(aes(x = year, 
+             y = AQRM_score, 
+             color= OHI_region_name)) +
   
-  facet_wrap(~ OHI_region_est, scales = "free_y") +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
   
-  labs(
-    title = "NP: AQRM Sub-Scores by Region [DRAFT - June 28 2026]",
-    y = "AQRM Score (from 0 to 100)",
+  facet_wrap(~ OHI_region_name, scales = "free_y") +
+  
+labs(
+    title = "NP: AQRM Scores by Region",
+    subtitle= "summed AQRM taxa", 
+    caption = "updated: Sep 5 2026",
+    y = "AQRM Current Status (0 to 1)",
     x = "Year"
   ) +
   
-  ylim(c(0, 101)) + 
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
   
-  theme_bw() +
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
   theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "none"
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
   )
 
 AQRM_SubScores_plot
 ```
 
+# Save AQRM_SubScores_plot:
 ```{r Save AQRM_SubScores_plot as a PNG}
 ggsave(AQRM_SubScores_plot,
-       filename = "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/AQRM_SubScores/AQRM_SubScores_plot_Jun282026.png",
+       filename = "/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/AQRM_SubScores/AQRM_SubScores_plot_Sep052026.png",
        width = 12,
        height = 12,
        dpi = 300
@@ -1230,7 +1390,61 @@ ggsave(AQRM_SubScores_plot,
 ```
 
 
-# >> SEA SHELLS ------------------------------
+# Plot AQRM_Landings over time:
+```{r Plot AQRM landings over time}
+colnames(AQRM_SubScores)
+
+AQRM_Landings_plot<- AQRM_SubScores %>%
+  filter(!is.na(OHI_region_name)) %>%
+  filter(year >= 2018 & year < 2025) %>%
+  
+  ggplot(aes(x = year, 
+             y = tot_annual_prod_kg, 
+             color= OHI_region_name)) +
+  
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  geom_hline(
+    aes(yintercept = mean_prod_2018_2022),
+    color = "darkgrey",
+    linetype = "dashed",
+    linewidth = 0.8
+  ) +
+  
+  facet_wrap(~ OHI_region_name, scales = "fixed") +
+  
+  labs(
+    title = "AQRM Landings by Region",
+    subtitle= "summed very likely and possibly aquarium taxa", 
+    caption = "updated: Sep 5 2026",
+    y = "Estimated Landings (kg)",
+    x = "Year"
+  ) +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+AQRM_Landings_plot
+```
+
+```{r Save AQRM_SubScores_plot as a PNG}
+ggsave(AQRM_Landings_plot,
+       filename = "/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/AQRM_SubScores/AQRM_Landings_plot_Sep052026.png",
+       width = 12,
+       height = 12,
+       dpi = 300
+       )
+```
+
+
+# >> 3. SEA SHELLS ------------------------------
 ```{r Deep dive into CARACOL - PURG?}
 NP_SHEL_Landings<- NP_Landings_residues %>%
   filter(Major_Functional_Group== "molluscs excl. cephalopods")
@@ -1484,7 +1698,363 @@ ggsave(SHEL_SubScores_plot,
 ```
 
 
-# >> SHARK FINS ------------------------------
+# >> 4. RESD: Other Residues ------------------------------
+
+```{r Make a discard column}
+NP_Landings_residues0<- NP_Landings_finalized %>%
+  mutate(est_weightNOTused_kg = recorded_weightOFanimal_kg - recorded_weightOFfillet_kg)
+
+dim(NP_Landings_residues0)
+# 3136896 obs, 63 vars.
+
+# Quick look:
+subset<- NP_Landings_residues0 %>%
+  slice_sample(n = 200)
+```
+
+```{r SANITY CHECKS}
+subset<- NP_Landings_residues %>%
+  filter(Residue_FLAG == "YES")
+
+subset<- NP_Landings_residues %>%
+  filter(Residue_FLAG == "NO")
+
+subset<- NP_Landings_residues %>%
+  filter(Fillet_FLAG == "YES") %>%
+  filter(is.na(recorded_weightOFanimal_kg))
+
+test <- NP_Landings_residues %>%
+  filter(recorded_taxa_group== "CAMARON") %>%
+  filter(year == 2024) %>%
+  filter(SoldWhole_FLAG == "YES")
+
+# NOTE TO SELF: Shrimp that were sold whole but have a lower landed weight than live weight are cooked shrimp...
+```
+
+
+# Make residues dataframe
+```{r Create NP_Landings_residues}
+table(NP_Landings_residues$record_type)
+      #  fillet other residue    sold whole 
+      # 1302050         62933       1729682 
+
+NP_Landings_residues<- NP_Landings_residues0 %>%
+  filter(record_type== "other residue")
+# 62933 obs., 59 vars.
+
+table(NP_Landings_residues$Major_Functional_Group)
+                   #                cephalopods                                   crustaceans 
+                   #                      24775                                          1519 
+                   #     demersal marine fishes                            marine species nei 
+                   #                      25296                                            78 
+                   # molluscs excl. cephalopods pelagic marine fish (excl. anchovy & sardine) 
+                   #                       3323                                            11 
+                   #                     sharks                               shrimps, prawns 
+                   #                       5871                                          2060 
+```
+
+# Previous residues work from HERE to...
+
+```{r Summary table for shrimp}
+# Quick look:
+subset<- NP_Landings_residues %>%
+  filter(recorded_taxa_group== "CAMARON")
+  # filter(year== 2010) %>%
+  # slice_sample(n = 500)
+
+table(subset$keywords_1)
+# Very few entries of CABEZA DE
+
+colnames(NP_Landings_residues)
+
+# Of those that were not sold whole, how much product was wasted?
+
+ShrimpResidues_summary <- NP_Landings_residues %>%
+#  filter(SoldWhole_FLAG== "NO") %>%
+  filter(recorded_taxa_group== "CAMARON") %>%
+  filter(!is.na(record_type)) %>%
+  group_by(year, record_type) %>%
+  summarise(
+    recorded_weightOFanimal_kg = sum(recorded_weightOFanimal_kg, na.rm = TRUE),
+    recorded_weightOFfillet_kg = sum(recorded_weightOFfillet_kg, na.rm = TRUE),
+    est_weightNOTused_kg = sum(est_weightNOTused_kg, na.rm = TRUE),
+    ratio_fillet.wholeanimal = recorded_weightOFfillet_kg/recorded_weightOFanimal_kg,
+    ratio_NOTused.wholeanimal = est_weightNOTused_kg/recorded_weightOFanimal_kg,
+    recorded_weightOFresidue_kg = sum(recorded_weightOFresidue_kg, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r Deep dive into CALAMAR}
+SquidResidues_summary <- NP_Landings_residues %>%
+#  filter(SoldWhole_FLAG== "NO") %>%
+  filter(recorded_taxa_group== "CALAMAR") %>%
+  filter(!is.na(record_type)) %>%
+  group_by(year, record_type) %>%
+  summarise(
+    recorded_weightOFanimal_kg = sum(recorded_weightOFanimal_kg, na.rm = TRUE),
+    recorded_weightOFfillet_kg = sum(recorded_weightOFfillet_kg, na.rm = TRUE),
+    est_weightNOTused_kg = sum(est_weightNOTused_kg, na.rm = TRUE),
+    ratio_fillet.wholeanimal = recorded_weightOFfillet_kg/recorded_weightOFanimal_kg,
+    ratio_NOTused.wholeanimal = est_weightNOTused_kg/recorded_weightOFanimal_kg,
+    recorded_weightOFresidue_kg = sum(recorded_weightOFresidue_kg, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+SquidResidues_summary<- SquidResidues_summary %>%
+  mutate(weight_product= case_when(
+      
+      record_type == "sold whole" ~ recorded_weightOFanimal_kg,
+      record_type == "fillet" ~ recorded_weightOFfillet_kg,
+      record_type == "other residue" ~ recorded_weightOFresidue_kg
+    )
+    
+  )
+
+# Plot the data: this shows us catches for items that were butchered versus not... It does not show us residues versus non-residues
+
+scale_factor <- max(SquidResidues_summary$recorded_weightOFanimal_kg, na.rm = TRUE) /
+                max(SquidResidues_summary$recorded_weightOFfillet_kg, na.rm = TRUE)
+
+#NOTE TO SELF: It's just not totally clear that mass of residues + mass of fillets should actually adds up to mass of total whole animal catch...
+
+
+SquidResidues_summary %>%
+  ggplot(aes(x = year)) +
+  
+  geom_line(aes(y = weight_product, color = record_type), linewidth = 1) +
+  
+  labs(
+    title = "Squid: Landings by Type",
+    x = "Year",
+    color = "Type"
+  ) +
+  theme_minimal()
+
+```
+
+```{r Filter out residues from NP_Landings}
+Residues_Landings<- NP_Landings_finalized %>%
+  filter(Residue_FLAG %in% c("YES"))
+
+dim(Residues_Landings)
+# 65668 obs., 62 vars.
+
+table(Residues_Landings$Major_Functional_Group)
+# Lots of cephalopods, demersal fish, crustaceans, and sharks. Makes sense!
+
+                   #                cephalopods                                   crustaceans 
+                   #                      24964                                          1519 
+                   #     demersal marine fishes                            marine species nei 
+                   #                      25296                                            78 
+                   # molluscs excl. cephalopods pelagic marine fish (excl. anchovy & sardine) 
+                   #                       5701                                            11 
+                   #                     sharks                               shrimps, prawns 
+                   #                       6039                                          2060
+```
+
+```{r Plot residues}
+colnames(NP_Landings_finalized)
+
+# Summary table by region and year:
+Residues_summary <- NP_Landings_finalized %>%
+  filter(Residue_FLAG %in% c("YES")) %>%
+  group_by(state, year, Major_Functional_Group) %>%
+  summarize(annual_prod_kg = sum(landed_weight))
+# 342 obs., 4 vars.
+
+# Plot over time:
+Residues_summary %>%
+  filter(year >= 2018 & year < 2025) %>%
+  
+  ggplot(aes(x = year, y = annual_prod_kg, color= Major_Functional_Group)) +
+  geom_line() +
+  
+  facet_wrap(~ state, scales = "free_y") +
+  
+  labs(x = "Year", y = "Production (kg)",
+       title = "Residues Production over Time [DRAFT]") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r First estimate the mass of all catches from shrimps demersal fishes cephalopods}
+Residues_groups<- c("shrimps, prawns", "demersal marine fishes", "cephalopods")
+
+Residues_Production <- NP_Landings_finalized %>%
+  filter(Major_Functional_Group %in% Residues_groups)
+# 2076822 obs.
+
+table(Residues_Production$record_type)
+      #  fillet other residue    sold whole 
+      # 1077068         52131        927636  
+
+# If record_type is NA make it "preparation_unknown"
+Residues_Production <- Residues_Production %>%
+  mutate(
+    record_type = coalesce(record_type, "preparation unknown")
+  )
+
+table(Residues_Production$record_type)
+            #  fillet       other residue preparation unknown          sold whole 
+            # 1077068               52131               19987              927636 
+```
+
+```{r Check sums of residues versus fillet weight}
+colnames(Residues_Production)
+
+record_types <- c("sold whole", "fillet", "other residue", "preparation unknown")
+
+# NOTE TO SELF: We can ignore residues taxa for now. I'll need to change this and get more specific with shrimp heads versus squid heads for example.
+
+Residues_summary<- Residues_Production %>%
+  group_by(year, 
+           OHI_region_est, 
+           record_type) %>%
+  summarize(
+    total_weight_mt= sum(landed_weight, na.rm= TRUE)/1000
+  )
+# 815 obs.
+
+Residues_summary <- Residues_summary %>%
+  ungroup() %>%
+  complete(
+    nesting(year, 
+            OHI_region_est
+            ),
+    record_type = record_types
+  )
+# 1008 obs.
+```
+
+```{r Look at the sums from 2018 to 2024}
+Residues_summary_2018.2024<- Residues_summary %>%
+  filter(!record_type== "sold whole") %>%
+  filter(year >= 2018 & year <= 2024)
+# 210 obs.
+```
+
+# Calculate RESD reference point:
+Reference point: "Full utilization of harvest amount." For now, I interpret this to mean that residues mass should equal approximately 0.20 * total mass - OR - ~0.3 * fillet mass in a given year x region.
+Reference period: 2018-2024
+
+- I estimate that, IN GENERAL, sale-able residues account for ~20% of total mass (MAX) while their usable (fillet) meat accounts for 60% of total mass.
+- This means that residues mass should be equal to about 0.30 * (fillet mass).
+- This is called 'RESD_REF_COEFF' here and can be easily changed.
+
+```{r RESD reference point}
+RESD_PROP_TOTAL_MASS = 0.20
+FILLET_PROP_TOTAL_MASS = 0.60
+RESD_REF_COEFF = RESD_PROP_TOTAL_MASS / FILLET_PROP_TOTAL_MASS
+
+colnames(Residues_summary_2018.2024)
+
+Residues_summary_2018.2024 <- Residues_summary_2018.2024 %>%
+  group_by(year, OHI_region_est) %>%
+  mutate(
+    fillet_mt = if (any(record_type == "fillet")) {
+      first(total_weight_mt[record_type == "fillet"])
+    } else {
+      NA_real_
+    },
+    ref_point_mt = if_else(
+      record_type == "other residue",
+      fillet_mt * RESD_REF_COEFF,
+      NA_real_
+    )
+  ) %>%
+  ungroup()
+
+# Reshape the dataframe:
+
+Residues_summary_wide <- Residues_summary_2018.2024 %>%
+  select(year, OHI_region_est, record_type, total_weight_mt) %>%
+  pivot_wider(
+    names_from = record_type,
+    values_from = total_weight_mt
+  ) %>%
+  rename(
+    fillet_mt = fillet,
+    residue_mt = `other residue`,
+    preparation_unknown_mt = `preparation unknown`
+  )
+
+colnames(Residues_summary_wide)
+
+Residues_summary_wide<- Residues_summary_wide %>%
+  mutate(
+    ref_point_mt= (fillet_mt) * RESD_REF_COEFF
+  ) %>%
+  select(year, OHI_region_est, fillet_mt, ref_point_mt, residue_mt)
+```
+
+# Calculate RESD_SubScores:
+```{r Calculate RESD_SubScores}
+RESD_SubScores <- Residues_summary_wide %>%
+  mutate(
+    RESD_score_prop = case_when(
+      # if residues production is lower than reference point, that's not great, score < 100
+      residue_mt <= ref_point_mt ~ (residue_mt/ref_point_mt),
+
+      # if residues production is higher than reference point then score = 100?
+      # NOTE TO SELF: this will need to change after group discussion!
+      residue_mt > ref_point_mt ~ 1,
+
+      TRUE ~ NA_real_
+    ),
+
+    RESD_SubScore = pmin(RESD_score_prop * 100, 100),
+    RESD_SubScore_alt = pmin(RESD_score_prop * 200, 100)
+  )
+```
+
+```{r Save the RESD_SubScores dataframe as needed}
+write.csv(RESD_SubScores, 
+          "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/RESD_SubScores/RESD_SubScores_df_Jun302026.csv", 
+          row.names = FALSE)
+```
+
+```{r Plot RESD_SubScores}
+# Plot over time:
+RESD_SubScores_plot<- RESD_SubScores %>%
+  filter(!is.na(OHI_region_est)) %>%
+  filter(year >= 2018 & year < 2025) %>%
+  
+  ggplot(aes(x = year, y = RESD_SubScore, color= OHI_region_est)) +
+  geom_line() +
+  
+  facet_wrap(~ OHI_region_est, scales = "free_y") +
+  
+  labs(
+    title = "NP: RESD Sub-Scores by Region [DRAFT - June 30 2026]",
+    y = "RESD Score (from 0 to 100)",
+    x = "Year"
+  ) +
+  
+  ylim(c(0, 101)) +
+  
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+
+RESD_SubScores_plot
+```
+
+```{r Save RESD_SubScores_plot as a PNG}
+ggsave(RESD_SubScores_plot,
+       filename = "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/RESD_SubScores/RESD_SubScores_plot_Jun302026.png",
+       width = 12,
+       height = 12,
+       dpi = 300
+       )
+```
+
+
+# >> 5. SHARK FINS ------------------------------
 
 ```{r First estimate the mass of all shark catches}
 SharkFin_Production <- NP_Landings_finalized %>%
@@ -1678,365 +2248,7 @@ ggsave(FINS_SubScores_plot,
 ```
 
 
-# >> RESD: Other Residues ------------------------------
-
-```{r Make a discard column}
-NP_Landings_residues0<- NP_Landings_finalized %>%
-  mutate(est_weightNOTused_kg = recorded_weightOFanimal_kg - recorded_weightOFfillet_kg)
-
-dim(NP_Landings_residues0)
-# 3136896 obs, 63 vars.
-
-# Quick look:
-subset<- NP_Landings_residues0 %>%
-  slice_sample(n = 200)
-```
-
-```{r SANITY CHECKS}
-subset<- NP_Landings_residues %>%
-  filter(Residue_FLAG == "YES")
-
-subset<- NP_Landings_residues %>%
-  filter(Residue_FLAG == "NO")
-
-subset<- NP_Landings_residues %>%
-  filter(Fillet_FLAG == "YES") %>%
-  filter(is.na(recorded_weightOFanimal_kg))
-
-test <- NP_Landings_residues %>%
-  filter(recorded_taxa_group== "CAMARON") %>%
-  filter(year == 2024) %>%
-  filter(SoldWhole_FLAG == "YES")
-
-# NOTE TO SELF: Shrimp that were sold whole but have a lower landed weight than live weight are cooked shrimp...
-```
-
-
-# Make residues dataframe
-```{r Create NP_Landings_residues}
-table(NP_Landings_residues$record_type)
-      #  fillet other residue    sold whole 
-      # 1302050         62933       1729682 
-
-NP_Landings_residues<- NP_Landings_residues0 %>%
-  filter(record_type== "other residue")
-# 62933 obs., 59 vars.
-
-table(NP_Landings_residues$Major_Functional_Group)
-                   #                cephalopods                                   crustaceans 
-                   #                      24775                                          1519 
-                   #     demersal marine fishes                            marine species nei 
-                   #                      25296                                            78 
-                   # molluscs excl. cephalopods pelagic marine fish (excl. anchovy & sardine) 
-                   #                       3323                                            11 
-                   #                     sharks                               shrimps, prawns 
-                   #                       5871                                          2060 
-```
-
-# Previous residues work from HERE to...
-
-```{r Summary table for shrimp}
-# Quick look:
-subset<- NP_Landings_residues %>%
-  filter(recorded_taxa_group== "CAMARON")
-  # filter(year== 2010) %>%
-  # slice_sample(n = 500)
-
-table(subset$keywords_1)
-# Very few entries of CABEZA DE
-
-colnames(NP_Landings_residues)
-
-# Of those that were not sold whole, how much product was wasted?
-
-ShrimpResidues_summary <- NP_Landings_residues %>%
-#  filter(SoldWhole_FLAG== "NO") %>%
-  filter(recorded_taxa_group== "CAMARON") %>%
-  filter(!is.na(record_type)) %>%
-  group_by(year, record_type) %>%
-  summarise(
-    recorded_weightOFanimal_kg = sum(recorded_weightOFanimal_kg, na.rm = TRUE),
-    recorded_weightOFfillet_kg = sum(recorded_weightOFfillet_kg, na.rm = TRUE),
-    est_weightNOTused_kg = sum(est_weightNOTused_kg, na.rm = TRUE),
-    ratio_fillet.wholeanimal = recorded_weightOFfillet_kg/recorded_weightOFanimal_kg,
-    ratio_NOTused.wholeanimal = est_weightNOTused_kg/recorded_weightOFanimal_kg,
-    recorded_weightOFresidue_kg = sum(recorded_weightOFresidue_kg, na.rm = TRUE),
-    .groups = "drop"
-  )
-```
-
-```{r Deep dive into CALAMAR}
-SquidResidues_summary <- NP_Landings_residues %>%
-#  filter(SoldWhole_FLAG== "NO") %>%
-  filter(recorded_taxa_group== "CALAMAR") %>%
-  filter(!is.na(record_type)) %>%
-  group_by(year, record_type) %>%
-  summarise(
-    recorded_weightOFanimal_kg = sum(recorded_weightOFanimal_kg, na.rm = TRUE),
-    recorded_weightOFfillet_kg = sum(recorded_weightOFfillet_kg, na.rm = TRUE),
-    est_weightNOTused_kg = sum(est_weightNOTused_kg, na.rm = TRUE),
-    ratio_fillet.wholeanimal = recorded_weightOFfillet_kg/recorded_weightOFanimal_kg,
-    ratio_NOTused.wholeanimal = est_weightNOTused_kg/recorded_weightOFanimal_kg,
-    recorded_weightOFresidue_kg = sum(recorded_weightOFresidue_kg, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-SquidResidues_summary<- SquidResidues_summary %>%
-  mutate(weight_product= case_when(
-      
-      record_type == "sold whole" ~ recorded_weightOFanimal_kg,
-      record_type == "fillet" ~ recorded_weightOFfillet_kg,
-      record_type == "other residue" ~ recorded_weightOFresidue_kg
-    )
-    
-  )
-
-# Plot the data: this shows us catches for items that were butchered versus not... It does not show us residues versus non-residues
-
-scale_factor <- max(SquidResidues_summary$recorded_weightOFanimal_kg, na.rm = TRUE) /
-                max(SquidResidues_summary$recorded_weightOFfillet_kg, na.rm = TRUE)
-
-#NOTE TO SELF: It's just not totally clear that mass of residues + mass of fillets should actually adds up to mass of total whole animal catch...
-
-
-SquidResidues_summary %>%
-  ggplot(aes(x = year)) +
-  
-  geom_line(aes(y = weight_product, color = record_type), linewidth = 1) +
-  
-  labs(
-    title = "Squid: Landings by Type",
-    x = "Year",
-    color = "Type"
-  ) +
-  theme_minimal()
-
-```
-
-```{r Filter out residues from NP_Landings}
-Residues_Landings<- NP_Landings_finalized %>%
-  filter(Residue_FLAG %in% c("YES"))
-
-dim(Residues_Landings)
-# 65668 obs., 62 vars.
-
-table(Residues_Landings$Major_Functional_Group)
-# Lots of cephalopods, demersal fish, crustaceans, and sharks. Makes sense!
-
-                   #                cephalopods                                   crustaceans 
-                   #                      24964                                          1519 
-                   #     demersal marine fishes                            marine species nei 
-                   #                      25296                                            78 
-                   # molluscs excl. cephalopods pelagic marine fish (excl. anchovy & sardine) 
-                   #                       5701                                            11 
-                   #                     sharks                               shrimps, prawns 
-                   #                       6039                                          2060
-```
-
-```{r Plot residues}
-colnames(NP_Landings_finalized)
-
-# Summary table by region and year:
-Residues_summary <- NP_Landings_finalized %>%
-  filter(Residue_FLAG %in% c("YES")) %>%
-  group_by(state, year, Major_Functional_Group) %>%
-  summarize(annual_prod_kg = sum(landed_weight))
-# 342 obs., 4 vars.
-
-# Plot over time:
-Residues_summary %>%
-  filter(year >= 2018 & year < 2025) %>%
-  
-  ggplot(aes(x = year, y = annual_prod_kg, color= Major_Functional_Group)) +
-  geom_line() +
-  
-  facet_wrap(~ state, scales = "free_y") +
-  
-  labs(x = "Year", y = "Production (kg)",
-       title = "Residues Production over Time [DRAFT]") +
-  theme_bw() +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1)
-  )
-```
-
-# ... HERE.
-
-```{r First estimate the mass of all catches from shrimps demersal fishes cephalopods}
-Residues_groups<- c("shrimps, prawns", "demersal marine fishes", "cephalopods")
-
-Residues_Production <- NP_Landings_finalized %>%
-  filter(Major_Functional_Group %in% Residues_groups)
-# 2076822 obs.
-
-table(Residues_Production$record_type)
-      #  fillet other residue    sold whole 
-      # 1077068         52131        927636  
-
-# If record_type is NA make it "preparation_unknown"
-Residues_Production <- Residues_Production %>%
-  mutate(
-    record_type = coalesce(record_type, "preparation unknown")
-  )
-
-table(Residues_Production$record_type)
-            #  fillet       other residue preparation unknown          sold whole 
-            # 1077068               52131               19987              927636 
-```
-
-```{r Check sums of residues versus fillet weight}
-colnames(Residues_Production)
-
-record_types <- c("sold whole", "fillet", "other residue", "preparation unknown")
-
-# NOTE TO SELF: We can ignore residues taxa for now. I'll need to change this and get more specific with shrimp heads versus squid heads for example.
-
-Residues_summary<- Residues_Production %>%
-  group_by(year, 
-           OHI_region_est, 
-           record_type) %>%
-  summarize(
-    total_weight_mt= sum(landed_weight, na.rm= TRUE)/1000
-  )
-# 815 obs.
-
-Residues_summary <- Residues_summary %>%
-  ungroup() %>%
-  complete(
-    nesting(year, 
-            OHI_region_est
-            ),
-    record_type = record_types
-  )
-# 1008 obs.
-```
-
-```{r Look at the sums from 2018 to 2024}
-Residues_summary_2018.2024<- Residues_summary %>%
-  filter(!record_type== "sold whole") %>%
-  filter(year >= 2018 & year <= 2024)
-# 210 obs.
-```
-
-# Calculate RESD reference point:
-Reference point: "Full utilization of harvest amount." For now, I interpret this to mean that residues mass should equal approximately 0.20 * total mass - OR - ~0.3 * fillet mass in a given year x region.
-Reference period: 2018-2024
-
-- I estimate that, IN GENERAL, sale-able residues account for ~20% of total mass (MAX) while their usable (fillet) meat accounts for 60% of total mass.
-- This means that residues mass should be equal to about 0.30 * (fillet mass).
-- This is called 'RESD_REF_COEFF' here and can be easily changed.
-
-```{r RESD reference point}
-RESD_PROP_TOTAL_MASS = 0.20
-FILLET_PROP_TOTAL_MASS = 0.60
-RESD_REF_COEFF = RESD_PROP_TOTAL_MASS / FILLET_PROP_TOTAL_MASS
-
-colnames(Residues_summary_2018.2024)
-
-Residues_summary_2018.2024 <- Residues_summary_2018.2024 %>%
-  group_by(year, OHI_region_est) %>%
-  mutate(
-    fillet_mt = if (any(record_type == "fillet")) {
-      first(total_weight_mt[record_type == "fillet"])
-    } else {
-      NA_real_
-    },
-    ref_point_mt = if_else(
-      record_type == "other residue",
-      fillet_mt * RESD_REF_COEFF,
-      NA_real_
-    )
-  ) %>%
-  ungroup()
-
-# Reshape the dataframe:
-
-Residues_summary_wide <- Residues_summary_2018.2024 %>%
-  select(year, OHI_region_est, record_type, total_weight_mt) %>%
-  pivot_wider(
-    names_from = record_type,
-    values_from = total_weight_mt
-  ) %>%
-  rename(
-    fillet_mt = fillet,
-    residue_mt = `other residue`,
-    preparation_unknown_mt = `preparation unknown`
-  )
-
-colnames(Residues_summary_wide)
-
-Residues_summary_wide<- Residues_summary_wide %>%
-  mutate(
-    ref_point_mt= (fillet_mt) * RESD_REF_COEFF
-  ) %>%
-  select(year, OHI_region_est, fillet_mt, ref_point_mt, residue_mt)
-```
-
-# Calculate RESD_SubScores:
-```{r Calculate RESD_SubScores}
-RESD_SubScores <- Residues_summary_wide %>%
-  mutate(
-    RESD_score_prop = case_when(
-      # if residues production is lower than reference point, that's not great, score < 100
-      residue_mt <= ref_point_mt ~ (residue_mt/ref_point_mt),
-
-      # if residues production is higher than reference point then score = 100?
-      # NOTE TO SELF: this will need to change after group discussion!
-      residue_mt > ref_point_mt ~ 1,
-
-      TRUE ~ NA_real_
-    ),
-
-    RESD_SubScore = pmin(RESD_score_prop * 100, 100),
-    RESD_SubScore_alt = pmin(RESD_score_prop * 200, 100)
-  )
-```
-
-```{r Save the RESD_SubScores dataframe as needed}
-write.csv(RESD_SubScores, 
-          "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/RESD_SubScores/RESD_SubScores_df_Jun302026.csv", 
-          row.names = FALSE)
-```
-
-```{r Plot RESD_SubScores}
-# Plot over time:
-RESD_SubScores_plot<- RESD_SubScores %>%
-  filter(!is.na(OHI_region_est)) %>%
-  filter(year >= 2018 & year < 2025) %>%
-  
-  ggplot(aes(x = year, y = RESD_SubScore, color= OHI_region_est)) +
-  geom_line() +
-  
-  facet_wrap(~ OHI_region_est, scales = "free_y") +
-  
-  labs(
-    title = "NP: RESD Sub-Scores by Region [DRAFT - June 30 2026]",
-    y = "RESD Score (from 0 to 100)",
-    x = "Year"
-  ) +
-  
-  ylim(c(0, 101)) +
-  
-  theme_bw() +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "none"
-  )
-
-RESD_SubScores_plot
-```
-
-```{r Save RESD_SubScores_plot as a PNG}
-ggsave(RESD_SubScores_plot,
-       filename = "/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/RESD_SubScores/RESD_SubScores_plot_Jun302026.png",
-       width = 12,
-       height = 12,
-       dpi = 300
-       )
-```
-
-
-# >> BAIT: PENDING ------------------------------
+# >> DATA DEFICIENT: BAIT ------------------------------
 ```{r Bait}
 Bait_keywords <- c(
 # Used as bait:
@@ -2087,7 +2299,7 @@ Bait_summary %>%
 ```
 
 
-# >> PEARLS and NACRE: DATA DEFICIENT ------------------------------
+# >> DATA DEFICIENT: Pearls and nacre (PERL) ------------------------------
 
 ```{r Take 2 Shells and pearls}
 # Apr 30 2026: 
@@ -2146,7 +2358,7 @@ ShellProduction_summary %>%
 ```
 
 
-# >> ALGAE: PENDING ------------------------------
+# >> DATA DEFICIENT: Algae (ALGA) ------------------------------
 ```{r Algae landings}
 GOC_AlgaeProduction <- NP_Landings %>%
   filter(
@@ -2182,226 +2394,188 @@ AlgaeProduction_summary %>%
 ```
 
 
-# NP SUB-SCORES AND REGIONAL NP_SCORE ------------------------------
-Reference points from Natural Products Reference Points (Jun 2026).xlsx.
 
-```{r Load clean_names_lowercase function}
-clean_names_lowercase <- function(x) {
-  x <- iconv(x, from = "", to = "UTF-8", sub = "")
-  x <- stringi::stri_trans_general(x, "Latin-ASCII")
-  x %>%
-    tolower() %>%
-    trimws()
-}
+# >> 6. Coastal Salt Production (SALT) ------------------------------
+
+Yearbooks downloaded from El Anuario Estadístico de la Minería Mexicana: https://www.sgm.gob.mx/Gobmx/productos/Anuarios-historicos.html
+
+Easier to manually input it into a google sheet.  
+
+```{r Load in the data}
+# Raw data
+Salt_Data0 <- read_csv(here("/home/shares/ohi/OHI_GOC/_raw_data/Anuario_Estadistico_de_la_Mineria_Mexicana","NP_Sal_Anuario_Estadistico_tidy_sal.csv"))
+# 54 obs., 5 vars.
+
+# Municipio key:
+MunicipioRegionKey<- read_csv("/home/ferrer/ohi_goc_prep/NP/v2025/NP_Keys/MunicipioRegionKey_Jun262026.csv")
+# 11 obs., 3 vars.
 ```
 
-```{r Load NP reference points}
-NP_reference_points <- read_excel(
-  here("Natural Products Reference Points (Jun 2026).xlsx")
-) %>%
-  clean_names() %>%
-  rename(reference_point = technical_reference_point) %>%
-  select(product, reference_point)
+```{r Merge MunicipioRegionKey to Salt_Data0}
+colnames(Salt_Data0)
 
-NP_reference_points
+Salt_Data_2018.2023<- Salt_Data0 %>%
+  left_join(MunicipioRegionKey,
+    by= c("estado", "municipio")
+    )
+# 54 obs., 6 vars.
+
+Salt_Data_2018.2023<- Salt_Data_2018.2023 %>%
+  select(year, state= estado, OHI_region= OHI_Region, municipality= municipio, 
+         reported_volume_mt= volume_tons, 
+         near_coast_= near_coast)
 ```
 
-```{r NP scoring helpers}
-# Stay steady: symmetric around 2018–2022 mean (5% tolerance = score 1).
-score_stay_steady <- function(catch_current, catch_ref, tolerance = NP_CATCH_TOLERANCE) {
-  if (is.na(catch_ref) || catch_ref <= 0) {
-    return(ifelse(!is.na(catch_current) && catch_current == 0, 1, NA_real_))
-  }
-  if (is.na(catch_current)) return(NA_real_)
-  if (abs(catch_current - catch_ref) <= tolerance * catch_ref) return(1)
-  min(catch_current / catch_ref, catch_ref / catch_current)
-}
+Extropolate salt data (at the site level) from 2018-2023 to 2024 and 2025
+```{r Extropolate Salt_Data_2018.2023 from 2018-2023 to 2024 and 2025}
+# First, take annual totals by region:
+Salt_Regional_totals <- Salt_Data_2018.2023 %>%
+  select(OHI_region, year, state, municipality, reported_volume_mt) %>%
+  group_by(state, municipality, year) %>%
+  summarise(
+    total_volume_mt = sum(reported_volume_mt, na.rm = TRUE),
+    OHI_region = first(OHI_region),
+    .groups = "drop"
+  )
 
-# Full utilization: current utilization rate vs 2018–2022 mean (cap at 1).
-score_full_utilization <- function(util_current, util_ref, tolerance = NP_CATCH_TOLERANCE) {
-  if (is.na(util_ref) || util_ref <= 0) return(NA_real_)
-  if (is.na(util_current)) return(NA_real_)
-  if (abs(util_current - util_ref) <= tolerance * util_ref) return(1)
-  min(util_current / util_ref, 1)
-}
+# Then, fit a linear trend for each region and predict 2024-2025:
+# Use the broom library for forecast.
+Salt_Regional_forecasts <- Salt_Regional_totals %>%
+  group_by(OHI_region, state, municipality) %>%
+  mutate(
+    valid_year_flag = !is.na(total_volume_mt) & total_volume_mt > 0
+  ) %>%
+  nest() %>%
+  mutate(
+    n_years_forecast_ = map_int(data, ~ sum(!is.na(.x$total_volume_mt) & .x$total_volume_mt > 0)),
+    
+    model = map(data, ~ lm(total_volume_mt ~ year, data = .x)),
+    
+    forecast = map(model, ~{
+      newdata <- tibble(year = c(2024, 2025))
+      newdata$predicted_volume_mt <- predict(.x, newdata = newdata)
+      newdata
+    })
+  ) %>%
+  select(OHI_region, state, municipality, forecast, n_years_forecast_) %>%
+  unnest(forecast)
+
+# Add a forecasted column:
+Salt_Regional_forecasts$forecasted_<- c("TRUE")
 ```
 
-```{r Annual catch by NP product and region}
-Pearls_keywords_scoring <- c("PERLAS", "MEDIAS PERLAS", "CONCHA NACAR")
+```{r Merge Salt_Regional_forecasts to Salt_Data_2018.2023}
+colnames(Salt_Data_2018.2023)
+colnames(Salt_Regional_forecasts)
 
-Sharkfin_keywords_scoring <- c(
-  "ALETA", "ALETA DE", "ALETA ECA DE", "ALETA FCA DE"
+Salt_Data_2018.2023$forecasted_<- c("FALSE")
+
+Salt_Data_2018.2025 <- bind_rows(
+  Salt_Data_2018.2023,
+  Salt_Regional_forecasts
 )
-
-NP_annual_catch <- NP_Landings %>%
-  mutate(
-    OHI_region_est = clean_names_lowercase(OHI_region_est),
-    pearl_kg = if_else(
-      if_any(keywords_1:keywords_4, ~ .x %in% Pearls_keywords_scoring),
-      weight_kg_corrected,
-      0
-    ),
-    sharkfin_kg = if_else(
-      Major_Functional_Group == "Sharks" &
-        if_any(keywords_1:keywords_4, ~ .x %in% Sharkfin_keywords_scoring) &
-        !str_detect(recorded_taxa_name_clean, "ATUN"),
-      weight_kg_corrected,
-      0
-    ),
-    shark_total_kg = if_else(
-      Major_Functional_Group == "Sharks",
-      weight_kg_corrected,
-      0
-    ),
-    algae_kg = if_else(
-      recorded_taxa_group == "ALGAS" |
-        Major_Functional_Group == "Marine algae",
-      weight_kg_corrected,
-      0
-    )
-  ) %>%
-  group_by(year, OHI_region_est) %>%
-  summarize(
-    pearl_catch_kg = sum(pearl_kg, na.rm = TRUE),
-    sharkfin_catch_kg = sum(sharkfin_kg, na.rm = TRUE),
-    shark_total_catch_kg = sum(shark_total_kg, na.rm = TRUE),
-    algae_catch_kg = sum(algae_kg, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    sharkfin_utilization = if_else(
-      shark_total_catch_kg > 0,
-      sharkfin_catch_kg / shark_total_catch_kg,
-      NA_real_
-    )
-  )
-
-NP_annual_catch
+# 76 obs., 9 vars.
 ```
 
-```{r Reference period means (2018–2022)}
-NP_reference_catch <- NP_annual_catch %>%
-  filter(year %in% NP_REF_YEARS) %>%
-  group_by(OHI_region_est) %>%
-  summarize(
-    mean_pearl_catch_2018.22_kg = mean(pearl_catch_kg, na.rm = TRUE),
-    mean_algae_catch_2018.22_kg = mean(algae_catch_kg, na.rm = TRUE),
-    mean_sharkfin_util_2018.22 = mean(sharkfin_utilization, na.rm = TRUE),
-    n_ref_years_pearl = sum(!is.na(pearl_catch_kg)),
-    n_ref_years_algae = sum(!is.na(algae_catch_kg)),
-    n_ref_years_sharkfin = sum(!is.na(sharkfin_utilization)),
-    .groups = "drop"
-  )
+```{r Create cleaned Salt_Data_finalized}
+colnames(Salt_Data_2018.2025)
 
-NP_reference_catch
+Salt_Data_finalized <- Salt_Data_2018.2025 %>%
+  select(year, state, OHI_region, municipality, near_coast_,
+         reported_volume_mt, predicted_volume_mt,
+         forecasted_, n_years_forecast_) %>%
+  mutate(
+    volume_mt = coalesce(reported_volume_mt, predicted_volume_mt)
+  ) %>%
+  relocate(volume_mt, .after= predicted_volume_mt)
 ```
 
-```{r Calculate NP sub-scores and regional NP_Score}
-NP_Regional_Scores <- NP_annual_catch %>%
-  filter(year %in% NP_SCORE_YEARS) %>%
-  left_join(NP_reference_catch, by = "OHI_region_est") %>%
+
+# Calculate SALT reference point:
+Salt reference point: "Salt production from all mines roughly equals production from Hermosillio, a great example of a good, sustainable mine."
+Salt reference period: 2018-2022
+
+```{r Calculate salt reference point}
+table(Salt_Data_finalized$municipality)
+colnames(Salt_Data_finalized)
+
+# Sum this year (by region) and compare to the mean annual regional volume over 2018–2022:
+Salt_ref_point <- Salt_Data_finalized %>%
+  filter(municipality == "hermosillo",
+         year >= 2018 & year <= 2022) %>%
+  summarise(mean_volume_2018_2022 = mean(volume_mt, na.rm = TRUE)) %>%
+  pull(mean_volume_2018_2022)
+```
+
+# Calculate SALT_SubScores:
+```{r Calculate SALT_SubScores}
+colnames(Salt_Data_finalized)
+
+# First, calculate the scores PER SALT MINE relative to the reference point:
+SALT_Scores_per_mine<- Salt_Data_finalized
+
+SALT_Scores_per_mine$ref_point_mt<- c(SALT_ref.point)
+
+SALT_Scores_per_mine <- SALT_Scores_per_mine %>%
   mutate(
-    Pearl_score = pmap_dbl(
-      list(pearl_catch_kg, mean_pearl_catch_2018.22_kg),
-      score_stay_steady
-    ),
-    Algae_score = pmap_dbl(
-      list(algae_catch_kg, mean_algae_catch_2018.22_kg),
-      score_stay_steady
-    ),
-    Sharkfin_score = pmap_dbl(
-      list(sharkfin_utilization, mean_sharkfin_util_2018.22),
-      score_full_utilization
-    ),
-    n_products_scored = rowSums(!is.na(cbind(Pearl_score, Sharkfin_score, Algae_score))),
-    NP_Score = rowMeans(
-      cbind(Pearl_score, Sharkfin_score, Algae_score),
+    mine_SALT_score = (volume_mt / ref_point_mt)* 100,
+    mine_SALT_score_capped = pmin(mine_SALT_score, 100)
+  )
+
+# Next take mean across all mines in that region (weighted by total production):
+colnames(Salt_Scores_per_mine)
+
+SALT_SubScores <- Salt_Scores_per_mine %>%
+  group_by(OHI_region, year) %>%
+  summarise(
+    SALT_score_capped = weighted.mean(
+      mine_SALT_score_capped,
+      w = volume_mt,
       na.rm = TRUE
-    )
-  ) %>%
-  select(
-    year,
-    OHI_region_est,
-    pearl_catch_kg,
-    mean_pearl_catch_2018.22_kg,
-    Pearl_score,
-    sharkfin_catch_kg,
-    shark_total_catch_kg,
-    sharkfin_utilization,
-    mean_sharkfin_util_2018.22,
-    Sharkfin_score,
-    algae_catch_kg,
-    mean_algae_catch_2018.22_kg,
-    Algae_score,
-    n_products_scored,
-    NP_Score
-  ) %>%
-  arrange(OHI_region_est, year)
-
-NP_Regional_Scores
+    ),
+    .groups = "drop"
+  )
 ```
 
-```{r Sanity check NP scores}
-summary(NP_Regional_Scores$NP_Score)
-
-NP_Regional_Scores %>%
-  filter(!is.na(NP_Score)) %>%
-  arrange(OHI_region_est, year)
-```
-
-```{r Plot NP_Score over time by region}
-region_colors <- c(
-  "region_1" = "royalblue",
-  "region_2" = "skyblue",
-  "region_3" = "orange",
-  "region_4" = "sienna1",
-  "region_5" = "plum",
-  "region_6" = "purple4",
-  "region_7" = "aquamarine3",
-  "region_8" = "gold2",
-  "region_9" = "tomato"
-)
-
-NP_Regional_Scores_overTime <- NP_Regional_Scores %>%
-  filter(!is.na(NP_Score)) %>%
-  ggplot(aes(x = year, y = NP_Score, color = OHI_region_est)) +
+```{r Plot salt scores!}
+SALT_SubScores_plot<- SALT_SubScores %>%
+  ggplot(aes(
+    x = year,
+    y = SALT_score_capped,
+    color = OHI_region
+  )) +
+  
   geom_line(linewidth = 1) +
   geom_point(size = 2) +
-  facet_wrap(~ OHI_region_est, scales = "fixed") +
-  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
-  scale_color_manual(values = region_colors) +
+  
+  facet_wrap(~ OHI_region, scales = "fixed") +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
   labs(
-    title = "GOC Natural Products: Regional NP_Score",
-    subtitle = "Mean of Pearl, Sharkfin, and Algae sub-scores vs 2018–2022 reference",
-    y = "NP_Score (0 to 1)",
+    title = "NP: SALT Sub-Scores by Region [DRAFT - June 26 2026]",
+    y = "SALT Score (from 0 to 100)",
     x = "Year"
   ) +
   
-  ylim(0, 1.05) +
+  ylim(0, 101) +
   
   theme_bw(base_size = 14) +
-  theme(legend.position = "none", strip.text = element_text(size = 12, face = "bold"))
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold")
+    # plot.title = element_text(size = 18, face = "bold")
+  )
 
-NP_Regional_Scores_overTime
+SALT_SubScores_plot
 ```
 
-
-# FINAL STEP: SAVE NP SCORES ------------------------------
-
-```{r SAVE NP regional scores}
-write.csv(
-  NP_Regional_Scores,
-  file = file.path(NP_WORK_DIR, "GOC_NP_Regional_Scores_Jun022026.csv"),
-  row.names = FALSE
-)
-```
-
-```{r SAVE NP score plot}
-ggsave(
-  filename = file.path(NP_WORK_DIR, "GOC_NP_Regional_Scores_Jun022026.png"),
-  plot = NP_Regional_Scores_overTime,
-  width = 12,
-  height = 8,
-  dpi = 300
-)
+```{r Save as PNG}
+  ggsave(
+    filename = sprintf("/home/ferrer/ohi_goc_prep/NP/v2025/NP_Scores/SALT_SubScores/SALT_SubScores_plot_Jun262026.png"),
+    plot = SALT_SubScores_plot,
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
 ```
