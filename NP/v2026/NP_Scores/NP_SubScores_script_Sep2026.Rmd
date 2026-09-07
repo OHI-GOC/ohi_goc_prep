@@ -122,10 +122,10 @@ StockStatus_Scores<- StockStatus_Scores %>%
 Reference point: the stock status (B/Bmsy) of taxa used for fish oil and fish meal (i.e., small pelagics) is close to 1 across regions x year
 Reference period: 2018-2024
 
-I interpreted this to mean that I should calculate the the stock status of small pelagics (region x year), geometrically weighted by total catch per stock (region x year).
+Model: Calculate the average stock_status of small pelagics (region x year), weight geometrically by total catch per stock (region x year).
 
 
-```{r Create FOFM_StockStatus}
+```{r Create FOFM_StockStatus list}
 unique(StockStatus_Scores$Major_Functional_Group)
 
 FOFM_Taxa<- c("anchovy & sardine (small pelagics)")
@@ -148,7 +148,7 @@ unique(FOFM_StockStatus$estimated_genus_name)
 # 7 unique genera of small pelagic fish.
 ```
 
-```{r Only 70% of all catch goes to Fish Oil Fish Meal}
+```{r Apply FOFM correction factor: 70% of all catch goes to Fish Oil Fish Meal}
 FOFM_PROPORTION<- 0.70
 
 FOFM_StockStatus<- FOFM_StockStatus %>%
@@ -304,7 +304,7 @@ FOFM_SubScores <- FOFM_SubScores %>%
 ```
 
 
-```{r Plot FOFM total landings over time}
+```{r Plot FOFM_SubScores over time}
 Region_colors<- c(
   "Western Upper Gulf" = "#C03729",
   "Western Midriff Islands" = "#E68C7C",
@@ -353,6 +353,7 @@ FOFM_SubScores_plot<- FOFM_SubScores %>%
 
 FOFM_SubScores_plot
 ```
+
 # Save FOFM_SubScores_plot:
 ```{r Save FOFM_SubScores_plot as a PNG}
 ggsave(plot = FOFM_SubScores_plot,
@@ -362,7 +363,6 @@ ggsave(plot = FOFM_SubScores_plot,
        dpi = 300
        )
 ```
-
 
 # Plot FOFM_Landings over time:
 ```{r Plot FOFM total landings over time}
@@ -414,7 +414,7 @@ FOFM_Landings_plot<- FOFM_SubScores %>%
 FOFM_Landings_plot
 ```
 
-# Should there be more landings from ANCHOVETA and SARDINA? Seems like no.
+# Should there be more landings from ANCHOVETA and SARDINA in other regions? Seems like no?
 
 ```{r Evaluate small pelagics from GOC_MarineLandings0 directly}
 GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
@@ -436,7 +436,7 @@ GOC_FOFM_Landings<- GOC_MarineLandings0 %>%
     OHI_region_est= clean_names_lowercase(OHI_region_est)
   )
 # 43 obs., 4 vars.
-# NOTE TO SELF: Based on this summary table, it does not seem like we are missing huge sums of FOFM. Seems like most small pelagic production comes from regions 7 and 8.
+# NOTE TO SELF: Based on this summary table, it does not seem like we are missing huge sums of FOFM in other regions. Seems like most small pelagic production does actually originate from regions 7 and 8.
 ```
 
 ```{r Join Region_Key to GOC_FOFM_Landings}
@@ -2530,6 +2530,7 @@ FINS_Production_summary_wide<- FINS_Production_summary_wide %>%
   select(year, OHI_region_est, sold_whole_mt, fillet_mt, ref_point_mt, fins_mt)
 ```
 
+
 ## Calculate FINS_SubScores:
 ```{r Calculate FINS_SubScores0}
 FINS_SubScores0 <- FINS_Production_summary_wide %>%
@@ -2685,8 +2686,397 @@ ggsave(FINS_SubScores_plot,
        dpi = 300
        )
 ```
-## Plot RESD_Production over time:
-```{r Plot RESD_Production over time}
+
+# NEW ADD FINS_SubScores option 2 with stock status (SEP 7 2026)
+
+```{r Create FINS_StockStatus list}
+unique(StockStatus_Scores$Major_Functional_Group)
+
+FINS_Taxa<- c("sharks")
+
+colnames(StockStatus_Scores)
+
+FINS_StockStatus0<- StockStatus_Scores %>%
+  filter(Major_Functional_Group %in% FINS_Taxa) %>%
+    select(year, Major_Functional_Group,
+           estimated_genus_name, estimated_family_name,
+           OHI_region_est,
+           total_weight_mt,
+           StockStatus_final,
+           StockStatus_source
+         )
+
+# 546 obs., 8 vars.
+
+unique(FINS_StockStatus0$estimated_genus_name)
+# 19 unique genera of sharks
+
+# Simplify the df:
+colnames(FINS_StockStatus0)
+
+FINS_StockStatus0<- FINS_StockStatus0 %>%
+  select(year, OHI_region_est, estimated_genus_name, StockStatus_final) %>%
+  distinct()
+```
+
+```{r Gapfill missing stock_status values}
+# Gapfill missing stock status values. Gapfill heirachy is:
+# Taxon × region × year mean
+# Taxon × region mean across all years
+# Taxon mean across all regions and years
+# Global mean across all sharks, regions, and years
+
+# Calculate fallback values first
+library(dplyr)
+
+# 1. Taxon × region × year mean
+taxon_region_year_mean <- FINS_StockStatus0 %>%
+  group_by(estimated_genus_name, OHI_region_est, year) %>%
+  summarise(
+    fill_value_1 = mean(StockStatus_final, na.rm = TRUE),
+    n_nonmissing = sum(!is.na(StockStatus_final)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    fill_value_1 = if_else(n_nonmissing > 0, fill_value_1, NA_real_)
+  ) %>%
+  select(-n_nonmissing)
+
+
+# 2. Taxon × region mean across all years
+taxon_region_mean <- FINS_StockStatus0 %>%
+  group_by(estimated_genus_name, OHI_region_est) %>%
+  summarise(
+    fill_value_2 = mean(StockStatus_final, na.rm = TRUE),
+    n_nonmissing = sum(!is.na(StockStatus_final)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    fill_value_2 = if_else(n_nonmissing > 0, fill_value_2, NA_real_)
+  ) %>%
+  select(-n_nonmissing)
+
+
+# 3. Taxon mean across all regions and years
+taxon_mean <- FINS_StockStatus0 %>%
+  group_by(estimated_genus_name) %>%
+  summarise(
+    fill_value_3 = mean(StockStatus_final, na.rm = TRUE),
+    n_nonmissing = sum(!is.na(StockStatus_final)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    fill_value_3 = if_else(n_nonmissing > 0, fill_value_3, NA_real_)
+  ) %>%
+  select(-n_nonmissing)
+
+
+# 4. Global mean
+global_mean <- mean(FINS_StockStatus0$StockStatus_final, na.rm = TRUE)
+
+
+# Create complete region × year grid for "nei" taxa:
+nei_grid <- expand_grid(
+  OHI_region_est = paste0("region_", 1:9),
+  year = full_seq(FINS_StockStatus0$year, 1)
+) %>%
+  mutate(
+    estimated_genus_name = "nei"
+  )
+
+# Create complete region × year grid for "NA" taxa:
+na_grid <- expand_grid(
+  OHI_region_est = paste0("region_", 1:9),
+  year = full_seq(FINS_StockStatus0$year, 1)
+) %>%
+  mutate(
+    estimated_genus_name = NA_character_
+  )
+
+# Add the NEI and NA grid to the existing data
+FINS_StockStatus <- bind_rows(
+  FINS_StockStatus0,
+  nei_grid
+) %>%
+  arrange(OHI_region_est, year, estimated_genus_name)
+
+FINS_StockStatus <- bind_rows(
+  FINS_StockStatus,
+  na_grid
+)
+
+
+# THEN apply gap filling hierarchy:
+FINS_StockStatus <- FINS_StockStatus %>%
+  left_join(
+    taxon_region_year_mean,
+    by = c("estimated_genus_name", "OHI_region_est", "year")
+  ) %>%
+  left_join(
+    taxon_region_mean,
+    by = c("estimated_genus_name", "OHI_region_est")
+  ) %>%
+  left_join(
+    taxon_mean,
+    by = "estimated_genus_name"
+  ) %>%
+  mutate(
+    provenance = case_when(
+      !is.na(StockStatus_final) ~ "observed",
+      !is.na(fill_value_1) ~ "gap_filled_taxon_region_year",
+      !is.na(fill_value_2) ~ "gap_filled_taxon_region",
+      !is.na(fill_value_3) ~ "gap_filled_taxon_all_regions_years",
+      !is.na(global_mean) ~ "gap_filled_global_mean",
+      TRUE ~ "missing"
+    ),
+    
+    StockStatus_final = case_when(
+      !is.na(StockStatus_final) ~ StockStatus_final,
+      !is.na(fill_value_1) ~ fill_value_1,
+      !is.na(fill_value_2) ~ fill_value_2,
+      !is.na(fill_value_3) ~ fill_value_3,
+      !is.na(global_mean) ~ global_mean,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  select(-fill_value_1, -fill_value_2, -fill_value_3)
+# 672 obs., 5 vars.
+```
+
+```{r Estimate fin production per genus}
+colnames(FINS_Production)
+
+FINS.only_Production<- FINS_Production %>%
+  filter(fin_ == "TRUE") %>%
+  group_by(year, OHI_region_est, OHI_region_name, estimated_genus_name) %>%
+  summarize(
+    est_fin_weight_mt = sum(landed_weight, na.rm = TRUE) / 1000
+  )
+
+# 216 obs., 5 vars.
+```
+
+```{r Merge FINS_StockStatus to FINS.only_Production}
+
+colnames(FINS_StockStatus)
+
+# Merge
+FINS.only_Production_summary <- FINS.only_Production %>%
+  left_join(
+    FINS_StockStatus,
+    by = c("OHI_region_est", "year", "estimated_genus_name")
+  ) %>%
+  filter(year >= 2018, year <= 2024)
+
+# 103 obs., 7 vars.
+```
+
+
+## Calculate FINS_StockStatus as the geometric mean of Stock_Status * FINS_weight_mt:
+
+```{r Weights and geometric mean}
+# Calculate the proportion of catch each "Stock" (i.e. genus) contributed to its regional total during the study period:
+colnames(FINS.only_Production)
+
+StudyPeriod_low= 2018
+StudyPeriod_high= 2024
+
+FINS_weights <- FINS.only_Production %>%
+  filter(year >= StudyPeriod_low & year <= StudyPeriod_high) %>%
+  
+  group_by(estimated_genus_name, OHI_region_est) %>%
+  mutate(
+    FINS_weight_mt = sum(est_fin_weight_mt, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  
+  group_by(OHI_region_est) %>%
+  mutate(
+    total_FINS_weight_mt = sum(est_fin_weight_mt, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  
+  mutate(
+    wprop_2018.24 = FINS_weight_mt / total_FINS_weight_mt
+  ) %>%
+  
+  distinct(
+    estimated_genus_name,
+    OHI_region_est,
+    wprop_2018.24
+  )
+
+
+# NOTE TO SELF: see point about geometric weights. Verify with Mel that this is correct. - EMF, Sep 5 2026.
+
+
+# SANITY CHECK: Do the weights add up to 1?
+TEST<- FINS_weights %>%
+  group_by(OHI_region_est) %>%
+  summarize(sum_w = sum(wprop_2018.24, na.rm= TRUE))
+# 9 obs., vars.; all = 1. Yup, looks good!
+```
+
+## Calculate FINS_SubScores2:
+```{r Add weights data to FINS.only_Production_summary:}
+colnames(FINS_weights)
+colnames(FINS.only_Production_summary)
+
+FINS.only_Production_summary <- FINS.only_Production_summary %>%
+  left_join(FINS_weights,
+            by = c("OHI_region_est", "estimated_genus_name"))
+
+
+# This is the geometric mean part:
+FINS_SubScores2 <- FINS.only_Production_summary %>%
+  group_by(OHI_region_est, year) %>%
+  summarize(
+    StockStatus_geo.mean = prod(StockStatus_final ^ wprop_2018.24, na.rm = TRUE),
+    FINS_biomass_mt = sum(est_fin_weight_mt, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(FINS_score2= StockStatus_geo.mean * 100)
+
+# 39 obs., 5 vars.
+```
+
+```{r Complete the FINS_SubScores2 grid}
+colnames(FINS_SubScores2)
+
+FINS_SubScores2 <- FINS_SubScores2 %>%
+  ungroup() %>%
+  complete(
+    OHI_region_est = paste0("region_", 1:9),
+    year = full_seq(year, 1),
+    fill = list(
+      FINS_score2 = NA_real_
+    )
+  ) %>%
+  arrange(OHI_region_est, year)
+
+# 63 obs., 5 vars.
+
+# Exclusion criteria?
+summary(FINS_SubScores2$FINS_biomass_mt) # median = 3, mean = 18
+sd(FINS_SubScores2$FINS_biomass_mt, na.rm = TRUE) # sd = 27
+
+exclusion_threshold = median(FINS_SubScores2$FINS_biomass_mt, na.rm= TRUE)
+
+FINS_SubScores2$region_exclude_include<- c(NA)
+
+FINS_SubScores2 <- FINS_SubScores2 %>%
+  group_by(OHI_region_est) %>%
+  mutate(
+    median_regional_prod_mt = median(FINS_biomass_mt, na.rm = TRUE),
+    
+    region_exclude_include = case_when(
+      is.na(median_regional_prod_mt) ~ "exclude",
+      median_regional_prod_mt <= exclusion_threshold ~ "exclude",
+      median_regional_prod_mt > exclusion_threshold ~ "include"
+    )
+  ) %>%
+  ungroup()
+# 63 obs., 7 vars.
+```
+
+```{r Merge Region_Key to FINS_SubScores2}
+FINS_SubScores2<- FINS_SubScores2 %>%
+  left_join(Region_Key, 
+            by = "OHI_region_est")
+# 63 obs., 8 vars.
+```
+
+
+## Save FINS_SubScores2:
+
+```{r Save the FINS_SubScores2}
+write.csv(FINS_SubScores2, 
+          "/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/FINS_SubScores/FINS_SubScores2_ASK_df_Sep072026.csv", 
+          row.names = FALSE)
+```
+
+## Plot FINS_SubScores:
+
+```{r Load in FINS_SubScores2 as needed}
+FINS_SubScores20<- read.csv("/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/FINS_SubScores/FINS_SubScores2_ASK_df_Sep072026.csv")
+# 63 obs., 8 vars.
+
+FINS_SubScores2<- FINS_SubScores20
+
+# Make sure to order the regions:
+region_order <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
+FINS_SubScores2 <- FINS_SubScores2 %>%
+  mutate(
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = region_order
+    )
+  )
+```
+
+```{r Plot FINS_SubScores2}
+# Plot over time:
+FINS_SubScores2_plot <- FINS_SubScores2 %>%
+  filter(!is.na(OHI_region_est)) %>%
+  
+  ggplot(aes(x = year, 
+             y = FINS_score2, 
+             color = OHI_region_name)) +
+  
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ OHI_region_name, scales = "fixed") +
+  
+  labs(
+    title = "NP: FINS Scores by Region",
+    subtitle= "summed FINS shark taxa", 
+    caption = "updated: Sep 6 2026",
+    y = "FINS Current Status (0 to 100)",
+    x = "Year"
+  ) +
+  
+  ylim(c(0, 101)) +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+FINS_SubScores2_plot
+```
+
+## Save FINS_SubScores2_plot:
+
+```{r Save FINS_SubScores2_plot}
+ggsave(FINS_SubScores2_plot,
+       filename = "/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/FINS_SubScores/FINS_SubScores2_plot_Sep062026.png",
+       width = 12,
+       height = 12,
+       dpi = 300
+       )
+```
+
+
+## Plot FINS_Production_plot over time:
+```{r Plot FINS_Production_plot over time}
 colnames(FINS_SubScores)
 
 FINS_Production_plot <- FINS_SubScores %>%
@@ -2856,6 +3246,12 @@ SALT_Data_finalized <- SALT_Data %>%
   relocate(volume_mt, .after= predicted_volume_mt)
 ```
 
+```{r Curious about SALT production region 7}
+test<- SALT_Data_finalized %>%
+  filter(OHI_region== "Region_7")
+
+# NOTE TO SELF: I actually just don't think the salt spike in region 7 2024 is real. I think this will be corrected when we load in new Anuario data for 2024. = September 7 2026
+```
 
 ## Calculate SALT reference point:
 Salt reference point: "Salt production from all mines roughly equals production from Hermosillio, a great example of a good, sustainable mine."
@@ -2872,6 +3268,7 @@ SALT_ref_point <- SALT_Data_finalized %>%
   summarise(mean_volume_2018_2022 = mean(volume_mt, na.rm = TRUE)) %>%
   pull(mean_volume_2018_2022)
 ```
+
 
 ## Calculate SALT_SubScores:
 
