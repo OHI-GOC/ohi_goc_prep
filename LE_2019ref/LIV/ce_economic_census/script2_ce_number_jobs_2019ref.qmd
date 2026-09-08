@@ -36,6 +36,8 @@ This script will be used to obtain current status scores for the Livelihoods (LI
 6. Finally, use current/baseline to calculate the LIV_number_jobs current status scores from 2003-2023 for all 9 Goc OHI Regions. 
 7. Save to Mazu.
 8. Explore using `plotly`.
+9. Apply the ENOE informality multiplier to coastal-adjusted jobs by state and `specific_sector`, then repeat population scaling and the 2019-reference current status.
+10. Save the informality-adjusted current status under a new filename so it can be compared with the CE-only series.
 
 
 ```{r}
@@ -445,7 +447,350 @@ num_jobs_cs_plotly
 ```
 
 
+## Informality-adjusted LIV number of jobs
 
+This section inflates coastal-adjusted CE jobs by the ENOE informality multiplier from `script2_5_informality_multiplier.qmd`, then repeats population scaling and the 2019-reference current status.
+
+The CE-only scores above are unchanged. This writes a separate file so both series can be compared in `script6_le_visualizations_2019ref.qmd`.
+
+**Multiplier source:** Section 12 n-weighted yearly rates (`enoe_yearly_avg_n_informality_multiplier_by_state_*.csv`).
+
+**Join keys:** GoC state (`estado`) × CE `specific_sector` (via the ENOE-to-CE crosswalk), with year matching:
+
+- CE 2018 (2019 Economic Census) → ENOE 2019
+- CE 2023 → ENOE 2023
+- CE 2003, 2008, 2013 → ENOE 2019 (earliest available year)
+
+**Fallback hierarchy** (from script 2.5):
+
+1. State × sector yearly multiplier when `low_n == FALSE` and the informal share is not 0% or 100%.
+2. State-only yearly multiplier.
+3. Leave unadjusted (`jobs_multiplier = 1`).
+
+Current status is still current / 2019-reference, but **both** the current year and the 2019 reference use informality-adjusted jobs. A constant multiplier would cancel in that ratio; scores can still change because sector mix (and therefore the effective multiplier) changes over time, and because 2018 vs 2023 use different ENOE years.
+
+This section can be run on its own. The first chunk reads the CE jobs, coastal adjustment, interpolated population, and ENOE multiplier files it needs.
+
+```{r}
+library(tidyverse)
+library(here)
+library(plotly)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+liv_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/le/liv"
+
+ce_job_totals <- read_csv(
+  here::here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int",
+    "ce_cleaned_totals_per_yr_municipio_activity.csv"
+  ),
+  show_col_types = FALSE
+) %>%
+  filter(!(municipio == "MEXICALI" & ano_censal == "2023")) %>%
+  dplyr::select(-c("a800a", "m000a", "j400a", "j300a"))
+
+if (!"estado" %in% names(ce_job_totals)) {
+  stop(
+    "ce_job_totals is missing `estado`, which is needed to join ENOE informality multipliers."
+  )
+}
+
+coastal_population_multipliers <- read_csv(
+  here::here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/le",
+    "coastal_adjustment_multiplier_2020.csv"
+  ),
+  show_col_types = FALSE
+)
+
+year_adj_pop_rgnid_interpolated <- read_csv(
+  here::here(
+    "/home/shares/ohi/OHI_GOC/spatial/population_municipal",
+    "interpolated_population_per_rgn_coastalmunicipios_2000_2020.csv"
+  ),
+  show_col_types = FALSE
+)
+
+state_name_lookup <- c(
+  "baja california" = "Baja California",
+  "baja california sur" = "Baja California Sur",
+  "sonora" = "Sonora",
+  "sinaloa" = "Sinaloa",
+  "nayarit" = "Nayarit",
+  "jalisco" = "Jalisco"
+)
+
+normalize_goc_state <- function(x) {
+  key <- stringr::str_to_lower(stringr::str_squish(as.character(x)))
+  unname(state_name_lookup[key])
+}
+
+ce_year_to_enoe_year <- function(ce_year) {
+  dplyr::if_else(as.numeric(ce_year) <= 2018, 2019, as.numeric(ce_year))
+}
+
+informality_state <- read_csv(
+  here::here(liv_dir, "enoe_yearly_avg_n_informality_multiplier_by_state.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    enoe_year = as.numeric(enoe_year),
+    state = normalize_goc_state(state)
+  ) %>%
+  dplyr::select(
+    enoe_year,
+    state,
+    jobs_multiplier_state = jobs_multiplier,
+    pct_informal_state = pct_informal,
+    n_unweighted_state = n_unweighted,
+    low_n_state = low_n
+  )
+
+## collapse ENOE categories that share a CE specific_sector (e.g. food_services
+## and temporary-accomodations both map to accommodations_food_drink)
+informality_sector <- read_csv(
+  here::here(liv_dir, "enoe_yearly_avg_n_informality_multiplier_by_state_category.csv"),
+  show_col_types = FALSE
+) %>%
+  filter(!is.na(suggested_ce_specific_sector), suggested_ce_specific_sector != "") %>%
+  mutate(
+    enoe_year = as.numeric(enoe_year),
+    state = normalize_goc_state(state)
+  ) %>%
+  group_by(enoe_year, state, specific_sector = suggested_ce_specific_sector) %>%
+  summarize(
+    pct_informal_sector = stats::weighted.mean(pct_informal, n_unweighted, na.rm = TRUE),
+    n_unweighted_sector = sum(n_unweighted, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    jobs_multiplier_sector = ifelse(
+      !is.na(pct_informal_sector) & pct_informal_sector < 1,
+      1 / (1 - pct_informal_sector),
+      NA_real_
+    ),
+    low_n_sector = n_unweighted_sector < 30,
+    extreme_rate_sector = pct_informal_sector %in% c(0, 1) | is.na(jobs_multiplier_sector)
+  )
+```
+
+Keep `estado` in the activity totals so Region 9 (Nayarit and Jalisco) can take different state multipliers. Coastal adjustments match the CE-only path above.
+
+```{r}
+total_jobs_per_rgn_state_and_activity <- ce_job_totals %>%
+  mutate(state = normalize_goc_state(estado)) %>%
+  group_by(ano_censal, rgn_id, state, general_sector, specific_sector) %>%
+  summarize(
+    jobs_per_act = sum(h000a, na.rm = TRUE),
+    ue_per_act = sum(ue, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+coastal_jobs_rgn_state_activity <- total_jobs_per_rgn_state_and_activity %>%
+  left_join(coastal_population_multipliers, by = "rgn_id") %>%
+  mutate(
+    coastal_pop_adjustment = ifelse(
+      rgn_id %in% "Region_1" & as.numeric(ano_censal) == 2023,
+      1,
+      coastal_pop_adjustment
+    ),
+    first_adj_coastal_jobs_per_act = ifelse(
+      rgn_id %in% c("Region_3", "Region_4"),
+      jobs_per_act * coastal_pop_adjustment,
+      jobs_per_act
+    ),
+    coastal_jobs_per_act = ifelse(
+      specific_sector %in% c(
+        "coastal_recreation",
+        "travel_planners",
+        "accommodations_food_drink",
+        "environmental_research_consulting"
+      ),
+      jobs_per_act * coastal_pop_adjustment,
+      first_adj_coastal_jobs_per_act
+    ),
+    first_adj_coastal_ue_per_act = ifelse(
+      rgn_id %in% c("Region_3", "Region_4"),
+      ue_per_act * coastal_pop_adjustment,
+      ue_per_act
+    ),
+    coastal_ue_per_act = ifelse(
+      specific_sector %in% c(
+        "coastal_recreation",
+        "travel_planners",
+        "accommodations_food_drink",
+        "environmental_research_consulting"
+      ),
+      ue_per_act * coastal_pop_adjustment,
+      first_adj_coastal_ue_per_act
+    )
+  ) %>%
+  dplyr::select(-c(
+    jobs_per_act,
+    ue_per_act,
+    first_adj_coastal_jobs_per_act,
+    first_adj_coastal_ue_per_act
+  ))
+
+coastal_jobs_informality <- coastal_jobs_rgn_state_activity %>%
+  mutate(enoe_year = ce_year_to_enoe_year(ano_censal)) %>%
+  left_join(informality_sector, by = c("enoe_year", "state", "specific_sector")) %>%
+  left_join(informality_state, by = c("enoe_year", "state")) %>%
+  mutate(
+    sector_ok = !is.na(jobs_multiplier_sector) &
+      !low_n_sector %in% TRUE &
+      !extreme_rate_sector %in% TRUE,
+    jobs_multiplier = dplyr::case_when(
+      sector_ok ~ jobs_multiplier_sector,
+      !is.na(jobs_multiplier_state) ~ jobs_multiplier_state,
+      TRUE ~ 1
+    ),
+    multiplier_source = dplyr::case_when(
+      sector_ok ~ "state_x_sector",
+      !is.na(jobs_multiplier_state) ~ "state_only",
+      TRUE ~ "unadjusted"
+    ),
+    coastal_jobs_per_act_adjusted = coastal_jobs_per_act * jobs_multiplier
+  )
+
+table(coastal_jobs_informality$multiplier_source, useNA = "ifany")
+```
+
+Aggregate to region, scale to coastal population, and score against the informality-adjusted 2019 reference.
+
+```{r}
+total_jobs_per_rgn_informality <- coastal_jobs_informality %>%
+  group_by(ano_censal, rgn_id) %>%
+  summarize(
+    total_jobs = sum(coastal_jobs_per_act_adjusted, na.rm = TRUE),
+    total_jobs_unadjusted = sum(coastal_jobs_per_act, na.rm = TRUE),
+    total_ue = sum(coastal_ue_per_act, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    total_jobs = round(total_jobs),
+    total_jobs_unadjusted = round(total_jobs_unadjusted),
+    total_ue = round(total_ue),
+    effective_jobs_multiplier = ifelse(
+      total_jobs_unadjusted > 0,
+      total_jobs / total_jobs_unadjusted,
+      NA_real_
+    )
+  )
+
+join_jobs_pop_informality <- inner_join(
+  total_jobs_per_rgn_informality,
+  year_adj_pop_rgnid_interpolated,
+  by = c("ano_censal" = "year_interpolated", "rgn_id")
+) %>%
+  dplyr::select(
+    rgn_id,
+    ce_ano_censal = ano_censal,
+    total_jobs,
+    total_jobs_unadjusted,
+    effective_jobs_multiplier,
+    total_population_interpolated_for_ce_year = population_interpolated,
+    population_original,
+    pop_ano_censal_original,
+    unidad_medida,
+    total_ue
+  ) %>%
+  left_join(coastal_population_multipliers, by = "rgn_id") %>%
+  mutate(
+    coastal_population_interpolated_for_ce_year =
+      total_population_interpolated_for_ce_year * coastal_pop_adjustment,
+    marine_jobs_per_local_pop = total_jobs / coastal_population_interpolated_for_ce_year
+  )
+
+reference_jobs_2019_informality <- join_jobs_pop_informality %>%
+  filter(as.numeric(ce_ano_censal) == 2018) %>%
+  dplyr::select(rgn_id, ref_value_2019 = marine_jobs_per_local_pop)
+
+ce_jobs_current_status_informality <- join_jobs_pop_informality %>%
+  dplyr::select(
+    rgn_id,
+    ce_ano_censal,
+    marine_jobs_per_local_pop,
+    effective_jobs_multiplier
+  ) %>%
+  left_join(reference_jobs_2019_informality, by = "rgn_id") %>%
+  mutate(
+    current_status_raw = marine_jobs_per_local_pop / ref_value_2019 * 100,
+    current_status = ifelse(current_status_raw >= 100, 100, current_status_raw)
+  )
+
+ce_jobs_current_status_informality
+```
+
+### Save informality-adjusted current status
+
+```{r}
+write_csv(
+  ce_jobs_current_status_informality,
+  here::here(liv_dir, "ce_jobs_current_status_2019ref_informality.csv")
+)
+```
+
+### Plotlys (informality-adjusted)
+
+```{r}
+num_jobs_cs_informality_plotly_noCAP <- plotly::plot_ly(
+  ce_jobs_current_status_informality,
+  x = ~ce_ano_censal,
+  y = ~current_status_raw,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "RAW CURRENT STATUS of marine-related jobs, CE x ENOE informality multiplier, 2018 reference",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "marine_jobs_per_local_pop / ref_value_2019")
+  ) %>%
+  add_lines(
+    x = range(ce_jobs_current_status_informality$ce_ano_censal),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+num_jobs_cs_informality_plotly_noCAP
+
+num_jobs_cs_informality_plotly <- plotly::plot_ly(
+  ce_jobs_current_status_informality,
+  x = ~ce_ano_censal,
+  y = ~current_status,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS of marine-related jobs, CE with ENOE informality multiplier, 2018 reference",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "marine_jobs_per_local_pop / ref_value_2019")
+  ) %>%
+  add_lines(
+    x = range(ce_jobs_current_status_informality$ce_ano_censal),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+num_jobs_cs_informality_plotly
+```
 
 
 
