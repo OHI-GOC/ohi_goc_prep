@@ -1,5 +1,5 @@
 ---
-title: "Rodalith Soft bottom - Gulf of California OHI"
+title: "Rhodolith beds - Gulf of California OHI"
 author: "Austin Martinez"
 date: 07/10/2026
 format: 
@@ -23,283 +23,163 @@ library(ggplot2)
 library(knitr)
 library(kableExtra)
 library(tmap)
+library(readr)
 ```
 
 ```{r}
-# Read in OHI region boundaries
-ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |> st_make_valid()
-
-# Filter OHI regions to marine polygons
-ohi_regions_marine <- ohi_regions |>
-  filter(location == "marine")
-```
-
-```{r}
-# Read in Rodoliths data
-rodoliths <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/rodoliths/rodolith_merge.shp")) |> 
-  st_make_valid() |> 
-  st_transform(st_crs(ohi_regions))
-
-# See if CRSs match
-print(st_crs(rodoliths) == st_crs(ohi_regions))
-```
-
-
-```{r}
-# Make data match extent of the ohi_regions layer
-rodoliths <- st_intersection(rodoliths, ohi_regions)
-```
-
-```{r}
-# Make a template raster to use in rasterization to make sure cell grids line up
-template_100m <- rast(
-  ext(ohi_regions),
-  resolution = 100,   # 100 m res
-  crs = st_crs(ohi_regions)$wkt
-)
-```
-
-```{r}
-# Rasterize the vector data
-soft_bottom_100m  <- rasterize(vect(rodoliths),  template_100m, field = 1, background = 0)
-```
-
-## Quick validation
-```{r}
-# Check alignment (resolution, origin, extent, CRS, rotation, cell alignment)
-compareGeom(soft_bottom_100m, template_100m)
-```
-
-
-```{r}
-summary(values(soft_bottom_100m))
-```
-
-```{r}
-# Groups every 10×10 block of 100‑m cells into one 1‑km cell, and computes the mean of values inside that block
-soft_bottom_fraction <- aggregate(soft_bottom_100m, fact = 10, fun = "mean")
-```
-
-```{r}
-# Checks to see if resolution is 1000m and if values are between 0-1
-summary(values(soft_bottom_fraction))
-res(soft_bottom_fraction)
-```
-
-```{r}
-# Mask out raster not in OHI marine regions
-marine_mask <- rasterize(
-  vect(ohi_regions_marine),
-  soft_bottom_fraction,
-  field = 1,
-  background = NA
-)
-
-soft_bottom_fraction_marine <- mask(soft_bottom_fraction, marine_mask)
-```
-
-
-
-```{r}
-tmap_mode("view")
-
-tm_shape(soft_bottom_fraction_marine) +
-  tm_raster(
-    palette = "-viridis",
-    title = "Proportion Soft Bottom",
-    alpha = 0.8,
-    breaks = seq(0, 1, by = 0.1),   # FORCE scale 0 → 1
-    legend.format = list(digits = 2)
-  ) +
-tm_shape(ohi_regions_marine) +
-  tm_borders(
-    col = "white",
-    lwd = 2,
-    alpha = 0.9
-  ) +
-tm_layout(
-    legend.outside = TRUE,
-    frame = FALSE
-)
-```
-
-
-## Use plot below to see if raster accuratly displays Rodalith extent
-```{r}
-tmap_mode("view")
-tmap_options(check.and.fix = TRUE)
-
-tm_shape(ohi_regions_marine) +
-  tm_borders(col = "black", lwd = 1) +
-  
-tm_shape(rodoliths) +
-  tm_fill(col = "purple", alpha = 1) +
-  tm_borders(col = "purple") +
-
-
-tm_layout(
-  frame = FALSE,
-  legend.outside = TRUE,
-  legend.outside.position = "right"
-)
-
-```
-
-
-
-
-
-```{r}
-rodolith_beds_1km <- soft_bottom_fraction_marine
-# NA out rodalith beds
-rodolith_beds_1km[rodolith_beds_1km <= 0] <- NA
-```
-
-
-## Destructive fishing data
-```{r}
-# Years of destructive fishing data available
+# Target CRS (matches OHI regions + soft-bottom pressure rasters)
+target_crs <- "EPSG:6372"  # Mexico ITRF2008 / LCC
 years <- 2007:2025
 
-# Build full file paths for each year's raster and load them into a multi-layer SpatRaster
-fishing_rasters <- rast(
-  paste0(
-    "/home/shares/ohi/OHI_GOC/goal_prep/pressures/vessels/benthic_destructive_fishing/destructive_fishing_hours_",
-    years,
-    "_1km.tif"
+# Soft-bottom fishing pressure (0–1) from soft_bottom.qmd
+prop_disturbed <- rast(
+  here("_habitats/HAB_soft_bottom/int/prop_disturbed_soft_bottom_1km.tif")
+)
+nlyr(prop_disturbed)
+```
+
+```{r}
+# Read OHI regions and transform to Mexico ITRF2008 / LCC
+ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |>
+  st_make_valid() |>
+  st_transform(target_crs)
+
+ohi_land   <- ohi_regions |> dplyr::filter(location == "land")
+ohi_marine <- ohi_regions |> dplyr::filter(location == "marine")
+```
+
+```{r}
+# Read rhodolith polygons and transform to EPSG:6372
+rodoliths <- st_read(
+  here("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/rodoliths/rodolith_merge.shp")
+) |>
+  st_make_valid() |>
+  st_transform(target_crs)
+
+stopifnot(st_crs(rodoliths) == st_crs(ohi_regions))
+print(st_crs(rodoliths)$Name)
+```
+
+Plot rhodolith locations as points (for visibility).
+```{r}
+rodolith_pts <- rodoliths |>
+  st_point_on_surface()
+
+# Land first (gray), then soft-bottom fishing pressure, then marine borders + points
+year_map <- 2025
+lyr <- which(years == year_map)
+plot(
+  vect(ohi_land),
+  col = "gray85",
+  border = "gray60",
+  lwd = 0.5,
+  main = paste0("Rhodolith beds (points) — soft-bottom pressure ", year_map),
+  axes = FALSE,
+  box = FALSE
+)
+plot(
+  prop_disturbed[[lyr]],
+  add = TRUE,
+  col = hcl.colors(100, "viridis"),
+  range = c(0, 1),
+  legend = TRUE,
+  axes = FALSE,
+  box = FALSE
+)
+plot(vect(ohi_marine), add = TRUE, border = "gray70", lwd = 0.7, col = NA)
+plot(
+  vect(rodolith_pts),
+  add = TRUE,
+  pch = 16,
+  cex = 0.2,
+  col = "red"
+)
+```
+
+```{r}
+# Assign each rhodolith polygon (piece) to a marine OHI region; drop land overlaps
+rodoliths <- st_intersection(rodoliths, ohi_marine) |>
+  st_collection_extract("POLYGON") |>
+  mutate(
+    poly_id   = dplyr::row_number(),
+    region_id = as.integer(id),
+    area_km2  = as.numeric(st_area(geometry)) / 1e6
+  ) |>
+  filter(area_km2 > 0)
+
+rodoliths
+```
+
+## Extract soft-bottom pressure under rhodolith beds
+
+Pressure under each bed = area-weighted mean of `prop_disturbed` cells overlapping the polygon.
+No recovery scaling applied for now (same 0–1 exposure scale as soft bottom).
+```{r}
+# Weighted mean pressure per rhodolith polygon × year
+ex <- terra::extract(
+  prop_disturbed,
+  vect(rodoliths),
+  fun = mean,
+  weights = TRUE,
+  na.rm = TRUE,
+  ID = TRUE
+)
+
+# Layer names → year; join polygon region + area
+pressure_cols <- setdiff(names(ex), "ID")
+df_poly <- as_tibble(ex) |>
+  rename(poly_id = ID) |>
+  left_join(
+    st_drop_geometry(rodoliths) |> select(poly_id, region_id, area_km2),
+    by = "poly_id"
+  ) |>
+  pivot_longer(
+    cols = all_of(pressure_cols),
+    names_to = "layer",
+    values_to = "prop"
+  ) |>
+  mutate(
+    year = as.integer(sub("prop_disturbed_", "", layer))
   )
-)
 
-# Print the total rasters in the stack
-nlyr(fishing_rasters)
+df_poly
 ```
 
 ```{r}
-soft_bottom_aligned <- project(rodolith_beds_1km, fishing_rasters[[1]])
-
-compareGeom(soft_bottom_aligned, fishing_rasters)
-```
-
-
-```{r}
-# Convert fishing hours to area km² of disturbance for each raster cell
-disturbance_raster_km2 <- fishing_rasters * 3.704 * 0.030
-```
-
-```{r}
-max(disturbance_raster_km2[[7]])
-```
-
-```{r}
-# Cap disturbance at 1 km² since there can't be more than 1 km² disturbance in a 1km² cell
-disturbance_raster_km2[disturbance_raster_km2 > 1] <- 1
-```
-
-
-```{r}
-# Find the km² of trawl disturbance per km² of soft‑bottom habitat present in the pixel. 
-disturbance_km_per_km_soft_bottom <- disturbance_raster_km2 / soft_bottom_aligned
-# We are doing this because we don't believe that trawling is random. We believe that trawls primarily target soft bottom and want to correct for that
-```
-
-```{r}
-# One trawl = 5 years of impact → annual disturbance scaled by 1/5 (0.2).
-disturbance_km_per_km_rodalith <- disturbance_km_per_km_soft_bottom / 0.2
-
-# Cap at 1
-disturbance_km_per_km_rodalith[disturbance_km_per_km_rodalith > 1] <- 1
-summary(values(disturbance_km_per_km_rodalith[[7]]))
-```
-
-## MAKE SURE VALUES ARE BETWEEB 0-1
-```{r}
-# Find how many km² of soft‑bottom disturbed per km² of soft‑bottom
-weighted_pressure <- disturbance_km_per_km_rodalith * soft_bottom_aligned
-summary(values(weighted_pressure[[7]]))
-```
-
-
-
-
-
-
-
-
-```{r}
-tmap_mode("view")
-
-tm_shape(weighted_pressure[[7]]) +
-  tm_raster(
-    palette = "-viridis",
-    title = "km² of rodalith disturbed per km² of radalith present (Year 7)",
-    alpha = 0.9,
-    style = "cont"
-  ) +
-tm_shape(ohi_regions_marine) +
-  tm_borders(col = "white", lwd = 2) +
-tm_layout(
-    legend.outside = TRUE,
-    frame = FALSE
-)
-```
-
-
-
-
-```{r}
-# Load region raster template (1 km resolution)
-template <- rast(here("spatial", "ohi_regions", "ohi_marine_raster_1km.tif"))
-
-# 1. Align disturbance-over-rodoliths stack to template grid
-disturbance_aligned <- project(weighted_pressure, template)
-
-# 2. Extract region IDs (one per pixel)
-region_ids <- as.vector(values(template))
-
-# 3. Number of pixels
-n_cells <- ncell(template)
-
-# 4. Number of years in the disturbance stack
-n_years <- nlyr(disturbance_aligned)
-
-# 5. Build long-format dataframe: pixel × year
-df_raster_regions <- tibble(
-  region_id   = rep(region_ids, times = n_years),
-  year        = rep(years, each = n_cells),
-  disturbance = as.vector(values(disturbance_aligned)),
-  rodolith_area = rep(as.vector(values(soft_bottom_aligned)), times = n_years)
-)
-
-# 6. Clean out NA rows
-df_raster_regions <- df_raster_regions |>
-  filter(!is.na(region_id),
-         !is.na(disturbance),
-         !is.na(rodolith_area))
-
-
-rodolith_pressure_df <- df_raster_regions |>
+# Area-weighted average pressure per region × year
+pressure_df <- df_poly |>
+  filter(!is.na(prop), !is.na(region_id), area_km2 > 0) |>
   group_by(region_id, year) |>
   summarise(
-    Pressure  = mean(disturbance, na.rm = TRUE),
+    area_sum  = sum(area_km2, na.rm = TRUE),
+    Pressure  = sum(prop * area_km2, na.rm = TRUE) / area_sum,
     RHO_score = 1 - Pressure,
+    Pressure  = Pressure * 100,
+    RHO_score = RHO_score * 100,
     .groups = "drop"
   )
 
-rodolith_pressure_df
+pressure_df
+
+dir.create(here("_habitats/HAB_rhodolith_beds/RHO_outputs"), showWarnings = FALSE)
+write_csv(
+  pressure_df,
+  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_region_scores_per_year.csv")
+)
 ```
 
-## Current rho
+## Current RHO
 ```{r}
-# Pick the year you want to display
-year_to_show <- 2025   # <-- change this to any year
+# Select a single year
+year_to_show <- 2025   # <-- change this to any year you want
 
-# Filter for that year
-rodolith_year <- rodolith_pressure_df |>
+# Filter for selected year
+pressure_year <- pressure_df |>
   filter(year == year_to_show) |>
   arrange(region_id)
 
-# Styled kable table
-rodolith_year |>
+# Make a kable table
+pressure_year |>
   select(region_id, Pressure, RHO_score) |>
   kable(
     digits = 4,
@@ -311,51 +191,35 @@ rodolith_year |>
     full_width = FALSE
   ) |>
   add_header_above(
-    setNames(
-      3,
-      paste0("Current Status (RHO) Scores — Year ", year_to_show)
-    )
+    setNames(3, paste0("Rhodolith Pressure & RHO — Year ", year_to_show))
   )
 ```
 
-
 ```{r}
-# Pick the year you want to map
-year_to_show <- 2025   # <-- change this to any year
-
-# Filter your multi-year DF for that year
-rodolith_year <- rodolith_pressure_df |>
-  filter(year == year_to_show) |>
-  mutate(region_id = as.integer(region_id))
-
-# Prepare OHI regions with numeric region_id
-ohi_regions_marine <- ohi_regions_marine |>
-  mutate(rgn_id_num = as.integer(gsub("Region_", "", rgn_id)))
-
-# Join the selected year's scores onto the polygons
-ohi_regions_map_rodolith <- ohi_regions_marine |>
+ohi_rho <- ohi_regions |>
   left_join(
-    rodolith_year |> select(region_id, RHO_score),
-    by = c("rgn_id_num" = "region_id")
+    pressure_year |> transmute(id = as.integer(region_id), RHO_score),
+    by = "id"
   )
-
-# Plot
-tmap_mode("view")
-
-tm_shape(ohi_regions_map_rodolith) +
-  tm_polygons(
-    col = "RHO_score",
-    palette = "-viridis",
-    title = paste0("Rodolith RHO_score (Year ", year_to_show, ")"),
-    alpha = 0.9,
-    border.col = "white",
-    border.lwd = 1
+ohi_land_map   <- ohi_rho |> filter(location == "land")
+ohi_marine_map <- ohi_rho |> filter(location == "marine")
+ggplot() +
+  geom_sf(data = ohi_land_map, fill = "#f5e6c8", color = "gray40", linewidth = 0.3) +
+  geom_sf(data = ohi_marine_map, aes(fill = RHO_score), color = "gray20", linewidth = 0.4) +
+  scale_fill_distiller(
+    palette = "RdYlGn",
+    direction = 1,
+    name = "RHO score",
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    na.value = "gray90"
   ) +
-tm_layout(
-    legend.outside = TRUE,
-    frame = FALSE
-)
-
+  labs(title = "Rhodolith habitat status (2025)") +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
 ```
 
 ```{r, fig.width=12, fig.height=7}
@@ -372,8 +236,8 @@ rgn_colors <- c(
   "Region_9" = "#8d61a9"
 )
 
-# Clean region names in rodolith_pressure_df to match color names
-rodolith_pressure_df <- rodolith_pressure_df |>
+# Clean region names in pressure_df to match color names
+pressure_df <- pressure_df |>
   mutate(
     region_clean = paste0("Region_", region_id),   # numeric → Region_#
     region_clean = gsub("_", " ", region_clean)    # Region_1 → Region 1
@@ -387,7 +251,7 @@ rgn_colors_clean <- setNames(
 
 # RHO time series plot with custom colors
 ggplot(
-  rodolith_pressure_df,
+  pressure_df,
   aes(
     x = year,
     y = RHO_score,
@@ -405,185 +269,85 @@ ggplot(
     color = "Region ID"
   ) +
   theme_minimal(base_size = 14)
-
 ```
 
+## Format and save data
+
 ```{r}
-rho_condition_df <- rodolith_pressure_df |>
-  filter(year %in% c(2007, 2025)) |>                     # baseline + current year
-  select(region_id, year, RHO_score) |>                  # keep needed columns
-  pivot_wider(
-    names_from = year,
-    values_from = RHO_score
-  ) |>                                                   # wide format: columns 2007 and 2025
+# Calculate condition score (0–100), same pattern as soft bottom
+condition_df <- pressure_df |>
+  select(region_id, year, condition = RHO_score) |>
   mutate(
-    condition_score = (`2025` / `2007`) * 100,           # compute condition score
-    condition_score = pmin(condition_score, 100)         # cap at 100
+    condition = pmin(condition, 100)
   )
+condition_df
 
-rho_condition_df
-```
-
-```{r}
-rho_trend_df <- rodolith_pressure_df |>
-  filter(year %in% c(2015, 2025)) |>                     # baseline + current year
-  select(region_id, year, RHO_score) |>                  # keep needed columns
-  pivot_wider(
-    names_from = year,
-    values_from = RHO_score
-  ) |>                                                   # wide format: columns 2015 and 2025
-  mutate(
-    trend = ((`2025` / `2015`)^(1/10) - 1) * 100,        # 10-year annualized % change
-    year  = 2025                                         # set trend year
-  ) |>
-  select(region_id, year, trend)
-
-rho_trend_df
-```
-
-```{r}
-# Write RHO CSV outputs
-
-# Current RHO (2025)
-write.csv(
-  rodolith_year,
-  "RHO_outputs/rho_current.csv",
-  row.names = FALSE
+write_csv(
+  condition_df,
+  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_status.csv")
 )
 
-# Current Status (RHO_2025 / RHO_2007)
-write.csv(
-  rho_condition_df,
-  "RHO_outputs/rho_current_status.csv",
-  row.names = FALSE
-)
-
-# Trend (RHO_2025 / RHO_2015)
-write.csv(
-  rho_trend_df,
-  "RHO_outputs/rho_trend.csv",
-  row.names = FALSE
-)
-
-# RHO score per region per year
-write.csv(
-  rodolith_pressure_df,
-  "RHO_outputs/rho_region_scores_per_year.csv",
-  row.names = FALSE
-)
-
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-## km² of disturbance OVER rodolith beds
-
-```{r}
-disturbance_raster_km2_uncapped <- fishing_rasters * 3.704 * 0.030
-rodolith_presence_1km <- rodolith_beds_1km > 0
-
-# 2. Align rodolith presence raster to the fishing grid (nearest neighbor)
-rodolith_presence_aligned <- project(
-  rodolith_presence_1km,
-  disturbance_raster_km2_uncapped[[1]],
-  method = "near"
-)
-
-# 3. Mask disturbance raster so ONLY rodolith cells remain
-disturbance_over_rodoliths <- mask(
-  disturbance_raster_km2_uncapped,
-  rodolith_presence_aligned,
-  maskvalues = 0
-)
-```
-
-```{r}
-summary(values(disturbance_over_rodoliths[[1]]))
-max(disturbance_over_rodoliths[[1]])
-```
-```{r}
-disturbance_over_rodoliths_aligned <- project(disturbance_over_rodoliths, template)
-
-df_disturbance_rodolith <- tibble(
-  region_id = as.vector(values(template)),
-  disturbance = as.vector(values(disturbance_over_rodoliths_aligned[[7]]))
-) |>
-  filter(!is.na(region_id), !is.na(disturbance)) |>
-  group_by(region_id) |>
-  summarise(
-    disturbance_over_rodoliths = mean(disturbance)
-  )
-df_disturbance_rodolith
-```
-
-
-```{r}
-# disturbance_aligned: SpatRaster with 19 layers (2007–2025)
-# soft_bottom_aligned: rodolith area raster (1 layer)
-
-# Compute pixel-level Pressure for each year
-pressure_rasters <- disturbance_aligned / soft_bottom_aligned
-
-# Convert Pressure to RHO (Condition)
-rho_rasters <- 1 - pressure_rasters
-
-# Optional: cap values between 0–1
-rho_rasters[rho_rasters < 0] <- 0
-rho_rasters[rho_rasters > 1] <- 1
-
-# Name layers by year
-names(rho_rasters) <- paste0("RHO_", years)
-
-rho_rasters
-
-```
-
-```{r}
-tmap_mode("view")
-
-tm_shape(rho_rasters[[which(years == 2025)]]) +
-  tm_raster(
-    palette = "-viridis",
-    title = "RHO Score (2025)",
-    alpha = 0.9
+condition_df <- condition_df |>
+  mutate(region_id = factor(region_id, levels = 1:9))
+ggplot(condition_df, aes(x = year, y = condition)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~ region_id, ncol = 3, labeller = labeller(region_id = function(x) paste("Region", x))) +
+  scale_x_continuous(breaks = pretty(condition_df$year)) +
+  labs(
+    x = "Year",
+    y = "Condition",
+    title = "Condition by region and year"
   ) +
-tm_shape(ohi_regions_marine) +
-  tm_borders(col = "white", lwd = 2)
-
+  theme_bw()
 ```
 
+## Trend Calculation
 
+```{r}
+# Trend Calculation: lm for most recent 5 years of data
+year_end <- max(condition_df$year, na.rm = TRUE)
+year_start <- year_end - 4
+calc_trends <- function(d) {
+  ys <- min(d$year)
+  ye <- max(d$year)
+  cs <- d$condition[d$year == ys][1]
+  fit_lin <- lm(condition ~ year, data = d)
+  fit_log <- lm(log(pmax(condition, 1e-6)) ~ year, data = d)
+  slope_lin <- unname(coef(fit_lin)["year"])
+  slope_log <- unname(coef(fit_log)["year"])
+  tibble(
+    year = ye,
+    year_start = ys,
+    year_end = ye,
+    condition_start = cs,
+    trend_pct_linear = (slope_lin / cs) * 100,
+    trend_pct_cagr   = (exp(slope_log) - 1) * 100
+  )
+}
+trend_df <- condition_df |>
+  filter(year >= year_start, year <= year_end) |>
+  group_by(region_id) |>
+  group_modify(~ calc_trends(.x)) |>
+  ungroup()
+
+trend_df
+
+write_csv(
+  trend_df,
+  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_trend.csv")
+)
+```
+
+## Pressure
+
+```{r}
+pressure_df_score <- pressure_df %>%
+  mutate(pressure = Pressure / 100) %>%
+  select(region_id, year, pressure)
+
+write_csv(
+  pressure_df_score,
+  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_pressure.csv")
+)
+```
