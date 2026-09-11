@@ -1,0 +1,349 @@
+---
+title: "OHI Scores Habitat Services - Gulf of California OHI"
+author: "Austin Martinez"
+date: 6/30/2026
+format: 
+  html:
+    code-fold: show
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+
+```{r Load in Libraries}
+# Load in Libraries
+library(sf)
+library(dplyr)
+library(here)
+library(terra)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tmap)
+library(stringr)
+library(readr)
+```
+
+```{r Read in OHI region boundaries}
+# Read in OHI region boundaries
+ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |> st_make_valid()
+```
+## Read in all habitat data
+```{r Read in habitat services data}
+# Read in habitat services data
+habitat_services_full <- read_csv(here::here("/home/ferrer/ohi_goc_prep/HS/v2026/HS_Scores_1.1/HS_components_df_Sep112026.csv"))
+```
+
+# Calculating the HS_current_status:
+
+```{r Calculate HS_current_status sub-scores}
+colnames(habitat_services_full)
+
+# Calculate carbon, filtration, and protection score
+HS_current_status <- habitat_services_full |>
+  group_by(rgn_id) |>
+  summarise(
+    PRO_score = sum(extent * coastal_protection * current_status, na.rm = TRUE) /
+                    sum(extent * coastal_protection, na.rm = TRUE),
+
+    FIL_score = sum(extent * filtration * current_status, na.rm = TRUE) /
+                       sum(extent * filtration, na.rm = TRUE),
+
+    SEQ_score = sum(extent * carbon_sequestration_gC.m2.yr * current_status, na.rm = TRUE) /
+                    sum(extent * carbon_sequestration_gC.m2.yr, na.rm = TRUE)
+  )
+
+HS_current_status
+```
+
+```{r Calculate HS_current_status based on sub-scores}
+# Average the 3 scores to get final OHI score
+HS_current_status <- HS_current_status |>
+  mutate(HS_score = (SEQ_score + FIL_score + PRO_score) / 3)
+
+HS_current_status
+```
+
+```{r Fill out the HS_current_status for all years 2020 through 2025 which we have data}
+HS_current_status_2 <- HS_current_status %>%
+  crossing(year = 2020:2025) %>%
+  arrange(rgn_id, year)
+
+# NOTE TO SELF: I made this dataframe (Sep 11 2026). This will change once we settle the debate on trend. - EMF
+
+```
+
+
+```{r Save HS_current_status}
+write.csv(HS_current_status_2,
+          "/home/ferrer/ohi_goc_prep/HS/v2026/HS_Scores_1.1/HS_current_status_Sep112026.csv",
+          row.names = FALSE)
+```
+
+
+```{r HS_current_status}
+# Ignore NAs
+HS_current_status <- HS_current_status |>
+  mutate(HS_score = rowMeans(
+    cbind(SEQ_score, FIL_score, PRO_score),
+    na.rm = TRUE
+  ))
+
+# Make a nice table
+HS_current_status |>
+  mutate(
+    rgn_id = gsub("Region_", "Region ", rgn_id),        # remove "Region_" prefix
+    SEQ_score = round(SEQ_score, 0),
+    FIL_score = round(FIL_score, 0),
+    PRO_score = round(PRO_score, 0),
+    HS_score = round(HS_score, 0)
+  ) |>
+  kable(
+    col.names = c(
+      "Region",
+      "Carbon Score",
+      "Filtration Score",
+      "Coastal Score",
+      "Habitat Services Score"
+    )
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "bordered"),
+    full_width = FALSE
+  ) |>
+  add_header_above(c("OHI Scores – Current Status" = 5))
+
+```
+
+
+```{r Plot HS_current_status}
+
+# Region colors
+rgn_colors <- c(
+  "Region 1" = "#C03729",
+  "Region 2" = "#E68C7C",
+  "Region 3" = "#FC8F24",
+  "Region 4" = "#dcaa38",
+  "Region 5" = "#cbd2a0",
+  "Region 6" = "#98a25a",
+  "Region 7" = "#747428",
+  "Region 8" = "#627391",
+  "Region 9" = "#8d61a9"
+)
+
+# Prepare data: remove underscores + convert to factor
+HS_current_status_plot <- HS_current_status %>%
+  mutate(
+    rgn_id = gsub("_", " ", rgn_id),
+    rgn_id = factor(rgn_id),
+    HS_score = round(HS_score, 0)
+  )
+
+ggplot(HS_current_status_plot, aes(
+  x = rgn_id,
+  y = HS_score,
+  fill = rgn_id
+)) +
+  geom_col(width = 0.7) +
+  geom_text(
+    aes(label = HS_score),
+    hjust = -0.2,        # moves text slightly to the right of the bar
+    size = 4.5
+  ) +
+  scale_fill_manual(values = rgn_colors) +
+  labs(
+    title = "Habitat Services Current Status Scores",
+    x = NULL,
+    y = "Current Status Score (0–100)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold")
+  ) +
+  coord_flip() +
+  ylim(0, max(HS_current_status$HS_score) * 1.15)
+
+
+```
+
+
+
+```{r Make a table for HS_current_status}
+HS_current_status_clean <- HS_current_status |>
+  mutate(
+    rgn_id = gsub("_", " ", rgn_id),
+    SEQ_score = round(SEQ_score, 1),
+    FIL_score = round(FIL_score, 1),
+    PRO_score = round(PRO_score, 1),
+    HS_score = round(HS_score, 1)
+  )
+
+HS_current_status_table <- HS_current_status_clean |>
+  left_join(
+    ohi_regions |> 
+      filter(location == "marine") |> 
+      select(rgn_id, ecorgn),
+    by = "rgn_id"
+  ) |>
+  mutate(
+    ecorgn = gsub("_", " ", ecorgn),
+    ecorgn = case_when(
+      rgn_id == "Region 1" ~ "Western Upper Gulf",
+      rgn_id == "Region 2" ~ "Western Midriff Islands",
+      rgn_id == "Region 3" ~ "Western Central Gulf",
+      rgn_id == "Region 4" ~ "Western Southern Gulf",
+      rgn_id == "Region 5" ~ "Eastern Upper Gulf",
+      rgn_id == "Region 6" ~ "Eastern Midriff Islands",
+      rgn_id == "Region 7" ~ "Eastern Sonora Coast",
+      rgn_id == "Region 8" ~ "Sinaloa Coast",
+      rgn_id == "Region 9" ~ "Southeastern Gulf",
+      TRUE ~ ecorgn
+    )
+  ) |>
+  select(
+    rgn_id,
+    ecorgn,
+    SEQ_score,
+    FIL_score,
+    PRO_score,
+    HS_score
+  )
+
+```
+
+```{r Clean the HS_current_status_table}
+HS_current_status_table |>
+  kable(
+    digits = 1,
+    col.names = c(
+      "Region ID",
+      "Region Name",
+      "Carbon Score",
+      "Filtration Score",
+      "Coastal Score",
+      "Habitat Services Score"
+    )
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "bordered", "condensed"),
+    full_width = FALSE
+  ) |>
+  add_header_above(c("OHI Habitat Services – Current Status" = 6))
+
+```
+
+```{r Map HS_current_status}
+# 1. DO NOT remove underscores before joining
+HS_current_status_clean <- HS_current_status |>
+  mutate(
+    HS_score = round(HS_score, 0)
+  )
+
+# 2. Join onto OHI polygons
+ohi_habitat_current_status <- ohi_regions |>
+  left_join(HS_current_status_clean, by = "rgn_id")
+
+# 3. Split marine vs land
+ohi_marine <- ohi_habitat_current_status |> filter(location == "marine")
+ohi_land   <- ohi_habitat_current_status |> filter(location == "land")
+
+# 4. Map
+tmap_mode("plot")
+
+HS_current_status_map<- tm_shape(ohi_land) +
+  tm_polygons(
+    col = "#f5e6c8",
+    border.col = "gray40",
+    lwd = 1,
+    alpha = 0.5,
+    legend.show = FALSE
+  ) +
+
+tm_shape(ohi_marine) +
+  tm_polygons(
+    col = "HS_score",
+    palette = "RdYlGn",
+    alpha = 0.8,
+    title = "Habitat Services OHI Score",
+    border.col = "black",
+    lwd = 1.2
+  ) +
+
+tm_layout(
+  title = "OHI Habitat Services – Current Status",
+  frame = FALSE,
+  legend.outside = TRUE
+)
+
+HS_current_status_map
+```
+
+
+# Calculating the final HS_trend from PRO, FIL, and SEQ sub-scores:
+# NOTE TO SELF (Sep 11 2026): I am deeply skeptical about this calculation of trend. For starters, I think the trend column includes NAs that MIGHT need to be zeros; I also think -- critically -- trend should be calculated per habitat type and then averaged.
+
+```{r Calculate HS_trend}
+
+colnames(habitat_services_full)
+
+# Calculate carbon, filtration, and protection score
+HS_trend <- habitat_services_full |>
+  group_by(rgn_id) |>
+  summarise(
+    SEQ_score = sum(extent * carbon_sequestration_gC.m2.yr * trend, na.rm = TRUE) /
+                    sum(extent * carbon_sequestration_gC.m2.yr, na.rm = TRUE) * 100,
+
+    FIL_score = sum(extent * filtration * trend, na.rm = TRUE) /
+                       sum(extent * filtration, na.rm = TRUE)* 100,
+
+    PRO_score = sum(extent * coastal_protection * trend, na.rm = TRUE) /
+                    sum(extent * coastal_protection, na.rm = TRUE) * 100
+  )
+
+HS_trend
+```
+
+```{r HS_final_trend}
+# Average the 3 scores to get final OHI score
+HS_final_trend <- HS_trend |>
+  mutate(HS_score = (SEQ_score + FIL_score + PRO_score) / 3)
+
+HS_final_trend
+```
+
+```{r Make a table for HS_trend}
+# Ignore NA values
+HS_trend <- HS_trend |>
+  mutate(HS_score = rowMeans(
+    cbind(SEQ_score, FIL_score, PRO_score),
+    na.rm = TRUE
+  ))
+
+# Make a nice table
+HS_trend |>
+  kable(
+    col.names = c(
+      "Region",
+      "Carbon Trend",
+      "Filtration Trend",
+      "Coastal Trend",
+      "Habitat Services Trend"
+    )
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "bordered"),
+    full_width = FALSE
+  ) |>
+  add_header_above(c("OHI Scores – Trend" = 5))
+
+```
+
+```{r Save HS_trend as csv}
+write.csv(HS_trend,
+          "/home/ferrer/ohi_goc_prep/HS/v2026/HS_Scores_1.1/HS_trend_Sep112026_DRAFT.csv",
+          row.names = FALSE)
+```
+
