@@ -1,0 +1,497 @@
+---
+title: 'OHI GoC 2025: TR Sustainability — Investment in potential tourism management'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# TR Sustainability: investment + infrastructure for tourism management
+
+This script rebuilds the **Investment in potential tourism management** sustainability subcomponent as:
+
+**investment** (federal CONANP budgets + returned fees) **+ infrastructure / management effectiveness** (SIMEC i-efectividad C2 & C3).
+
+## Method
+
+1. **Budget/fees (temporal variation):**  
+   `score_budget = mean(V003, V005, returned cobro de derechos)`  
+   Reference for V003/V005 = 2012–2018 mean (same as before). Scores capped at 100.
+
+2. **SIMEC i-efectividad (spatial variation):**  
+   For each GoC ANP, `score_anp = mean(Componente Administrativo y Financiero, Componente de Usos y Beneficios)`.  
+   Then `score_simec = mean(score_anp)` across ANPs in that region.  
+   Scores are held constant across years until SIMEC is updated (reports are ~2021–2022).
+
+3. **Combine:**  
+   - If the region has ≥1 SIMEC-scored GoC ANP:  
+     `score = mean(score_budget, score_simec)`  
+   - If not:  
+     `score = score_budget` only
+
+In theory, once SIMEC is updated regularly it could replace the budget/fee indicators. For now, budgets give year-to-year change; SIMEC gives cross-region structure.
+
+**C2** (Administrativo y financiero) includes presupuesto, personal, equipo, infraestructura de manejo, and cobro de derechos.  
+**C3** (Usos y beneficios) includes beneficios económicos, producción sustentable, uso sustentable, and infraestructura para visitantes.
+
+# 1. Setup
+
+```{r}
+library(tidyverse)
+library(here)
+library(plotly)
+library(janitor)
+
+region_levels <- paste0("Region_", 1:9)
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+analysis_years <- 2019:2025
+budget_hist_years <- 2012:2018
+
+output_sustainability <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability"
+)
+
+simec_dir <- here::here("/home/shares/ohi/OHI_GOC/_raw_data/SIMEC")
+if (!dir.exists(simec_dir)) {
+  simec_dir <- here::here("SIMEC")
+}
+```
+
+# 2. Budget component: V003, V005, returned fees
+
+## 2.1 Federal CONANP program budgets
+
+```{r}
+fed_budget_raw <- read_csv(
+  here::here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/sust_int/conanp_int",
+    "fed_budget_programas_importantes_2012_2026.csv"
+  ),
+  show_col_types = FALSE
+)
+
+## keep V003 (ANP management) and V005 (protection/restoration) only —
+## not S046 / PROCODES, per the restructured formula
+fed_budget_programs <- fed_budget_raw %>%
+  select(
+    year,
+    v003_anp_management,
+    v005_protection_restoration
+  ) %>%
+  pivot_longer(
+    cols = c(v003_anp_management, v005_protection_restoration),
+    names_to = "programas",
+    values_to = "mdp_2026"
+  )
+
+w_hist_avg_fed_budget <- fed_budget_programs %>%
+  filter(year %in% budget_hist_years) %>%
+  group_by(programas) %>%
+  summarise(hist_avg_mdp_2026 = mean(mdp_2026, na.rm = TRUE), .groups = "drop")
+
+current_status_fed_budget <- fed_budget_programs %>%
+  left_join(w_hist_avg_fed_budget, by = "programas") %>%
+  mutate(
+    current_status_raw = (mdp_2026 / hist_avg_mdp_2026) * 100,
+    current_status = pmin(current_status_raw, 100)
+  )
+
+current_status_fed_budget %>%
+  filter(year %in% analysis_years) %>%
+  arrange(programas, year)
+```
+
+```{r}
+fed_budget_plotly <- plot_ly(
+  current_status_fed_budget,
+  x = ~year,
+  y = ~current_status_raw,
+  color = ~programas,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS: CONANP V003 & V005 (millones de pesos 2026)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)")
+  ) %>%
+  add_lines(
+    x = range(current_status_fed_budget$year, na.rm = TRUE),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+fed_budget_plotly
+```
+
+## 2.2 Returned cobro de derechos
+
+```{r}
+pct_returned_df <- read_csv(
+  here::here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/NOSSA_cuidar_lo_que_importa/d2026",
+    "CONANP_fees_returned_2007_2026.csv"
+  ),
+  show_col_types = FALSE
+) %>%
+  clean_names() %>%
+  select(year, pct_returned)
+
+current_status_fees <- pct_returned_df %>%
+  mutate(
+    programas = "return_cobros_from_shcp",
+    current_status_raw = pct_returned * 100,
+    current_status = pmin(current_status_raw, 100)
+  )
+
+current_status_fees %>%
+  filter(year %in% analysis_years)
+```
+
+## 2.3 Average budget + fees (same national value → all regions)
+
+```{r}
+cs_budget_parts <- bind_rows(
+  current_status_fed_budget %>%
+    select(year, programas, current_status),
+  current_status_fees %>%
+    select(year, programas, current_status)
+) %>%
+  filter(year %in% analysis_years)
+
+## national score: mean of V003, V005, returned fees
+cs_budget_national <- cs_budget_parts %>%
+  group_by(year) %>%
+  summarise(
+    score_budget = mean(current_status, na.rm = TRUE),
+    n_budget_parts = n(),
+    .groups = "drop"
+  )
+
+## expand to all 9 regions (budget has no regional variation)
+cs_budget <- crossing(
+  year = analysis_years,
+  rgn_id = factor(region_levels, levels = region_levels)
+) %>%
+  left_join(cs_budget_national, by = "year")
+
+cs_budget
+```
+
+# 3. SIMEC i-efectividad: C2 + C3
+
+Read ANP-level scores with GoC region assignments from `identifying_lasting_special_places_SIMEC_w_rgns.csv`.
+
+**Region assignment rules:**
+
+- Drop non-GoC ANPs (`rgn_id == "NA"`).
+- Split multi-region strings (e.g. `"Region_1, Region_5"` → both regions).
+- **`Islas del Golfo de California` (`rgn_id == "all"`)** is expanded to **all 9 OHI regions** for now (Gulf-wide ANP).
+
+```{r}
+simec_raw <- read_csv(
+  file.path(simec_dir, "identifying_lasting_special_places_SIMEC_w_rgns.csv"),
+  show_col_types = FALSE
+) %>%
+  clean_names()
+
+## clean_names turns components into snake_case; confirm names
+names(simec_raw)
+
+simec_anp <- simec_raw %>%
+  rename(
+    c2_admin_financiero = componente_administrativo_y_financiero,
+    c3_usos_beneficios = componente_de_usos_y_beneficios
+  ) %>%
+  mutate(
+    score_anp_c2_c3 = rowMeans(
+      cbind(c2_admin_financiero, c3_usos_beneficios),
+      na.rm = TRUE
+    )
+  ) %>%
+  ## drop non-GoC only
+  filter(!is.na(rgn_id), !rgn_id %in% c("NA", "na")) %>%
+  ## Islas del Golfo ("all") → every OHI region
+  mutate(
+    rgn_id = if_else(
+      str_to_lower(str_squish(rgn_id)) == "all",
+      paste(region_levels, collapse = ", "),
+      as.character(rgn_id)
+    )
+  ) %>%
+  ## explode "Region_1, Region_5" and the expanded "all" string
+  separate_rows(rgn_id, sep = ",\\s*") %>%
+  mutate(
+    rgn_id = str_squish(rgn_id),
+    rgn_id = factor(rgn_id, levels = region_levels)
+  ) %>%
+  filter(!is.na(rgn_id))
+
+simec_anp %>%
+  select(
+    ano_reporte, nombre, rgn_id,
+    c2_admin_financiero, c3_usos_beneficios, score_anp_c2_c3, i_efectividad
+  ) %>%
+  arrange(rgn_id, nombre)
+```
+
+```{r}
+## mean across ANPs within each region (one static score per region)
+cs_simec <- simec_anp %>%
+  group_by(rgn_id) %>%
+  summarise(
+    score_simec = mean(score_anp_c2_c3, na.rm = TRUE),
+    score_c2 = mean(c2_admin_financiero, na.rm = TRUE),
+    score_c3 = mean(c3_usos_beneficios, na.rm = TRUE),
+    n_anp_simec = n_distinct(nombre),
+    anp_names = paste(sort(unique(nombre)), collapse = "; "),
+    .groups = "drop"
+  )
+
+cs_simec
+```
+
+```{r}
+plot_ly(
+  cs_simec,
+  x = ~rgn_id,
+  y = ~score_simec,
+  type = "bar",
+  marker = list(color = ~rgn_colors[as.character(rgn_id)]),
+  text = ~paste0(n_anp_simec, " ANPs<br>"),
+  hoverinfo = "text+y"
+) %>%
+  layout(
+    title = "SIMEC mean(C2 Administrativo, C3 Usos y beneficios) by region",
+    xaxis = list(title = "Region"),
+    yaxis = list(title = "Score (0 - 100)", range = c(0, 105))
+  )
+```
+
+# 4. Combine investment + infrastructure
+
+```{r}
+cs_invest_mgmt <- cs_budget %>%
+  left_join(cs_simec, by = "rgn_id") %>%
+  mutate(
+    has_simec = !is.na(score_simec),
+    ## regions with SIMEC: avg(budget, simec); without: budget only
+    score = if_else(
+      has_simec,
+      rowMeans(cbind(score_budget, score_simec), na.rm = TRUE),
+      score_budget
+    ),
+    sust_type = "conanp_fee_budget",
+    rgn_label = rgn_labels[as.character(rgn_id)],
+    method = if_else(
+      has_simec,
+      "mean(budget_V003_V005_fees, simec_C2_C3)",
+      "budget_V003_V005_fees_only"
+    )
+  ) %>%
+  arrange(rgn_id, year)
+
+cs_invest_mgmt %>%
+  select(
+    rgn_id, year, score_budget, score_simec, has_simec,
+    score, method, n_anp_simec
+  )
+```
+
+## Merge-ready table
+
+Same shape as the previous `investment_tourism_management_final_*.csv` so `tr_merge.qmd` / `tr_current_status.qmd` can keep using `score` + `sust_type = "conanp_fee_budget"`.
+
+```{r}
+cs_for_merge <- cs_invest_mgmt %>%
+  transmute(
+    rgn_id = factor(rgn_id, levels = region_levels),
+    year,
+    score,
+    sust_type = "conanp_fee_budget",
+    score_budget,
+    score_simec,
+    has_simec,
+    method
+  )
+
+cs_for_merge
+```
+
+# 5. Plots
+
+```{r}
+## parts that go into the budget average
+budget_parts_plotly <- plot_ly(
+  cs_budget_parts,
+  x = ~year,
+  y = ~current_status,
+  color = ~programas,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Budget parts: V003, V005, returned cobro de derechos",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)", range = c(0, 105))
+  ) %>%
+  add_lines(
+    x = range(analysis_years),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+budget_parts_plotly
+```
+
+```{r}
+invest_mgmt_plotly <- plot_ly(
+  cs_invest_mgmt,
+  x = ~year,
+  y = ~score,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    rgn_label, "<br>",
+    "Final: ", round(score, 1), "<br>",
+    "Budget: ", round(score_budget, 1), "<br>",
+    "SIMEC C2+C3: ", ifelse(has_simec, round(score_simec, 1), "NA (budget only)")
+  ),
+  hoverinfo = "text+x"
+) %>%
+  layout(
+    title = "TR Sustainability: investment + infrastructure (tourism management)",
+    xaxis = list(title = "Año // Year"),
+    yaxis = list(title = "Puntaje // Percent (out of 100)", range = c(0, 105))
+  ) %>%
+  add_lines(
+    x = range(analysis_years),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meta // Goal (100/100)",
+    inherit = FALSE
+  )
+invest_mgmt_plotly
+```
+
+```{r}
+## compare budget-only vs combined for a recent year
+compare_yr <- max(analysis_years)
+compare_df <- cs_invest_mgmt %>%
+  filter(year == compare_yr) %>%
+  select(rgn_id, score_budget, score_simec, score) %>%
+  pivot_longer(
+    cols = c(score_budget, score_simec, score),
+    names_to = "layer",
+    values_to = "value"
+  ) %>%
+  mutate(
+    layer = recode(
+      layer,
+      score_budget = "Budget (V003+V005+fees)",
+      score_simec = "SIMEC mean(C2, C3)",
+      score = "Final combined"
+    )
+  )
+
+plot_ly(
+  compare_df,
+  x = ~rgn_id,
+  y = ~value,
+  color = ~layer,
+  type = "bar"
+) %>%
+  layout(
+    barmode = "group",
+    title = paste0("Budget vs SIMEC vs final — ", compare_yr),
+    xaxis = list(title = "Region"),
+    yaxis = list(title = "Score (0–100)", range = c(0, 105))
+  )
+```
+
+# 6. Save outputs
+
+```{r}
+write_csv(
+  cs_budget_parts,
+  file.path(output_sustainability, "invest_mgmt_budget_parts_v003_v005_fees_2019_2025.csv")
+)
+write_csv(
+  simec_anp,
+  file.path(output_sustainability, "invest_mgmt_simec_anp_c2_c3_goc.csv")
+)
+write_csv(
+  cs_simec,
+  file.path(output_sustainability, "invest_mgmt_simec_region_means_c2_c3.csv")
+)
+write_csv(
+  cs_invest_mgmt,
+  file.path(output_sustainability, "invest_mgmt_detail_budget_simec_2019_2025.csv")
+)
+
+## drop-in replacement for the previous merge file
+write_csv(
+  cs_for_merge,
+  file.path(output_sustainability, "investment_tourism_management_final_091526.csv")
+)
+
+## also write a clearly named merge file
+write_csv(
+  cs_for_merge %>% select(rgn_id, year, score, sust_type),
+  file.path(
+    output_sustainability,
+    "tr_sust_invest_mgmt_tourism_current_status_2019_2025.csv"
+  )
+)
+```
+
+## Notes
+
+- **Formula:** `avg( avg(V003, V005, returned fees), avg(C2, C3) )` when SIMEC exists; else budget only.
+- **S046 / PROCODES** is no longer in this average (restructure uses V003 + V005 + fees).
+- **SIMEC years:** ANP reports are 2021 or 2022; the regional mean is held constant across 2019–2025 so budgets still drive temporal change.
+- **Islas del Golfo:** `rgn_id == "all"` is expanded to all 9 regions, so every region (including Region_7) has at least that SIMEC ANP in the mean.
+- **Merge:** point `tr_merge.qmd` / `tr_current_status.qmd` at `investment_tourism_management_final_091526.csv` (or the `tr_sust_invest_mgmt_tourism_...` file). `sust_type` stays `"conanp_fee_budget"` so the overall Sustainability mean does not need renaming.
+- **Future:** if SIMEC is updated annually, it can replace the budget/fee layer entirely.
