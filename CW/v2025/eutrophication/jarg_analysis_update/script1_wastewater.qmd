@@ -1,0 +1,217 @@
+---
+title: 'OHI GoC eutrophication update: wastewater nitrogen (script 1)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    theme: cerulean
+    highlight-style: haddock
+editor_options:
+  chunk_output_type: console
+---
+
+# Script 1: wastewater nitrogen
+
+This script estimates nitrogen from human wastewater following Romero-Gil et al. (2026), then routes it through watersheds and pourpoints to OHI regions.
+
+For scoring later, we want the **mean** wastewater scenario from JARG's Supplemental Table 6.
+
+We already did a lot of the hard WWTP spatial work in Chemicals pharmaceuticals. The plan here is to reuse that, and only add the nitrogen-specific pieces (protein, population, NRE).
+
+Note: 2020 `caudal` values look wrong across plants in the SINA data. Save / read the plant-level file as reported, then apply the same kind of 2020 flag + interpolate fix here (as in pharmaceuticals), when we compute nitrogen.
+
+---
+
+## What JARG did
+
+JARG modeled annual nitrogen from wastewater as:
+
+$$
+N_{\mathrm{ww}} = \mathrm{pop} \times \mathrm{protein}_{g/day} \times 365 \times 0.16 \times (1 - \mathrm{NRE})
+$$
+
+Protein came from ENSANUT by age and sex. Population came from the INEGI 2020 locality census. Urban areas got an NRE from CONAGUA treatment plants (flow-weighted by process). Rural areas had NRE = 0 (everything reaches water).
+
+Their study covered 29 coastal municipalities and did not fully cover Nayarit and Jalisco, which we need for the GoC.
+
+Helpful prototype code lives in `OceanHealth-Sanitation-main/N_Urb.ipynb` and `cursor_generated/urban-sanitation.qmd`.
+
+---
+
+## What we already have from CW
+
+From `chemicals/pharmaceuticals/script1_wwtp_effluent.qmd`:
+
+| File | What it is |
+|------|------------|
+| `humans_int/wwtps_watershed_plant_level.gpkg` | Plant-level WWTPs ∩ watersheds (`proceso`, `caudal`, `basin_id`, `anio`, etc.). Saved as reported (no 2020 fix yet). |
+| `humans_int/wwtp_liters_effluent_by_watershed.csv` | Effluent liters per watershed × year |
+| `humans_int/effluent_wwtp_liters_rgnid.csv` | Same idea, already at region |
+| `humans_int/pourpoints_effluent_wwtp_liters_final.gpkg` | Pourpoints with liters |
+
+The plant-level gpkg is the key input for NRE. Liters / pourpoints are helpful for QA and for matching the pharmaceuticals spatial filter.
+
+---
+
+## Population + protein (decisions)
+
+**Protein:** use JARG Supplemental / paper **Table 1** mean g protein/day by age × sex. That is the Mean scenario we want anyway. No need for ENSANUT 2018 right now.
+
+```{r table1-protein}
+# jarg table 1 means (g protein / person / day)
+protein_table1 <- tribble(
+  ~age_group, ~sex, ~protein_g_day,
+  "0-4",   "F", 37.10,
+  "0-4",   "M", 39.80,
+  "5-14",  "F", 54.80,
+  "5-14",  "M", 59.80,
+  "15-19", "F", 59.60,
+  "15-19", "M", 75.00,
+  "20-29", "F", 53.60,
+  "20-29", "M", 69.60,
+  "30-59", "F", 57.00,
+  "30-59", "M", 77.70,
+  "60+",   "F", 44.00,
+  "60+",   "M", 61.50
+)
+
+proto <- 0.16  # protein to n
+```
+
+**Population options we have:**
+
+| Source | Age × sex? | Notes |
+|--------|------------|-------|
+| `population_localities/inegi_boundaries_pop.shp` | **No** (only `POBTOT`) | Good for locality totals + watershed routing |
+| `population_municipal/..._2000_2020.csv` | **No** (total only) | Includes Nayarit/Jalisco + `rgn_id` |
+| Full INEGI census iter CSV | Yes (if redownloaded) | Closest to JARG |
+
+So the locality shapefile does **not** have age groups. If you redownload municipal or locality census with age × sex columns, we can match Table 1 fully. Until then, a practical fallback is: total pop × a single mean protein (average of Table 1, or JARG's rural mean ~53.37 g/day), documented clearly.
+
+---
+
+## Outline of what to do here
+
+1. Read plant-level WWTPs and join NRE by `proceso`.
+2. Flag / fix bad 2020 `caudal` (same idea as pharmaceuticals), then flow-weight NRE to each `basin_id` × year.
+3. Estimate nitrogen from population × Table 1 protein (mean scenario).
+4. Apply (1 - NRE) for urban / treated areas; NRE = 0 for rural.
+5. Sum nitrogen to watershed, then pourpoint, then region (same 50 km / 10 km filter as pharmaceuticals).
+6. Write intermediates under `eutrophication/jarg_analysis_update/int/`.
+
+---
+
+## Setup
+
+```{r setup}
+library(tidyverse)
+library(here)
+library(sf)
+library(stringi)
+library(janitor)
+library(mapview)
+```
+
+```{r paths}
+pharma_humans_int <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chemicals/pharmaceuticals/humans_int"
+)
+eut_int <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/eutrophication/jarg_analysis_update/int"
+)
+```
+
+### Read WWTP intermediates
+
+```{r read-wwtp-plant-level}
+# plant-level wwtps intersected with watersheds (raw, including 2020 as reported)
+wwtps_plants <- st_read(
+  here::here(pharma_humans_int, "wwtps_watershed_plant_level.gpkg")
+)
+
+glimpse(st_drop_geometry(wwtps_plants))
+```
+
+```{r read-wwtp-watershed-liters}
+# liters of effluent by watershed (already built in pharmaceuticals; useful for qa)
+wwtp_liters <- read_csv(
+  here::here(pharma_humans_int, "wwtp_liters_effluent_by_watershed.csv")
+)
+
+glimpse(wwtp_liters)
+```
+
+### NRE lookup (from JARG supplemental Table 2)
+
+```{r nre-lookup}
+# rough starting lookup; expand to match every SINA proceso string
+nre_by_process <- tribble(
+  ~proceso_key,                ~nre,
+  "lodos activados",           0.75,
+  "lagunas aireadas",          0.60,
+  "lagunas de estabilizacion", 0.60,
+  "primario avanzado",         0.10,
+  "tanque septico",            0.85,
+  "biodiscos",                 0.45,
+  "filtros biologicos",        0.45,
+  "humedal",                   0.45
+)
+
+# cw choice: mean protein scenario (not mean-sigma / mean+sigma)
+```
+
+### Sketch: flow-weighted NRE by watershed
+
+```{r nre-by-watershed-todo}
+# next steps once proceso matching is locked in:
+# 1) fix 2020 caudal (flag vs non-2020 median, set bad rows to na, interpolate)
+# 2) join nre_by_process on cleaned proceso strings
+# 3) flow-weight nre by basin_id x anio
+#
+# nre_watershed <- wwtps_plants %>%
+#   st_drop_geometry() %>%
+#   mutate(proceso_clean = str_to_lower(stri_trans_general(proceso, "Latin-ASCII"))) %>%
+#   # join nre_by_process with a careful match on proceso_clean
+#   mutate(ef_l_yr = caudal * 31536000) %>%
+#   group_by(basin_id, anio) %>%
+#   summarize(
+#     nre_flow_weighted = sum(nre * ef_l_yr, na.rm = TRUE) / sum(ef_l_yr, na.rm = TRUE),
+#     .groups = "drop"
+#   )
+```
+
+### Sketch: nitrogen from population (still needs census + protein)
+
+```{r population-n-todo}
+# jarg style:
+# n_kg_yr = protein_g_day * 365 * pop * 0.16 * (1 - nre)
+# rural: nre = 0
+# urban: nre from watershed / municipality
+#
+# then sum to basin_id and join to pourpoints like pharmaceuticals
+```
+
+### Write outputs (when ready)
+
+```{r write-todo}
+# write_csv(tn_ww_by_watershed, here::here(eut_int, "tn_wastewater_by_watershed.csv"))
+# write_csv(tn_ww_by_region,    here::here(eut_int, "tn_wastewater_by_region.csv"))
+```
+
+---
+
+## Status
+
+| Piece | Status |
+|-------|--------|
+| Methods + mean coefficient | Documented |
+| Plant-level WWTP gpkg | Ready to read |
+| Table 1 protein (mean) | Hard-coded in script |
+| Locality pop age × sex | Not in current shp (POBTOT only) |
+| 2020 caudal fix | Do in this script |
+| Region totals | Pending |
+
+Next: `script2_agriculture.qmd`

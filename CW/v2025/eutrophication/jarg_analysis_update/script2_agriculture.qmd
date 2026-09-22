@@ -1,0 +1,165 @@
+---
+title: 'OHI GoC eutrophication update: agriculture nitrogen (script 2)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    theme: cerulean
+    highlight-style: haddock
+editor_options:
+  chunk_output_type: console
+---
+
+# Script 2: agriculture nitrogen
+
+This script estimates nitrogen runoff from agriculture following Romero-Gil et al. (2026), then sends it through watersheds and pourpoints.
+
+For scoring later, we want a **10% leaching coefficient** (JARG Supplemental Table 6).
+
+Important: we only want **processed** CONABIO USV agriculture layers for where crops sit. Crop area × fertilizer rates come from DGSIAP / SIAP.
+
+---
+
+## What JARG did
+
+$$
+N_{\mathrm{ag}} = \sum (\mathrm{area}_c \times \mathrm{fertilizer}_c \times L_c)
+$$
+
+- Area: SIAP irrigated sown area
+- Fertilizer rates: `Fertilizantes.csv` (INIFAP / Páez-Osuna)
+- Leaching: **we use 10%**
+
+JARG's older extract stopped at 2020 (`cultivos4.csv`). We now also have DGSIAP cierre files through 2025.
+
+---
+
+## Data paths
+
+```{r paths}
+pesticides_int <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chemicals/pesticides/int"
+)
+dgsiap_agricola <- here::here(
+  "/home/shares/ohi/OHI_GOC/_raw_data/DGSIAP_produccion_agricola/d2026"
+)
+jarg_repo <- here::here(
+  "/home/shares/ohi/OHI_GOC/_raw_data/romero_gil_2026_estimated_nitrogen_discharge_goc/d2026/OceanHealth-Sanitation-main"
+)
+eut_int <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/eutrophication/jarg_analysis_update/int"
+)
+lc_cw <- 0.10
+
+goc_states <- c(
+  "Baja California", "Baja California Sur", "Sonora",
+  "Sinaloa", "Nayarit", "Jalisco"
+)
+```
+
+Already available:
+
+| File | Role |
+|------|------|
+| `pesticides/int/ag_area_ha_by_watershed.csv` | USV ag area by watershed (weights) |
+| `Fertilizantes.csv` (JARG repo) | kg N / ha by crop |
+| `DGSIAP_produccion_agricola/d2026/Cierre_agricola_mun_YYYY.csv` | Municipal sown area 2019-2025 (extend with older years / cultivos4 as needed) |
+
+---
+
+## Setup
+
+```{r setup}
+library(tidyverse)
+library(here)
+library(sf)
+library(janitor)
+library(mapview)
+```
+
+### Read USV ag area by watershed
+
+```{r read-ag-area-watershed}
+ag_area_by_watershed <- read_csv(
+  here::here(pesticides_int, "ag_area_ha_by_watershed.csv")
+)
+
+glimpse(ag_area_by_watershed)
+```
+
+### Read fertilizer rates
+
+```{r fertilizer-rates}
+fert <- read_csv(here::here(jarg_repo, "Fertilizantes.csv")) %>%
+  clean_names()
+
+fert
+```
+
+### Read DGSIAP cierre agricola (2019-2025 shown here)
+
+```{r read-dgsiap-agricola}
+# files currently in the folder: 2019 through 2025
+ag_years <- 2019:2025
+
+# read one year of municipal cierre
+read_ag_year <- function(year) {
+  read_csv(
+    here::here(dgsiap_agricola, paste0("Cierre_agricola_mun_", year, ".csv"))
+  ) %>%
+    clean_names() %>%
+    mutate(year = as.numeric(anio))
+}
+
+# bind years and keep GoC states + irrigated modality
+cultivos_dgsiap <- map_dfr(ag_years, read_ag_year) %>%
+  filter(
+    nomestado %in% goc_states,
+    idmodalidad == 1  # riego, same as jarg
+  )
+
+glimpse(cultivos_dgsiap)
+unique(cultivos_dgsiap$nomestado)
+```
+
+### Optional: older years from JARG cultivos4 (2003-2020)
+
+```{r read-cultivos4-optional}
+# use if you want the long pre-2019 series
+# cultivos4 <- read_csv(here::here(jarg_repo, "cultivos4.csv")) %>%
+#   clean_names() %>%
+#   filter(nomestado %in% goc_states, idmodalidad == 1)
+```
+
+### Sketch: applied N then 10% leaching
+
+```{r ag-n-todo}
+# 1) join cultivos to fert by idcultivo
+# 2) nin_kg = sembrada * fertilizante_n_kg_ha
+# 3) nag_kg = nin_kg * 0.10
+# 4) allocate municipal nag to watersheds with ag_area_by_watershed shares
+# 5) pourpoint -> region
+```
+
+### Write outputs (when ready)
+
+```{r write-todo}
+# write_csv(tn_ag_by_watershed, here::here(eut_int, "tn_agriculture_by_watershed.csv"))
+# write_csv(tn_ag_by_region,    here::here(eut_int, "tn_agriculture_by_region.csv"))
+```
+
+---
+
+## Status
+
+| Piece | Status |
+|-------|--------|
+| DGSIAP 2019-2025 path | Wired in |
+| Fertilizantes + USV watershed area | Ready |
+| Full N calc + pourpoints | Still to finish |
+| Pre-2019 series | Optional via cultivos4 |
+
+Next: `script3_livestock.qmd`
