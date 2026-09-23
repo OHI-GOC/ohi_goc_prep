@@ -15,11 +15,11 @@ editor_options:
 
 # Script 2: agriculture nitrogen
 
-This script estimates nitrogen runoff from agriculture following Romero-Gil et al. (2026), then sends it through watersheds and pourpoints.
+Here we estimate nitrogen runoff from agriculture following Romero-Gil et al. (2026), then allocate municipal totals to GoC watersheds (`basin_id`).
 
-For scoring later, we want a **10% leaching coefficient** (JARG Supplemental Table 6).
+For scoring later, we use a **10% leaching coefficient** (JARG Supplemental Table 6). JARG's main text used 20%; Table 6 also reports 5%, 10%, and 15%.
 
-Important: we only want **processed** CONABIO USV agriculture layers for where crops sit. Crop area × fertilizer rates come from DGSIAP / SIAP.
+We take crop area and crop mix from **DGSIAP cierre agricola**. Fertilizer rates come from JARG's `Fertilizantes.csv` (INIFAP / Páez-Osuna). Where crops sit spatially (for allocating municipal N into watersheds) comes from processed CONABIO **USV cropland**.
 
 ---
 
@@ -29,17 +29,27 @@ $$
 N_{\mathrm{ag}} = \sum (\mathrm{area}_c \times \mathrm{fertilizer}_c \times L_c)
 $$
 
-- Area: SIAP irrigated sown area
-- Fertilizer rates: `Fertilizantes.csv` (INIFAP / Páez-Osuna)
-- Leaching: **we use 10%**
+- Area: SIAP irrigated sown area (`Sembrada`, modalidad riego)
+- Fertilizer: kg N / ha for ~18 crops that cover most irrigated area
+- Leaching: we use **$L_c = 0.10$**
 
-JARG's older extract stopped at 2020 (`cultivos4.csv`). We now also have DGSIAP cierre files through 2025.
+JARG kept municipal totals (with a Gulf-drainage area filter). We go one step further and split each municipality's nitrogen across GoC watersheds using USV cropland area shares (see the worked example in section 3).
 
 ---
 
-## Data paths
+## Setup
 
-```{r paths}
+```{r setup}
+library(tidyverse)
+library(here)
+library(sf)
+library(janitor)
+library(mapview)
+library(plotly)
+sf_use_s2(FALSE)
+```
+
+```{r paths-constants}
 pesticides_int <- here::here(
   "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chemicals/pesticides/int"
 )
@@ -52,114 +62,323 @@ jarg_repo <- here::here(
 eut_int <- here::here(
   "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/eutrophication/jarg_analysis_update/int"
 )
+spatial_regions <- here::here("/home/shares/ohi/OHI_GOC/spatial/OHI_regions")
+spatial_admin <- here::here("/home/shares/ohi/OHI_GOC/spatial/land_admin_boundaries")
+
 lc_cw <- 0.10
+ag_years <- 2019:2025
 
 goc_states <- c(
   "Baja California", "Baja California Sur", "Sonora",
   "Sinaloa", "Nayarit", "Jalisco"
 )
+
+# dir.create(eut_int, recursive = TRUE, showWarnings = FALSE)
 ```
-
-Already available:
-
-| File | Role |
-|------|------|
-| `pesticides/int/ag_area_ha_by_watershed.csv` | USV ag area by watershed (weights) |
-| `Fertilizantes.csv` (JARG repo) | kg N / ha by crop |
-| `DGSIAP_produccion_agricola/d2026/Cierre_agricola_mun_YYYY.csv` | Municipal sown area 2019-2025 (extend with older years / cultivos4 as needed) |
 
 ---
 
-## Setup
+## 1. Fertilizer rates (18 crops)
 
-```{r setup}
-library(tidyverse)
-library(here)
-library(sf)
-library(janitor)
-library(mapview)
+```{r fertilizer-rates}
+fert <- read_csv(
+  here::here(jarg_repo, "Fertilizantes.csv"),
+  locale = locale(encoding = "latin1"),
+  show_col_types = FALSE
+) %>%
+  clean_names() %>%
+  rename(fert_n_kg_ha = fertilizante_n_kg_ha)
+
+fert
 ```
 
-### Read USV ag area by watershed
+---
 
-```{r read-ag-area-watershed}
+## 2. DGSIAP irrigated sown area (2019-2025)
+
+Files live at:
+
+`/home/shares/ohi/OHI_GOC/_raw_data/DGSIAP_produccion_agricola/d2026/Cierre_agricola_mun_YYYY.csv`
+
+We keep GoC states, **riego** (`idmodalidad == 1`), and crops that have a fertilizer rate in `Fertilizantes.csv` (same 18-crop focus as JARG).
+
+```{r read-dgsiap-agricola}
+read_ag_year <- function(year) {
+  read_csv(
+    here::here(dgsiap_agricola, paste0("Cierre_agricola_mun_", year, ".csv")),
+    locale = locale(encoding = "latin1"),
+    show_col_types = FALSE
+  ) %>%
+    clean_names() %>%
+    mutate(
+      across(where(is.character), ~ iconv(.x, from = "latin1", to = "UTF-8")),
+      year = as.numeric(anio),
+      idestado = as.numeric(idestado),
+      idmunicipio = as.numeric(idmunicipio),
+      idcultivo = as.numeric(idcultivo),
+      sembrada = as.numeric(sembrada)
+    )
+}
+
+cultivos_dgsiap <- map_dfr(ag_years, read_ag_year) %>%
+  filter(
+    nomestado %in% goc_states,
+    idmodalidad == 1
+  )
+
+glimpse(cultivos_dgsiap)
+unique(cultivos_dgsiap$nomestado)
+unique(cultivos_dgsiap$anio) # 2019-2025
+```
+
+```{r join-fert-municipal-n}
+# applied N, then 10% leaching, at the crop x municipality x year row
+tn_ag_crop <- cultivos_dgsiap %>%
+  inner_join(fert %>% dplyr::select(idcultivo, cultivo, fert_n_kg_ha), by = "idcultivo") %>%
+  mutate(
+    nin_kg = sembrada * fert_n_kg_ha,
+    nag_kg = nin_kg * lc_cw,
+    tn_agriculture_t_yr = nag_kg / 1000
+  )
+
+# municipal totals (before watershed allocation)
+tn_ag_municipal <- tn_ag_crop %>%
+  group_by(year, idestado, nomestado, idmunicipio, nommunicipio) %>%
+  summarize(
+    sembrada_ha = sum(sembrada, na.rm = TRUE),
+    nin_kg = sum(nin_kg, na.rm = TRUE),
+    nag_kg = sum(nag_kg, na.rm = TRUE),
+    tn_agriculture_t_yr = sum(tn_agriculture_t_yr, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+total_goc_annual_tn <- tn_ag_municipal %>%
+  group_by(year) %>%
+  summarize(
+    n_mun = n_distinct(paste(idestado, idmunicipio)),
+    tn_agriculture_t_yr = sum(tn_agriculture_t_yr, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(year) # interesting, it has decreased in the last three years!!
+
+total_goc_annual_tn
+```
+
+```{r plotly-tn-ag-municipal-lines}
+tn_ag_municipal_plotly <- plot_ly(
+  tn_ag_municipal %>% filter(year >= 2019, year <= 2025),
+  x = ~year,
+  y = ~tn_agriculture_t_yr,
+  color = ~nommunicipio,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(nommunicipio, ", ", nomestado),
+  hovertemplate = paste(
+    "%{text}<br>",
+    "Year: %{x}<br>",
+    "TN agriculture: %{y:.2f} t N / yr",
+    "<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Agriculture nitrogen by municipality (2019-2025)",
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "t N / year"),
+    showlegend = TRUE,
+    legend = list(title = list(text = "Municipality"))
+  )
+
+tn_ag_municipal_plotly
+```
+
+Quick coverage check (matched fert crops vs all riego GoC area) so we can see how much sown area sits outside the 18-crop fertilizer table:
+
+```{r fert-coverage-qa}
+coverage <- cultivos_dgsiap %>%
+  group_by(year) %>%
+  summarize(
+    sembrada_all_ha = sum(sembrada, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    tn_ag_crop %>%
+      group_by(year) %>%
+      summarize(sembrada_fert_ha = sum(sembrada, na.rm = TRUE), .groups = "drop"),
+    by = "year"
+  ) %>%
+  mutate(frac_area_with_fert = sembrada_fert_ha / sembrada_all_ha)
+
+coverage
+```
+
+---
+
+## 3. Allocate municipal N to watersheds (`basin_id`)
+
+Municipal SIAP / DGSIAP totals are one number per municipality × year. Watersheds cut across those boundaries, so one municipality can send N into several `basin_id`s, and some of its land may not drain to the GoC at all.
+
+**USV cropland area shares** means we use mapped cropland polygons (CONABIO USV) to decide how much of that municipal N belongs in each GoC watershed.
+
+### Worked example
+
+If Mexicali has **100 t N / year** from our DGSIAP × fertilizer × 10% calc, and USV shows cropland in two GoC watersheds inside Mexicali:
+
+| basin_id | USV cropland in that mun ∩ basin | Share |
+|----------|----------------------------------|-------|
+| A | 800 ha | 80% |
+| B | 200 ha | 20% |
+
+Then:
+
+- basin A gets \(100 \times 0.80 = 80\) t N / year
+- basin B gets \(100 \times 0.20 = 20\) t N / year
+
+We are **not** saying fertilizer was applied at the watershed scale. We are saying: SIAP / DGSIAP tells us how much N the municipality generated; USV tells us where the cropland sits, so we split that municipal total proportionally.
+
+### Why we use USV, not raw municipality ∩ watershed land area
+
+Raw polygon area would spread N over desert, cities, and non-crop land inside the municipality. USV cropland is a better proxy for where agriculture actually is, which matches the idea that fertilizer N comes from cropped land.
+
+### Steps we take in code
+
+1. Read GoC watersheds, municipality polygons, and USV agriculture.
+2. Keep cropland classes only (same filter as pesticides).
+3. Intersect USV ∩ municipality ∩ watershed; get `ag_area_ha`.
+4. For each DGSIAP year, use the nearest USV survey year for weights (USV years are sparse; DGSIAP is annual).
+5. `tn_basin = tn_mun * (ag_ha_mun_basin / sum_ag_ha_mun_in_goc_basins)`.
+
+Municipalities with **no** USV cropland inside any GoC watershed contribute **0** at the watershed step (even if they still have municipal TN in `tn_ag_municipal`). That is intentional for "N reaching the GoC via cropland in GoC-draining basins," but it can drop some SIAP N that never gets a spatial home under this rule. We keep the municipal table for QA.
+
+```{r read-spatial}
+watershed_goc <- st_read(here::here(spatial_regions, "watersheds_goc.gpkg")) %>%
+  st_make_valid()
+
+municipio_sf <- st_read(
+  here::here(spatial_admin, "mex_admin2_joined_w_municipio_codigos.shp")
+) %>%
+  clean_names() %>%
+  mutate(
+    idestado = as.numeric(clv_std),
+    idmunicipio = as.numeric(clv_mnc)
+  ) %>%
+  filter(idestado %in% unique(tn_ag_municipal$idestado)) %>%
+  select(idestado, idmunicipio, geometry) %>%
+  st_make_valid()
+
+usv_ag <- st_read(here::here(pesticides_int, "usv_agriculture_goc_allyears.gpkg")) %>%
+  st_make_valid()
+
+types_of_agriculture <- read_csv(
+  here::here(pesticides_int, "types_of_agriculture_usv_agriculture_goc_allyears.csv"),
+  show_col_types = FALSE
+)
+
+keep_ag <- types_of_agriculture %>%
+  filter(is_cropland == "Y")
+
+usv_ag_clean <- usv_ag %>%
+  filter(descripcio %in% keep_ag$descripcio)
+```
+
+```{r mun-basin-usv-weights}
+# project everything to watershed CRS (meters)
+target_crs <- st_crs(watershed_goc)
+
+usv_r <- st_transform(usv_ag_clean, target_crs)
+mun_r <- st_transform(municipio_sf, target_crs)
+ws_r <- st_transform(watershed_goc %>% select(basin_id), target_crs)
+
+# USV x municipality
+usv_mun <- st_intersection(
+  usv_r %>% select(year, descripcio),
+  mun_r
+) %>%
+  mutate(area_ha = as.numeric(st_area(.)) / 10000)
+
+# then x watershed
+usv_mun_ws <- st_intersection(
+  usv_mun,
+  ws_r
+) %>%
+  mutate(area_ha = as.numeric(st_area(.)) / 10000)
+
+mun_basin_ag <- usv_mun_ws %>%
+  st_drop_geometry() %>%
+  group_by(usv_year = as.numeric(year), idestado, idmunicipio, basin_id) %>%
+  summarize(ag_area_ha = sum(area_ha, na.rm = TRUE), .groups = "drop")
+
+glimpse(mun_basin_ag)
+```
+
+```{r allocate-to-watershed}
+usv_years <- sort(unique(mun_basin_ag$usv_year))
+usv_years # [1] 1985 2001 2005 2009 2013 2016 2021
+
+pick_usv_year <- function(y) {
+  usv_years[which.min(abs(usv_years - y))]
+}
+
+# weights within each municipality (among GoC basins only)
+mun_basin_w <- mun_basin_ag %>%
+  group_by(usv_year, idestado, idmunicipio) %>%
+  mutate(
+    ag_area_mun_goc = sum(ag_area_ha, na.rm = TRUE),
+    w_basin = if_else(ag_area_mun_goc > 0, ag_area_ha / ag_area_mun_goc, NA_real_)
+  ) %>%
+  ungroup()
+
+tn_ag_by_watershed <- tn_ag_municipal %>%
+  mutate(usv_year = map_dbl(year, pick_usv_year)) %>%
+  left_join(
+    mun_basin_w,
+    by = c("usv_year", "idestado", "idmunicipio")
+  ) %>%
+  filter(!is.na(basin_id), !is.na(w_basin), w_basin > 0) %>%
+  mutate(
+    tn_agriculture_t_yr = tn_agriculture_t_yr * w_basin,
+    nag_kg = nag_kg * w_basin,
+    nin_kg = nin_kg * w_basin
+  ) %>%
+  group_by(basin_id, year, usv_year) %>%
+  summarize(
+    tn_agriculture_t_yr = sum(tn_agriculture_t_yr, na.rm = TRUE),
+    nag_kg = sum(nag_kg, na.rm = TRUE),
+    nin_kg = sum(nin_kg, na.rm = TRUE),
+    n_municipalities = n_distinct(paste(idestado, idmunicipio)),
+    .groups = "drop"
+  ) %>%
+  arrange(year, basin_id)
+
+tn_ag_by_watershed
+
+tn_ag_by_watershed %>%
+  group_by(year) %>%
+  summarize(
+    n_basins = n_distinct(basin_id),
+    tn_agriculture_t_yr = sum(tn_agriculture_t_yr, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+Optional QA: we can compare to the existing USV-only watershed area table from pesticides.
+
+```{r compare-ag-area}
 ag_area_by_watershed <- read_csv(
-  here::here(pesticides_int, "ag_area_ha_by_watershed.csv")
+  here::here(pesticides_int, "ag_area_ha_by_watershed.csv"),
+  show_col_types = FALSE
 )
 
 glimpse(ag_area_by_watershed)
 ```
 
-### Read fertilizer rates
-
-```{r fertilizer-rates}
-fert <- read_csv(here::here(jarg_repo, "Fertilizantes.csv")) %>%
-  clean_names()
-
-fert
-```
-
-### Read DGSIAP cierre agricola (2019-2025 shown here)
-
-```{r read-dgsiap-agricola}
-# files currently in the folder: 2019 through 2025
-ag_years <- 2019:2025
-
-# read one year of municipal cierre
-read_ag_year <- function(year) {
-  read_csv(
-    here::here(dgsiap_agricola, paste0("Cierre_agricola_mun_", year, ".csv"))
-  ) %>%
-    clean_names() %>%
-    mutate(year = as.numeric(anio))
-}
-
-# bind years and keep GoC states + irrigated modality
-cultivos_dgsiap <- map_dfr(ag_years, read_ag_year) %>%
-  filter(
-    nomestado %in% goc_states,
-    idmodalidad == 1  # riego, same as jarg
-  )
-
-glimpse(cultivos_dgsiap)
-unique(cultivos_dgsiap$nomestado)
-```
-
-### Optional: older years from JARG cultivos4 (2003-2020)
-
-```{r read-cultivos4-optional}
-# use if you want the long pre-2019 series
-# cultivos4 <- read_csv(here::here(jarg_repo, "cultivos4.csv")) %>%
-#   clean_names() %>%
-#   filter(nomestado %in% goc_states, idmodalidad == 1)
-```
-
-### Sketch: applied N then 10% leaching
-
-```{r ag-n-todo}
-# 1) join cultivos to fert by idcultivo
-# 2) nin_kg = sembrada * fertilizante_n_kg_ha
-# 3) nag_kg = nin_kg * 0.10
-# 4) allocate municipal nag to watersheds with ag_area_by_watershed shares
-# 5) pourpoint -> region
-```
-
-### Write outputs (when ready)
-
-```{r write-todo}
-# write_csv(tn_ag_by_watershed, here::here(eut_int, "tn_agriculture_by_watershed.csv"))
-# write_csv(tn_ag_by_region,    here::here(eut_int, "tn_agriculture_by_region.csv"))
-```
-
 ---
 
-## Status
+## 4. Write watershed output
 
-| Piece | Status |
-|-------|--------|
-| DGSIAP 2019-2025 path | Wired in |
-| Fertilizantes + USV watershed area | Ready |
-| Full N calc + pourpoints | Still to finish |
-| Pre-2019 series | Optional via cultivos4 |
+Primary deliverable for script 5 is watershed TN (10% leaching already applied). Pourpoints and OHI regions are handled in script 5.
 
-Next: `script3_livestock.qmd`
+```{r write-outputs}
+write_csv(tn_ag_municipal, here::here(eut_int, "tn_agriculture_municipal.csv"))
+write_csv(mun_basin_ag, here::here(eut_int, "usv_ag_area_ha_mun_basin.csv"))
+write_csv(tn_ag_by_watershed, here::here(eut_int, "tn_agriculture_by_watershed.csv"))
+```

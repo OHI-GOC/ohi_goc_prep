@@ -1,0 +1,408 @@
+---
+title: 'OHI GoC eutrophication update: livestock nitrogen (script 3)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    theme: cerulean
+    highlight-style: haddock
+editor_options:
+  chunk_output_type: console
+---
+
+# Script 3: livestock nitrogen
+
+Here we estimate nitrogen from livestock following Romero-Gil et al. (2026), then allocate municipal totals to GoC watersheds (`basin_id`) using FAO **GLW4** livestock density (same spatial proxy as Chemicals pharmaceuticals). Pourpoints → OHI regions happen once in script 5.
+
+For scoring later, we want a **40% export coefficient** (JARG Supplemental Table 6).
+
+**Data decision:** we use SIAP municipal **heads** from the pharmaceuticals clean file  
+(`siap_livestock_municipal_clean.csv`, product Carne, column `cabezas_asacrificados`).  
+That matches JARG's "livestock heads from SIAP yearbooks" closely enough. We do not overwrite that Chemicals file.
+
+---
+
+## What JARG did
+
+$$
+N_{\mathrm{liv}} = \left(\sum \mathrm{heads}_s \times EF_s\right) \times E_{\mathrm{export}}
+$$
+
+| Species (`nomespecie`) | EF (kg N head⁻¹ year⁻¹) |
+|------------------------|-------------------------|
+| Bovino | 21.9 |
+| Caprino | 6.3 |
+| Ovino | 4.1 |
+| Porcino | 4.1 |
+| Ave | 0.79 |
+
+---
+
+## How we get to watershed TN (GLW4)
+
+SIAP gives municipal heads (how much). A municipality can drain to several watersheds, so we need a spatial proxy for where animals sit inside the municipality.
+
+Same rule as Chemicals pharmaceuticals `script3_livestock.qmd`:
+
+> GLW4 (FAO livestock density) = **where**, SIAP / DGSIAP = **how much**
+
+1. Compute municipal nitrogen by species (heads × EF × 0.40).
+2. Prep each species' FAO GLW4 density raster (2020, heads/km²), crop to GoC municipalities, project to Mexico LCC, resample to 1 km (Chemicals helpers).
+3. Intersect municipalities with GoC watersheds.
+4. For each species, sum GLW density inside each mun ∩ basin polygon; convert to weights within the municipality (among GoC basins only).
+5. Allocate species nitrogen with those weights; sum to `basin_id` × year.
+
+If a municipality has no GLW density inside any GoC basin for a species, we fall back to intersection **area** share for that mun × species only (rare edge case).
+
+GLW files on mazu (from Chemicals):
+
+`/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026/`
+
+| Species | File |
+|---------|------|
+| Bovino | `GLW4-2020.D-DA.CTL.tif` |
+| Ave | `GLW4-2020.D-DA.CHK.tif` |
+| Caprino | `GLW4-2020.D-DA.GTS.tif` |
+| Porcino | `GLW4-2020.D-DA.PGS.tif` |
+| Ovino | `GLW4-2020.D-DA.SHP.tif` |
+
+---
+
+## Setup
+
+```{r setup}
+library(tidyverse)
+library(here)
+library(sf)
+library(terra)
+library(janitor)
+library(mapview)
+sf_use_s2(FALSE)
+```
+
+```{r paths-constants}
+export_cw <- 0.40
+
+ef_kg_n_per_head_yr <- tribble(
+  ~nomespecie, ~ef,
+  "Bovino",  21.9,
+  "Caprino",  6.3,
+  "Ovino",    4.1,
+  "Porcino",  4.1,
+  "Ave",      0.79
+)
+
+# same species → GLW file map as Chemicals pharmaceuticals script3
+species_glw_map <- tribble(
+  ~nomespecie, ~glw_file,
+  "Bovino",  "GLW4-2020.D-DA.CTL.tif",
+  "Ave",     "GLW4-2020.D-DA.CHK.tif",
+  "Caprino", "GLW4-2020.D-DA.GTS.tif",
+  "Porcino", "GLW4-2020.D-DA.PGS.tif",
+  "Ovino",   "GLW4-2020.D-DA.SHP.tif"
+)
+
+livestock_int <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chemicals/pharmaceuticals/livestock_int"
+)
+eut_int <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/eutrophication/jarg_analysis_update/int"
+)
+glw_dir <- here::here(
+  "/home/shares/ohi/OHI_GOC/_raw_data/FAO_livestock_density/d2026"
+)
+spatial_regions <- here::here("/home/shares/ohi/OHI_GOC/spatial/OHI_regions")
+spatial_admin <- here::here("/home/shares/ohi/OHI_GOC/spatial/land_admin_boundaries")
+
+# Mexico ITRF / LCC (same target CRS Chemicals uses for GLW prep)
+mexico_lcc <- "+proj=lcc +lat_1=17.5 +lat_2=29.5 +lat_0=12 +lon_0=-102 +x_0=2500000 +y_0=0 +datum=WGS84 +units=m +no_defs"
+
+dir.create(eut_int, recursive = TRUE, showWarnings = FALSE)
+```
+
+### Read SIAP municipal heads (already written from pharmaceuticals)
+
+```{r read-siap}
+siap_municipal <- read_csv(
+  here::here(livestock_int, "siap_livestock_municipal_clean.csv"),
+  show_col_types = FALSE
+) %>%
+  clean_names() %>%
+  mutate(
+    anio = as.integer(anio),
+    cveestado = as.numeric(cveestado),
+    cvempio = as.numeric(cvempio),
+    cabezas_asacrificados = as.numeric(cabezas_asacrificados)
+  )
+
+glimpse(siap_municipal)
+```
+
+### Apply emission factors and 40% export (municipal × species)
+
+Keep species rows here so we can weight each species with its own GLW4 density map.
+
+```{r livestock-n-species}
+tn_liv_species <- siap_municipal %>%
+  filter(nomespecie %in% ef_kg_n_per_head_yr$nomespecie) %>%
+  left_join(ef_kg_n_per_head_yr, by = "nomespecie") %>%
+  mutate(
+    heads = cabezas_asacrificados,
+    n_kg_gross = heads * ef,
+    n_kg_export = n_kg_gross * export_cw,
+    tn_livestock_t_yr = n_kg_export / 1000,
+    year = anio
+  )
+
+tn_liv_species %>%
+  group_by(year) %>%
+  summarize(
+    n_mun = n_distinct(paste(cveestado, cvempio)),
+    tn_livestock_t_yr = sum(tn_livestock_t_yr, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(year)
+```
+
+---
+
+## Build GLW4 mun × basin weights (Chemicals pattern)
+
+### Municipality polygons (erase GoC islands, same as Chemicals)
+
+```{r mun-polygons}
+municipio_sf <- st_read(
+  here::here(spatial_admin, "mex_admin2_joined_w_municipio_codigos.shp"),
+  quiet = TRUE
+) %>%
+  clean_names() %>%
+  mutate(
+    cveestado = as.numeric(clv_std),
+    cvempio = as.numeric(clv_mnc)
+  ) %>%
+  filter(cveestado %in% unique(tn_liv_species$cveestado)) %>%
+  select(cveestado, cvempio, geometry) %>%
+  st_make_valid()
+
+# erase GoC islands in a metric CRS (110 m buffer). buffering in lon/lat would wipe Mexico.
+islands_path <- here::here(
+  "/home/shares/ohi/OHI_GOC/spatial/from_hem_POEM_ANP/232_ANP-ITRF08_16062025",
+  "232_ANP-ITRF08_16062025.shp"
+)
+
+if (file.exists(islands_path)) {
+  islands_polygons <- st_read(islands_path, quiet = TRUE) %>%
+    clean_names() %>%
+    filter(str_detect(nombre, regex("Islas del Golfo de California", ignore_case = TRUE)))
+
+  if (nrow(islands_polygons) > 0) {
+    islands_lcc <- islands_polygons %>%
+      st_transform(mexico_lcc) %>%
+      st_make_valid()
+
+    municipio_sf <- municipio_sf %>%
+      st_transform(mexico_lcc) %>%
+      st_difference(st_union(st_buffer(islands_lcc, dist = 110))) %>%
+      st_make_valid() %>%
+      st_collection_extract("POLYGON", warn = FALSE)
+  } else {
+    message("island filter returned 0 rows; keeping municipality polygons as-is")
+    municipio_sf <- st_transform(municipio_sf, mexico_lcc)
+  }
+} else {
+  message("island shapefile not found; keeping municipality polygons as-is")
+  municipio_sf <- st_transform(municipio_sf, mexico_lcc)
+}
+
+stopifnot(nrow(municipio_sf) > 0)
+stopifnot(!all(st_is_empty(municipio_sf)))
+
+# single multipolygon mask for GLW crop (WGS84 to match FAO rasters)
+mun_union_geom <- municipio_sf %>%
+  st_union() %>%
+  st_make_valid()
+
+stopifnot(!st_is_empty(mun_union_geom))
+
+mun_union <- st_sf(id = 1L, geometry = st_transform(mun_union_geom, 4326))
+
+cat(
+  "mun_union area (km2):",
+  as.numeric(st_area(st_transform(mun_union, mexico_lcc))) / 1e6,
+  "\n"
+)
+```
+
+### Prep GLW4 rasters to 1 km (Chemicals `prep_glw_1km`)
+
+```{r prep-glw-1km}
+prep_glw_1km <- function(glw_path, mask_polygon) {
+  glw_raw <- terra::rast(glw_path)
+
+  mask_sf <- mask_polygon %>%
+    st_make_valid() %>%
+    st_transform(terra::crs(glw_raw))
+
+  # terra needs a SpatVector / SpatExtent, not a bare sf with empty geom
+  mask_v <- terra::vect(mask_sf)
+  if (terra::nrow(mask_v) < 1) {
+    stop("mask SpatVector is empty after transform to GLW CRS")
+  }
+
+  glw_cropped <- terra::crop(glw_raw, mask_v)
+
+  # project to Mexico LCC, then resample to 1 km
+  glw_projected <- terra::project(glw_cropped, mexico_lcc)
+  mask_lcc <- terra::vect(st_transform(mask_polygon, mexico_lcc))
+  glw_masked <- terra::mask(glw_projected, mask_lcc)
+
+  template_1km <- terra::rast(glw_masked)
+  terra::res(template_1km) <- 1000
+  glw_1km <- terra::resample(glw_masked, template_1km, method = "near")
+  glw_1km <- terra::mask(glw_1km, mask_lcc)
+
+  glw_1km
+}
+
+glw_1km_list <- purrr::map(
+  setNames(species_glw_map$glw_file, species_glw_map$nomespecie),
+  function(f) {
+    message("prep GLW 1km: ", f)
+    prep_glw_1km(file.path(glw_dir, f), mun_union)
+  }
+)
+```
+
+### Mun ∩ watershed polygons + area fallback
+
+```{r mun-basin-polygons}
+watershed_goc <- st_read(
+  here::here(spatial_regions, "watersheds_goc.gpkg"),
+  quiet = TRUE
+) %>%
+  st_make_valid()
+
+target_crs <- mexico_lcc
+mun_r <- st_transform(municipio_sf, target_crs)
+ws_r <- st_transform(watershed_goc %>% select(basin_id), target_crs)
+
+mun_ws_poly <- st_intersection(mun_r, ws_r) %>%
+  st_make_valid() %>%
+  mutate(area_m2 = as.numeric(st_area(.))) %>%
+  filter(is.finite(area_m2), area_m2 > 0)
+
+# area shares (fallback when GLW sum is 0 for a mun × species)
+mun_ws_area <- mun_ws_poly %>%
+  st_drop_geometry() %>%
+  group_by(cveestado, cvempio, basin_id) %>%
+  summarize(area_m2 = sum(area_m2, na.rm = TRUE), .groups = "drop") %>%
+  group_by(cveestado, cvempio) %>%
+  mutate(
+    area_mun_goc = sum(area_m2, na.rm = TRUE),
+    w_area = area_m2 / area_mun_goc
+  ) %>%
+  ungroup() %>%
+  select(cveestado, cvempio, basin_id, w_area)
+
+glimpse(mun_ws_area)
+```
+
+### Species-specific GLW density weights
+
+```{r mun-basin-glw-weights}
+# sum GLW cells in each mun ∩ basin polygon; weight within municipality
+glw_weights_one_species <- function(glw_1km, mun_ws_poly, nomespecie) {
+  mun_ws_lcc <- st_transform(mun_ws_poly, terra::crs(glw_1km))
+  glw_sum <- terra::extract(
+    glw_1km,
+    terra::vect(mun_ws_lcc),
+    fun = sum,
+    na.rm = TRUE
+  )
+
+  mun_ws_lcc %>%
+    st_drop_geometry() %>%
+    mutate(
+      nomespecie = nomespecie,
+      glw_sum = glw_sum[[2]]
+    ) %>%
+    group_by(cveestado, cvempio, basin_id, nomespecie) %>%
+    summarize(glw_sum = sum(glw_sum, na.rm = TRUE), .groups = "drop") %>%
+    group_by(cveestado, cvempio, nomespecie) %>%
+    mutate(
+      glw_mun_goc = sum(glw_sum, na.rm = TRUE),
+      w_glw = if_else(glw_mun_goc > 0, glw_sum / glw_mun_goc, NA_real_)
+    ) %>%
+    ungroup()
+}
+
+mun_basin_glw <- purrr::imap_dfr(
+  glw_1km_list,
+  function(glw, sp) {
+    message("GLW mun×basin weights: ", sp)
+    glw_weights_one_species(glw, mun_ws_poly, sp)
+  }
+)
+
+# final weight: GLW when available, else area share
+mun_basin_w <- mun_basin_glw %>%
+  left_join(mun_ws_area, by = c("cveestado", "cvempio", "basin_id")) %>%
+  mutate(
+    w_basin = coalesce(w_glw, w_area),
+    weight_source = if_else(is.finite(w_glw), "glw4", "area_fallback")
+  ) %>%
+  filter(is.finite(w_basin), w_basin > 0)
+
+mun_basin_w %>%
+  count(nomespecie, weight_source)
+
+glimpse(mun_basin_w)
+```
+
+---
+
+## Allocate species TN to watersheds
+
+```{r allocate-to-watershed}
+tn_liv_by_watershed <- tn_liv_species %>%
+  inner_join(
+    mun_basin_w %>% select(cveestado, cvempio, basin_id, nomespecie, w_basin, weight_source),
+    by = c("cveestado", "cvempio", "nomespecie")
+  ) %>%
+  mutate(
+    tn_livestock_t_yr = tn_livestock_t_yr * w_basin,
+    n_kg_export = n_kg_export * w_basin
+  ) %>%
+  group_by(basin_id, year) %>%
+  summarize(
+    tn_livestock_t_yr = sum(tn_livestock_t_yr, na.rm = TRUE),
+    n_municipalities = n_distinct(paste(cveestado, cvempio)),
+    n_species = n_distinct(nomespecie),
+    .groups = "drop"
+  ) %>%
+  arrange(year, desc(tn_livestock_t_yr))
+
+tn_liv_by_watershed
+
+tn_liv_by_watershed %>%
+  group_by(year) %>%
+  summarize(
+    n_basins = n_distinct(basin_id),
+    tn_livestock_t_yr = sum(tn_livestock_t_yr, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+---
+
+## Write watershed output
+
+Primary deliverable for script 5 is watershed TN (40% export already applied; GLW4 allocation already applied). Pourpoints and OHI regions are handled in script 5.
+
+```{r write-outputs}
+write_csv(mun_basin_w, here::here(eut_int, "livestock_mun_basin_glw4_weights.csv"))
+write_csv(tn_liv_by_watershed, here::here(eut_int, "tn_livestock_by_watershed.csv"))
+```

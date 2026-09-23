@@ -15,19 +15,17 @@ editor_options:
 
 # Script 1: wastewater nitrogen
 
-This script estimates nitrogen from human wastewater following Romero-Gil et al. (2026), then routes it through watersheds and pourpoints to OHI regions.
+Here we estimate nitrogen from human wastewater following Romero-Gil et al. (2026), then allocate it to GoC watersheds (`basin_id`). Pourpoints → OHI regions happen once in script 5.
 
 For scoring later, we want the **mean** wastewater scenario from JARG's Supplemental Table 6.
 
-We already did a lot of the hard WWTP spatial work in Chemicals pharmaceuticals. The plan here is to reuse that, and only add the nitrogen-specific pieces (protein, population, NRE).
+We already did a lot of the hard WWTP spatial work in Chemicals pharmaceuticals. Here we reuse that, and only add the nitrogen-specific pieces (protein, population, NRE).
 
-Note: 2020 `caudal` values look wrong across plants in the SINA data. Save / read the plant-level file as reported, then apply the same kind of 2020 flag + interpolate fix here (as in pharmaceuticals), when we compute nitrogen.
+Note: many 2020 `caudal` values in SINA look wrong. We keep the plant file as reported, then fix 2020 outliers and fill gaps in section 1 before computing NRE.
 
 ---
 
 ## What JARG did
-
-JARG modeled annual nitrogen from wastewater as:
 
 $$
 N_{\mathrm{ww}} = \mathrm{pop} \times \mathrm{protein}_{g/day} \times 365 \times 0.16 \times (1 - \mathrm{NRE})
@@ -37,7 +35,32 @@ Protein came from ENSANUT by age and sex. Population came from the INEGI 2020 lo
 
 Their study covered 29 coastal municipalities and did not fully cover Nayarit and Jalisco, which we need for the GoC.
 
-Helpful prototype code lives in `OceanHealth-Sanitation-main/N_Urb.ipynb` and `cursor_generated/urban-sanitation.qmd`.
+---
+
+## Population data
+
+### INEGI ITER 2020 (locality age × sex)
+
+On mazu:
+
+`/home/shares/ohi/OHI_GOC/_raw_data/inegi_population/d2026/iter_00_cpv2020/`
+
+This is the **2020** Censo de Población y Vivienda ITER (locality-level). It gives:
+
+- Locality IDs + names, and DMS `LONGITUD` / `LATITUD`
+- `POBTOT`, `POBFEM`, `POBMAS`
+- Quinquenal age × sex columns so we can match JARG Table 1
+- `TAMLOC` size class (we treat TAMLOC ≥ 5, i.e. ≥ 2,500 people, as urban)
+
+### CONAPO municipal projections (`pobproy_ggrupos.csv`)
+
+On mazu:
+
+`/home/shares/ohi/OHI_GOC/_raw_data/CONAPO_demographic_indicators/d2026/pobproy_ggrupos.csv`
+
+Annual municipal population **1990–2040** by sex and broad age groups (`POB_00_011`, `POB_012_29`, `POB_30_59`, `POB_60_mm`, `POB_TOTAL`). Those age bins do not match Table 1 exactly, so we use CONAPO mainly to **scale the 2020 ITER nitrogen baseline** through time with `POB_TOTAL` ratios (municipality × year / municipality × 2020).
+
+**Workflow:** 2020 detailed N from ITER × Table 1 × NRE → then multiply municipal N by CONAPO total-pop scale factors for other years → push to watersheds with 2020 locality→basin shares.
 
 ---
 
@@ -47,21 +70,58 @@ From `chemicals/pharmaceuticals/script1_wwtp_effluent.qmd`:
 
 | File | What it is |
 |------|------------|
-| `humans_int/wwtps_watershed_plant_level.gpkg` | Plant-level WWTPs ∩ watersheds (`proceso`, `caudal`, `basin_id`, `anio`, etc.). Saved as reported (no 2020 fix yet). |
+| `humans_int/wwtps_watershed_plant_level.gpkg` | Plant-level WWTPs ∩ watersheds |
 | `humans_int/wwtp_liters_effluent_by_watershed.csv` | Effluent liters per watershed × year |
 | `humans_int/effluent_wwtp_liters_rgnid.csv` | Same idea, already at region |
 | `humans_int/pourpoints_effluent_wwtp_liters_final.gpkg` | Pourpoints with liters |
 
-The plant-level gpkg is the key input for NRE. Liters / pourpoints are helpful for QA and for matching the pharmaceuticals spatial filter.
-
 ---
 
-## Population + protein (decisions)
+## Setup
 
-**Protein:** use JARG Supplemental / paper **Table 1** mean g protein/day by age × sex. That is the Mean scenario we want anyway. No need for ENSANUT 2018 right now.
+```{r setup}
+library(tidyverse)
+library(here)
+library(sf)
+library(stringi)
+library(janitor)
+library(mapview)
+library(plotly)
+sf_use_s2(FALSE)
+```
 
-```{r table1-protein}
-# jarg table 1 means (g protein / person / day)
+```{r paths-constants}
+pharma_humans_int <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chemicals/pharmaceuticals/humans_int"
+)
+eut_int <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/eutrophication/jarg_analysis_update/int"
+)
+spatial_regions <- here::here("/home/shares/ohi/OHI_GOC/spatial/OHI_regions")
+
+iter_dir <- here::here(
+  "/home/shares/ohi/OHI_GOC/_raw_data/inegi_population/d2026/iter_00_cpv2020"
+)
+iter_csv <- here::here(iter_dir, "conjunto_de_datos", "conjunto_de_datos_iter_00CSV20.csv")
+if (!file.exists(iter_csv)) {
+  # sometimes the CSV sits directly in the folder
+  cand <- list.files(iter_dir, pattern = "iter_00CSV20\\.csv$|conjunto_de_datos_iter", recursive = TRUE, full.names = TRUE)
+  if (length(cand) > 0) iter_csv <- cand[[1]]
+}
+
+conapo_csv <- here::here(
+  "/home/shares/ohi/OHI_GOC/_raw_data/CONAPO_demographic_indicators/d2026/pobproy_ggrupos.csv"
+)
+
+proto <- 0.16  # protein to N
+year_census <- 2020L
+# years we will scale to with CONAPO (overlap with WWTP / other eut sources as needed)
+conapo_years <- 2000:2025
+
+goc_entidad <- c("02", "03", "14", "18", "25", "26")  # BC, BCS, Jal, Nay, Sin, Son
+goc_clave_ent <- c(2, 3, 14, 18, 25, 26)
+
+# Table 1 mean protein (g / person / day)
 protein_table1 <- tribble(
   ~age_group, ~sex, ~protein_g_day,
   "0-4",   "F", 37.10,
@@ -78,140 +138,501 @@ protein_table1 <- tribble(
   "60+",   "M", 61.50
 )
 
-proto <- 0.16  # protein to n
+# map ITER quinquenal columns onto Table 1 groups
+age_col_map <- tribble(
+  ~age_group, ~sex, ~iter_col,
+  "0-4",   "F", "P_0A4_F",
+  "0-4",   "M", "P_0A4_M",
+  "5-14",  "F", "P_5A9_F",
+  "5-14",  "M", "P_5A9_M",
+  "5-14",  "F", "P_10A14_F",
+  "5-14",  "M", "P_10A14_M",
+  "15-19", "F", "P_15A19_F",
+  "15-19", "M", "P_15A19_M",
+  "20-29", "F", "P_20A24_F",
+  "20-29", "M", "P_20A24_M",
+  "20-29", "F", "P_25A29_F",
+  "20-29", "M", "P_25A29_M",
+  "30-59", "F", "P_30A34_F",
+  "30-59", "M", "P_30A34_M",
+  "30-59", "F", "P_35A39_F",
+  "30-59", "M", "P_35A39_M",
+  "30-59", "F", "P_40A44_F",
+  "30-59", "M", "P_40A44_M",
+  "30-59", "F", "P_45A49_F",
+  "30-59", "M", "P_45A49_M",
+  "30-59", "F", "P_50A54_F",
+  "30-59", "M", "P_50A54_M",
+  "30-59", "F", "P_55A59_F",
+  "30-59", "M", "P_55A59_M",
+  "60+",   "F", "P_60YMAS_F",
+  "60+",   "M", "P_60YMAS_M"
+)
 ```
-
-**Population options we have:**
-
-| Source | Age × sex? | Notes |
-|--------|------------|-------|
-| `population_localities/inegi_boundaries_pop.shp` | **No** (only `POBTOT`) | Good for locality totals + watershed routing |
-| `population_municipal/..._2000_2020.csv` | **No** (total only) | Includes Nayarit/Jalisco + `rgn_id` |
-| Full INEGI census iter CSV | Yes (if redownloaded) | Closest to JARG |
-
-So the locality shapefile does **not** have age groups. If you redownload municipal or locality census with age × sex columns, we can match Table 1 fully. Until then, a practical fallback is: total pop × a single mean protein (average of Table 1, or JARG's rural mean ~53.37 g/day), documented clearly.
 
 ---
 
-## Outline of what to do here
+## 1. NRE from WWTP plants (flow-weighted by watershed)
 
-1. Read plant-level WWTPs and join NRE by `proceso`.
-2. Flag / fix bad 2020 `caudal` (same idea as pharmaceuticals), then flow-weight NRE to each `basin_id` × year.
-3. Estimate nitrogen from population × Table 1 protein (mean scenario).
-4. Apply (1 - NRE) for urban / treated areas; NRE = 0 for rural.
-5. Sum nitrogen to watershed, then pourpoint, then region (same 50 km / 10 km filter as pharmaceuticals).
-6. Write intermediates under `eutrophication/jarg_analysis_update/int/`.
+We reuse the Chemicals plant×watershed table, but first we fix **2020 caudal**. Many plants show a 2020 flow that is far from every other year for that plant. We:
 
----
+1. keep one row per plant × year
+2. compare each plant's 2020 caudal to its median in non-2020 years
+3. drop 2020 values that are more than 5× larger or smaller than that median
+4. fill the gap by interpolating across years (or, if the plant only has one year of data, reuse that value)
 
-## Setup
-
-```{r setup}
-library(tidyverse)
-library(here)
-library(sf)
-library(stringi)
-library(janitor)
-library(mapview)
-```
-
-```{r paths}
-pharma_humans_int <- here::here(
-  "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chemicals/pharmaceuticals/humans_int"
-)
-eut_int <- here::here(
-  "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/eutrophication/jarg_analysis_update/int"
-)
-```
-
-### Read WWTP intermediates
-
-```{r read-wwtp-plant-level}
-# plant-level wwtps intersected with watersheds (raw, including 2020 as reported)
-wwtps_plants <- st_read(
-  here::here(pharma_humans_int, "wwtps_watershed_plant_level.gpkg")
-)
-
-glimpse(st_drop_geometry(wwtps_plants))
-```
-
-```{r read-wwtp-watershed-liters}
-# liters of effluent by watershed (already built in pharmaceuticals; useful for qa)
-wwtp_liters <- read_csv(
-  here::here(pharma_humans_int, "wwtp_liters_effluent_by_watershed.csv")
-)
-
-glimpse(wwtp_liters)
-```
-
-### NRE lookup (from JARG supplemental Table 2)
+Then we attach an NRE by process name and take a **flow-weighted mean NRE per watershed** in the census year.
 
 ```{r nre-lookup}
-# rough starting lookup; expand to match every SINA proceso string
 nre_by_process <- tribble(
   ~proceso_key,                ~nre,
   "lodos activados",           0.75,
   "lagunas aireadas",          0.60,
   "lagunas de estabilizacion", 0.60,
+  "lagunas de estabilización", 0.60,
   "primario avanzado",         0.10,
   "tanque septico",            0.85,
+  "tanque séptico",            0.85,
   "biodiscos",                 0.45,
   "filtros biologicos",        0.45,
+  "filtros biológicos",        0.45,
   "humedal",                   0.45
 )
-
-# cw choice: mean protein scenario (not mean-sigma / mean+sigma)
 ```
 
-### Sketch: flow-weighted NRE by watershed
-
-```{r nre-by-watershed-todo}
-# next steps once proceso matching is locked in:
-# 1) fix 2020 caudal (flag vs non-2020 median, set bad rows to na, interpolate)
-# 2) join nre_by_process on cleaned proceso strings
-# 3) flow-weight nre by basin_id x anio
-#
-# nre_watershed <- wwtps_plants %>%
-#   st_drop_geometry() %>%
-#   mutate(proceso_clean = str_to_lower(stri_trans_general(proceso, "Latin-ASCII"))) %>%
-#   # join nre_by_process with a careful match on proceso_clean
-#   mutate(ef_l_yr = caudal * 31536000) %>%
-#   group_by(basin_id, anio) %>%
-#   summarize(
-#     nre_flow_weighted = sum(nre * ef_l_yr, na.rm = TRUE) / sum(ef_l_yr, na.rm = TRUE),
-#     .groups = "drop"
-#   )
+```{r read-wwtp-plants}
+wwtps_plants <- st_read(here::here(pharma_humans_int, "wwtps_watershed_plant_level.gpkg")) %>%
+  st_drop_geometry() %>%
+  clean_names() %>%
+  mutate(
+    anio = as.integer(anio),
+    caudal = as.numeric(caudal),
+    proceso_clean = str_to_lower(stri_trans_general(as.character(proceso), "Latin-ASCII"))
+  ) %>%
+  # sina gpkg currently repeats each plant-year 7 times; keep one
+  distinct(clvplanta, anio, .keep_all = TRUE)
 ```
 
-### Sketch: nitrogen from population (still needs census + protein)
+```{r fix-2020-caudal}
+# fill missing caudal along a plant's year series.
+# needs at least two years with data to interpolate; one year → copy that value; none → leave NA.
+fill_caudal_series <- function(year, caudal) {
+  keep <- is.finite(caudal)
+  year_ok <- year[keep]
+  caudal_ok <- caudal[keep]
 
-```{r population-n-todo}
-# jarg style:
-# n_kg_yr = protein_g_day * 365 * pop * 0.16 * (1 - nre)
-# rural: nre = 0
-# urban: nre from watershed / municipality
-#
-# then sum to basin_id and join to pourpoints like pharmaceuticals
+  n_years <- n_distinct(year_ok)
+
+  if (n_years >= 2) {
+    # one value per year, then linear interpolate / extrapolate
+    series <- tibble(year = year_ok, caudal = caudal_ok) %>%
+      group_by(year) %>%
+      summarize(caudal = mean(caudal), .groups = "drop")
+
+    approx(series$year, series$caudal, xout = year, rule = 2)$y
+  } else if (n_years == 1) {
+    rep(mean(caudal_ok), length(year))
+  } else {
+    caudal
+  }
+}
+
+wwtps_plants <- wwtps_plants %>%
+  group_by(clvplanta) %>%
+  mutate(
+    # plant's typical flow outside 2020
+    caudal_typical = median(caudal[anio != 2020], na.rm = TRUE),
+
+    # 2020 looks broken if it is >5x or <1/5 of that typical flow
+    caudal_2020_outlier = anio == 2020 &
+      is.finite(caudal) &
+      is.finite(caudal_typical) &
+      caudal_typical > 0 &
+      (caudal > 5 * caudal_typical | caudal < caudal_typical / 5),
+
+    # set outliers to NA so the fill step can replace them
+    caudal_clean = if_else(caudal_2020_outlier, NA_real_, caudal)
+  ) %>%
+  arrange(anio) %>%
+  mutate(caudal_fix = fill_caudal_series(anio, caudal_clean)) %>%
+  ungroup()
 ```
 
-### Write outputs (when ready)
+### QA: did the 2020 fix look right?
 
-```{r write-todo}
-# write_csv(tn_ww_by_watershed, here::here(eut_int, "tn_wastewater_by_watershed.csv"))
-# write_csv(tn_ww_by_region,    here::here(eut_int, "tn_wastewater_by_region.csv"))
+Same idea as Chemicals `script1_wwtp_effluent.qmd`: interactive plant time series + a red dotted line at 2020. Chemicals used a **3×** flag and plotted the **raw** series; here we use **5×**, and we add a **fixed** series plot plus a 2020 raw-vs-fixed scatter so you can confirm the interpolation.
+
+```{r qa-2020-caudal-plotly}
+flagged_plants <- wwtps_plants %>%
+  filter(caudal_2020_outlier) %>%
+  distinct(clvplanta) %>%
+  pull(clvplanta)
+
+cat("flagged 2020 plants:", length(flagged_plants), "\n")
+
+caudal_qa <- wwtps_plants %>%
+  filter(clvplanta %in% flagged_plants) %>%
+  select(clvplanta, anio, basin_id, proceso, capacidad, caudal, caudal_fix, caudal_typical)
+
+hover_txt <- ~paste0(
+  "Plant: ", clvplanta,
+  "<br>Basin: ", basin_id,
+  "<br>Proceso: ", proceso,
+  "<br>Capacidad: ", capacidad,
+  "<br>Caudal: ", caudal_l_s, " L/s"
+)
+
+# 1) raw series (chemicals-style: find the 2020 spike/dip)
+caudal_raw_flagged_plotly <- plot_ly(
+  caudal_qa %>% mutate(caudal_l_s = caudal),
+  x = ~anio,
+  y = ~caudal_l_s,
+  color = ~clvplanta,
+  type = "scatter",
+  mode = "lines+markers",
+  text = hover_txt,
+  hoverinfo = "text+x+y"
+) %>%
+  layout(
+    title = "Flagged plants: raw caudal (look for 2020 outliers)",
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "Caudal (L/s)"),
+    shapes = list(list(
+      type = "line", x0 = 2020, x1 = 2020,
+      y0 = 0, y1 = 1, yref = "paper",
+      line = list(color = "red", dash = "dot")
+    ))
+  )
+
+caudal_raw_flagged_plotly
+
+# 2) fixed series (same plants; 2020 should sit with the rest of the series)
+caudal_fix_flagged_plotly <- plot_ly(
+  caudal_qa %>% mutate(caudal_l_s = caudal_fix),
+  x = ~anio,
+  y = ~caudal_l_s,
+  color = ~clvplanta,
+  type = "scatter",
+  mode = "lines+markers",
+  text = hover_txt,
+  hoverinfo = "text+x+y"
+) %>%
+  layout(
+    title = "Flagged plants: fixed caudal (after 2020 interpolation)",
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "Caudal (L/s)"),
+    shapes = list(list(
+      type = "line", x0 = 2020, x1 = 2020,
+      y0 = 0, y1 = 1, yref = "paper",
+      line = list(color = "red", dash = "dot")
+    ))
+  )
+
+caudal_fix_flagged_plotly
+
+# 3) 2020 only: raw vs fixed (points off the 1:1 line were corrected)
+caudal_2020_compare <- caudal_qa %>%
+  filter(anio == 2020)
+
+one_to_one <- range(
+  c(caudal_2020_compare$caudal, caudal_2020_compare$caudal_fix),
+  na.rm = TRUE
+)
+
+caudal_2020_scatter_plotly <- plot_ly(
+  caudal_2020_compare,
+  x = ~caudal,
+  y = ~caudal_fix,
+  type = "scatter",
+  mode = "markers",
+  text = ~paste0(
+    clvplanta, " | ", basin_id,
+    "<br>Raw: ", caudal, " L/s",
+    "<br>Fixed: ", caudal_fix, " L/s",
+    "<br>Typical (non-2020 median): ", round(caudal_typical, 2)
+  ),
+  hoverinfo = "text",
+  name = "plants"
+) %>%
+  add_trace(
+    x = one_to_one,
+    y = one_to_one,
+    type = "scatter",
+    mode = "lines",
+    line = list(color = "gray", dash = "dash"),
+    showlegend = FALSE,
+    hoverinfo = "skip",
+    inherit = FALSE
+  ) %>%
+  layout(
+    title = "2020 caudal: raw (x) vs fixed (y); dashed = 1:1",
+    xaxis = list(title = "Raw caudal 2020 (L/s)", type = "log"),
+    yaxis = list(title = "Fixed caudal 2020 (L/s)", type = "log")
+  )
+
+caudal_2020_scatter_plotly
+```
+
+```{r nre-by-basin}
+# first matching process key wins
+match_nre <- function(proceso_clean) {
+  hits <- nre_by_process$nre[str_detect(proceso_clean, fixed(nre_by_process$proceso_key))]
+  if (length(hits) == 0 || all(is.na(hits))) return(NA_real_)
+  hits[[1]]
+}
+
+wwtps_plants <- wwtps_plants %>%
+  mutate(nre = map_dbl(proceso_clean, match_nre))
+
+# flow-weighted NRE in the census year (caudal is L/s → L/year)
+nre_by_basin <- wwtps_plants %>%
+  filter(
+    anio == year_census,
+    !is.na(basin_id),
+    is.finite(caudal_fix),
+    caudal_fix > 0
+  ) %>%
+  mutate(ef_l_yr = caudal_fix * 31536000) %>%
+  group_by(basin_id) %>%
+  summarize(
+    nre_flow_weighted = sum(nre * ef_l_yr, na.rm = TRUE) / sum(ef_l_yr, na.rm = TRUE),
+    n_plants = n(),
+    .groups = "drop"
+  )
+
+summary(nre_by_basin$nre_flow_weighted)
 ```
 
 ---
 
-## Status
+## 2. Read 2020 ITER localities and compute protein-weighted N (before NRE)
 
-| Piece | Status |
-|-------|--------|
-| Methods + mean coefficient | Documented |
-| Plant-level WWTP gpkg | Ready to read |
-| Table 1 protein (mean) | Hard-coded in script |
-| Locality pop age × sex | Not in current shp (POBTOT only) |
-| 2020 caudal fix | Do in this script |
-| Region totals | Pending |
+```{r parse-dms}
+# ITER stores coords like 116°35'42.482" W
+parse_dms <- function(x) {
+  x <- str_trim(as.character(x))
+  out <- rep(NA_real_, length(x))
+  ok <- !is.na(x) & x != "" & x != "*"
+  # degrees, minutes, seconds, hemisphere
+  m <- str_match(x[ok], "([0-9]+).*?([0-9]+).*?([0-9.]+).*?([NnSsEeWw])")
+  deg <- as.numeric(m[, 2])
+  minu <- as.numeric(m[, 3])
+  sec <- as.numeric(m[, 4])
+  hemi <- toupper(m[, 5])
+  val <- deg + minu / 60 + sec / 3600
+  val[hemi %in% c("W", "S")] <- -val[hemi %in% c("W", "S")]
+  out[ok] <- val
+  out
+}
+```
 
-Next: `script2_agriculture.qmd`
+```{r read-iter-protein-n}
+iter_cols_needed <- c(
+  "ENTIDAD", "NOM_ENT", "MUN", "NOM_MUN", "LOC", "NOM_LOC",
+  "LONGITUD", "LATITUD", "TAMLOC", "POBTOT",
+  unique(age_col_map$iter_col)
+)
+
+iter_raw <- read_csv(
+  iter_csv,
+  col_select = any_of(iter_cols_needed),
+  locale = locale(encoding = "UTF-8"),
+  show_col_types = FALSE,
+  na = c("", "NA", "N/A", "*")
+) %>%
+  clean_names() %>%
+  mutate(
+    entidad = str_pad(as.character(entidad), 2, pad = "0"),
+    mun = str_pad(as.character(mun), 3, pad = "0"),
+    loc = str_pad(as.character(loc), 4, pad = "0")
+  ) %>%
+  filter(
+    entidad %in% goc_entidad,
+    mun != "000",
+    !loc %in% c("0000", "9998", "9999")
+  )
+
+# long age × sex pops, join Table 1 protein
+age_col_map_clean <- age_col_map %>%
+  mutate(iter_col_clean = make_clean_names(iter_col))
+
+iter_age_long <- iter_raw %>%
+  pivot_longer(
+    cols = any_of(age_col_map_clean$iter_col_clean),
+    names_to = "iter_col_clean",
+    values_to = "pop",
+    values_transform = list(pop = as.numeric)
+  ) %>%
+  left_join(age_col_map_clean, by = "iter_col_clean", relationship = "many-to-many") %>%
+  left_join(protein_table1, by = c("age_group", "sex")) %>%
+  filter(!is.na(protein_g_day), is.finite(pop), pop > 0) %>%
+  # kg N / year before NRE: protein_g_day * 0.365 * 0.16 * pop
+  mutate(n_kg_yr_gross = protein_g_day * 0.365 * proto * pop)
+
+tn_loc_gross <- iter_age_long %>%
+  group_by(entidad, nom_ent, mun, nom_mun, loc, nom_loc, longitud, latitud, tamloc, pobtot) %>%
+  summarize(
+    n_kg_yr_gross = sum(n_kg_yr_gross, na.rm = TRUE),
+    pop_age_sex = sum(pop, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    year = year_census,
+    lon = parse_dms(longitud),
+    lat = parse_dms(latitud),
+    urban = as.numeric(tamloc) >= 5,  # >= 2500 people
+    tn_gross_t_yr = n_kg_yr_gross / 1000
+  ) %>%
+  filter(is.finite(lon), is.finite(lat))
+
+glimpse(tn_loc_gross)
+sum(tn_loc_gross$tn_gross_t_yr, na.rm = TRUE)
+```
+
+---
+
+## 3. Assign localities to watersheds and apply (1 - NRE)
+
+```{r loc-to-watershed-nre}
+watershed_goc <- st_read(here::here(spatial_regions, "watersheds_goc.gpkg")) %>%
+  st_make_valid()
+
+loc_sf <- tn_loc_gross %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+  st_transform(st_crs(watershed_goc))
+
+loc_ws <- st_join(loc_sf, watershed_goc %>% select(basin_id), join = st_within, left = TRUE)
+
+# points on edges can miss; try nearest basin if needed
+missing <- loc_ws %>% filter(is.na(basin_id))
+if (nrow(missing) > 0) {
+  nearest_i <- st_nearest_feature(missing, watershed_goc)
+  loc_ws$basin_id[is.na(loc_ws$basin_id)] <- watershed_goc$basin_id[nearest_i]
+}
+
+tn_ww_locality <- loc_ws %>%
+  st_drop_geometry() %>%
+  left_join(nre_by_basin, by = "basin_id") %>%
+  mutate(
+    nre = case_when(
+      urban & is.finite(nre_flow_weighted) ~ nre_flow_weighted,
+      urban & !is.finite(nre_flow_weighted) ~ 0,  # urban but no plant in basin: treat as untreated
+      TRUE ~ 0                                   # rural
+    ),
+    n_kg_yr = n_kg_yr_gross * (1 - nre),
+    tn_wastewater_t_yr = n_kg_yr / 1000
+  )
+
+tn_ww_by_watershed_2020 <- tn_ww_locality %>%
+  group_by(basin_id, year) %>%
+  summarize(
+    tn_wastewater_t_yr = sum(tn_wastewater_t_yr, na.rm = TRUE),
+    n_localities = n(),
+    pop_age_sex = sum(pop_age_sex, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(tn_wastewater_t_yr))
+
+tn_ww_by_watershed_2020
+sum(tn_ww_by_watershed_2020$tn_wastewater_t_yr, na.rm = TRUE)
+```
+
+---
+
+## 4. Scale 2020 N through time with CONAPO `POB_TOTAL`
+
+We hold the 2020 protein × NRE structure fixed, and scale each municipality's 2020 wastewater N by:
+
+$$
+\mathrm{scale}_{m,t} = \frac{\mathrm{POB\_TOTAL}_{m,t}}{\mathrm{POB\_TOTAL}_{m,2020}}
+$$
+
+Then we redistribute each year's municipal N to basins using the **2020** locality→basin shares (so spatial pattern stays from ITER).
+
+```{r conapo-scales}
+conapo <- read_csv(conapo_csv, locale = locale(encoding = "latin1"), show_col_types = FALSE) %>%
+  clean_names() %>%
+  filter(clave_ent %in% goc_clave_ent, ano %in% conapo_years) %>%
+  mutate(
+    idestado = as.integer(clave_ent),
+    idmunicipio = as.integer(clave %% 1000),
+    year = as.integer(ano),
+    pob_total = as.numeric(pob_total)
+  ) %>%
+  group_by(idestado, idmunicipio, year) %>%
+  summarize(pob_total = sum(pob_total, na.rm = TRUE), .groups = "drop")  # sum HOMBRES + MUJERES
+
+conapo_scale <- conapo %>%
+  left_join(
+    conapo %>%
+      filter(year == year_census) %>%
+      select(idestado, idmunicipio, pob_2020 = pob_total),
+    by = c("idestado", "idmunicipio")
+  ) %>%
+  mutate(scale_pop = if_else(pob_2020 > 0, pob_total / pob_2020, NA_real_))
+
+summary(conapo_scale$scale_pop)
+```
+
+```{r scale-mun-to-watershed-years}
+# 2020 municipal TN after NRE
+tn_ww_mun_2020 <- tn_ww_locality %>%
+  mutate(
+    idestado = as.integer(entidad),
+    idmunicipio = as.integer(mun)
+  ) %>%
+  group_by(idestado, nom_ent, idmunicipio, nom_mun) %>%
+  summarize(tn_wastewater_t_yr_2020 = sum(tn_wastewater_t_yr, na.rm = TRUE), .groups = "drop")
+
+# 2020 locality shares of each municipality's TN within each basin
+loc_mun_basin_w <- tn_ww_locality %>%
+  mutate(
+    idestado = as.integer(entidad),
+    idmunicipio = as.integer(mun)
+  ) %>%
+  group_by(idestado, idmunicipio, basin_id) %>%
+  summarize(tn_loc = sum(tn_wastewater_t_yr, na.rm = TRUE), .groups = "drop") %>%
+  group_by(idestado, idmunicipio) %>%
+  mutate(
+    tn_mun = sum(tn_loc, na.rm = TRUE),
+    w_basin = if_else(tn_mun > 0, tn_loc / tn_mun, NA_real_)
+  ) %>%
+  ungroup() %>%
+  select(idestado, idmunicipio, basin_id, w_basin)
+
+tn_ww_by_watershed <- tn_ww_mun_2020 %>%
+  inner_join(
+    conapo_scale %>% select(idestado, idmunicipio, year, scale_pop),
+    by = c("idestado", "idmunicipio")
+  ) %>%
+  mutate(tn_wastewater_t_yr = tn_wastewater_t_yr_2020 * scale_pop) %>%
+  inner_join(loc_mun_basin_w, by = c("idestado", "idmunicipio")) %>%
+  mutate(tn_wastewater_t_yr = tn_wastewater_t_yr * w_basin) %>%
+  group_by(basin_id, year) %>%
+  summarize(
+    tn_wastewater_t_yr = sum(tn_wastewater_t_yr, na.rm = TRUE),
+    n_municipalities = n_distinct(paste(idestado, idmunicipio)),
+    .groups = "drop"
+  ) %>%
+  arrange(year, desc(tn_wastewater_t_yr))
+
+tn_ww_by_watershed %>%
+  group_by(year) %>%
+  summarize(tn_wastewater_t_yr = sum(tn_wastewater_t_yr, na.rm = TRUE), .groups = "drop")
+```
+
+Note: NRE is baked into the 2020 baseline. We do not re-estimate plant NRE for every CONAPO year here (WWTP years are shorter anyway). A later refinement can apply year-specific flow-weighted NRE where SINA years exist.
+
+---
+
+## 5. Write watershed output
+
+Primary deliverable for script 5 is watershed TN (coefficients / NRE already applied). Pourpoints and OHI regions are handled in script 5.
+
+```{r write-outputs}
+# optional QA intermediates
+# write_csv(tn_ww_locality, here::here(eut_int, "tn_wastewater_locality_2020.csv"))
+# write_csv(tn_ww_mun_2020, here::here(eut_int, "tn_wastewater_municipal_2020.csv"))
+
+write_csv(tn_ww_by_watershed, here::here(eut_int, "tn_wastewater_by_watershed.csv"))
+```

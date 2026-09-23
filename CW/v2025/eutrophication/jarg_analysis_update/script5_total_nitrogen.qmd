@@ -13,15 +13,13 @@ editor_options:
   chunk_output_type: console
 ---
 
-# Script 5: total nitrogen by region
+# Script 5: total nitrogen (watersheds → pourpoints → regions)
 
-This script just adds the four sources together so we have total nitrogen entering the Gulf by OHI region (and by watershed, for QA).
+Here we add the four source watershed tables from scripts 1-4, **gapfill missing years**, then route the complete panel through pourpoints to OHI regions. Source coefficients are already baked in upstream:
 
-Coefficients baked into scripts 1-4:
-
-| Source | Coefficient |
-|--------|-------------|
-| Wastewater | Mean |
+| Source | Coefficient (applied in scripts 1-4) |
+|--------|--------------------------------------|
+| Wastewater | Mean NRE pathway |
 | Agriculture | 10% leaching |
 | Livestock | 40% export |
 | Shrimp | 100% export |
@@ -30,39 +28,54 @@ $$
 TN = N_{\mathrm{ww}} + N_{\mathrm{ag}} + N_{\mathrm{liv}} + N_{\mathrm{shrimp}}
 $$
 
-We are **not** dividing by coastline here. That was the old approach and it made Mexicali look much worse than the water-delivery story suggests. Scoring / reference points live in script 6 (and we are not ready for that yet).
+We apply those fractions **before** pourpoints (in scripts 1-4). Pourpoints here are only a delivery / region-assignment step.
+
+We are **not** dividing by coastline. Scoring lives in script 6.
+
+### Gapfill (done here, before summing)
+
+Same idea as Chemicals, using **zoo**:
+
+1. **Between known years:** linear interpolate with `na.approx` (e.g. livestock 2023 between 2022 and 2024; shrimp years between USV survey years).
+2. **After the last known year:** carry forward with `na.locf` (e.g. shrimp **2021 → 2022–2025**; livestock last year → 2025 if needed).
+
+| Source | Typical gap | Fill |
+|--------|-------------|------|
+| Livestock | missing **2023** | `na.approx`, then `na.locf` through 2025 |
+| Shrimp | USV years only; nothing after **2021** | `na.approx` between surveys, then **carry 2021 forward** to 2022–2025 |
+| Wastewater / agriculture | usually annual | same (`na.approx` then `na.locf`) if any hole |
+
+We gapfill **within each `basin_id`** that already has that source. Basins that never had shrimp (etc.) stay 0 for that source after the join.
+
+Then we **keep only years in the complete panel**: from the first year all four sources have begun, through **2025**.
 
 ---
 
 ## Inputs (from scripts 1-4)
 
-Expected under:
+Under:
 
 `/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/eutrophication/jarg_analysis_update/int/`
 
 | File | From |
 |------|------|
-| `tn_wastewater_by_region.csv` | script 1 |
-| `tn_agriculture_by_region.csv` | script 2 |
-| `tn_livestock_by_region.csv` | script 3 |
-| `tn_shrimp_by_region.csv` | script 4 |
+| `tn_wastewater_by_watershed.csv` | script 1 |
+| `tn_agriculture_by_watershed.csv` | script 2 |
+| `tn_livestock_by_watershed.csv` | script 3 |
+| `tn_shrimp_by_watershed.csv` | script 4 |
 
-Same idea at watershed level is nice for maps:
-
-- `tn_*_by_watershed.csv`
-
-Each region table should at least have: `rgn_id`, `year` (if available), and the source TN column in **t N per year**.
+Each should have at least: `basin_id`, `year`, and the source TN column in **t N per year**.
 
 ---
 
 ## Outline
 
-1. Read the four region tables.
-2. Full join on `rgn_id` (+ `year` if present).
-3. Replace missing sources with 0 only after checking they are true zeros, not missing files.
-4. Sum to `tn_total_t_yr`.
-5. Quick plots (stacked bars by source, map if watershed version exists).
-6. Write `output/tn_total_by_region.csv` (keep source columns too).
+1. Read the four watershed tables (keep missing years as NA, not 0).
+2. Choose the panel years (first shared start → 2025).
+3. Gapfill each source by basin (keep observed years as anchors → `na.approx` between them → `na.locf` after the last year).
+4. Join, sum to `tn_total_t_yr`, print coverage.
+5. Pourpoints → regions.
+6. Plotlys; write outputs.
 
 ---
 
@@ -71,7 +84,11 @@ Each region table should at least have: `rgn_id`, `year` (if available), and the
 ```{r setup}
 library(tidyverse)
 library(here)
+library(sf)
 library(janitor)
+library(plotly)
+library(zoo)
+sf_use_s2(FALSE)
 ```
 
 ```{r paths}
@@ -81,62 +98,365 @@ eut_int <- here::here(
 eut_out <- here::here(
   "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/eutrophication/jarg_analysis_update/output"
 )
-```
+spatial_regions <- here::here("/home/shares/ohi/OHI_GOC/spatial/OHI_regions")
 
-### Read sources (once scripts 1-4 have written them)
+year_end_panel <- 2025L
 
-```{r read-sources}
-# ww  <- read_csv(here::here(eut_int, "tn_wastewater_by_region.csv"))
-# ag  <- read_csv(here::here(eut_int, "tn_agriculture_by_region.csv"))
-# liv <- read_csv(here::here(eut_int, "tn_livestock_by_region.csv"))
-# shr <- read_csv(here::here(eut_int, "tn_shrimp_by_region.csv"))
-```
-
-### Add them up
-
-```{r combine}
-# tn_total_by_region <- ww %>%
-#   full_join(ag,  by = c("rgn_id", "year")) %>%
-#   full_join(liv, by = c("rgn_id", "year")) %>%
-#   full_join(shr, by = c("rgn_id", "year")) %>%
-#   mutate(
-#     across(starts_with("tn_"), ~ replace_na(.x, 0)),
-#     tn_total_t_yr = tn_wastewater_t_yr + tn_agriculture_t_yr +
-#       tn_livestock_t_yr + tn_shrimp_t_yr
-#   )
-#
-# tn_total_by_region
-```
-
-### Quick look
-
-```{r plot-todo}
-# tn_long <- tn_total_by_region %>%
-#   select(rgn_id, year, starts_with("tn_")) %>%
-#   select(-tn_total_t_yr) %>%
-#   pivot_longer(starts_with("tn_"), names_to = "source", values_to = "t_yr")
-#
-# ggplot(tn_long, aes(x = rgn_id, y = t_yr, fill = source)) +
-#   geom_col() +
-#   labs(x = NULL, y = "t N / year", title = "Nitrogen by source and region") +
-#   theme_classic() +
-#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
-```
-
-### Write
-
-```{r write-todo}
-# write_csv(tn_total_by_region, here::here(eut_out, "tn_total_by_region.csv"))
+dir.create(eut_out, recursive = TRUE, showWarnings = FALSE)
 ```
 
 ---
 
-## Status
+## 1. Read watershed sources
 
-| Piece | Status |
-|-------|--------|
-| Combine plan | Ready |
-| Actual joins | Blocked until scripts 1-4 write region tables |
-| No coastline standardization | Intentional |
+```{r read-sources}
+ww <- read_csv(
+  here::here(eut_int, "tn_wastewater_by_watershed.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(year = as.integer(year)) %>%
+  select(basin_id, year, tn_wastewater_t_yr)
 
-Next: `script6_eut_current_status.qmd` (hold for discussion)
+ag <- read_csv(
+  here::here(eut_int, "tn_agriculture_by_watershed.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(year = as.integer(year)) %>%
+  select(basin_id, year, tn_agriculture_t_yr)
+
+liv <- read_csv(
+  here::here(eut_int, "tn_livestock_by_watershed.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(year = as.integer(year)) %>%
+  select(basin_id, year, tn_livestock_t_yr)
+
+shr <- read_csv(
+  here::here(eut_int, "tn_shrimp_by_watershed.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(year = as.integer(year)) %>%
+  select(basin_id, year, tn_shrimp_t_yr)
+
+# observed year ranges (before gapfill)
+source_years <- tibble(
+  source = c("wastewater", "agriculture", "livestock", "shrimp"),
+  years = list(
+    sort(unique(ww$year)),
+    sort(unique(ag$year)),
+    sort(unique(liv$year)),
+    sort(unique(shr$year))
+  )
+) %>%
+  mutate(
+    year_min = map_int(years, min),
+    year_max = map_int(years, max),
+    n_years = map_int(years, length),
+    missing_2023 = map_lgl(years, ~ !(2023L %in% .x))
+  ) %>%
+  select(source, year_min, year_max, n_years, missing_2023)
+
+source_years
+```
+
+---
+
+## 2. Gapfill by basin, then keep the complete panel
+
+```{r gapfill-sources}
+# panel starts when every source has begun (usually agriculture is the limiter)
+year_start_panel <- max(
+  min(ww$year),
+  min(ag$year),
+  min(liv$year),
+  min(shr$year)
+)
+years_panel <- year_start_panel:year_end_panel
+
+cat("complete panel years:", paste(years_panel, collapse = ", "), "\n")
+
+# gapfill one tn column within each basin.
+# keep ALL observed years as anchors (e.g. shrimp 2016 + 2021), expand through year_end,
+# then: na.approx between known years, na.locf after the last known year.
+gapfill_basin <- function(df, value_col, years_out) {
+  col <- rlang::as_string(rlang::ensym(value_col))
+
+  df %>%
+    group_by(basin_id) %>%
+    group_modify(function(.x, .y) {
+      y_lo <- min(c(.x$year, years_out), na.rm = TRUE)
+      y_hi <- max(years_out)
+
+      out <- .x %>%
+        tidyr::complete(year = y_lo:y_hi) %>%
+        arrange(year)
+
+      v <- out[[col]]
+      if (sum(is.finite(v)) >= 2L) {
+        v <- zoo::na.approx(v, x = out$year, na.rm = FALSE)
+      }
+      # carry forward after last observation (shrimp 2021 → 2022:2025)
+      v <- zoo::na.locf(v, na.rm = FALSE)
+      out[[col]] <- v
+
+      out %>%
+        filter(year %in% years_out) %>%
+        select(year, all_of(col))
+    }) %>%
+    ungroup()
+}
+
+ww_g <- gapfill_basin(ww, tn_wastewater_t_yr, years_panel)
+ag_g <- gapfill_basin(ag, tn_agriculture_t_yr, years_panel)
+liv_g <- gapfill_basin(liv, tn_livestock_t_yr, years_panel)
+shr_g <- gapfill_basin(shr, tn_shrimp_t_yr, years_panel)
+
+# sanity check: shrimp should be non-zero across the panel after fill, not only 2016/2021
+cat("\nshrimp gulf totals AFTER gapfill (should be >0 each panel year):\n")
+print(
+  shr_g %>%
+    group_by(year) %>%
+    summarize(tn_shrimp_t_yr = sum(tn_shrimp_t_yr, na.rm = TRUE), .groups = "drop")
+)
+
+# join; basins with no history for a source get 0 (not invented from other basins)
+tn_by_watershed <- ww_g %>%
+  full_join(ag_g, by = c("basin_id", "year")) %>%
+  full_join(liv_g, by = c("basin_id", "year")) %>%
+  full_join(shr_g, by = c("basin_id", "year")) %>%
+  mutate(
+    across(starts_with("tn_"), ~ replace_na(.x, 0)),
+    tn_total_t_yr = tn_wastewater_t_yr + tn_agriculture_t_yr +
+      tn_livestock_t_yr + tn_shrimp_t_yr
+  ) %>%
+  arrange(year, desc(tn_total_t_yr))
+
+tn_by_watershed
+
+# gulf-wide coverage after gapfill (all four should be present every panel year)
+tn_year_coverage <- tn_by_watershed %>%
+  group_by(year) %>%
+  summarize(
+    n_basins = n_distinct(basin_id),
+    tn_wastewater_t_yr = sum(tn_wastewater_t_yr),
+    tn_agriculture_t_yr = sum(tn_agriculture_t_yr),
+    tn_livestock_t_yr = sum(tn_livestock_t_yr),
+    tn_shrimp_t_yr = sum(tn_shrimp_t_yr),
+    tn_total_t_yr = sum(tn_total_t_yr),
+    has_ww = tn_wastewater_t_yr > 0,
+    has_ag = tn_agriculture_t_yr > 0,
+    has_liv = tn_livestock_t_yr > 0,
+    has_shr = tn_shrimp_t_yr > 0,
+    n_sources_present = has_ww + has_ag + has_liv + has_shr,
+    .groups = "drop"
+  ) %>%
+  arrange(year)
+
+tn_year_coverage
+
+# keep only years where all four sources are present gulf-wide
+years_complete <- tn_year_coverage %>%
+  filter(n_sources_present == 4) %>%
+  pull(year)
+
+tn_by_watershed <- tn_by_watershed %>%
+  filter(year %in% years_complete)
+
+cat("years kept (all four sources):", paste(years_complete, collapse = ", "), "\n")
+```
+
+### QA: livestock 2023 and shrimp carry-forward
+
+```{r qa-gapfill-plotly}
+# livestock: raw vs gapfilled gulf totals (2023 should no longer be a hole)
+liv_raw_gulf <- liv %>%
+  group_by(year) %>%
+  summarize(tn_livestock_t_yr = sum(tn_livestock_t_yr, na.rm = TRUE), .groups = "drop") %>%
+  mutate(series = "raw")
+
+liv_fill_gulf <- liv_g %>%
+  group_by(year) %>%
+  summarize(tn_livestock_t_yr = sum(tn_livestock_t_yr, na.rm = TRUE), .groups = "drop") %>%
+  mutate(series = "gapfilled")
+
+liv_qa <- bind_rows(liv_raw_gulf, liv_fill_gulf)
+
+liv_gapfill_plotly <- plot_ly(
+  liv_qa,
+  x = ~year,
+  y = ~tn_livestock_t_yr,
+  color = ~series,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Livestock TN (gulf total): raw vs gapfilled",
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "t N / year"),
+    shapes = list(list(
+      type = "line", x0 = 2023, x1 = 2023,
+      y0 = 0, y1 = 1, yref = "paper",
+      line = list(color = "red", dash = "dot")
+    ))
+  )
+
+liv_gapfill_plotly
+
+# shrimp: raw vs gapfilled (2022-2025 should match 2021)
+shr_raw_gulf <- shr %>%
+  group_by(year) %>%
+  summarize(tn_shrimp_t_yr = sum(tn_shrimp_t_yr, na.rm = TRUE), .groups = "drop") %>%
+  mutate(series = "raw")
+
+shr_fill_gulf <- shr_g %>%
+  group_by(year) %>%
+  summarize(tn_shrimp_t_yr = sum(tn_shrimp_t_yr, na.rm = TRUE), .groups = "drop") %>%
+  mutate(series = "gapfilled")
+
+shr_qa <- bind_rows(shr_raw_gulf, shr_fill_gulf)
+
+shr_gapfill_plotly <- plot_ly(
+  shr_qa,
+  x = ~year,
+  y = ~tn_shrimp_t_yr,
+  color = ~series,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Shrimp TN (gulf total): raw vs gapfilled (approx between USV years; carry 2021 → 2022-2025)",
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "t N / year"),
+    shapes = list(list(
+      type = "line", x0 = 2021, x1 = 2021,
+      y0 = 0, y1 = 1, yref = "paper",
+      line = list(color = "red", dash = "dot")
+    ))
+  )
+
+shr_gapfill_plotly
+```
+
+---
+
+## 3. Pourpoints → OHI regions
+
+Same Chemicals pattern: join by `basin_id`, keep pourpoints inside the 50 km inland buffer, drop Pacific-side peninsula pourpoints that are outside the 10 km buffer for Regions 2, 4, and 9.
+
+```{r pourpoints-to-regions}
+pourpoints_goc <- st_read(here::here(spatial_regions, "pourpoints_goc.gpkg"), quiet = TRUE)
+
+marine_and_inland50 <- st_read(
+  here::here(spatial_regions, "marine_and_inland50.gpkg"),
+  quiet = TRUE
+)
+marine_and_inland10 <- st_read(
+  here::here(spatial_regions, "marine_and_inland10.gpkg"),
+  quiet = TRUE
+)
+
+pour_tn <- pourpoints_goc %>%
+  select(basin_id) %>%
+  left_join(tn_by_watershed, by = "basin_id") %>%
+  filter(!is.na(tn_total_t_yr), tn_total_t_yr > 0) %>%
+  st_transform(st_crs(marine_and_inland50)) %>%
+  st_intersection(marine_and_inland50) %>%
+  mutate(
+    is_within_10km = lengths(
+      st_within(., st_transform(marine_and_inland10, st_crs(.)))
+    ) > 0
+  ) %>%
+  filter(!(is_within_10km == FALSE & rgn_id %in% c("Region_2", "Region_4", "Region_9")))
+
+tn_by_region <- pour_tn %>%
+  st_drop_geometry() %>%
+  group_by(rgn_id, year) %>%
+  summarize(
+    across(starts_with("tn_"), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  arrange(year, rgn_id)
+
+tn_by_region
+
+tn_by_region %>%
+  group_by(year) %>%
+  summarize(
+    n_regions = n_distinct(rgn_id),
+    across(starts_with("tn_"), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+```
+
+---
+
+## 4. Quick look (plotly)
+
+```{r plotly-sources-by-region}
+tn_long <- tn_by_region %>%
+  select(
+    rgn_id, year,
+    tn_wastewater_t_yr, tn_agriculture_t_yr,
+    tn_livestock_t_yr, tn_shrimp_t_yr
+  ) %>%
+  pivot_longer(starts_with("tn_"), names_to = "source", values_to = "t_yr") %>%
+  mutate(
+    source = recode(
+      source,
+      tn_wastewater_t_yr = "wastewater",
+      tn_agriculture_t_yr = "agriculture",
+      tn_livestock_t_yr = "livestock",
+      tn_shrimp_t_yr = "shrimp"
+    )
+  )
+
+tn_sources_plotly <- plot_ly(
+  tn_long,
+  x = ~rgn_id,
+  y = ~t_yr,
+  color = ~source,
+  frame = ~year,
+  type = "bar"
+  #text = ~paste0(source, ": ", round(t_yr, 1), " t N/yr"),
+  #hoverinfo = "text+x"
+) %>%
+  layout(
+    barmode = "stack",
+    title = "Nitrogen by source and region (t N / year)",
+    xaxis = list(title = NULL),
+    yaxis = list(title = "t N / year"),
+    legend = list(title = list(text = "Source"))
+  )
+
+tn_sources_plotly
+
+tn_total_plotly <- plot_ly(
+  tn_by_region,
+  x = ~year,
+  y = ~tn_total_t_yr,
+  color = ~rgn_id,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(rgn_id, "<br>", year, ": ", round(tn_total_t_yr, 1), " t N/yr"),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Total nitrogen by region over time (gapfilled complete panel)",
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "t N / year"),
+    legend = list(title = list(text = "Region"))
+  )
+
+tn_total_plotly
+```
+
+---
+
+## 5. Write outputs
+
+```{r write-outputs}
+write_csv(tn_by_watershed, here::here(eut_out, "tn_total_by_watershed.csv"))
+write_csv(tn_by_region, here::here(eut_out, "tn_total_by_region.csv"))
+write_csv(tn_year_coverage, here::here(eut_out, "tn_year_coverage.csv"))
+write_csv(source_years, here::here(eut_out, "tn_source_years_raw.csv"))
+```

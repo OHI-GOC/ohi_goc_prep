@@ -13,19 +13,31 @@ editor_options:
   chunk_output_type: console
 ---
 
-# Script 6: eutrophication current status (on hold)
+# Script 6: eutrophication current status
 
-This is where we will turn regional total nitrogen into a pressure and a current status score.
+Here we turn regional total nitrogen from script 5 into a pressure and a current status score.
 
-**We are not ready to lock a reference point yet.** Keep this script as a place for notes and options until we have that discussion.
-
-Input will come from script 5:
+Input:
 
 `jarg_analysis_update/output/tn_total_by_region.csv`
 
+We follow the same **Chemicals** status pattern (ideal = 0; maximum = mean of the top 5 observations), but we score on **raw t N / year** from pourpoints. We intentionally do **not** divide by coastline. The old coastline workflow made Region 1 (Mexicali) look much worse than the water-delivery story, and it gapfilled Region 9 from Region 8. We do not repeat that.
+
+$$
+\mathrm{pressure} = \min\left(1,\ \frac{TN_{\mathrm{current}} - TN_{\mathrm{ideal}}}{TN_{\mathrm{maximum}} - TN_{\mathrm{ideal}}}\right)
+$$
+
+$$
+\mathrm{status} = (1 - \mathrm{pressure}) \times 100
+$$
+
+with $TN_{\mathrm{ideal}} = 0$ and $TN_{\mathrm{maximum}}$ = mean of the top 5 `tn_total_t_yr` values across all regions and years in the scoring panel.
+
+This is a **working default** aligned with pharmaceuticals / pesticides / untreated wastewater. If the EWG prefers a different reference later, we only need to change the maximum step.
+
 ---
 
-## What we did last time (for context only)
+## What we did last time (context only)
 
 The old `cw_eutrophication.qmd` workflow:
 
@@ -35,84 +47,228 @@ The old `cw_eutrophication.qmd` workflow:
 4. Weighted municipalities into regions by coastline
 5. Gapfilled Region 9 with Region 8
 
-That pushed Region 1 (Mexicali) very low because of a short coastline, and it treated Region 9 as a copy of Region 8. We do not want to repeat that.
+We keep that history here so we remember why this update is different.
 
 ---
 
-## What we want this update to support
-
-- Ideal = 0 nitrogen
-- Use pourpoint-based regional TN from script 5 (t N / year), not coastline-standardized municipal values
-- No Region 8 → Region 9 copy-paste
-
-$$
-\mathrm{Status} = (1 - \mathrm{pressure}) \times 100
-$$
-
----
-
-## Reference point options to discuss
-
-These are options only. Do not implement until we agree.
-
-1. **Top-5 mean** of regional TN across all regions and years (same pattern as Chemicals)
-2. **Single historical maximum** regional TN
-3. A literature / policy threshold if we find one that actually applies to annual land-based loads to the GoC
-4. Something else the EWG prefers
-
-Open questions:
-
-- Do we keep raw t N / year, or normalize by something other than coastline (shelf area, discharge volume, etc.)?
-- Single year snapshot vs multi-year panel for the maximum?
-- Cap pressure at 1 when a region exceeds the reference?
-
----
-
-## Placeholder code (do not treat as final)
+## Setup
 
 ```{r setup}
 library(tidyverse)
 library(here)
+library(plotly)
+
+region_levels <- paste0("Region_", 1:9)
+
+rgn_colors <- c(
+  Region_1 = "#C03729",
+  Region_2 = "#E68C7C",
+  Region_3 = "#FC8F24",
+  Region_4 = "#dcaa38",
+  Region_5 = "#cbd2a0",
+  Region_6 = "#98a25a",
+  Region_7 = "#747428",
+  Region_8 = "#627391",
+  Region_9 = "#8d61a9"
+)
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+# plotly legend uses the color column values; map palette to display names
+rgn_colors_labeled <- setNames(
+  unname(rgn_colors[region_levels]),
+  unname(rgn_labels[region_levels])
+)
 ```
 
 ```{r paths}
 eut_out <- here::here(
   "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/eutrophication/jarg_analysis_update/output"
 )
-```
 
-```{r read-when-ready}
-# tn <- read_csv(here::here(eut_out, "tn_total_by_region.csv"))
-```
-
-```{r score-placeholder}
-# example only, not approved:
-# max_ref <- tn %>%
-#   slice_max(tn_total_t_yr, n = 5) %>%
-#   summarize(maximum = mean(tn_total_t_yr)) %>%
-#   pull(maximum)
-#
-# scored <- tn %>%
-#   mutate(
-#     pressure = pmin(1, tn_total_t_yr / max_ref),
-#     status = (1 - pressure) * 100
-#   )
-```
-
-```{r write-placeholder}
-# later, once reference points are agreed:
-# write_csv(scored %>% select(rgn_id, year, status),
-#           here::here(eut_out, "nutrient_status.csv"))
-# write_csv(scored %>% select(rgn_id, year, pressure),
-#           here::here(eut_out, "nutrient_pressure.csv"))
+dir.create(eut_out, recursive = TRUE, showWarnings = FALSE)
 ```
 
 ---
 
-## Status
+## 1. Read script 5 totals
 
-| Piece | Status |
-|-------|--------|
-| Needs reference-point discussion | Yes |
-| Implement scoring | Not yet |
-| Depends on | Script 5 totals |
+```{r read-tn}
+tn <- read_csv(
+  here::here(eut_out, "tn_total_by_region.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(year = as.integer(year)) %>%
+  arrange(year, rgn_id)
+
+# optional: year coverage from script 5, if present
+coverage_path <- here::here(eut_out, "tn_year_coverage.csv")
+if (file.exists(coverage_path)) {
+  tn_year_coverage <- read_csv(coverage_path, show_col_types = FALSE)
+  tn_year_coverage
+}
+
+tn
+```
+
+### Scoring panel
+
+Script 5 already gapfills and keeps only years where all four sources are present. We score on that full table.
+
+```{r scoring-panel}
+tn_score <- tn
+
+score_years <- sort(unique(tn_score$year))
+
+cat("scoring years (from script 5 complete panel):", paste(score_years, collapse = ", "), "\n")
+cat("n region-years:", nrow(tn_score), "\n")
+
+if (exists("tn_year_coverage")) {
+  tn_year_coverage
+}
+
+tn_score
+```
+
+---
+
+## 2. Reference point and status
+
+```{r score}
+ideal <- 0
+
+top5 <- tn_score %>%
+  slice_max(tn_total_t_yr, n = 5, with_ties = FALSE)
+
+top5
+
+maximum <- mean(top5$tn_total_t_yr)
+maximum
+
+nutrient_status <- tn_score %>%
+  mutate(
+    ideal = ideal,
+    maximum = maximum,
+    pressure = pmin(1, (tn_total_t_yr - ideal) / (maximum - ideal)),
+    status = (1 - pressure) * 100
+  ) %>%
+  arrange(year, rgn_id)
+
+nutrient_status
+```
+
+---
+
+## 3. Quick look (plotly)
+
+```{r plotly-status}
+nutrient_status_plot <- nutrient_status %>%
+  mutate(
+    rgn_id = factor(rgn_id, levels = region_levels),
+    rgn_label = factor(
+      rgn_labels[as.character(rgn_id)],
+      levels = unname(rgn_labels[region_levels])
+    )
+  )
+
+status_plotly <- plot_ly(
+  nutrient_status_plot,
+  x = ~year,
+  y = ~status,
+  color = ~rgn_label,
+  colors = rgn_colors_labeled,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    rgn_id, " (", rgn_label, ")",
+    "<br>Year: ", year,
+    "<br>TN: ", round(tn_total_t_yr, 1), " t N/yr",
+    "<br>Pressure: ", round(pressure, 3),
+    "<br>Status: ", round(status, 1)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Clean Waters: eutrophication current status (top-5 mean reference)",
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "Status (0-100)", range = c(0, 100)),
+    legend = list(title = list(text = "Region")),
+    shapes = list(list(
+      type = "line",
+      x0 = min(nutrient_status_plot$year),
+      x1 = max(nutrient_status_plot$year),
+      y0 = 100, y1 = 100,
+      line = list(color = "gray", dash = "dot")
+    ))
+  )
+
+status_plotly
+
+pressure_plotly <- plot_ly(
+  nutrient_status_plot,
+  x = ~year,
+  y = ~pressure,
+  color = ~rgn_label,
+  colors = rgn_colors_labeled,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    rgn_id, " (", rgn_label, ")",
+    "<br>", year, ": pressure ", round(pressure, 3)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Eutrophication pressure (1 = at or above top-5 mean reference)",
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "Pressure (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Region"))
+  )
+
+pressure_plotly
+```
+
+---
+
+## 4. Write outputs
+
+```{r write-outputs}
+write_csv(
+  nutrient_status,
+  here::here(eut_out, "nutrient_status_full.csv")
+)
+
+write_csv(
+  nutrient_status %>% select(rgn_id, year, status),
+  here::here(eut_out, "nutrient_status.csv")
+)
+
+write_csv(
+  nutrient_status %>% select(rgn_id, year, pressure),
+  here::here(eut_out, "nutrient_pressure.csv")
+)
+
+# small reference log so we remember how the score was built
+ref_log <- tibble(
+  ideal = ideal,
+  maximum_top5_mean = maximum,
+  n_top5 = nrow(top5),
+  scoring_years = paste(score_years, collapse = ";"),
+  top5_detail = top5 %>%
+    mutate(lab = paste0(rgn_id, " ", year, "=", round(tn_total_t_yr, 1))) %>%
+    pull(lab) %>%
+    paste(collapse = "; ")
+)
+
+write_csv(ref_log, here::here(eut_out, "nutrient_reference_point.csv"))
+```
