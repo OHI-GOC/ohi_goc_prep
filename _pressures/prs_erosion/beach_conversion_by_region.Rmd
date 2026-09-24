@@ -1,0 +1,420 @@
+---
+title: "Shoreline class by OHI region, 2010–2020"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+date: "2026-09-23"
+---
+
+# Summary
+
+**Decision.** This dataset will not be used as a beach-loss pressure. Built shore can replace beach, and that loss would matter on developed coasts, but the 2010–2020 comparison does not give a clear regional signal. Sandy shoreline is also the least reliable class in the product, and the lines do not measure the beach changes this assessment needs.
+
+GCL_FCS30 maps the waterline, not the beach. Each year is a line classified as artificial, biogenic, sandy, muddy, rocky, or estuary. Sandy (class 2) is the beach class. Length was measured for 2010, 2015, and 2020 inside the Gulf ecoregion and assigned to the nine marine OHI regions. The source is Zuo et al. (2025), downloaded from Zenodo (10.5281/zenodo.13943679).
+
+What the lines can show is a swap from sandy shore to seawall, port, or fill. They do not record beach width, beach area, or erosion that leaves the shore sandy. A malecón stays invisible while sand remains in front of the wall. The published sandy F1 score is about 75%, the lowest of the six classes, and sandy is often confused with rocky. The waterline itself is only located to about 30 m.
+
+Gulf-wide sandy length went from 2,079 km in 2010 to 2,072 km in 2015 to 2,000 km in 2020. Artificial length fell from 395 km to 352 km, then stayed near 356 km. That is a small sandy decline without a matching gain in structures.
+
+By region, only Nayarit shows sandy loss together with an artificial gain over the full decade (sandy −17 km, artificial +21 km). That path is not steady: Nayarit artificial length was 70 km, then 35 km, then 91 km. Elsewhere, sandy declines are paired with flat or falling artificial length. Sonora’s midriff region lost 38 km of sandy shore while artificial length changed by about 2 km. Several regions have identical 2010 and 2015 lengths, then a jump in 2020, which reads as a classification change rather than a shoreline trend.
+
+The tables and plots below keep the comparison. They are not an input to the pressure score.
+
+# Purpose
+
+This script measures how much of the Gulf of California shoreline is sandy, artificial, rocky, biogenic, muddy, or estuary in 2010, 2015, and 2020, for each marine OHI region.
+
+Sandy shoreline (class 2) is the beach class. The comparison that matters for built structures crowding out beach is a loss of sandy length in the same region as a gain of artificial length.
+
+# Data
+
+GCL_FCS30 is a global coastline, mapped as lines at 30 m from Landsat, for the nominal years 2010, 2015, and 2020.
+
+- Record: https://zenodo.org/records/13943679
+- DOI: https://doi.org/10.5281/zenodo.13943679
+- Paper: Zuo et al. (2025), *Scientific Data* 12:129, https://doi.org/10.1038/s41597-025-04430-0
+
+The files used here live on the OHI share:
+
+`/home/shares/ohi/OHI_GOC/_raw_data/GCL_FCS30/d2025`
+
+`GCL2020` was already in that folder (saved 3 April 2025). `GCL2010` and `GCL2015` were added 23 September 2026 from the Zenodo record above. The script below downloads a year only when its shapefile is missing.
+
+| Code | Class |
+|---|---|
+| 0 | artificial |
+| 1 | biogenic |
+| 2 | sandy (beach) |
+| 3 | muddy |
+| 4 | rocky |
+| 5 | estuary |
+
+The `.prj` on each shapefile is Web Mercator. Length fields stored in the attribute table are not ground lengths, so this script measures length after projecting to a Gulf Albers CRS.
+
+Overall classification accuracy is about 85%. Sandy is the weakest class (F1 about 75%) and is often confused with rocky. The waterline is located to about one Landsat pixel (30 m). Because these are lines, the script does not measure beach width, beach area, or gradual erosion.
+
+# Setup
+
+```{r setup}
+library(sf)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(here)
+
+# Planar geometry after we project to meters.
+sf_use_s2(FALSE)
+
+# Share path on this Linux machine. Same layout as the other OHI GoC scripts.
+dir_M <- c(
+  "Windows" = "//mazu.nceas.ucsb.edu/ohi",
+  "Darwin"  = "/Volumes/ohi",
+  "Linux"   = "/home/shares/ohi"
+)[[Sys.info()[["sysname"]]]]
+
+gcl_raw_dir <- file.path(dir_M, "OHI_GOC", "_raw_data", "GCL_FCS30", "d2025")
+int_dir <- here("_pressures", "prs_beach_conversion", "int")
+dir.create(int_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Equal-area projection centered on the Gulf, in meters.
+gulf_crs <- st_crs("+proj=aea +lat_1=23 +lat_2=30 +lat_0=25 +lon_0=-110 +datum=WGS84 +units=m +no_defs")
+
+# Class 2 is the beach category used in the comparison.
+class_labels <- c(
+  "0" = "artificial",
+  "1" = "biogenic",
+  "2" = "sandy",
+  "3" = "muddy",
+  "4" = "rocky",
+  "5" = "estuary"
+)
+
+years <- c(2010, 2015, 2020)
+```
+
+# Download a year if it is not already on the share
+
+Each year needs the shapefile and its sidecar files. Existing files are left as they are.
+
+```{r download}
+zenodo <- "https://zenodo.org/records/13943679/files"
+
+for (year in years) {
+  for (ext in c("cpg", "dbf", "prj", "shp", "shx")) {
+    dest <- file.path(gcl_raw_dir, sprintf("GCL%s.%s", year, ext))
+    if (file.exists(dest) && file.info(dest)$size > 0) {
+      next
+    }
+    url <- sprintf("%s/GCL%s.%s?download=1", zenodo, year, ext)
+    message("Downloading ", basename(dest))
+    download.file(url, dest, mode = "wb", quiet = TRUE)
+  }
+}
+```
+
+# Study area
+
+The ecoregion polygon is the same clip used for the 2020 coastline exploration. Marine OHI regions receive the length totals. Land regions are not used.
+
+```{r study-area}
+eco <- st_read(
+  here("spatial", "OpenStreetMapCoastline", "GoC_polygon_ecoregion_latlon.shp"),
+  quiet = TRUE
+) %>%
+  st_transform(gulf_crs) %>%
+  st_make_valid()
+
+marine <- st_read(
+  here("spatial", "ohi_regions", "goc_ohi_rgns.shp"),
+  quiet = TRUE
+) %>%
+  filter(location == "marine") %>%
+  st_transform(gulf_crs) %>%
+  st_make_valid()
+
+# Stable region order for tables and plots.
+marine <- marine %>%
+  mutate(rgn_num = as.integer(gsub("Region_", "", rgn_id))) %>%
+  arrange(rgn_num)
+```
+
+# Clip each year, measure length, and assign a region
+
+For each year the script:
+
+1. Reads the global lines that fall in a box around the Gulf, using the shapefile CRS.
+2. Projects those lines to Gulf Albers and clips them to the ecoregion.
+3. Measures length in kilometers from that projected geometry.
+4. Assigns the segment to the nearest marine OHI region, using the segment centroid.
+
+```{r clip-and-measure}
+clip_one_year <- function(year) {
+  shp_path <- file.path(gcl_raw_dir, sprintf("GCL%s.shp", year))
+  prj_txt <- paste(readLines(sub("\\.shp$", ".prj", shp_path), warn = FALSE), collapse = "")
+  file_crs <- tryCatch(st_crs(prj_txt), error = function(e) st_crs(NA))
+  if (is.na(file_crs)) {
+    file_crs <- if (grepl("Mercator", prj_txt)) st_crs(3857) else st_crs(4326)
+  }
+
+  # Pad the box by 20 km so a line that barely crosses the boundary is not dropped.
+  eco_in_file_crs <- st_transform(eco, file_crs)
+  bb <- st_bbox(eco_in_file_crs)
+  pad <- if (isTRUE(st_is_longlat(eco_in_file_crs))) 0.2 else 20000
+  bb[c("xmin", "ymin")] <- bb[c("xmin", "ymin")] - pad
+  bb[c("xmax", "ymax")] <- bb[c("xmax", "ymax")] + pad
+
+  message("Reading ", year, " inside the Gulf box")
+  lines <- st_read(shp_path, wkt_filter = st_as_text(st_as_sfc(bb)), quiet = TRUE) %>%
+    st_transform(gulf_crs) %>%
+    st_make_valid()
+
+  # Keep the portion inside the ecoregion. Intersection can return empty pieces.
+  message("Clipping ", year, " to the ecoregion")
+  lines <- st_intersection(lines, st_union(eco))
+  lines <- lines[!st_is_empty(lines), ]
+
+  # Some clipped pieces come back as collections. Keep the line parts only.
+  if (any(st_geometry_type(lines) == "GEOMETRYCOLLECTION")) {
+    lines <- st_collection_extract(lines, "LINESTRING")
+  }
+  lines <- lines[!st_is_empty(lines), ]
+
+  lines <- lines %>%
+    mutate(
+      year = year,
+      class = as.integer(class),
+      shore_class = class_labels[as.character(class)],
+      length_km = as.numeric(st_length(geometry)) / 1000
+    ) %>%
+    select(year, class, shore_class, length_km)
+
+  # Centroid of each segment, then the nearest marine region.
+  # In 2020 almost every centroid already fell inside a marine region.
+  centroids <- st_centroid(lines)
+  nearest <- st_nearest_feature(centroids, marine)
+  dist_m <- as.numeric(st_distance(centroids, marine[nearest, ], by_element = TRUE))
+
+  lines %>%
+    mutate(
+      rgn_id = marine$rgn_id[nearest],
+      estado = marine$estado[nearest],
+      ecorgn = marine$ecorgn[nearest],
+      rgn_num = marine$rgn_num[nearest],
+      dist_to_rgn_m = dist_m
+    )
+}
+
+gulf_by_year <- lapply(years, clip_one_year)
+gulf <- bind_rows(gulf_by_year)
+```
+
+Segments whose centroid sits far from every marine region are still assigned, and the distance is kept so they can be checked.
+
+```{r region-distance}
+summary(gulf$dist_to_rgn_m)
+```
+
+# Save the clipped lines and the length tables
+
+```{r save-lines}
+for (yr in years) {
+  out_gpkg <- file.path(int_dir, sprintf("gcl_gulf_%s.gpkg", yr))
+  if (file.exists(out_gpkg)) file.remove(out_gpkg)
+  st_write(gulf %>% filter(year == yr), out_gpkg, quiet = TRUE)
+}
+```
+
+```{r summarise}
+# One row per year and class, for the whole Gulf crop.
+gulf_totals <- gulf %>%
+  st_drop_geometry() %>%
+  group_by(year, class, shore_class) %>%
+  summarise(length_km = sum(length_km), n_segments = n(), .groups = "drop") %>%
+  arrange(year, class)
+
+# One row per year, region, and class.
+region_totals <- gulf %>%
+  st_drop_geometry() %>%
+  group_by(year, rgn_num, rgn_id, estado, ecorgn, class, shore_class) %>%
+  summarise(length_km = sum(length_km), n_segments = n(), .groups = "drop") %>%
+  arrange(year, rgn_num, class)
+
+write_csv(gulf_totals, file.path(int_dir, "shoreline_km_by_year_class.csv"))
+write_csv(region_totals, file.path(int_dir, "shoreline_km_by_region_year_class.csv"))
+
+gulf_totals
+```
+
+# Length by region
+
+Sandy share is sandy length divided by all shoreline length in that region and year.
+
+```{r region-wide}
+region_wide <- region_totals %>%
+  select(year, rgn_num, rgn_id, estado, ecorgn, shore_class, length_km) %>%
+  pivot_wider(names_from = shore_class, values_from = length_km, values_fill = 0) %>%
+  mutate(
+    total_km = artificial + biogenic + sandy + muddy + rocky + estuary,
+    sandy_share = sandy / total_km,
+    artificial_share = artificial / total_km
+  ) %>%
+  arrange(year, rgn_num)
+
+write_csv(region_wide, file.path(int_dir, "shoreline_km_by_region_year_wide.csv"))
+region_wide
+```
+
+```{r plot-classes}
+# Same six classes in every year, so a missing class still has a bar of zero.
+class_levels <- unname(class_labels)
+
+plot_totals <- region_totals %>%
+  mutate(
+    shore_class = factor(shore_class, levels = class_levels),
+    region = paste0(rgn_num, " ", gsub("_", " ", estado))
+  )
+
+p_classes <- ggplot(plot_totals, aes(x = region, y = length_km, fill = shore_class)) +
+  geom_col() +
+  facet_wrap(~ year, ncol = 1) +
+  scale_fill_brewer(palette = "Set2", name = "Shoreline class") +
+  labs(
+    title = "Shoreline length by class and OHI region",
+    x = "OHI marine region",
+    y = "Length (km)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+ggsave(
+  file.path(int_dir, "shoreline_km_by_region_year.png"),
+  p_classes, width = 9, height = 10, dpi = 120
+)
+p_classes
+```
+
+# Beach and structures through time
+
+Each line is one marine OHI region. Beach length is the sandy class. Structures are the artificial class. The three years are the nominal GCL years, so the line connects 2010, 2015, and 2020.
+
+```{r trend-data}
+# Region names include the ecoregion so the two Baja California regions stay distinct.
+trend <- region_totals %>%
+  filter(shore_class %in% c("sandy", "artificial")) %>%
+  mutate(
+    region = paste0(
+      rgn_num, " ",
+      gsub("_", " ", ecorgn), ", ",
+      gsub("_", " ", estado)
+    )
+  )
+
+region_levels <- trend %>%
+  distinct(rgn_num, region) %>%
+  arrange(rgn_num) %>%
+  pull(region)
+
+trend <- trend %>%
+  mutate(region = factor(region, levels = region_levels))
+```
+
+```{r plot-beach-trend}
+beach_trend <- trend %>% filter(shore_class == "sandy")
+
+p_beach <- ggplot(beach_trend, aes(x = year, y = length_km, color = region, group = region)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = years) +
+  scale_color_brewer(palette = "Set1", name = "OHI region") +
+  labs(
+    title = "Sandy shoreline length by OHI region",
+    x = "Year",
+    y = "Beach length (km)"
+  ) +
+  theme_bw()
+
+ggsave(
+  file.path(int_dir, "sandy_length_by_region_year.png"),
+  p_beach, width = 9, height = 5.5, dpi = 120
+)
+p_beach
+```
+
+```{r plot-structures-trend}
+structure_trend <- trend %>% filter(shore_class == "artificial")
+
+p_structures <- ggplot(structure_trend, aes(x = year, y = length_km, color = region, group = region)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = years) +
+  scale_color_brewer(palette = "Set1", name = "OHI region") +
+  labs(
+    title = "Artificial shoreline length by OHI region",
+    x = "Year",
+    y = "Structure length (km)"
+  ) +
+  theme_bw()
+
+ggsave(
+  file.path(int_dir, "artificial_length_by_region_year.png"),
+  p_structures, width = 9, height = 5.5, dpi = 120
+)
+p_structures
+```
+
+# Change from 2010 to 2020
+
+The built-shore signal is a sandy decrease together with an artificial increase. Other class changes are saved so a sandy loss that reappears as rocky is visible rather than treated as beach loss.
+
+```{r change}
+change <- region_totals %>%
+  select(rgn_num, rgn_id, estado, ecorgn, shore_class, year, length_km) %>%
+  pivot_wider(names_from = year, values_from = length_km, names_prefix = "km_", values_fill = 0) %>%
+  mutate(change_2010_2020_km = km_2020 - km_2010) %>%
+  arrange(rgn_num, shore_class)
+
+write_csv(change, file.path(int_dir, "shoreline_change_2010_2020_by_region_class.csv"))
+
+# One row per region for the two classes used to judge built-shore replacement.
+sandy_art <- change %>%
+  filter(shore_class %in% c("sandy", "artificial")) %>%
+  select(rgn_num, rgn_id, estado, ecorgn, shore_class, km_2010, km_2015, km_2020, change_2010_2020_km) %>%
+  pivot_wider(
+    names_from = shore_class,
+    values_from = c(km_2010, km_2015, km_2020, change_2010_2020_km)
+  )
+
+write_csv(sandy_art, file.path(int_dir, "sandy_and_artificial_change_by_region.csv"))
+sandy_art
+```
+
+```{r plot-change}
+change_plot <- change %>%
+  filter(shore_class %in% c("sandy", "artificial")) %>%
+  mutate(
+    region = paste0(rgn_num, " ", gsub("_", " ", estado)),
+    shore_class = factor(shore_class, levels = c("sandy", "artificial"))
+  )
+
+p_change <- ggplot(change_plot, aes(x = region, y = change_2010_2020_km, fill = shore_class)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.65) +
+  geom_hline(yintercept = 0) +
+  scale_fill_manual(values = c(sandy = "#1b9e77", artificial = "#d95f02"), name = "Class") +
+  labs(
+    title = "Change in sandy and artificial shoreline, 2010 to 2020",
+    x = "OHI marine region",
+    y = "Change in length (km)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+ggsave(
+  file.path(int_dir, "sandy_artificial_change_2010_2020.png"),
+  p_change, width = 9, height = 5, dpi = 120
+)
+p_change
+```
+
+A negative sandy bar and a positive artificial bar of similar size, in the same region, is the replacement pattern. A sandy change that is matched by rocky rather than artificial is left in `shoreline_change_2010_2020_by_region_class.csv` and is not counted as built shore replacing beach.
