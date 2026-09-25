@@ -15,11 +15,11 @@ editor_options:
 
 # Script 4: shrimp aquaculture nitrogen
 
-This script estimates nitrogen from shrimp farming following Romero-Gil et al. (2026), then routes it through watersheds and pourpoints.
+Here we estimate nitrogen from shrimp farming following Romero-Gil et al. (2026) at GoC watersheds (`basin_id`). We then use pourpoints to assign coastal watershed nitrogen output to OHI regions in script 5.
 
-For scoring later, we want **100%** of estimated shrimp-farm nitrogen to reach the sea (JARG Supplemental Table 6). Table 6 also has 50% and 85%; we use 100% because ponds discharge right to nearby waters.
+We will use a **100% export coefficient**, chosen from JARG's Supplemental Table 6 (Table 6 also has 50% and 85%; we use 100% because ponds discharge directly to nearby waters).
 
-Good news: Chemicals already estimated shrimp production the way we want, using pond area × 1.5 tons/ha (González-Rivas et al. 2023).
+**Data and methods overview:** production comes from Chemicals pharmaceuticals shrimp intermediates: pond area × 1.5 t/ha (González-Rivas et al. 2023), already summarized by watershed. We apply Páez-Osuna / Romero-Gil's 47 kg N per metric tonne of shrimp, then convert to t N / year.
 
 ---
 
@@ -49,16 +49,16 @@ Paper: https://doi.org/10.2166/wpt.2026.239
 
 ---
 
-## What we already have from CW/Chemicals 
+## What we already have from CW (use this)
 
 From `chemicals/pharmaceuticals/script2_shrimp_farming.qmd`:
 
-<!-- ```r -->
-<!-- aq_production_by_watershed <- aq_area_by_watershed %>% -->
-<!--   mutate( -->
-<!--     shrimp_prod_tons = aq_area_ha * 1.5  # ha * tons/ha = tons -->
-<!--   ) -->
-<!-- ``` -->
+```r
+aq_production_by_watershed <- aq_area_by_watershed %>%
+  mutate(
+    shrimp_prod_tons = aq_area_ha * 1.5  # ha * tons/ha = tons
+  )
+```
 
 Already written on mazu:
 
@@ -69,7 +69,7 @@ Already written on mazu:
 | Pourpoint gpkg | `chemicals/pharmaceuticals/shrimp_int/shrimp_tons_pourpoints_prod_final.gpkg` |
 | Aquaculture USV polygons | `chemicals/pesticides/int/usv_aquaculture_goc_allyears.gpkg` |
 
-To do this analysis, we only need the tons of shrimp produced, then × 47 kg N/ton × 1.0.
+We do **not** need the pharmaceutical mg columns for eutrophication. We only need tons of shrimp, then × 47 kg N/ton × 1.0.
 
 **Unit assumption:** we treat González-Rivas / Chemicals `shrimp_prod_tons` (and `shrimp_tons`) as **metric tonnes** (1 t = 1000 kg), then apply Páez-Osuna / Romero-Gil’s 47 kg N per tonne directly:
 
@@ -79,12 +79,11 @@ We do **not** apply the pharmaceuticals short-ton conversion (`* 907.18474`). Th
 
 ---
 
-## Outline of what to do here
+## Outline of what we do here
 
 1. Read `aq_production_tons_shrimp_by_watershed.csv`.
 2. Compute `tn_shrimp_t_yr = shrimp_prod_tons * 47 / 1000` (kg → t), with export = 1.
-3. Join to pourpoints / regions (or start from `shrimp_tons_pourpoints_prod_rgnid.csv` if you only need region totals).
-4. Write eutrophication intermediates.
+3. Write `tn_shrimp_by_watershed.csv` for script 5 (pourpoints / regions happen there).
 
 ---
 
@@ -106,12 +105,11 @@ eut_int <- here::here(
   "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/eutrophication/jarg_analysis_update/int"
 )
 
-
 kg_n_per_t_shrimp <- 47  # Paez-Osuna (2007) via Romero-Gil et al. (2026): kg N released per ton shrimp
-export_cw <- 1.0 # Table 6 100% export to coastal waters
+export_cw <- 1.0          # main-text / Table 6 100% export to coastal waters
 ```
 
-### Read in shrimp production (again, already calculated within `CW/chemicals/pharmaceuticals/script2_shrimp_farming.qmd`)
+### Read shrimp production (already built)
 
 ```{r read-shrimp-prod}
 aq_production_by_watershed <- read_csv(
@@ -132,25 +130,146 @@ tn_shrimp_by_watershed <- aq_production_by_watershed %>%
 summary(tn_shrimp_by_watershed$tn_shrimp_t_yr)
 ```
 
-### Optional: region totals from existing pourpoint table
+### Write watershed output
 
-```{r region-from-existing}
-shrimp_by_region_tons <- read_csv(
-  here::here(shrimp_int, "shrimp_tons_pourpoints_prod_rgnid.csv")
-)
-
-tn_shrimp_by_region <- shrimp_by_region_tons %>%
-  mutate(
-    tn_shrimp_t_yr = shrimp_tons * kg_n_per_t_shrimp / 1000 * export_cw
-  )
-
-tn_shrimp_by_region
-```
-
-### Write outputs
+Primary deliverable for script 5 is watershed TN (47 kg N/t × 100% export already applied). Pourpoints and OHI regions are handled in script 5.
 
 ```{r write-outputs}
 write_csv(tn_shrimp_by_watershed, here::here(eut_int, "tn_shrimp_by_watershed.csv"))
-write_csv(tn_shrimp_by_region, here::here(eut_int, "tn_shrimp_by_region.csv"))
 ```
 
+---
+
+## QA: pourpoints vs pond polygons (are we losing coastal shrimp N?)
+
+Ponds are already inside GoC watersheds (script 4 only reads the watershed production table). Any gulf-wide gap between watershed TN and pourpoint→region TN is from the **pourpoint delivery filter** (50 km inland buffer; Pacific-side peninsula pourpoints outside 10 km), not from ponds sitting outside coastal watersheds.
+
+This chunk maps USV aquaculture polygons, GoC pourpoints, and flags basins that have shrimp TN but do not survive the Chemicals shrimp pourpoint filter (same 50 km / Region 4 rule as `script2_shrimp_farming.qmd`).
+
+```{r qa-shrimp-pourpoint-mapview}
+library(sf)
+sf_use_s2(FALSE)
+
+watershed_goc <- st_read(here::here(spatial_regions, "watersheds_goc.gpkg")) %>%
+  st_make_valid()
+
+regions_ohi <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp"))
+
+spatial_regions <- here::here("/home/shares/ohi/OHI_GOC/spatial/OHI_regions")
+pesticides_int <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/cw/v2025/chemicals/pesticides/int"
+)
+
+pourpoints_goc <- st_read(
+  here::here(spatial_regions, "pourpoints_goc.gpkg"),
+  quiet = TRUE
+)
+marine_and_inland50 <- st_read(
+  here::here(spatial_regions, "marine_and_inland50.gpkg"),
+  quiet = TRUE
+)
+marine_and_inland10 <- st_read(
+  here::here(spatial_regions, "marine_and_inland10.gpkg"),
+  quiet = TRUE
+)
+
+# USV aquaculture (same source Chemicals used for pond area)
+usv_aq_path <- here::here(pesticides_int, "usv_aquaculture_goc_allyears.gpkg")
+usv_aq <- st_read(usv_aq_path, quiet = TRUE) %>%
+  clean_names()
+
+# prefer a recent survey year for the map
+aq_years <- sort(unique(as.integer(usv_aq$year)))
+map_year <- if (2021L %in% aq_years) 2021L else max(aq_years)
+usv_aq_map <- usv_aq %>% filter(as.integer(year) == map_year)
+
+tn_year <- tn_shrimp_by_watershed %>%
+  filter(year == map_year) %>%
+  select(basin_id, tn_shrimp_t_yr, shrimp_prod_tons, aq_area_ha)
+
+# join watershed TN to pourpoints; apply same Chemicals shrimp spatial filter
+pour_shrimp <- pourpoints_goc %>%
+  select(basin_id) %>%
+  left_join(tn_year, by = "basin_id") %>%
+  filter(!is.na(tn_shrimp_t_yr), tn_shrimp_t_yr > 0) %>%
+  st_transform(st_crs(marine_and_inland50)) %>%
+  st_intersection(marine_and_inland50) %>%
+  mutate(
+    is_within_10km = lengths(
+      st_within(., st_transform(marine_and_inland10, st_crs(.)))
+    ) > 0
+  ) %>%
+  # Chemicals shrimp filter: drop Pacific-side peninsula pourpoints outside 10 km for Region 4
+  filter(!(is_within_10km == FALSE & rgn_id == "Region_4"))
+
+basins_kept <- unique(pour_shrimp$basin_id)
+basins_all <- unique(tn_year$basin_id)
+basins_lost <- setdiff(basins_all, basins_kept)
+
+tn_lost <- tn_year %>%
+  filter(basin_id %in% basins_lost) %>%
+  summarize(
+    n_basins_lost = n(),
+    shrimp_prod_tons = sum(shrimp_prod_tons, na.rm = TRUE),
+    tn_shrimp_t_yr = sum(tn_shrimp_t_yr, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+tn_kept <- tn_year %>%
+  filter(basin_id %in% basins_kept) %>%
+  summarize(
+    n_basins_kept = n(),
+    tn_shrimp_t_yr = sum(tn_shrimp_t_yr, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat(
+  "map year:", map_year, "\n",
+  "watershed basins with shrimp:", length(basins_all), "\n",
+  "basins kept after pourpoint filter:", tn_kept$n_basins_kept, "\n",
+  "basins lost:", tn_lost$n_basins_lost, "\n",
+  "TN kept (t N/yr):", round(tn_kept$tn_shrimp_t_yr, 2), "\n",
+  "TN lost (t N/yr):", round(tn_lost$tn_shrimp_t_yr, 2), "\n",
+  "% retained:", round(100 * tn_kept$tn_shrimp_t_yr /
+    (tn_kept$tn_shrimp_t_yr + tn_lost$tn_shrimp_t_yr), 2), "\n"
+)
+
+tn_year %>%
+  filter(basin_id %in% basins_lost) %>%
+  arrange(desc(tn_shrimp_t_yr)) %>%
+  print(n = 20)
+
+# pourpoints that never get shrimp TN (no join or filtered out) vs kept
+pour_all_with_tn <- pourpoints_goc %>%
+  select(basin_id) %>%
+  left_join(tn_year, by = "basin_id") %>%
+  mutate(has_shrimp = !is.na(tn_shrimp_t_yr) & tn_shrimp_t_yr > 0)
+
+pour_lost_basins <- pour_all_with_tn %>%
+  filter(basin_id %in% basins_lost)
+
+mapview(
+  usv_aq_map,
+  col.regions = "darkorange",
+  alpha.regions = 0.55,
+  layer.name = paste0("USV aquaculture ", map_year)
+) +
+  mapview(
+    pour_shrimp,
+    zcol = "tn_shrimp_t_yr",
+    layer.name = "Pourpoints kept (TN)"
+  ) +
+  mapview(
+    pour_lost_basins,
+    col.regions = "red",
+    layer.name = "Pourpoints in lost basins (filtered or no coastal pourpoint)"
+  ) +
+  mapview(
+    watershed_goc,
+    col.regions = "blue",
+    layer.name = "Watersheds") +
+  mapview(
+    regions_ohi,
+    col.regions = "pink",
+    layer.name = "OHI Regions")
+```

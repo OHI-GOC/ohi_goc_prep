@@ -1,5 +1,5 @@
 ---
-title: 'OHI GoC eutrophication update: current status (script 6)'
+title: 'OHI GoC eutrophication update: current status ALT (script 7)'
 author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
 format:
   html:
@@ -13,43 +13,29 @@ editor_options:
   chunk_output_type: console
 ---
 
-# Script 6: eutrophication current status
+# Script 7: eutrophication current status (ALT rescaling)
 
-Here we turn regional total nitrogen from script 5 into a coastline-standardized pressure and a current status score.
-
-Input: `jarg_analysis_update/output/tn_total_by_region.csv`
-
-We use the same reference pattern as Chemicals (ideal = 0; maximum = mean of the top 5 observations across regions and years). Before scoring we **divide regional TN by mainland coastline length (km)**, same Natural Earth / island-erase workflow as pharmaceuticals and pesticides.
+Alternate scoring to `script6_eut_current_status.qmd`. Same coastline-standardized TN (`tn_t_per_km_coastline`) and same top-5 mean reference. Script 6 maps the reference to pressure = 1 (status = 0). Here we **rescale** that same pressure linearly so the reference maps to pressure = 0.5 (status = 50), and the full score range is **50 to 100** (not a hard floor that flattens mid values).
 
 $$
 TN_{\mathrm{km}} = \frac{TN_{\mathrm{region}}}{L_{\mathrm{coast,\,km}}}
 $$
 
 $$
-\mathrm{pressure} = \min\left(1,\ \frac{TN_{\mathrm{km,\,current}} - TN_{\mathrm{ideal}}}{TN_{\mathrm{maximum}} - TN_{\mathrm{ideal}}}\right)
+\mathrm{pressure}_{\mathrm{raw}} = \min\left(1,\ \frac{TN_{\mathrm{km,\,current}} - TN_{\mathrm{ideal}}}{TN_{\mathrm{maximum}} - TN_{\mathrm{ideal}}}\right)
 $$
 
 $$
-\mathrm{status} = (1 - \mathrm{pressure}) \times 100
+\mathrm{pressure} = 0.5 \times \mathrm{pressure}_{\mathrm{raw}}
 $$
 
-with $TN_{\mathrm{ideal}} = 0$ and $TN_{\mathrm{maximum}}$ = mean of the top 5 `tn_t_per_km_coastline` values in the scoring panel. A region at the top-5 mean reference gets pressure = 1 and status = 0.
+$$
+\mathrm{status} = (1 - \mathrm{pressure}) \times 100 = 50 + 50 \times (1 - \mathrm{pressure}_{\mathrm{raw}})
+$$
 
-**Data and methods overview:** working default aligned with pharmaceuticals / pesticides. For an alternate reference where the top-5 mean maps to pressure = 0.5 (status floor = 50), see `script7_eut_current_status_ALT.qmd`.
+with $TN_{\mathrm{ideal}} = 0$ and $TN_{\mathrm{maximum}}$ = mean of the top 5 `tn_t_per_km_coastline` values. So zero TN → status 100; at the top-5 mean → status 50; halfway to the reference → status 75 (not 50). Values above the top-5 mean stay at pressure 0.5 / status 50.
 
----
-
-## What we did last time (context only)
-
-The old `cw_eutrophication.qmd` workflow:
-
-1. Used JARG Table 6 with Mean / 10% / 40% / 100%
-2. Divided municipal TN by coastline km
-3. Used the max municipal ton/km as the reference
-4. Weighted municipalities into regions by coastline
-5. Gapfilled Region 9 with Region 8
-
-We keep that history here so we remember why this update is different (watershed → pourpoint → region first, then coastline standardize at the region level; no Region 9 ← Region 8 fill).
+**Data and methods overview:** reads the same script 5 region totals as script 6; rebuilds coastline lengths the same way. Writes parallel `*_ALT.csv` outputs so the default script 6 files stay untouched.
 
 ---
 
@@ -89,11 +75,13 @@ rgn_labels <- c(
   "Region_9" = "Southeastern Gulf"
 )
 
-# plotly legend uses the color column values; map palette to display names
 rgn_colors_labeled <- setNames(
   unname(rgn_colors[region_levels]),
   unname(rgn_labels[region_levels])
 )
+
+# ALT: rescale script-6 pressure so the top-5 mean reference → 0.5 (status 50-100)
+pressure_at_reference <- 0.5
 ```
 
 ```{r paths}
@@ -117,21 +105,12 @@ tn <- read_csv(
   mutate(year = as.integer(year)) %>%
   arrange(year, rgn_id)
 
-# optional: year coverage from script 5, if present
-coverage_path <- here::here(eut_out, "tn_year_coverage.csv")
-if (file.exists(coverage_path)) {
-  tn_year_coverage <- read_csv(coverage_path, show_col_types = FALSE)
-  tn_year_coverage
-}
-
 tn
 ```
 
 ---
 
-## 2. Standardize by coastline length (same as Chemicals)
-
-Prefer the already-built Chemicals coastline layer if present; otherwise rebuild from Natural Earth + island erase (same steps as pharmaceuticals `script4_current_status.qmd`).
+## 2. Standardize by coastline length (same as script 6 / Chemicals)
 
 ```{r coastline-by-region}
 coast_no_islands_path <- here::here(spatial_regions, "goc_coastline_no_islands.gpkg")
@@ -192,34 +171,17 @@ tn_std <- tn %>%
   left_join(coastline_by_rgn %>% select(rgn_id, coastline_length_km), by = "rgn_id") %>%
   mutate(tn_t_per_km_coastline = tn_total_t_yr / coastline_length_km)
 
-summary(tn_std$tn_t_per_km_coastline)
-tn_std
-```
-
-### Scoring panel
-
-Script 5 already gapfills and keeps only years where all four sources are present. We score on that full table, after coastline standardization.
-
-```{r scoring-panel}
 tn_score <- tn_std
-
 score_years <- sort(unique(tn_score$year))
-
-cat("scoring years (from script 5 complete panel):", paste(score_years, collapse = ", "), "\n")
-cat("n region-years:", nrow(tn_score), "\n")
-
-if (exists("tn_year_coverage")) {
-  tn_year_coverage
-}
-
+cat("scoring years:", paste(score_years, collapse = ", "), "\n")
 tn_score
 ```
 
 ---
 
-## 3. Reference point and status
+## 3. ALT rescaling: status 50-100 (reference → pressure 0.5)
 
-```{r score}
+```{r score-alt}
 ideal <- 0
 
 top5 <- tn_score %>%
@@ -230,24 +192,47 @@ top5
 maximum <- mean(top5$tn_t_per_km_coastline)
 maximum
 
-nutrient_status <- tn_score %>%
+nutrient_status_alt <- tn_score %>%
   mutate(
     ideal = ideal,
     maximum = maximum,
-    pressure = pmin(1, (tn_t_per_km_coastline - ideal) / (maximum - ideal)),
+    # same raw pressure as script 6 (0 at ideal, 1 at/above top-5 mean)
+    pressure_raw = pmin(1, (tn_t_per_km_coastline - ideal) / (maximum - ideal)),
+    # rescale so reference → 0.5; full range maps linearly to status 50-100
+    pressure = pressure_at_reference * pressure_raw,
     status = (1 - pressure) * 100
   ) %>%
   arrange(year, rgn_id)
 
-nutrient_status
+# sanity: zero → 100; at/above reference → 50; mid-reference → 75
+stopifnot(min(nutrient_status_alt$status) >= 50 - 1e-8)
+stopifnot(max(nutrient_status_alt$pressure) <= pressure_at_reference + 1e-8)
+stopifnot(
+  all(
+    abs(
+      nutrient_status_alt$status -
+        (50 + 50 * (1 - nutrient_status_alt$pressure_raw))
+    ) < 1e-8
+  )
+)
+
+nutrient_status_alt %>%
+  summarize(
+    status_min = min(status),
+    status_max = max(status),
+    pressure_max = max(pressure),
+    .groups = "drop"
+  )
+
+nutrient_status_alt
 ```
 
 ---
 
 ## 4. Quick look (plotly)
 
-```{r plotly-status}
-nutrient_status_plot <- nutrient_status %>%
+```{r plotly-status-alt}
+nutrient_status_plot <- nutrient_status_alt %>%
   mutate(
     rgn_id = factor(rgn_id, levels = region_levels),
     rgn_label = factor(
@@ -256,33 +241,7 @@ nutrient_status_plot <- nutrient_status %>%
     )
   )
 
-tn_km_plotly <- plot_ly(
-  nutrient_status_plot,
-  x = ~year,
-  y = ~tn_t_per_km_coastline,
-  color = ~rgn_label,
-  colors = rgn_colors_labeled,
-  type = "scatter",
-  mode = "lines+markers",
-  text = ~paste0(
-    rgn_id, " (", rgn_label, ")",
-    "<br>Year: ", year,
-    "<br>TN: ", round(tn_total_t_yr, 1), " t N/yr",
-    "<br>Coast: ", round(coastline_length_km, 1), " km",
-    "<br>TN/km: ", round(tn_t_per_km_coastline, 3)
-  ),
-  hoverinfo = "text"
-) %>%
-  layout(
-    title = "Total nitrogen standardized by coastline (t N / km)",
-    xaxis = list(title = "Year", dtick = 1),
-    yaxis = list(title = "t N / km coastline"),
-    legend = list(title = list(text = "Region"))
-  )
-
-tn_km_plotly
-
-status_plotly <- plot_ly(
+status_plotly_alt <- plot_ly(
   nutrient_status_plot,
   x = ~year,
   y = ~status,
@@ -300,22 +259,31 @@ status_plotly <- plot_ly(
   hoverinfo = "text"
 ) %>%
   layout(
-    title = "Clean Waters: eutrophication current status (top-5 mean of TN/km; pressure 1 at reference)",
+    title = "Eutrophication status ALT (rescaled 50-100; top-5 mean TN/km = status 50)",
     xaxis = list(title = "Year", dtick = 1),
     yaxis = list(title = "Status (0-100)", range = c(0, 100)),
     legend = list(title = list(text = "Region")),
-    shapes = list(list(
-      type = "line",
-      x0 = min(nutrient_status_plot$year),
-      x1 = max(nutrient_status_plot$year),
-      y0 = 100, y1 = 100,
-      line = list(color = "gray", dash = "dot")
-    ))
+    shapes = list(
+      list(
+        type = "line",
+        x0 = min(nutrient_status_plot$year),
+        x1 = max(nutrient_status_plot$year),
+        y0 = 100, y1 = 100,
+        line = list(color = "gray", dash = "dot")
+      ),
+      list(
+        type = "line",
+        x0 = min(nutrient_status_plot$year),
+        x1 = max(nutrient_status_plot$year),
+        y0 = 50, y1 = 50,
+        line = list(color = "gray", dash = "dash")
+      )
+    )
   )
 
-status_plotly
+status_plotly_alt
 
-pressure_plotly <- plot_ly(
+pressure_plotly_alt <- plot_ly(
   nutrient_status_plot,
   x = ~year,
   y = ~pressure,
@@ -330,54 +298,44 @@ pressure_plotly <- plot_ly(
   hoverinfo = "text"
 ) %>%
   layout(
-    title = "Eutrophication pressure (1 = at or above top-5 mean TN/km)",
+    title = "Eutrophication pressure ALT (rescaled; 0.5 = at or above top-5 mean TN/km)",
     xaxis = list(title = "Year", dtick = 1),
     yaxis = list(title = "Pressure (0-1)", range = c(0, 1.05)),
     legend = list(title = list(text = "Region"))
   )
 
-pressure_plotly
+pressure_plotly_alt
 ```
 
 ---
 
-## 5. Write outputs
+## 5. Write ALT outputs
 
-```{r write-outputs}
+```{r write-outputs-alt}
 write_csv(
-  coastline_by_rgn,
-  here::here(eut_out, "coastline_length_by_region.csv")
+  nutrient_status_alt,
+  here::here(eut_out, "nutrient_status_full_ALT.csv")
 )
 
 write_csv(
-  tn_std,
-  here::here(eut_out, "tn_total_by_region_per_km_coastline.csv")
+  nutrient_status_alt %>% select(rgn_id, year, status),
+  here::here(eut_out, "nutrient_status_ALT.csv")
 )
 
 write_csv(
-  nutrient_status,
-  here::here(eut_out, "nutrient_status_full.csv")
+  nutrient_status_alt %>% select(rgn_id, year, pressure),
+  here::here(eut_out, "nutrient_pressure_ALT.csv")
 )
 
-write_csv(
-  nutrient_status %>% select(rgn_id, year, status),
-  here::here(eut_out, "nutrient_status.csv")
-)
-
-write_csv(
-  nutrient_status %>% select(rgn_id, year, pressure),
-  here::here(eut_out, "nutrient_pressure.csv")
-)
-
-# small reference log so we remember how the score was built
-ref_log <- tibble(
+ref_log_alt <- tibble(
   ideal = ideal,
   maximum_top5_mean_tn_per_km = maximum,
   n_top5 = nrow(top5),
   scoring_years = paste(score_years, collapse = ";"),
   metric = "tn_t_per_km_coastline",
-  pressure_at_reference = 1,
-  status_floor = 0,
+  method = "rescale: pressure = 0.5 * pressure_raw (script6); status 50-100",
+  pressure_at_reference = pressure_at_reference,
+  status_at_reference = (1 - pressure_at_reference) * 100,
   top5_detail = top5 %>%
     mutate(
       lab = paste0(
@@ -388,5 +346,5 @@ ref_log <- tibble(
     paste(collapse = "; ")
 )
 
-write_csv(ref_log, here::here(eut_out, "nutrient_reference_point.csv"))
+write_csv(ref_log_alt, here::here(eut_out, "nutrient_reference_point_ALT.csv"))
 ```
