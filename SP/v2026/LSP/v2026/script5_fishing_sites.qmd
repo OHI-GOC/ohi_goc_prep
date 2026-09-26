@@ -1,0 +1,328 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Sentido de Pertenencia: Lasting Special Places
+
+## Script 5: fishing sites
+
+In this script, I will score fishing grounds the EWG flagged as iconic. I will check whether each site sits in a fishing refuge (ZRP), a cooperative TURF, or a federal protected area. Those institutional layers tell me the place has some form of stewardship beyond open access.
+
+**What I do**
+
+1. Filter the EWG list to fishing area rows and assign each site an OHI region.
+2. Spatial join TNC ZRP polygons (with a 1 km buffer).
+3. Flag the one site I confirmed sits inside a TURF using the Aceves-Bueno Shiny map.
+4. Join protected areas for SIMEC scores, merge the best protection, average by region, write CSVs.
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+library(stringdist)
+library(stringi)
+```
+
+## Why these sites matter
+
+Fishing can be subsistence, recreation, or tradition. For lasting special places I care about whether the ground itself is managed so it can remain usable into the future. The EWG named each site.
+
+## Read fishing sites and assign regions
+
+```{r}
+lsp_list_ewg <- read_csv(
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets", "ewg_lsp_inventory_prepared.csv"),
+  show_col_types = FALSE
+) %>%
+  janitor::clean_names()
+
+ewg_fishing_site_list <- lsp_list_ewg %>%
+  filter(
+    type_of_lsp %in% c(
+      '"Important fishing areas, could have fishing refuges (zonas de refugio pesquero or ZRP)"'
+    )
+  ) %>%
+  mutate(
+    long = as.numeric(long),
+    lat = as.numeric(lat)
+  ) %>%
+  filter(!is.na(long), !is.na(lat)) %>%
+  st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+
+mapview(ewg_fishing_site_list)
+
+ohi_rgns <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp"), quiet = TRUE)
+
+ewg_fishing_site_list_goc_rgnid <- st_intersection(
+  st_transform(ewg_fishing_site_list, st_crs(ohi_rgns)),
+  ohi_rgns
+)
+
+mapview(ewg_fishing_site_list_goc_rgnid, zcol = "rgn_id")
+```
+
+## ZRPs (fishing refuges)
+
+Now I will pull TNC's geoportal GeoJSON and buffer sites by 1 km so points near a refuge boundary still count.
+
+```{r}
+tnc_zrps_raw <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/TNC_geoportal_fishing_refuge_zones/d2026",
+    "Zonas_Refugios_Pesqueros_-8805549763229037385.geojson"
+  ),
+  quiet = TRUE
+) %>%
+  janitor::clean_names()
+
+mapview(tnc_zrps_raw, col.regions = "blue") +
+  mapview(ewg_fishing_site_list, col.regions = "black")
+
+inland_50 <- st_read(
+  here("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer", "inland_50km_goc.shp"),
+  quiet = TRUE
+)
+
+ewg_fishing_site_buffered <- st_buffer(
+  st_transform(ewg_fishing_site_list_goc_rgnid, st_crs(inland_50)),
+  dist = 1000
+)
+
+ewg_fishing_site_condition_zrp <- st_join(
+  st_transform(ewg_fishing_site_buffered, st_crs(tnc_zrps_raw)),
+  st_make_valid(tnc_zrps_raw),
+  join = st_intersects,
+  left = TRUE
+) %>%
+  mutate(in_zrp = !is.na(name)) %>%
+  rename(zrp_name = name) %>%
+  mutate(zrp_condition = ifelse(in_zrp, 100, 0)) %>%
+  dplyr::select(rgn_id, lasting_special_place_lsp, in_zrp, zrp_condition) %>%
+  distinct()
+```
+
+## TURFs (cooperative tenure)
+
+National TURF polygons are not easy to download. I used the Shiny map from Aceves-Bueno et al. 2023 and confirmed one EWG site sits inside a TURF: the Yaqui and Mayo fishing camps at the Sonora Sinaloa border. Now I will set that site to 100. If more sites turn up later, I can extend this `ifelse`.
+
+Papers and map:  
+<https://journals.plos.org/plosone/article/figure?id=10.1371/journal.pone.0286739.g003>  
+<https://ereaceves.shinyapps.io/Tapp>
+
+```{r}
+ewg_fishing_site_condition_turf <- ewg_fishing_site_condition_zrp %>%
+  mutate(
+    in_turf = lasting_special_place_lsp ==
+      "Yaqui and Mayo People have historic (and current) important fishing camps at Sonora-Sinala border. RCB",
+    overall_condition = ifelse(in_turf, 100, zrp_condition)
+  )
+```
+
+## Protected area (SIMEC) scores
+
+If ZRP and TURF both score 0, a site can still sit inside an ANP and inherit SIMEC. Now I will join the v2 protected area layer and fuzzy match SIMEC names the same way as in scripts 3 and 4.
+
+```{r}
+all_protected <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem",
+    "all_goc_protected_areas_v2_2025.shp"
+  ),
+  quiet = TRUE
+)
+
+ewg_fishing_site_condition_ANP <- st_join(
+  st_transform(ewg_fishing_site_condition_turf, st_crs(all_protected)),
+  all_protected %>% dplyr::select(name, geometry),
+  join = st_intersects,
+  left = TRUE
+) %>%
+  mutate(in_protected_area = !is.na(name)) %>%
+  rename(protected_area_name = name)
+
+mapview(ewg_fishing_site_condition_ANP, zcol = "in_protected_area") +
+  mapview(all_protected, col.regions = "pink")
+```
+
+## Match overlapping parks to SIMEC
+
+Alrighty, now that I know which parks each fishing site touches, I will prepare SIMEC for **2020 and 2023** the same way as in script 0 (averaging 2020 island-by-state rows). Then I will fuzzy-match park names and assign scores for each year.
+
+```{r}
+# status years i want lsp scores for
+status_years <- c(2020L, 2023L)
+
+# prepare simec for 2020 and 2023 (same logic as script 0)
+# older 2020 reports split islas del golfo by state/region; i average those rows
+i_efectividad_by_year <- read_csv(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/SIMEC",
+    "simec_i_efectividad_anp_2026.csv"
+  ),
+  show_col_types = FALSE,
+  na = c("", "NA", "N/A")
+) %>%
+  janitor::clean_names() %>%
+  mutate(
+    nombre = str_squish(as.character(nombre)),
+    ano_reporte = suppressWarnings(as.integer(ano_reporte)),
+    i_efectividad = suppressWarnings(as.numeric(i_efectividad)),
+    nombre = if_else(
+      str_to_upper(nombre) == "ISLAS DEL GOLFO DE CALIFORNIA",
+      "ISLAS DEL GOLFO DE CALIFORNIA",
+      nombre
+    )
+  ) %>%
+  filter(
+    !is.na(ano_reporte),
+    !is.na(i_efectividad),
+    !is.na(nombre),
+    nombre != "",
+    ano_reporte %in% status_years
+  ) %>%
+  group_by(ano_reporte, nombre) %>%
+  summarize(
+    i_efectividad = mean(i_efectividad, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# year-specific simec min and max (for ramsar rules / nom floors)
+simec_bounds_by_year <- i_efectividad_by_year %>%
+  group_by(ano_reporte) %>%
+  summarize(
+    simec_max = max(i_efectividad, na.rm = TRUE),
+    simec_min = min(i_efectividad, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+normalize_name <- function(x) {
+  x %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_to_upper() %>%
+    str_remove_all(
+      "\\bPARQUE NACIONAL\\b|\\bPARQUE\\b|\\bNACIONAL\\b|\\bZONA MARINA\\b|\\bARCHIPIELAGO\\b"
+    ) %>%
+    str_squish()
+}
+
+# fuzzy match on unique park names
+i_efectividad_norm <- i_efectividad_by_year %>%
+  distinct(nombre) %>%
+  mutate(nombre_norm = normalize_name(nombre))
+
+fishing_sites_norm <- ewg_fishing_site_condition_ANP %>%
+  mutate(protected_area_norm = normalize_name(protected_area_name))
+
+matches <- stringdist::amatch(
+  fishing_sites_norm$protected_area_norm,
+  i_efectividad_norm$nombre_norm,
+  method = "jw",
+  maxDist = 0.2
+)
+
+fishing_sites_base <- fishing_sites_norm %>%
+  mutate(
+    nombre_matched = i_efectividad_norm$nombre[matches],
+    nombre_norm_matched = i_efectividad_norm$nombre_norm[matches]
+  ) %>%
+  st_drop_geometry()
+
+# expand to both status years, then join that year's simec score
+fishing_sites_w_SIMEC <- bind_rows(
+  fishing_sites_base %>% mutate(ano_reporte = 2020L),
+  fishing_sites_base %>% mutate(ano_reporte = 2023L)
+) %>%
+  left_join(
+    i_efectividad_by_year,
+    by = c("nombre_matched" = "nombre", "ano_reporte")
+  ) %>%
+  left_join(simec_bounds_by_year, by = "ano_reporte") %>%
+  mutate(
+    protected_area_condition = ifelse(!is.na(i_efectividad), i_efectividad, NA_real_),
+    # ramsar with a management plan: high score for that year
+    protected_area_condition = ifelse(
+      protected_area_name == "Humedales del Delta del Río Colorado",
+      simec_max,
+      protected_area_condition
+    ),
+    # cabo pulmo is no take; leave it for careful manual handling
+    protected_area_condition = ifelse(
+      nombre_matched == "CABO PULMO",
+      0,
+      protected_area_condition
+    ),
+    year = ano_reporte
+  ) %>%
+  group_by(year, lasting_special_place_lsp) %>%
+  summarize(
+    protected_area_condition = max(protected_area_condition, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    protected_area_condition = ifelse(
+      is.infinite(protected_area_condition),
+      NA_real_,
+      protected_area_condition
+    )
+  )
+```
+
+## Final site condition and region average
+
+Now that I have ZRP, TURF, and SIMEC scores, I will start from ZRP or TURF (same in both years). When that is still 0, I will fill in that year's SIMEC. Today all sites have some of these layers, so I do not need a separate codified floor (though NOM links for clams and squid are useful if empty sites appear later). After that I will average site conditions within each OHI region for each status year and write the tables to Mazu.
+
+```{r}
+# zrp / turf scores do not change by year, so i expand them to 2020 and 2023
+fishing_base_by_year <- bind_rows(
+  ewg_fishing_site_condition_turf %>% st_drop_geometry() %>% mutate(year = 2020L),
+  ewg_fishing_site_condition_turf %>% st_drop_geometry() %>% mutate(year = 2023L)
+)
+
+final_ewg_fishing_site_condition <- fishing_base_by_year %>%
+  left_join(
+    fishing_sites_w_SIMEC,
+    by = c("lasting_special_place_lsp", "year")
+  ) %>%
+  mutate(
+    overall_condition = ifelse(
+      overall_condition == 0,
+      protected_area_condition,
+      overall_condition
+    )
+  )
+
+rgn_final_ewg_fishing_site_condition <- final_ewg_fishing_site_condition %>%
+  group_by(year, rgn_id) %>%
+  summarize(condition = mean(overall_condition, na.rm = TRUE), .groups = "drop")
+```
+
+
+```{r}
+write_csv(
+  final_ewg_fishing_site_condition,
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_lsp_fishing_sites.csv")
+)
+write_csv(
+  rgn_final_ewg_fishing_site_condition,
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_region_fishing_sites.csv")
+)
+```

@@ -1,0 +1,243 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Sentido de Pertenencia: Lasting Special Places
+
+## Script 2: special protected areas on the EWG list
+
+Alrighty, in this script I will score the protected areas the EWG named explicitly. When CONANP reports a SIMEC i-efectividad score, that becomes the condition. For Ramsar-only sites I will follow simple rules based on whether a management plan is present. I will do this for **both 2020 and 2023**, then write site and region tables with a `year` column so script 8 can merge both years.
+
+**What I do**
+
+1. Read the combined protected area layer (`all_goc_protected_areas_v2_2025.shp`).
+2. Read the EWG special protected areas table.
+3. Prepare SIMEC for 2020 and 2023 (average 2020 island-by-state rows).
+4. Join SIMEC onto the EWG list for each year, apply Ramsar rules, average by region and year, write CSVs.
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+```
+
+## Protected areas (ANPs)
+
+Protected areas on the list are already protected by design. I still need a condition score that reflects management quality, and for that I will rely mainly on CONANP's SIMEC i-efectividad.
+
+### Read the combined protected area layer
+
+Now I will load the v2 layer from script 1 (WDPA + CONANP + HEM). This is the same layer scripts 3 through 7 should use.
+
+```{r}
+all_protected <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem",
+    "all_goc_protected_areas_v2_2025.shp"
+  ),
+  quiet = TRUE
+)
+
+mapview(all_protected)
+```
+
+Optional: older CBMC GCMP MPAs for context (sites designated before 2020).
+
+```{r}
+cbmc_gcmp_2020_mpas <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main/shp",
+    "final_mpa_layer.shp"
+  ),
+  quiet = TRUE
+) %>%
+  janitor::clean_names() %>%
+  st_zm(drop = TRUE, what = "ZM")
+
+table(st_geometry_type(cbmc_gcmp_2020_mpas))
+mapview(cbmc_gcmp_2020_mpas)
+```
+
+## Read the EWG list of protected areas
+
+Next I will pull in the EWG list so I have the expert names, WDPA labels, SIMEC names, Ramsar flags, and region ids.
+
+```{r}
+ewg_mentioned_protected_areas <- read_csv(
+  here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets",
+    "ewg_special_protected_areas_on_list.csv"
+  ),
+  show_col_types = FALSE
+) %>%
+  janitor::clean_names()
+```
+
+## Prepare SIMEC i-efectividad for 2020 and 2023
+
+Now that I have the EWG list, I will prepare the multi-year SIMEC extract. Older 2020 reports split **Islas del Golfo de California** by state / region; the 2023 report gives one park-wide score. So first I will average any park that has more than one row in the same year, then keep both status years. (Script 0 walks through this prep in more detail.)
+
+```{r}
+# status years i want lsp scores for
+status_years <- c(2020L, 2023L)
+
+i_efectividad_by_year <- read_csv(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/SIMEC",
+    "simec_i_efectividad_anp_2026.csv"
+  ),
+  show_col_types = FALSE,
+  na = c("", "NA", "N/A")
+) %>%
+  janitor::clean_names() %>%
+  mutate(
+    nombre = str_squish(as.character(nombre)),
+    ano_reporte = suppressWarnings(as.integer(ano_reporte)),
+    i_efectividad = suppressWarnings(as.numeric(i_efectividad)),
+    # unify island spelling (some 2020 rows have a trailing space)
+    nombre = if_else(
+      str_to_upper(nombre) == "ISLAS DEL GOLFO DE CALIFORNIA",
+      "ISLAS DEL GOLFO DE CALIFORNIA",
+      nombre
+    )
+  ) %>%
+  filter(
+    !is.na(ano_reporte),
+    !is.na(i_efectividad),
+    !is.na(nombre),
+    nombre != "",
+    ano_reporte %in% status_years
+  ) %>%
+  # average multi-row parks within a year (mainly 2020 islands)
+  group_by(ano_reporte, nombre) %>%
+  summarize(
+    i_efectividad = mean(i_efectividad, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# year-specific simec min and max (for ramsar rules)
+simec_bounds_by_year <- i_efectividad_by_year %>%
+  group_by(ano_reporte) %>%
+  summarize(
+    simec_max = max(i_efectividad, na.rm = TRUE),
+    simec_min = min(i_efectividad, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+## Assign condition for each year (SIMEC and Ramsar rules)
+
+Alrighty, now that SIMEC is ready, I will duplicate the EWG list once per status year, join that year's SIMEC score, then apply Ramsar management plan rules and a few special cases (whale shark refuge, vaquita refuge, Loreto II).
+
+```{r}
+protected_area_condition <- bind_rows(
+  ewg_mentioned_protected_areas %>% mutate(ano_reporte = 2020L),
+  ewg_mentioned_protected_areas %>% mutate(ano_reporte = 2023L)
+) %>%
+  left_join(
+    i_efectividad_by_year,
+    by = c("i_efectividad_name" = "nombre", "ano_reporte")
+  ) %>%
+  left_join(simec_bounds_by_year, by = "ano_reporte") %>%
+  mutate(
+    overall_condition = ifelse(is.na(i_efectividad), 0, i_efectividad),
+    overall_condition = case_when(
+      # ramsar plan in progress: take the better of simec and 60
+      if_ramsar_has_management_plan == "in_progress" ~
+        pmax(i_efectividad, 60, na.rm = TRUE),
+      # ramsar plan yes: use at least the highest simec in that year
+      if_ramsar_has_management_plan == "y" ~
+        pmax(i_efectividad, simec_max, na.rm = TRUE),
+      # ramsar plan no: cap at the lowest simec in that year
+      if_ramsar_has_management_plan == "n" ~
+        pmin(i_efectividad, simec_min, na.rm = TRUE),
+      lasting_special_place_description == "Whale shark Area de Refugio in La Paz - AHW , BW" ~ 75,
+      # loreto ii is new; leave na until simec is published
+      lasting_special_place_description == "Loreto II" ~ NA_real_,
+      lasting_special_place_description == "Área de Refúgio para la Protección de la Vaquita" ~ 75,
+      TRUE ~ overall_condition
+    ),
+    rgn_id = str_replace_all(rgn_id, " ", "_"),
+    year = ano_reporte
+  ) %>%
+  dplyr::select(
+    year,
+    rgn_id,
+    lasting_special_place_description,
+    overall_condition,
+    i_efectividad_name,
+    wdpa_orig_name,
+    if_ramsar_has_management_plan,
+    ramsar_link
+  )
+```
+
+Now that each site has a condition, I will attach geometry from `all_protected` by WDPA name so I can map the latest year.
+
+```{r}
+protected_condition_w_geometry <- protected_area_condition %>%
+  filter(year == 2023L) %>%
+  left_join(
+    all_protected,
+    by = c("wdpa_orig_name" = "name")
+  ) %>%
+  st_as_sf()
+
+mapview(protected_condition_w_geometry, zcol = "overall_condition")
+```
+
+## Condition per region and year
+
+Now that I have a condition for every protected area site, I will average those site conditions within each OHI region for each status year.
+
+```{r}
+rgn_protected_area_condition <- protected_area_condition %>%
+  group_by(year, rgn_id) %>%
+  summarize(
+    condition = mean(overall_condition, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+## Write to Mazu
+
+Finally, I will save the site-level and region-level tables for scripts 7 and 8. Both include a `year` column (2020 and 2023).
+
+```{r}
+write_csv(
+  protected_area_condition,
+  here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output",
+    "condition_lsp_protected_areas.csv"
+  )
+)
+
+write_csv(
+  rgn_protected_area_condition,
+  here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output",
+    "condition_region_protected_areas.csv"
+  )
+)
+```
+
+

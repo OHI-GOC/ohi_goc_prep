@@ -1,0 +1,255 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Sentido de Pertenencia: Lasting Special Places
+
+## Script 1: combine protected area layers and read the EWG list
+
+In this script I build one protected area layer for the Gulf of California. Let's put CONANP, WDPA, and HEM polygons into the same table, dissolve once if I need a simple footprint map, and write the result to Mazu for scripts 2 through 7. At the end I also load the prepared EWG inventory so I can plot expert points on top of those polygons.
+
+**What I do**
+
+1. Explore CONANP downloads for the Gulf states.
+2. Align CRS and geometry types, then bind WDPA, HEM, and CONANP into `all_protected`.
+3. Write `all_goc_protected_areas_v2_2025.shp` (and a dissolved version).
+4. Read the EWG list and map the points.
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+```
+
+## Make one protected area layer
+
+### Explore CONANP layers
+
+First I read voluntary conservation sites, primary zonification, July 2025 ANPs, and CONANP regions. I only keep Gulf states we score for OHI GoC.
+
+```{r}
+gulf_states <- c(
+  "Baja California", "Baja California Sur",
+  "Sonora", "Sinaloa", "Nayarit", "Jalisco"
+)
+
+voluntariamente_conanp <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CONANP/619_ADVC_VIGENTES_MARZO_2026",
+    "619_ADVC_VIGENTES_MARZO_2026.shp"
+  ),
+  quiet = TRUE
+) %>%
+  st_zm(drop = TRUE, what = "ZM") %>%
+  janitor::clean_names() %>%
+  filter(estado %in% gulf_states)
+
+table(st_geometry_type(voluntariamente_conanp))
+mapview(voluntariamente_conanp)
+```
+
+```{r}
+# this layer uses `estados` (plural) with uppercase / multi-state labels
+zonification_primaria <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CONANP/SHAPE_ANPS_ZN",
+    "ZP_ANPS_22042024.shp"
+  ),
+  quiet = TRUE
+) %>%
+  janitor::clean_names() %>%
+  filter(
+    str_detect(
+      estados,
+      regex("BAJA CALIFORNIA|SONORA|SINALOA|NAYARIT|JALISCO", ignore_case = TRUE)
+    )
+  )
+
+unique(zonification_primaria$estados)
+mapview(zonification_primaria)
+```
+
+```{r}
+conanp_anps_julio_2025 <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CONANP/232_ANP-ITRF08_04072025",
+    "232_ANP-ITRF08_04072025.shp"
+  ),
+  quiet = TRUE
+) %>%
+  st_zm(drop = TRUE, what = "ZM") %>%
+  janitor::clean_names()
+
+table(st_geometry_type(conanp_anps_julio_2025))
+mapview(conanp_anps_julio_2025)
+```
+
+```{r}
+regions_CONANP <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CONANP/Regionalizacion_22052017",
+    "Regionalizacion_22052017.shp"
+  ),
+  quiet = TRUE
+) %>%
+  janitor::clean_names()
+```
+
+### Read WDPA and HEM layers
+
+I also need the Gulf-clipped WDPA layer and HEM's ANP polygons. HEM is especially useful for coverage that WDPA alone can miss (for example some land parks and Loreto II).
+
+```{r}
+wdpa_poly_all <- st_read(
+  here(
+    "SP/v2026/LSP/v2025/output",
+    "WDPA_Jan2025_shp_clipped_all.shp"
+  ),
+  quiet = TRUE
+) %>%
+  janitor::clean_names() %>%
+  st_make_valid()
+
+table(st_geometry_type(wdpa_poly_all))
+mapview(wdpa_poly_all)
+```
+
+```{r}
+# gulf-related estado labels used in the hem shapefile
+hem_gulf_estados <- c(
+  "Baja California Sur",
+  "Jalisco",
+  "Baja California",
+  "Sonora",
+  "Nayarit",
+  "Sinaloa",
+  "Baja California y Baja California Sur",
+  "B.C., B.C.S., Sonora y Sinaloa",
+  "Jalisco y Nayarit"
+)
+
+hem_protected_anps <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/spatial/from_hem_POEM_ANP/232_ANP-ITRF08_16062025",
+    "232_ANP-ITRF08_16062025.shp"
+  ),
+  quiet = TRUE
+) %>%
+  st_zm(drop = TRUE, what = "ZM") %>%
+  janitor::clean_names() %>%
+  filter(estados %in% hem_gulf_estados) %>%
+  st_make_valid()
+
+unique(hem_protected_anps$estados)
+table(st_geometry_type(hem_protected_anps))
+mapview(hem_protected_anps)
+
+# quick check that loreto parks are present in hem
+hem_protected_anps %>%
+  filter(nombre %in% c("Bahía de Loreto", "Loreto II")) %>%
+  mapview(zcol = "nombre")
+```
+
+### Combine WDPA, HEM, and CONANP
+
+Now that WDPA, HEM, and CONANP are loaded, I reproject everything to the WDPA CRS, cast to multipolygon, and bind the rows. I keep a `source` column so I know where each polygon came from.
+
+```{r}
+# reproject so all three layers share crs (wdpa is albers / goC aea)
+hem_protected_anps_reproj <- st_transform(hem_protected_anps, st_crs(wdpa_poly_all))
+conanp_anps_julio_2025_reproj <- st_transform(conanp_anps_julio_2025, st_crs(wdpa_poly_all))
+
+wdpa_clean <- st_cast(wdpa_poly_all, "MULTIPOLYGON") %>%
+  mutate(source = "wdpa_2025")
+
+hem_clean <- st_cast(hem_protected_anps_reproj, "MULTIPOLYGON") %>%
+  mutate(source = "hem")
+
+conanp_clean <- st_cast(conanp_anps_julio_2025_reproj, "MULTIPOLYGON") %>%
+  mutate(source = "conanp_2025")
+
+all_protected <- bind_rows(
+  wdpa_clean %>% dplyr::select(name, source, geometry),
+  hem_clean %>% dplyr::select(name = nombre, source, geometry),
+  conanp_clean %>% dplyr::select(name = nombre, source, geometry)
+) %>%
+  st_make_valid()
+
+table(all_protected$source)
+# mapview basemap needs lon/lat; keep analysis layer in wdpa crs
+mapview(st_transform(all_protected, 4326), zcol = "source")
+
+# one multipolygon for coverage checks
+all_protected_dissolved <- all_protected %>%
+  st_union() %>%
+  st_make_valid() %>%
+  st_as_sf() %>%
+  mutate(layer = "all_goc_protected")
+
+all_protected_dissolved
+mapview(st_transform(all_protected_dissolved, 4326))
+```
+
+### Write the combined layer to Mazu
+
+Later scripts (2 through 7) should read this v2 file so they use the same polygons, including Alto Golfo.
+
+```{r}
+st_write(
+  all_protected,
+  here("/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem", "all_goc_protected_areas_v3_2026.shp"),
+  delete_dsn = TRUE
+)
+st_write(
+  all_protected_dissolved,
+  here("/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem", "all_goc_protected_areas_dissolved_v3_2026.shp"),
+  delete_dsn = TRUE
+)
+```
+
+## Read in the EWG list of LSP sites
+
+Current status for this goal depends on whether a lasting special place has a protection, and how well that protection is managed. For example, if Isla Tiburón sits inside an ANP, its condition may follow CONANP's SIMEC i-efectividad score. Sites outside ANPs get other rules in later scripts.
+
+Types of LSPs and their intended protections:  
+<https://docs.google.com/spreadsheets/d/1RwNTzRZdBIDtzi7d1ceFxhNmVghN47NxTgrhZV8O2SM/edit?gid=1758421523#gid=1758421523>
+
+Let's load the prepared inventory and map points on the combined protected areas.
+
+```{r}
+lsp_list_ewg <- read_csv(
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets", "ewg_lsp_inventory_prepared.csv"),
+  show_col_types = FALSE
+) %>%
+  janitor::clean_names()
+
+lsp_list_ewg_pts <- lsp_list_ewg %>%
+  mutate(
+    lat = as.numeric(lat),
+    long = as.numeric(long)
+  ) %>%
+  filter(!is.na(lat), !is.na(long)) %>%
+  st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE)
+
+mapview(lsp_list_ewg_pts, col.regions = "orange") +
+  mapview(all_protected, col.regions = "blue")
+```

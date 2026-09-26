@@ -1,0 +1,364 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Sentido de Pertenencia: Lasting Special Places
+
+## Script 7: other marine places of importance
+
+Scripts 2 through 6 cover named protected areas, dive sites, archaeology, fishing grounds, and special habitats. Some EWG rows are still left over as "Marine location of importance". Alrighty, in this script I will score those leftovers. First I will try protected area and SIMEC. If that gives a zero, I will fill in curated legal and literature scores from a Google Sheet.
+
+**What I do**
+
+1. Read the full EWG list and the condition tables from scripts 2 through 5.
+2. Keep marine importance rows that were not scored yet (and skip habitat names handled in script 6).
+3. Buffer, join the v2 protected area layer, fuzzy match SIMEC, apply Ramsar rules when needed.
+4. Fill remaining zeros from `lsps_codified_protections_estimated_condition.csv`, average by region, write CSVs.
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+library(stringdist)
+library(stringi)
+```
+
+## Read the inventory and earlier scores
+
+```{r}
+lsp_list_ewg <- read_csv(
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets", "ewg_lsp_inventory_prepared.csv"),
+  show_col_types = FALSE
+) %>%
+  janitor::clean_names()
+
+fishing_site_condition <- read_csv(
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_lsp_fishing_sites.csv"),
+  show_col_types = FALSE
+)
+archaeological_site_condition <- read_csv(
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_lsp_archaeological_sites.csv"),
+  show_col_types = FALSE
+)
+protected_area_condition <- read_csv(
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_lsp_protected_areas.csv"),
+  show_col_types = FALSE
+)
+dive_sites_condition <- read_csv(
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_lsp_dive_sites.csv"),
+  show_col_types = FALSE
+)
+```
+
+## Names already covered in other scripts
+
+Now I will build a simple name list so I can find what is still missing.
+
+```{r}
+normalize_name <- function(x) {
+  x %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_to_upper() %>%
+    str_remove_all(
+      "\\bPARQUE NACIONAL\\b|\\bPARQUE\\b|\\bNACIONAL\\b|\\bZONA MARINA\\b|\\bARCHIPIELAGO\\b"
+    ) %>%
+    str_squish()
+}
+
+fishing_site_condition_join <- fishing_site_condition %>%
+  dplyr::select(rgn_id, lsp_name = lasting_special_place_lsp, condition = overall_condition)
+
+archaeological_site_condition_join <- archaeological_site_condition %>%
+  dplyr::select(rgn_id, lsp_name = lasting_special_place_lsp, condition = overall_condition)
+
+protected_area_condition_join <- protected_area_condition %>%
+  mutate(
+    lsp_name = case_when(
+      !is.na(wdpa_orig_name) ~ wdpa_orig_name,
+      is.na(wdpa_orig_name) & !is.na(i_efectividad_name) ~ i_efectividad_name,
+      TRUE ~ lasting_special_place_description
+    ),
+    lsp_name = normalize_name(lsp_name),
+    lsp_name = str_replace_all(lsp_name, "LA TOVARA", "La Tovara")
+  ) %>%
+  dplyr::select(rgn_id, lsp_name, condition = overall_condition)
+
+dive_sites_condition_join <- dive_sites_condition %>%
+  mutate(lsp_name = paste0("Dive Site: ", nombre_sitio_de_buceo)) %>%
+  dplyr::select(rgn_id, lsp_name, condition = overall_condition)
+
+all_categorical_lsps <- bind_rows(
+  fishing_site_condition_join,
+  archaeological_site_condition_join,
+  protected_area_condition_join,
+  dive_sites_condition_join
+)
+
+lsps_not_in_categories <- setdiff(
+  lsp_list_ewg$lasting_special_place_lsp,
+  all_categorical_lsps$lsp_name
+)
+```
+
+## Missing marine sites to score here
+
+Now that I know which names are already covered, I will drop habitat rows that script 6 already covers with polygons. Also note: `rgn_id` should already live on the inventory when exported from the sheets.
+
+```{r}
+habitat_names_to_skip <- c(
+  "Coquina Reefs in Libertad, Bahia Lobos, and Peñasco - AHW",
+  "Only coral reefs in Gulf (Cabo Pulmo/Los Frailes & Bahía San Gabriel on Is. Espíritu Santo). RCB, BW",
+  "Massive seagrass beds (Zostera marina), RCB, BW\n\nThe largest and most stable annual seagrass beds (Zostera marina) are in the eastern Pacific. The eelgrass in the Gulf of California is 100% annual, no perennial, and is considered a subspecies, JTC, BW",
+  "Puerto Lobos N most mangrove (black mangrove) population, BW",
+  "Mangrove coastal lagoons, JTC."
+)
+
+lsps_missing_condition <- lsp_list_ewg %>%
+  filter(lasting_special_place_lsp %in% lsps_not_in_categories) %>%
+  filter(type_of_lsp %in% "Marine location of importance") %>%
+  mutate(
+    lat = as.numeric(lat),
+    long = as.numeric(long)
+  ) %>%
+  filter(!is.na(lat), !is.na(long)) %>%
+  st_as_sf(coords = c("long", "lat"), crs = 4326, remove = FALSE) %>%
+  filter(!lasting_special_place_lsp %in% habitat_names_to_skip) %>%
+  dplyr::select(rgn_id, lsp_name = lasting_special_place_lsp) %>%
+  mutate(rgn_id = str_replace_all(rgn_id, " ", "_"))
+
+mapview(lsps_missing_condition)
+```
+
+## Protected areas and spatial join
+
+Alrighty, now I will buffer the leftover sites and join them to the combined protected area layer so I know which parks they touch.
+
+```{r}
+all_protected <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem",
+    "all_goc_protected_areas_v2_2025.shp"
+  ),
+  quiet = TRUE
+)
+
+lsps_missing_buffered <- st_buffer(
+  st_transform(lsps_missing_condition, st_crs(all_protected)),
+  dist = 100
+)
+
+lsps_missing_protected <- st_join(
+  lsps_missing_buffered,
+  all_protected %>% dplyr::select(name, geometry),
+  join = st_intersects,
+  left = TRUE
+) %>%
+  mutate(in_protected_area = !is.na(name)) %>%
+  rename(protected_area_name = name)
+```
+
+## Match overlapping parks to SIMEC
+
+Now that I know which parks these leftover sites touch, I will prepare SIMEC for **2020 and 2023** the same way as in script 0 (averaging 2020 island-by-state rows).
+
+```{r}
+# status years i want lsp scores for
+status_years <- c(2020L, 2023L)
+
+# prepare simec for 2020 and 2023 (same logic as script 0)
+# older 2020 reports split islas del golfo by state/region; i average those rows
+i_efectividad_by_year <- read_csv(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/SIMEC",
+    "simec_i_efectividad_anp_2026.csv"
+  ),
+  show_col_types = FALSE,
+  na = c("", "NA", "N/A")
+) %>%
+  janitor::clean_names() %>%
+  mutate(
+    nombre = str_squish(as.character(nombre)),
+    ano_reporte = suppressWarnings(as.integer(ano_reporte)),
+    i_efectividad = suppressWarnings(as.numeric(i_efectividad)),
+    nombre = if_else(
+      str_to_upper(nombre) == "ISLAS DEL GOLFO DE CALIFORNIA",
+      "ISLAS DEL GOLFO DE CALIFORNIA",
+      nombre
+    )
+  ) %>%
+  filter(
+    !is.na(ano_reporte),
+    !is.na(i_efectividad),
+    !is.na(nombre),
+    nombre != "",
+    ano_reporte %in% status_years
+  ) %>%
+  group_by(ano_reporte, nombre) %>%
+  summarize(
+    i_efectividad = mean(i_efectividad, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# year-specific simec min and max (for ramsar rules / nom floors)
+simec_bounds_by_year <- i_efectividad_by_year %>%
+  group_by(ano_reporte) %>%
+  summarize(
+    simec_max = max(i_efectividad, na.rm = TRUE),
+    simec_min = min(i_efectividad, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+i_efectividad_norm <- i_efectividad_by_year %>%
+  distinct(nombre) %>%
+  mutate(nombre_norm = normalize_name(nombre))
+
+lsp_missing_sites_norm <- lsps_missing_protected %>%
+  mutate(protected_area_norm = normalize_name(protected_area_name))
+
+matches <- stringdist::amatch(
+  lsp_missing_sites_norm$protected_area_norm,
+  i_efectividad_norm$nombre_norm,
+  method = "jw",
+  maxDist = 0.2
+)
+
+lsp_missing_base <- lsp_missing_sites_norm %>%
+  mutate(
+    nombre_matched = i_efectividad_norm$nombre[matches],
+    nombre_norm_matched = i_efectividad_norm$nombre_norm[matches]
+  ) %>%
+  st_drop_geometry()
+
+# expand to both status years, then join that year's simec score
+lsp_missing_w_SIMEC <- bind_rows(
+  lsp_missing_base %>% mutate(ano_reporte = 2020L),
+  lsp_missing_base %>% mutate(ano_reporte = 2023L)
+) %>%
+  left_join(
+    i_efectividad_by_year,
+    by = c("nombre_matched" = "nombre", "ano_reporte")
+  ) %>%
+  left_join(simec_bounds_by_year, by = "ano_reporte") %>%
+  mutate(
+    year = ano_reporte,
+    protected_area_condition = ifelse(!is.na(i_efectividad), i_efectividad, NA_real_)
+  )
+
+ramsar_management_plans <- read_csv(
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets", "ramsar_site_management_plan_presence.csv"),
+  show_col_types = FALSE
+)
+
+# ramsar only when i have a park name but no simec match
+lsp_missing_RAMSAR <- lsp_missing_w_SIMEC %>%
+  filter(!is.na(protected_area_name) & is.na(nombre_norm_matched)) %>%
+  left_join(
+    ramsar_management_plans,
+    by = c("protected_area_name" = "wdpa_orig_name")
+  ) %>%
+  mutate(
+    protected_area_condition = case_when(
+      if_ramsar_has_management_plan == "y" ~ simec_max,
+      if_ramsar_has_management_plan == "in_progress" ~ 60,
+      if_ramsar_has_management_plan == "n" ~ simec_min,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  dplyr::select(
+    year, rgn_id, lsp_name, protected_area_condition,
+    if_ramsar_has_management_plan, protected_area_name,
+    in_protected_area, protected_area_norm
+  )
+
+lsp_missing_only_conanp_ANPs <- lsp_missing_w_SIMEC %>%
+  filter(!protected_area_name %in% lsp_missing_RAMSAR$protected_area_name | is.na(protected_area_name)) %>%
+  dplyr::select(
+    year, rgn_id, lsp_name, protected_area_condition,
+    protected_area_name, in_protected_area, protected_area_norm
+  )
+
+final_lsp_missing_condition <- bind_rows(
+  lsp_missing_only_conanp_ANPs,
+  lsp_missing_RAMSAR
+) %>%
+  group_by(year, rgn_id, lsp_name) %>%
+  summarize(
+    protected_area_condition = max(protected_area_condition, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    protected_area_condition = ifelse(
+      is.infinite(protected_area_condition) | is.nan(protected_area_condition),
+      0,
+      protected_area_condition
+    ),
+    lsp_name_join = stringi::stri_trim_both(lsp_name)
+  )
+```
+
+## Codified scores when still at zero
+
+Google sheet (estimated condition of protection):  
+<https://docs.google.com/spreadsheets/d/1RwNTzRZdBIDtzi7d1ceFxhNmVghN47NxTgrhZV8O2SM/edit?gid=193789975#gid=193789975>
+
+Codified scores do not change by year; SIMEC / Ramsar scores do. Now that I have the park-based scores, I will fill any remaining zeros from the curated sheet, then average by region and year and write the tables to Mazu.
+
+```{r}
+other_protections_condition_score <- read_csv(
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets", "lsps_codified_protections_estimated_condition.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(lsp_name_join = stringi::stri_trim_both(lsp_name)) %>%
+  dplyr::select(-lsp_name)
+
+lsps_other_protections_condition <- left_join(
+  final_lsp_missing_condition,
+  other_protections_condition_score,
+  by = "lsp_name_join"
+)
+
+final_other_protections_condition <- lsps_other_protections_condition %>%
+  mutate(
+    overall_condition = ifelse(
+      protected_area_condition == 0,
+      estimated_condition_of_protection,
+      protected_area_condition
+    ),
+    overall_condition = as.numeric(overall_condition)
+  )
+
+rgn_final_other_protections_condition <- final_other_protections_condition %>%
+  group_by(year, rgn_id) %>%
+  summarize(condition = mean(overall_condition, na.rm = TRUE), .groups = "drop")
+
+
+write_csv(
+  final_other_protections_condition,
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_lsp_other_marine_places.csv")
+)
+write_csv(
+  rgn_final_other_protections_condition,
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_region_other_marine_places.csv")
+)
+```
+
+

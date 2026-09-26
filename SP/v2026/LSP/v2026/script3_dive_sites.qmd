@@ -1,0 +1,350 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Sentido de Pertenencia: Lasting Special Places
+
+## Script 3: dive sites
+
+In this script I will score dive sites as lasting special places. People travel far to see wildlife and underwater habitats, so if those sites are not protected they can lose what makes them special.
+
+When a dive site sits inside a protected area, I will give it that park's SIMEC management score. When it sits outside any park, I will still use a soft floor based on NOM-012-TUR-2016, which sets rules for all dive tourism (inside and outside ANPs).
+
+**What I do**
+
+1. Read all dive sites and the conservation priority table from CBMC GCMP.
+2. Keep points that fall in Gulf of California marine regions or the 10 km inland buffer, and assign `rgn_id`.
+3. Buffer priority sites, join protected areas, fuzzy match SIMEC names, set condition, average by region, write CSVs.
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(mapview)
+library(stringdist)
+library(stringi)
+```
+
+## Why dive sites matter
+
+Dive tourism is a direct human ocean connection. Operators earn more when wildlife is intact, which often means no take zones and careful management (Arcos-Aguilar et al. 2021). Protections can include ANPs and NOMs for ecotourism, especially NOM-012-TUR-2016.
+
+The qualitative sections below explain why dive tourism counts as sense of place; the executable chunks starting with **Read in dive sites** implement the quantitative pathway.
+
+*Overview*
+Dive sites are considered lasting special places because people make a concerted effort to travel to these locations, some of them rather remote, and view wildlife. It is a direct connection between humans and the ocean, and if these places are not protected, then it is possible there will not continue to be a visited dive spot because their unique features are not there anymore. If possible, we should separate out dive spots that are known for the rock formations versus the wildlife viewing.
+
+[From Arcos-Aguilar et al. 2021](https://datamares.org/wp-content/uploads/2021/12/Arcos-etal-2021-Diving-tourism-in-Mexico-Economic-and-conservation-importance.pdf):
+
+  "The trip price is related to the accessibility of the diving sites. Areas with low accessibility charge more per trip than areas with high accessibility (Fig. 3). The increase in trip price can be related to an increase in costs to reach the diving sites by operators (e.g. higher gasoline consumption per trip); thus, accessibility of the diving sites can represent an advantage to the operators. However, the dive sites close to shore are under more environmental pressures than remote areas and are harder to manage [54]. Whenever management measures are implemented, the support of the community is essential. The success of MPAs is linked to the involvement and support of local communities in MPA management [55].
+
+  "Diving operators can increase revenues by supporting environmental protections that increase the chances of encounters with pristine wildlife. This is one of the top factors influencing travel decisions made by ecotourists, and such encounters have a higher probability of occurring within a No-Take Zone where biodiversity has full protection [47]. Establishing higher prices to access protected areas is not unheard of, especially when it can deliver an improved experience. Indeed, the number of No-Take Zones was found to be positively correlated with the popularity of a site, and in turn popularity drives revenues (Fig. 3). Tourists may be willing to pay more to ensure local conservation and to visit healthy habitats [23,26]."
+
+  "There is high potential revenue and greater benefits to be had by promoting a system of small-scale diving operations that prioritize the quality of tourists’ experiences, which can then translate into higher prices, increasing net revenues and decreasing pressure on biodiversity over time."
+
+  "Preservation of biodiversity embedded in diving sites must take into consideration long-term effects to the environment, the economy, and the livelihood of people and communities. To achieve this, diving operators should actively participate in marine spatial planning decisionmaking processes due to their economic importance and the necessity of community-based management. As of now, Mexico has the opportunity to become a beacon for community-led management through ecotourism activities that stimulate a novel and profitable way of using marine resources sustainably."
+
+*Potential protections:* 
+Protected areas/no-take zones, tourism use regulations/permits (CONANP visitor permits), Normas Oficiales Mexicanas (NOMs) for ecotourism (for diving, Norma Oficial Mexicana, NOM-012-TUR-2016).
+
+*Planned methods:*
+If it falls into a protected area, the condition will be based on the management effectiveness determined by CONANP's SIMEC index of effectiveness (i-efectividad). If not, the condition will be a 0.60 out of 1, because in [NOM-012-TUR-2016](https://dof.gob.mx/nota_to_doc.php%3Fcodnota%3D5450981), in section 6.11, it says this: "6.11 Para la práctica de buceo, tanto en las áreas naturales protegidas como en aquellas que se encuentran fuera, el prestador de servicios turísticos de buceo debe informar que las actividades de buceo deben realizarse sin dañar o extraer la flora y fauna silvestre acuática (viva o muerta), así como no intervenir, alterar o extraer monumentos y vestigios arqueológicos, históricos y artísticos, entendiéndose por éstos tanto los bienes prehistóricos y paleontológicos, así como los naufragios o pecios. En caso de realizar inmersiones en lugares que contengan patrimonio cultural subacuático, por seguridad del turista o usuario y de dicho patrimonio deberán mantener una distancia mínima de un metro de los elementos que conformen el patrimonio cultural subacuático. Los usuarios deberán verificar que todos los instrumentos que porten estén debidamente sujetos para que no arrastren y no dañen el patrimonio cultural o las formaciones coralinas. En caso de practicarse el buceo en cavidades naturales, lo anterior debe aplicarse también para no ocasionar daño a las formaciones geológicas ahí presentes." Therefore, there are some legal limitations on the actions of divers to protected the marine area, regardless of whether it falls into a protected area or not. 
+
+https://ecojurisprudence.org/initiatives/mexico-law-on-ecological-equilibrium-and-environmental-protection//
+
+## Read dive sites
+
+First I will read every dive site polygon or point, plus a smaller priority table with coordinates and popularity fields.
+
+```{r}
+dive_sites_raw <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main",
+    "shp/Diving_sites_v1.0_01032021/dive_sites.shp"
+  ),
+  quiet = TRUE
+) %>%
+  janitor::clean_names()
+
+mapview(dive_sites_raw)
+
+dive_sites_w_priority <- readxl::read_xlsx(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/CBMC-GCMP-prioritization-of-diving-sites-main",
+    "data/tabla_prioridad.xlsx"
+  )
+) %>%
+  janitor::clean_names() %>%
+  st_as_sf(coords = c("longitud", "latitud"), crs = 4326, remove = FALSE)
+
+mapview(dive_sites_w_priority)
+```
+
+## Limit to the Gulf of California
+
+Now I will union marine OHI regions with the inland 10 km buffer. That way nearshore sites still get a region id.
+
+```{r}
+inland_10 <- st_read(
+  here("/home/shares/ohi/OHI_GOC/spatial/inland_10km_buffer", "inland_10km_goc.shp"),
+  quiet = TRUE
+)
+
+regions_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp"), quiet = TRUE) %>%
+  filter(location == "marine")
+
+marine_and_inland10 <- bind_rows(regions_marine, inland_10) %>%
+  dplyr::select(rgn_id, geometry) %>%
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
+
+mapview(marine_and_inland10)
+```
+
+Now that I have that region layer, I will intersect both dive layers with it.
+
+```{r}
+dive_sites_goc_rgnid <- st_intersection(
+  st_transform(dive_sites_raw, st_crs(marine_and_inland10)),
+  marine_and_inland10
+)
+
+dive_sites_w_priority_goc_rgnid <- st_intersection(
+  st_transform(dive_sites_w_priority, st_crs(marine_and_inland10)),
+  marine_and_inland10
+)
+
+mapview(dive_sites_goc_rgnid, zcol = "rgn_id")
+mapview(dive_sites_w_priority_goc_rgnid, zcol = "rgn_id")
+
+st_write(
+  dive_sites_goc_rgnid,
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/int", "prep_dive_sites_with_region.gpkg"),
+  delete_dsn = TRUE
+)
+st_write(
+  dive_sites_w_priority_goc_rgnid,
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/int", "prep_dive_sites_priority_with_region.gpkg"),
+  delete_dsn = TRUE
+)
+```
+
+## Which priority sites fall in a protected area?
+
+Alrighty, now I will load the v2 protected area layer from script 1 (includes Alto Golfo). Then I will buffer each priority site by 300 m so GPS jitter still picks up nearby park edges, and I will keep sites outside parks as well (`left = TRUE`).
+
+```{r}
+all_protected <- st_read(
+  here(
+    "/home/shares/ohi/OHI_GOC/spatial/protected_areas_wdpa_conanp_and_hem",
+    "all_goc_protected_areas_v2_2025.shp"
+  ),
+  quiet = TRUE
+)
+
+dive_sites_buffered <- st_buffer(
+  st_transform(dive_sites_w_priority_goc_rgnid, st_crs(all_protected)),
+  dist = 300
+)
+
+dive_sites_protected <- st_join(
+  dive_sites_buffered,
+  all_protected %>% dplyr::select(name, geometry),
+  join = st_intersects,
+  left = TRUE
+) %>%
+  mutate(in_protected_area = !is.na(name)) %>%
+  rename(protected_area_name = name)
+
+table(dive_sites_protected$in_protected_area)
+mapview(dive_sites_protected, zcol = "in_protected_area") +
+  mapview(all_protected, col.regions = "pink")
+```
+
+Note: if a buffer hits more than one park, I will get one row per park. I will collapse those later by taking the best score.
+
+## Match each park name to SIMEC
+
+Now that I know which parks each dive site touches, I will prepare SIMEC for **2020 and 2023** the same way as in script 0 (averaging 2020 island-by-state rows). WDPA names and SIMEC `nombre` values rarely match character for character, so next I will normalize strings and use a fuzzy match, then score each dive site in both years.
+
+```{r}
+# status years i want lsp scores for
+status_years <- c(2020L, 2023L)
+
+# prepare simec for 2020 and 2023 (same logic as script 0)
+# older 2020 reports split islas del golfo by state/region; i average those rows
+i_efectividad_by_year <- read_csv(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/SIMEC",
+    "simec_i_efectividad_anp_2026.csv"
+  ),
+  show_col_types = FALSE,
+  na = c("", "NA", "N/A")
+) %>%
+  janitor::clean_names() %>%
+  mutate(
+    nombre = str_squish(as.character(nombre)),
+    ano_reporte = suppressWarnings(as.integer(ano_reporte)),
+    i_efectividad = suppressWarnings(as.numeric(i_efectividad)),
+    nombre = if_else(
+      str_to_upper(nombre) == "ISLAS DEL GOLFO DE CALIFORNIA",
+      "ISLAS DEL GOLFO DE CALIFORNIA",
+      nombre
+    )
+  ) %>%
+  filter(
+    !is.na(ano_reporte),
+    !is.na(i_efectividad),
+    !is.na(nombre),
+    nombre != "",
+    ano_reporte %in% status_years
+  ) %>%
+  group_by(ano_reporte, nombre) %>%
+  summarize(
+    i_efectividad = mean(i_efectividad, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# year-specific simec min and max (for ramsar rules / nom floors)
+simec_bounds_by_year <- i_efectividad_by_year %>%
+  group_by(ano_reporte) %>%
+  summarize(
+    simec_max = max(i_efectividad, na.rm = TRUE),
+    simec_min = min(i_efectividad, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+normalize_name <- function(x) {
+  x %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_to_upper() %>%
+    str_remove_all(
+      "\\bPARQUE NACIONAL\\b|\\bPARQUE\\b|\\bNACIONAL\\b|\\bZONA MARINA\\b|\\bARCHIPIELAGO\\b"
+    ) %>%
+    str_squish()
+}
+
+# fuzzy match on unique park names (not year-duplicated rows)
+i_efectividad_norm <- i_efectividad_by_year %>%
+  distinct(nombre) %>%
+  mutate(nombre_norm = normalize_name(nombre))
+
+dive_sites_norm <- dive_sites_protected %>%
+  mutate(protected_area_norm = normalize_name(protected_area_name))
+
+matches <- stringdist::amatch(
+  dive_sites_norm$protected_area_norm,
+  i_efectividad_norm$nombre_norm,
+  method = "jw",
+  maxDist = 0.2 #0.5
+)
+
+dive_sites_matched <- dive_sites_norm %>%
+  mutate(
+    nombre_matched = i_efectividad_norm$nombre[matches],
+    nombre_norm_matched = i_efectividad_norm$nombre_norm[matches]
+  )
+
+# inspect matches before scoring
+dive_sites_matched %>%
+  st_drop_geometry() %>%
+  distinct(protected_area_name, protected_area_norm, nombre_matched) %>%
+  print(n = Inf)
+
+# expand each dive site to both status years, then join that year's simec score
+dive_sites_base <- dive_sites_matched %>%
+  st_drop_geometry()
+
+dive_sites_w_SIMEC <- bind_rows(
+  dive_sites_base %>% mutate(ano_reporte = 2020L),
+  dive_sites_base %>% mutate(ano_reporte = 2023L)
+) %>%
+  left_join(
+    i_efectividad_by_year,
+    by = c("nombre_matched" = "nombre", "ano_reporte")
+  ) %>%
+  left_join(simec_bounds_by_year, by = "ano_reporte") %>%
+  mutate(
+    protected_area_condition = ifelse(!is.na(i_efectividad), i_efectividad, NA_real_),
+    year = ano_reporte
+  ) %>%
+  dplyr::select(
+    year, rgn_id, nombre_sitio_de_buceo, protected_area_name, protected_area_condition,
+    simec_min, popularidad_de_los_sitios, riqueza_de_especies, amenaza_de_cambio_climatico,
+    valor_turistico, estado, latitud, longitud
+  )
+```
+
+## Condition for each dive site and year
+
+Now that I have SIMEC matches, I will set the condition: if SIMEC is present I will use it; if not, I will use a NOM floor equal to the lowest SIMEC value **in that year**. That captures the idea that divers face some legal limits everywhere under NOM-012, even though those limits are weaker than park management.
+
+```{r}
+dive_sites_condition <- dive_sites_w_SIMEC %>%
+  group_by(year, nombre_sitio_de_buceo, rgn_id, latitud) %>%
+  summarize(
+    nom_condition = dplyr::first(simec_min),
+    protected_area_condition = max(protected_area_condition, na.rm = TRUE),
+    popularidad_de_los_sitios = dplyr::first(popularidad_de_los_sitios),
+    riqueza_de_especies = dplyr::first(riqueza_de_especies),
+    amenaza_de_cambio_climatico = dplyr::first(amenaza_de_cambio_climatico),
+    valor_turistico = dplyr::first(valor_turistico),
+    estado = dplyr::first(estado),
+    longitud = dplyr::first(longitud),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    protected_area_condition = ifelse(
+      is.infinite(protected_area_condition),
+      NA_real_,
+      protected_area_condition
+    ),
+    overall_condition = ifelse(
+      !is.na(protected_area_condition) & is.finite(protected_area_condition),
+      protected_area_condition,
+      nom_condition
+    )
+  ) %>%
+  dplyr::select(
+    year, rgn_id, nombre_sitio_de_buceo, overall_condition, protected_area_condition,
+    popularidad_de_los_sitios, riqueza_de_especies, amenaza_de_cambio_climatico,
+    valor_turistico, estado, latitud, longitud
+  )
+
+dive_sites_condition_sf <- dive_sites_condition %>%
+  filter(year == 2023L) %>%
+  st_as_sf(coords = c("longitud", "latitud"), crs = 4326, remove = FALSE)
+
+mapview(dive_sites_condition_sf, zcol = "overall_condition") +
+  mapview(all_protected)
+```
+
+## Condition per region and year, then write to Mazu
+
+Now that every dive site has a condition, I will average those scores within each OHI region for each status year, then write the site and region tables to Mazu.
+```{r}
+rgn_dive_sites_condition <- dive_sites_condition %>%
+  group_by(year, rgn_id) %>%
+  summarize(condition = mean(overall_condition, na.rm = TRUE), .groups = "drop")
+
+write_csv(dive_sites_condition, here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_lsp_dive_sites.csv"))
+write_csv(rgn_dive_sites_condition, here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_region_dive_sites.csv"))
+```
