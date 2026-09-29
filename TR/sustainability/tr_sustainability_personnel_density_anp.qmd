@@ -1,0 +1,389 @@
+---
+title: 'OHI GoC 2025: TR Sustainability — ANP personnel density'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# TR Sustainability: ANP personnel density
+
+I received personnel counts by protected area from a CONANP response on the Plataforma Nacional de Transparencia (SAI 340008300059326). Here I turn those counts into a simple density score: how close each ANP is to the staffing levels that the Nature Sustainability paper associates with effective management.
+
+## What I am doing
+
+1. Read personnel by ANP and year (2018-2026).
+2. Join each ANP to its surface area (hectares) from CONANP's national ANP list.
+3. Convert hectares to km² and compute people per km².
+4. Compare to two reference densities from Appleton et al. (Nature Sustainability):
+   - **All personnel for effective management:** 1 person per 13.33 km²
+   - **Rangers:** 1 ranger per 25.90 km²
+5. Score = `min(1, current_density / reference_density) * 100`. At or above the reference gets 100.
+
+For "rangers" I use the **operativo** categories in the SAI table (`perm_operativo + event_operativo`), which is the closest field-staff proxy in this response. All other density scores use total staff (CONANP calls this column `personal_total` in Spanish; I rename it to `personnel_total` below).
+
+# 1. Setup
+
+```{r}
+library(tidyverse)
+library(here)
+library(readxl)
+library(janitor)
+library(plotly)
+
+analysis_years <- 2018:2025
+
+## Appleton et al. reference points (km² per person)
+ref_km2_all_personnel <- 13.33
+ref_km2_rangers <- 25.90
+
+output_sustainability <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/tr/v2025/output_sustainability"
+)
+
+personnel_raw <- read_csv(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONANP/anp_personnel/digitized/SAI_340008300059326_personal_ANP.csv"), show_col_types = FALSE)
+
+anp_areas_raw <- read_excel(here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONANP/anp_personnel", "Listado_de_las_Áreas_Naturales_Protegidas_de_México.xlsx"), sheet = "Hoja1") %>%
+  janitor::clean_names()
+```
+
+# 2. Clean the SAI personnel table
+
+Each row is one ANP in one year. CONANP's `personal_total` already sums permanent and eventual staff (Spanish *personal* = personnel). I rename it to `personnel_total` and also build an operativo (ranger-proxy) total.
+
+```{r}
+personnel <- personnel_raw %>%
+  mutate(
+    anp_clean = str_squish(anp_clean),
+    operativo_total = replace_na(perm_operativo, 0) + replace_na(event_operativo, 0),
+    personnel_total = replace_na(personal_total, 0)
+  ) %>%
+  select(
+    year = anio,
+    anp_clean,
+    entidad_federativa,
+    perm_total,
+    event_total,
+    personnel_total,
+    operativo_total
+  )
+
+personnel %>%
+  count(year)
+
+unique(personnel$anp_clean)
+```
+
+# 3. Clean ANP areas from the national list
+
+`SUPERFICIE` is in **hectares**. I convert to km² by dividing by 100.
+
+```{r}
+anp_areas <- anp_areas_raw %>%
+  transmute(
+    nombre_listado = str_squish(nombre),
+    categoria = categoria_de_manejo,
+    estados = estados,
+    region_conanp = region,
+    superficie_ha = as.numeric(superficie),
+    superficie_terrestre_ha = as.numeric(superficie_terrestre),
+    superficie_marina_ha = as.numeric(superficie_marina),
+    area_km2 = superficie_ha / 100
+  ) %>%
+  filter(!is.na(nombre_listado), !is.na(area_km2), area_km2 > 0)
+
+anp_areas %>%
+  select(nombre_listado, area_km2, superficie_ha) %>%
+  arrange(nombre_listado) %>%
+  head(10)
+```
+
+# 4. Match names and keep coastal / marine GoC ANPs only
+
+A few names need a careful hand match (for example Isla San Pedro Mártir is not Sierra de San Pedro Mártir, and Zona Marina Isla Isabel is its own decree). Islas del Golfo comes as two "Zona Sur" rows in the SAI table, so I map both to the single national ANP and sum staff later.
+
+I only keep ANPs that are **marine, coastal, island, or otherwise GoC-linked** for this TR layer. Pinacate stays in because it overlaps archaeological sites we use in Lasting Special Places (LSP). Islas Marías stay in as part of the Gulf of California system. Bavispe and Sierra de Álamos-Río Cuchujaqui are inland and dropped.
+
+**Keep:** Alto Golfo; Islas del Golfo; Isla San Pedro Mártir; Meseta de Cacaxtla; Playa Ceuta; Playa El Verde Camacho; Playa Huizache Caimanero; Isla Isabel; Zona Marina de la Isla Isabel; Islas Marietas; El Pinacate y Gran Desierto de Altar; Islas Marías.
+
+**Drop:** Bavispe; Sierra de Álamos-Río Cuchujaqui (inland sierras, not coastal/marine GoC).
+
+```{r}
+anp_crosswalk <- tribble(
+  ~anp_clean, ~nombre_listado, ~keep_coastal_goc,
+  "Alto Golfo De California y Delta Del Río Colorado", "Alto Golfo de California y Delta del Río Colorado", TRUE,
+  "Bavispe", "Bavispe", FALSE,
+  "El Pinacate y Gran Desierto de Altar", "El Pinacate y Gran Desierto de Altar", TRUE,
+  "Isla De San Pedro Martir", "Isla San Pedro Mártir", TRUE,
+  "Isla Isabel", "Isla Isabel", TRUE,
+  "Islas Del Golfo De California, Zona Sur, Sinaloa", "Islas del Golfo de California", TRUE,
+  "Islas Del Golfo De California, Zona Sur, Sonora", "Islas del Golfo de California", TRUE,
+  "Islas Marietas", "Islas Marietas", TRUE,
+  "Islas Marías", "Islas Marías", TRUE,
+  "Meseta De Cacaxtla", "Meseta de Cacaxtla", TRUE,
+  "Santuario Playa Ceuta", "Playa Ceuta", TRUE,
+  "Santuario Playa El Verde Camacho", "Playa El Verde Camacho", TRUE,
+  "Santuario Playa Huizache Caimanero", "Playa Huizache Caimanero", TRUE,
+  "Sierra De Alamos Rio Cuchujaqui", "Sierra de Álamos-Río Cuchujaqui", FALSE,
+  "Zona Marina Isla Isabel", "Zona Marina de la Isla Isabel", TRUE
+)
+
+## check that every listado name exists
+setdiff(anp_crosswalk$nombre_listado, anp_areas$nombre_listado)
+
+anp_crosswalk %>%
+  filter(keep_coastal_goc) %>%
+  distinct(nombre_listado)
+```
+
+```{r}
+## sum staff when multiple SAI rows share one national ANP (Islas del Golfo)
+personnel_matched <- personnel %>%
+  inner_join(
+    anp_crosswalk %>% filter(keep_coastal_goc),
+    by = "anp_clean"
+  ) %>%
+  group_by(year, nombre_listado) %>%
+  summarise(
+    personnel_total = sum(personnel_total, na.rm = TRUE),
+    operativo_total = sum(operativo_total, na.rm = TRUE),
+    perm_total = sum(perm_total, na.rm = TRUE),
+    event_total = sum(event_total, na.rm = TRUE),
+    anp_clean_parts = paste(sort(unique(anp_clean)), collapse = " | "),
+    .groups = "drop"
+  ) %>%
+  left_join(anp_areas, by = "nombre_listado")
+
+## anyone still missing area?
+personnel_matched %>%
+  filter(is.na(area_km2)) %>%
+  distinct(nombre_listado, anp_clean_parts)
+
+personnel_matched %>%
+  filter(year == 2023) %>%
+  select(nombre_listado, personnel_total, operativo_total, area_km2, superficie_ha)
+```
+
+# 5. Density and current status scores
+
+```{r}
+## people per km²
+## reference density = 1 / ref_km2
+## score = min(1, current / reference) * 100
+personnel_density <- personnel_matched %>%
+  filter(!is.na(area_km2)) %>%
+  mutate(
+    dens_all = personnel_total / area_km2,
+    dens_ranger = operativo_total / area_km2,
+    ref_dens_all = 1 / ref_km2_all_personnel,
+    ref_dens_ranger = 1 / ref_km2_rangers,
+    ratio_all = dens_all / ref_dens_all,
+    ratio_ranger = dens_ranger / ref_dens_ranger,
+    current_status_all = pmin(1, ratio_all) * 100,
+    current_status_ranger = pmin(1, ratio_ranger) * 100,
+    ## nicer labels for plots
+    anp_label = nombre_listado,
+    km2_per_person = if_else(personnel_total > 0, area_km2 / personnel_total, NA_real_),
+    km2_per_ranger = if_else(operativo_total > 0, area_km2 / operativo_total, NA_real_)
+  ) %>%
+  arrange(nombre_listado, year)
+
+personnel_density %>%
+  filter(year %in% analysis_years) %>%
+  select(
+    year, anp_label, personnel_total, operativo_total, area_km2,
+    dens_all, current_status_all, dens_ranger, current_status_ranger
+  )
+```
+
+Quick read of 2023:
+
+```{r}
+personnel_density %>%
+  filter(year == 2023) %>%
+  select(
+    anp_label, personnel_total, area_km2, km2_per_person,
+    current_status_all, operativo_total, current_status_ranger
+  ) %>%
+  arrange(desc(current_status_all))
+```
+
+# 6. Plotly: current status over time (all-personnel density)
+
+Here we can compare each protected area's score against the effective-management staffing ideal (1 person per 13.33 km²).
+
+```{r}
+plot_df <- personnel_density %>%
+  filter(year %in% analysis_years)
+
+personnel_status_plotly <- plot_ly(
+  plot_df,
+  x = ~year,
+  y = ~current_status_all,
+  color = ~anp_label,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    anp_label, "<br>",
+    "Year: ", year, "<br>",
+    "Staff: ", personnel_total, "<br>",
+    "Area: ", round(area_km2, 1), " km²<br>",
+    "Density: ", signif(dens_all, 3), " people/km²<br>",
+    "km² per person: ", ifelse(is.na(km2_per_person), "NA", round(km2_per_person, 1)), "<br>",
+    "Score: ", round(current_status_all, 1)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "ANP personnel density vs effective management (1 person / 13.33 km²)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Current status (0-100)", range = c(0, 105)),
+    legend = list(orientation = "v", x = 1.02, y = 1)
+  ) %>%
+  add_lines(
+    x = range(analysis_years),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meets reference (100)",
+    inherit = FALSE
+  )
+
+personnel_status_plotly
+```
+
+## Optional: ranger-proxy scores over time
+
+Same idea, but using operativo staff and the ranger reference (1 ranger per 25.90 km²).
+
+```{r}
+ranger_status_plotly <- plot_ly(
+  plot_df,
+  x = ~year,
+  y = ~current_status_ranger,
+  color = ~anp_label,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    anp_label, "<br>",
+    "Operativo staff: ", operativo_total, "<br>",
+    "Score: ", round(current_status_ranger, 1)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "ANP operativo (ranger proxy) density vs 1 ranger / 25.90 km²",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Current status (0-100)", range = c(0, 105))
+  ) %>%
+  add_lines(
+    x = range(analysis_years),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Meets reference (100)",
+    inherit = FALSE
+  )
+
+ranger_status_plotly
+```
+
+## Optional: raw density (people per km²)
+
+```{r}
+plot_ly(
+  plot_df,
+  x = ~year,
+  y = ~dens_all,
+  color = ~anp_label,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Raw personnel density (people per km²)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "People per km²")
+  ) %>%
+  add_lines(
+    x = range(analysis_years),
+    y = c(1 / ref_km2_all_personnel, 1 / ref_km2_all_personnel),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Reference (1 / 13.33)",
+    inherit = FALSE
+  )
+```
+
+# 7. Save outputs
+
+```{r}
+write_csv(
+  anp_crosswalk,
+  file.path(output_sustainability, "anp_personnel_name_crosswalk.csv")
+)
+
+write_csv(
+  personnel_density,
+  file.path(output_sustainability, "anp_personnel_density_detail_2018_2025.csv")
+)
+
+cs_personnel_all <- personnel_density %>%
+  filter(year %in% analysis_years) %>%
+  transmute(
+    year,
+    anp = nombre_listado,
+    score = current_status_all,
+    sust_type = "anp_personnel_density_all",
+    personnel_total,
+    area_km2,
+    dens_all
+  )
+
+cs_personnel_ranger <- personnel_density %>%
+  filter(year %in% analysis_years) %>%
+  transmute(
+    year,
+    anp = nombre_listado,
+    score = current_status_ranger,
+    sust_type = "anp_personnel_density_ranger",
+    operativo_total,
+    area_km2,
+    dens_ranger
+  )
+
+write_csv(
+  cs_personnel_all,
+  file.path(
+    output_sustainability,
+    "tr_sust_anp_personnel_density_all_current_status_2018_2025.csv"
+  )
+)
+
+write_csv(
+  cs_personnel_ranger,
+  file.path(
+    output_sustainability,
+    "tr_sust_anp_personnel_density_ranger_current_status_2018_2025.csv"
+  )
+)
+```
+
+## Notes
+
+- Reference points come from Appleton et al., *Nature Sustainability*, figure on global terrestrial PA personnel densities (effective management = 1 person / 13.33 km²; rangers = 1 ranger / 25.90 km²).
+- Area source is CONANP's national list (`SUPERFICIE` in hectares). I use total surface (terrestrial + marine) so marine ANPs are not understated.
+- Islas del Golfo Zona Sur (Sinaloa) and Zona Sur (Sonora) are summed into one ANP before dividing by area.
+- Several ANPs have zero staff in some years. Those get a score of 0, not NA.
+- Restricted to coastal / marine / GoC-linked ANPs. Dropped only Bavispe and Sierra de Álamos-Río Cuchujaqui. Kept Pinacate (LSP archaeological overlap) and Islas Marías (GoC).
+- This SAI extract is still only the offices in the response, not every GoC ANP. ANP-level for now; next step could be mapping to `rgn_id` for the Sustainability merge, once the data for Baja California and Baja California Sur is obtained.
