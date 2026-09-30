@@ -29,10 +29,12 @@ library(stringr)
 library(data.table)
 library(zoo) # used for gapfilling RAM data.
 library(sf) # for work on shape fines
+
 # Visualization
 library(ggplot2)
-library(colorspace)
 library(ggforce)
+library(ggpubr) # Plotting lm statistics on ggplot.
+library(colorspace)
 library(plotly)
 library(htmlwidgets)
 library(htmltools)
@@ -41,19 +43,13 @@ library(htmltools)
 setwd("/home/ferrer/ohi_goc_prep/_habitats/")
 ```
 
-# LOAD & CLEAN DATA ------------------------------
+# PANGAS DATA ------------------------------
 
 
 ```{r Load in PANGAS_biomass data}
 PANGAS_biomass <- pg_data("10.1594/PANGAEA.963907")
 
 PANGAS_biomass_Data0 <- PANGAS_biomass[[1]]$data
-```
-
-```{r Load in PANGAS_density data}
-PANGAS_density <- pg_data("10.1594/PANGAEA.963910")
-
-PANGAS_density_Data0 <- PANGAS_density[[1]]$data
 ```
 
 ```{r Clean PANGAS_biomass}
@@ -72,7 +68,7 @@ PANGAS_biomass <- PANGAS_biomass_Data0 %>%
     years = `Years [a]`,
     family = Family,
     species = `Species UID`,
-    biomass = `Biom [g/m**2] (Estimated based on the abunda...)`,
+    mean_biomass = `Biom [g/m**2] (Estimated based on the abunda...)`,
     sd_biomass = `Std dev [±] (Of mean biomass values, Calcu...)`,
     samples = `Samples [#]`,
     slope = `Slope (Calculated)`,
@@ -85,6 +81,12 @@ PANGAS_biomass <- PANGAS_biomass_Data0 %>%
     year_mid = (year_initial + year_final) / 2
   )
 
+```
+
+```{r Load in PANGAS_density data}
+PANGAS_density <- pg_data("10.1594/PANGAEA.963910")
+
+PANGAS_density_Data0 <- PANGAS_density[[1]]$data
 ```
 
 ```{r Clean PANGAS_density}
@@ -105,7 +107,7 @@ PANGAS_density <- PANGAS_density_Data0 %>%
     years = `Years [a]`,
     family = Family,
     species = `Species UID`,
-    density = `Ind a [#/m**2] (Mean density. Estimated based...)`,
+    mean_density = `Ind a [#/m**2] (Mean density. Estimated based...)`,
     sd_density = `Std dev [±] (Of mean density values, Calcu...)`,
     samples = `Samples [#]`,
     slope = `Slope (Calculated)`,
@@ -120,10 +122,229 @@ PANGAS_density <- PANGAS_density_Data0 %>%
 
 ```
 
+# Add OHI region details to the PANGAS density data
 
-# REVIEW DATA ------------------------------
+```{r Loading in OHI regions and buffer shape files}
+# OHI regions:
+OHI_regions_metadata <- readLines("/home/shares/ohi/OHI_GOC/spatial/OHI_regions/marine/ohi_goc_final_071025.prj")
+# CRS: EPSG:4326 in practice, poorly labeled in meta-data.
 
-```{r Simple plots}
+OHI_regions_shape0 <- sf::st_read(
+  "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/marine/ohi_goc_final_071025.shp",
+  options = "ENCODING=LATIN1"
+)
+
+st_crs(OHI_regions_shape0)
+
+OHI_regions_shape0 <- st_make_valid(OHI_regions_shape0)
+
+# Quick plot:
+OHI_Region_plot<- ggplot(OHI_regions_shape0) +
+  geom_sf(aes(fill = rgn_id)) +
+  theme_bw()
+
+OHI_Region_plot
+
+# 50km buffer:
+OHI_buffer_metadata <- readLines("/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer/inland_50km_goc.prj")
+# Projected CRS name: Mexico_ITRF2008_LCC
+
+OHI_buffer_shape0 <- sf::st_read(
+  "/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer/inland_50km_goc.shp",
+  options = "ENCODING=LATIN1"
+)
+
+st_crs(OHI_buffer_shape0)
+
+OHI_buffer_shape0 <- st_make_valid(OHI_buffer_shape0)
+
+# Quick plot:
+OHI_Buffer_plot<- ggplot(OHI_buffer_shape0) +
+  geom_sf(aes(fill = rgn_id)) +
+  theme_bw()
+
+OHI_Buffer_plot
+```
+
+```{r Some quick cleaning}
+# Let's use CRS 4326 for all projections now.
+crs_use = 4326
+
+# Change CRS on OHI_buffer_shape to match CRS on OHI_regions_shape
+OHI_regions_shape <- st_transform(OHI_regions_shape0, crs_use)
+
+# Change CRS on OHI_buffer_shape to match CRS on OHI_regions_shape
+OHI_buffer_shape <- st_transform(OHI_buffer_shape0, crs_use)
+
+# Remove columns and extract useful info:
+OHI_buffer_shape<- OHI_buffer_shape0 %>%
+  select(-c(estado))
+
+additional_info<- OHI_buffer_shape0 %>%
+  select(rgn_id, ecorgn) %>%
+  st_drop_geometry()
+
+# Add new columns to OHI_regions_shape
+OHI_regions_shape <- OHI_regions_shape %>%
+  left_join(
+    additional_info,
+    by = "rgn_id"
+  ) %>%
+  mutate(
+    location= c("sea")
+  ) %>%
+  relocate(location, .after= rgn_id)
+
+rm(additional_info)
+```
+
+```{r Join OHI geometric key to PANGAS_density}
+# Step 0 — define a Coordinate Reference System (CRS) once and stick to it:
+crs_use <- 4326
+# Alternative could be: CRS 5070 is the USA Contiguous Albers Equal Area (good proxy for northern Mexico too). EPSG:5070 is centered on the U.S., so Baja / Sonora are near the edge of its optimal zone.
+
+# Step 1 — Convert master table to spatial points
+# Turn PANGAS_density into an sf object
+colnames(PANGAS_density)
+
+master_sf <- PANGAS_density %>%
+  filter(!is.na(longitude), !is.na(latitude)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), 
+           crs = crs_use,
+           remove = FALSE) %>%
+  st_transform(crs_use)
+
+# Step 2 — Transform polygons ONCE
+buffer_sf <- OHI_buffer_shape %>%
+  st_transform(crs_use)
+
+sea_sf <- OHI_regions_shape %>%
+  st_transform(crs_use)
+
+# Check CRS:
+st_crs(master_sf)
+st_crs(buffer_sf)
+st_crs(sea_sf)
+
+# Check spatial extents
+st_bbox(master_sf)
+st_bbox(buffer_sf)
+st_bbox(sea_sf)
+
+# Check number of polygon matches for each PANGAS point:
+st_intersects(master_sf, buffer_sf)
+st_intersects(master_sf, sea_sf)
+# Only intersects with the sea boundaries and none of the land boundaries, which makes sense.
+
+# Step 3 — Spatial join to land buffer polygons
+# Join points → OHI_buffer_shape
+master_land <- st_join(
+  master_sf,
+  buffer_sf,
+  join = st_within,
+  left = TRUE
+)
+
+# Re-name columns to be safe:
+master_land <- master_land %>%
+  rename(
+    rgn_id_land = rgn_id,
+    ecorgn_land = ecorgn,
+    location_land = location
+  )
+
+# Step 5 — Spatial join to sea regions
+# Join same (or filtered) points → OHI_regions_shape
+master_all <- st_join(
+  master_land,
+  sea_sf,
+  join = st_within,
+  left = TRUE
+)
+
+# Step 6 — Remove duplicate column names cleanly
+# master_all <- master_all %>%
+#   rename(
+#     rgn_id_sea = rgn_id,
+#     ecorgn_sea = ecorgn,
+#     location_sea = location
+#   )
+
+# Clean
+colnames(master_all)
+
+PANGAS_density<- master_all %>%
+  select(area, zone, latitude, longitude,
+         rgn_id, ecorgn,
+         activity, institution, samples,
+         year_initial, year_final, year_mid, years,
+         family, species,
+         density_min, density_max, sd_density,
+         mean_density, slope,
+         p_value)
+```
+
+## QC: Does sampling effort impact mean density estimates? No, at least not at this level.
+
+```{r Does sampling effort impact mean density estimates?}
+
+plot_df <- PANGAS_density |>
+  distinct(species, samples, mean_density) |>
+  filter(!is.na(samples), !is.na(mean_density))
+
+# Calculate p-value for each species
+pvals <- plot_df |>
+  group_by(species) |>
+  summarise(
+    p_value = summary(lm(mean_density ~ samples))$coefficients[
+      "samples", "Pr(>|t|)"
+    ],
+    .groups = "drop"
+  ) |>
+  mutate(
+    label = paste0(
+      "p = ",
+      format.pval(p_value, digits = 3, eps = 0.001)
+    )
+  )
+
+# Plot
+ggplot(plot_df, aes(x = samples, y = mean_density)) +
+  geom_point(size = 2.5, alpha = 0.7) +
+  
+  geom_smooth(
+    method = "lm",
+    se = TRUE,
+    color = "steelblue"
+  ) +
+  
+  geom_text(
+    data = pvals,
+    aes(
+      x = Inf,
+      y = Inf,
+      label = label
+    ),
+    hjust = 1.1,
+    vjust = 1.5,
+    inherit.aes = FALSE
+  ) +
+  
+  facet_wrap(~ species, scales = "free") +
+  
+  labs(
+    x = "Number of samples",
+    y = "Mean density",
+    title = "Sampling effort vs. mean density"
+  ) +
+  
+  theme_bw()
+
+```
+
+## Visualize density and biomass data:
+
+```{r Simple slope plots}
 plot(PANGAS_biomass$slope)
 
 plot(PANGAS_density$slope)
@@ -136,8 +357,66 @@ summary(PANGAS_biomass$slope_se)
 
 ```
 
+```{r Plot PANGAS biomass slopes per region}
+ggplot(
+  PANGAS_biomass %>% filter(!is.na(slope)),
+  aes(x = zone, y = slope)
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = "grey40"
+  ) +
+  geom_jitter(
+    width = 0.15,
+    alpha = 0.3
+  ) +
+  geom_boxplot(
+    width = 0.4,
+    alpha = 0.5,
+    outlier.shape = NA
+  ) +
+  labs(
+    x = "Gulf region",
+    y = "Estimated annual change in abundance"
+  ) +
+  theme_bw()
 
-```{r Summarize slope by species and zone}
+```
+
+```{r Plot PANGAS density slopes per region}
+ggplot(
+  PANGAS_density %>% filter(!is.na(slope)),
+  aes(x = family, y = slope)
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = "grey40"
+  ) +
+  geom_jitter(
+    width = 0.15,
+    alpha = 0.25
+  ) +
+  geom_boxplot(
+    width = 0.5,
+    alpha = 0.5,
+    outlier.shape = NA
+  ) +
+  facet_wrap(~ zone) +
+  labs(
+    x = "Family",
+    y = "Estimated annual change in density"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+## Slope means:
+```{r Summarize biomass slopes by species and zone}
 colnames(PANGAS_biomass)
 
 species_zone_biomass_slope <- PANGAS_biomass %>%
@@ -156,8 +435,7 @@ species_zone_density_slope <- PANGAS_density %>%
 ```
 
 
-```{r mean plots}
-
+```{r Plot mean biomass per species / zone}
 ggplot(
   species_zone_biomass_slope,
   aes(x = species, y = mean_slope, fill = species)
@@ -233,9 +511,8 @@ plot(species_zone_biomass_slope$mean_slope)
 plot(species_zone_density_slope$mean_slope)
 ```
 
-# Let's try a new approach:
-```{r}
-library(dplyr)
+## Slopes pre and post 2015:
+```{r Pre and post 2015}
 
 dat <- PANGAS_biomass %>%
   mutate(
@@ -260,8 +537,7 @@ table(dat$assessment_period, dat$family)
 ```
 
 
-```{r Viz}
-library(ggplot2)
+```{r Visualization pre and post 2015}
 
 ggplot(
   dat %>% filter(!is.na(slope), !is.na(assessment_period)),
@@ -286,7 +562,7 @@ ggplot(
 
 ```
 
-```{r Model}
+```{r Model pre and post 2015}
 dat_test <- dat %>%
   filter(
     !is.na(slope),
@@ -313,16 +589,8 @@ summary(mod)
 
 ```
 
-```{r}
-dat %>%
-  select(year_initial, year_final, year_mid) %>%
-  distinct() %>%
-  arrange(year_initial, year_final)
 
-```
-
-
-```{r Is there evidence density has declined?}
+```{r Is there evidence density has declined pre and post 2015?}
 library(dplyr)
 library(ggplot2)
 
@@ -363,63 +631,273 @@ ggplot(
 
 ```
 
-```{r}
-ggplot(
-  PANGAS_density %>% filter(!is.na(slope)),
-  aes(x = zone, y = slope)
-) +
-  geom_hline(
-    yintercept = 0,
-    linetype = "dashed",
-    color = "grey40"
-  ) +
-  geom_jitter(
-    width = 0.15,
-    alpha = 0.3
-  ) +
-  geom_boxplot(
-    width = 0.4,
-    alpha = 0.5,
-    outlier.shape = NA
-  ) +
-  labs(
-    x = "Gulf region",
-    y = "Estimated annual change in density"
-  ) +
-  theme_bw()
 
+
+
+## Revised approach (Sep 29 2026): testing two scoring options
+
+```{r Estimate annual density based on estimated mean_density and slope}
+# Use the mean_density and slope parameters to estimate annual density. Bound by density_max and density_min.
+
+colnames(PANGAS_density)
+
+PANGAS_density_yearly0 <- PANGAS_density %>%
+  rowwise() %>%
+  mutate(
+    year = list(seq(year_initial, year_final))
+  ) %>%
+  tidyr::unnest(year)
+
+# 4719 obs., 23 vars.
 ```
 
-```{r}
-ggplot(
-  PANGAS_density %>% filter(!is.na(slope)),
-  aes(x = family, y = slope)
-) +
-  geom_hline(
-    yintercept = 0,
-    linetype = "dashed",
-    color = "grey40"
-  ) +
-  geom_jitter(
-    width = 0.15,
-    alpha = 0.25
-  ) +
-  geom_boxplot(
-    width = 0.5,
-    alpha = 0.5,
-    outlier.shape = NA
-  ) +
-  facet_wrap(~ zone) +
-  labs(
-    x = "Family",
-    y = "Estimated annual change in density"
-  ) +
-  theme_bw() +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1)
+```{r filter out p is NA}
+colnames(PANGAS_density_yearly0)
+
+PANGAS_density_yearly <- PANGAS_density_yearly0 %>%
+  filter(!is.na(p_value)) %>%
+  mutate(
+    slope_classification = case_when(
+      slope < 0 & p_value < 0.05  ~ "significant negative slope",
+      slope < 0 & p_value >= 0.05 ~ "non-significant negative slope",
+      slope >= 0 & p_value < 0.05 ~ "significant positive slope",
+      slope >= 0 & p_value >= 0.05 ~ "non-significant positive slope"
+    )
+  ) %>%
+  select(area, zone, latitude, longitude,
+         rgn_id, ecorgn,
+         activity, institution, samples,
+         year_initial, year_final, year_mid,
+         family, species,
+         density_min, density_max, sd_density,
+         year, mean_density, slope,
+         p_value, slope_classification)
+
+table(PANGAS_density_yearly$slope_classification)
+
+# non-significant negative slope non-significant positive slope     significant negative slope     significant positive slope 
+#                            797                           1630                            265                           1033 
+```
+
+# Option 1: proportion of statistically negative slopes
+```{r Summarize slopes per year zone species}
+colnames(PANGAS_density_yearly)
+
+PANGAS_scores_option1 <- PANGAS_density_yearly %>%
+  select(rgn_id, species, year, samples, institution, slope_classification) %>%
+  group_by(rgn_id, species, year) %>%
+  summarise(
+    n_samples = sum(samples),
+    n_datasets = n_distinct(institution),
+    prop_sig_negative =
+      mean(slope_classification == "significant negative slope"),
+    prop_nonsig_negative =
+      mean(slope_classification == "non-significant negative slope"),
+    prop_sig_positive =
+      mean(slope_classification == "significant positive slope"),
+    prop_nonsig_positive =
+      mean(slope_classification == "non-significant positive slope"),
+    .groups = "drop"
   )
 
+PANGAS_scores_option1<- PANGAS_scores_option1 %>%
+  mutate(
+    score_option1 = (1-prop_sig_negative)*100
+  )
 ```
+
+```{r Simple plot}
+ggplot(PANGAS_scores_option1, 
+       aes(x = year, y = prop_sig_negative, color = species)) +
+  
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.5) +
+  
+  facet_wrap(~ rgn_id) +
+  
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent
+  ) +
+
+  labs(
+    x = "Year",
+    y = "Proportion of significant negative slopes",
+    color = "Species"
+  ) +
+  
+  scale_color_viridis_d()+
+  theme_bw()
+```
+
+```{r Summarize by rgn_id and year}
+colnames(PANGAS_scores_option1)
+
+PANGAS_scores_option11<- PANGAS_scores_option1 %>%
+  group_by(rgn_id, year) %>%
+  summarize(
+    score_option1= mean(score_option1)
+  )
+```
+
+```{r Simple plot of Option 1}
+ggplot(PANGAS_scores_option11, 
+       aes(x = year, y = score_option1, color = rgn_id)) +
+  
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.5) +
+  
+  facet_wrap(~ rgn_id) +
+  
+  scale_y_continuous(
+    limits = c(0, 100),
+  ) +
+  labs(
+    title = "PANGAS Rocky Reef Data - Scoring Option 1",
+    caption = "Option 1 represents one minus the proportion of significant negative slopes (p < 0.05) \nmeaned across species & data sets at the annual x zone level",
+    x = "Year",
+    y = "Rocky Reef Fish Scores [Option 1]",
+    color = "Zone"
+  ) +
+#  scale_color_viridis_d()+
+  theme_bw()
+```
+
+## Option 2: score equals estimated fish density (that year at that site) relative to mean density
+```{r PANGAS_scores_option2}
+colnames(PANGAS_density_yearly)
+
+# Estimate density per species per year per survey:
+PANGAS_scores_option2 <-PANGAS_density_yearly %>%
+  mutate(
+    estimated_density_raw = mean_density +
+      slope * (year - year_mid),
+
+    estimated_density = pmax(0, estimated_density_raw),
+
+    density_was_bounded = estimated_density_raw < 0
+  )
+
+# For slopes that are not significant, estimated_density should equal mean_density:
+PANGAS_scores_option2<- PANGAS_scores_option2 %>%
+  mutate(
+    estimated_density = case_when(
+      slope_classification == "non-significant negative slope" ~ mean_density,
+      slope_classification == "non-significant positive slope" ~ mean_density,
+      slope_classification == "significant positive slope" ~ estimated_density,
+      slope_classification == "significant negative slope" ~ estimated_density,
+    )
+  )
+  
+
+colnames(PANGAS_scores_option2)
+
+PANGAS_scores_option22<- PANGAS_scores_option2 %>%
+  select(year, rgn_id, species, samples, institution, mean_density, estimated_density) %>%
+  group_by(rgn_id, species, year) %>%
+  summarise(
+    n_samples = sum(samples),
+    n_datasets = n_distinct(institution),
+    mean_density = mean(mean_density, na.rm= TRUE),
+    mean_est_annual_density= mean(estimated_density, na.rm= TRUE)
+  )
+```
+
+```{r How does sampling effort impact mean density estimates at this level?}
+plot_df <- PANGAS_scores_option22 |>
+  distinct(species, n_samples, mean_density) |>
+  filter(!is.na(n_samples), !is.na(mean_density))
+
+# Calculate p-value for each species
+pvals <- plot_df |>
+  group_by(species) |>
+  summarise(
+    p_value = summary(lm(mean_density ~ n_samples))$coefficients[
+      "n_samples", "Pr(>|t|)"
+    ],
+    .groups = "drop"
+  ) |>
+  mutate(
+    label = paste0(
+      "p = ",
+      format.pval(p_value, digits = 3, eps = 0.001)
+    )
+  )
+
+# Plot
+ggplot(plot_df, aes(x = n_samples, y = mean_density)) +
+  geom_point(size = 2.5, alpha = 0.7) +
+  
+  geom_smooth(
+    method = "lm",
+    se = TRUE,
+    color = "steelblue"
+  ) +
+  
+  geom_text(
+    data = pvals,
+    aes(
+      x = Inf,
+      y = Inf,
+      label = label
+    ),
+    hjust = 1.1,
+    vjust = 1.5,
+    inherit.aes = FALSE
+  ) +
+  
+  facet_wrap(~ species, scales = "free") +
+  
+  labs(
+    x = "Number of samples",
+    y = "Mean density",
+    title = "Sampling effort vs. mean density",
+    caption = "Mean fish density: estimates taken across individual species & data sets at the annual x region level."
+  ) +
+  
+  theme_bw()
+
+# At this level, the number of samples does bias the mean density outcome.
+```
+
+This exercise leads me to believe that we should not use option 2 since it is biased by sample size.
+
+```{r Summarize by rgn_id and year}
+colnames(PANGAS_scores_option2)
+
+TEST<- PANGAS_scores_option22 %>%
+  group_by(rgn_id, year) %>%
+  summarize(
+    mean_density= mean(mean_density, na.rm= TRUE)
+  )
+```
+
+```{r Simple plot mean densities by rgn_id}
+ggplot(TEST, 
+       aes(x = year, y = mean_density, color = rgn_id)) +
+  
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.5) +
+  
+  facet_wrap(~ rgn_id) +
+
+  labs(
+    title = "PANGAS Rocky Reef Data: mean fish densities per zone",
+    caption = "These mean density estimates are biased by the postive relationship between mean density and # samples.",
+    x = "Year",
+    y = "Mean fish density",
+    color = "OHI Region"
+  ) +
+  theme_bw()
+```
+
+
+
+
+
+# COBI DATA ------------------------------
+
+## COBI_Invert_Data0
 
 ```{r Look into COBI inverts data}
 COBI_Invert_Data0<- read.csv("/home/shares/ohi/OHI_GOC/_raw_data/COBI/COBI_Invertebrados_Reserva_Biosfera_IslaSanPedroMartir_2007_2022.csv")
@@ -548,7 +1026,7 @@ scale_color_manual(
 ```
 
 
-# Now let's look at the COBI fish data:
+## COBI_Fish_Data0
 ```{r Look into COBI inverts data}
 COBI_Fish_Data0<- read.csv("/home/shares/ohi/OHI_GOC/_raw_data/COBI/COBI_Peces_Reserva_Biosfera_IslaSanPedroMartir_2007_2022.csv")
 ```

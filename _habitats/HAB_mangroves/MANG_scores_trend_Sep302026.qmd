@@ -1,18 +1,18 @@
----
-title: "Mangrove Habitat Condition and Trend with a buffer - Gulf of California OHI"
-author: "Austin Martinez"
-date: 03/26/2026
-format: 
-  html:
-    code-fold: show
-execute:
-  echo: true
-  message: false
-  warning: false
----
+################################################################################
 
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
 
-```{r}
+original author: "Austin Martinez"
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
 # Load in Libraries
 library(sf)
 library(dplyr)
@@ -24,17 +24,33 @@ library(knitr)
 library(kableExtra)
 library(tmap)
 
+setwd("/home/ferrer/ohi_goc_prep/_habitats/")
 ```
 
-```{r}
+
+# STEP 1: LOAD IN OHI REGIONS & CREATE 20KM BUFFER ------------------------------
+ 
+```{r Load in the OHI Region_Key0}
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
+
+colnames(Region_Key0)
+
+Region_Key<- Region_Key0 %>%
+  select(OHI_region= OHI_region_est, OHI_region_name) %>%
+  distinct()
+```
+
+
+```{r Read in OHI region boundaries}
 # Read in OHI region boundaries
 ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |> st_make_valid()
 
 ```
 
-## Create buffer
+```{r Create 20km coastal buffer around OHI regions}
+# DECISION POINT: We clipped coverage to a 20-km coastal buffer to avoid capturing coverage located on the west side of the Baja California peninsula.
 
-```{r}
+COASTAL_BUFFER = 20000 # (20,000m or 20km)
 
 # Create 20km buffer (run once)
 sf::sf_use_s2(FALSE)
@@ -44,7 +60,9 @@ ohi_regions_marine <- ohi_regions |>
   st_union()
 
 # Make a buffer ring
-buffer_outer <- st_buffer(ohi_regions_marine, dist = 20000)
+buffer_outer <- st_buffer(ohi_regions_marine, 
+                          dist = COASTAL_BUFFER)
+
 buffer_ring  <- st_difference(buffer_outer, ohi_regions_marine) |> st_make_valid()
 
 # Union it to the marine OHI layer
@@ -52,10 +70,21 @@ ohi_marine_plus_20km <- st_union(ohi_regions_marine, buffer_ring)
 
 ```
 
-## EXTENT — Hem MANGLAR (2025)
+# STEP 2: CALCULATE MANGROVE EXTENT (source: Hem's Data, est. 2025) ------------------------------
 
-```{r}
-# Filter hem data to only include mangrove layers
+```{r Load in Hem's mangrove data}
+# Read in Hem data
+hem_mangroves <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/mangrove_Hem/USV_AGRUPADO/USV_AGRUPADO.shp")) |> 
+  st_make_valid()
+
+# Match hem data to OHI CRS
+hem_mangroves <- st_transform(hem_mangroves, st_crs(ohi_regions))
+
+```
+
+```{r Filter Hem's data to only mangrove layers}
+# Filter:
+
 hem_mangroves_only <- hem_mangroves |>
   filter(DESCRIP_AG %in% c("MANGLAR", 
                            "VEGETACIÓN SECUNDARIA ARBÓREA DE MANGLAR", 
@@ -66,12 +95,12 @@ hem_mangroves_only <- hem_mangroves |>
   st_make_valid()
 ```
 
-```{r}
+```{r Clip mangrove data to the 20km buffer extent}
 # Clip mangrove data to the 20km buffer extent
 hem_mangroves_only <- st_intersection(hem_mangroves_only, ohi_marine_plus_20km)
 
-# Find the mangrove area in each region
-rgns_hem <- st_intersection(hem_mangroves_only, ohi_regions) |>
+# Assign the mangrove extent to each OHI region
+MANG_current_extent <- st_intersection(hem_mangroves_only, ohi_regions) |>
   group_by(rgn_id) |>
   summarise(geometry = st_union(x), .groups = "drop") |>
   mutate(
@@ -87,22 +116,22 @@ all_rgns <- tibble(
   year = 2025
 )
 
-rgns_hem <- all_rgns |>
-  left_join(rgns_hem, by = c("rgn_id", "year")) |>
+MANG_current_extent <- all_rgns |>
+  left_join(MANG_current_extent, by = c("rgn_id", "year")) |>
   mutate(area_km2 = replace_na(area_km2, 0)) |>
   select(rgn_id, area_km2, year)
 
 # Make a nice Ktable
-rgns_hem |>
+MANG_current_extent |>
   kable(digits = 4, col.names = c("Region", "Extent (km²)", "Year")) |>
   kable_styling(bootstrap_options = c("striped", "bordered")) |>
   add_header_above(
     c('Mangrove Extent' = 3))
 ```
 
-## Condition CONABIO
+# STEP 3: CALCULATE MANGROVE SCORES, i.e. "Current Status"  (source: Global Mangrove Watch, 1996-2020)  ------------------------------
 
-```{r}
+```{r Read in Global Mangrove Watch data}
 # Read in mangrove data
 gmw_1996 <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/zenodo_mangrove/gmw_v3_1996_vec/gmw_v3_1996_vec.shp")) |> 
   st_make_valid()
@@ -126,22 +155,20 @@ gmw_2017 <- st_transform(gmw_2017, st_crs(ohi_regions))
 gmw_2020 <- st_transform(gmw_2020, st_crs(ohi_regions))
 ```
 
-```{r}
-# Read in Hem data
-hem_mangroves <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/mangrove_Hem/USV_AGRUPADO/USV_AGRUPADO.shp")) |> 
-  st_make_valid()
-
-# Match hem data to OHI CRS
-hem_mangroves <- st_transform(hem_mangroves, st_crs(ohi_regions))
-
-```
-
-```{r}
-# 1996
+## Clip mangrove data to the 20km buffer extent & estimate the mangrove area in each OHI region:
+```{r Clip mangrove data 1996 through 2020 to the 20km buffer extent}
 # Clip mangrove data to the 20km buffer extent
 gmw_1996 <- st_intersection(gmw_1996, ohi_marine_plus_20km)
+gmw_2007 <- st_intersection(gmw_2007, ohi_marine_plus_20km)
+gmw_2010 <- st_intersection(gmw_2010, ohi_marine_plus_20km)
+gmw_2015 <- st_intersection(gmw_2015, ohi_marine_plus_20km)
+gmw_2017 <- st_intersection(gmw_2017, ohi_marine_plus_20km)
+gmw_2020 <- st_intersection(gmw_2020, ohi_marine_plus_20km)
+```
 
-# Find the mangrove area in each region
+```{r Assign the mangrove area to OHI regions}
+# Assign the mangrove area to OHI regions (per year) in:
+# 1996
 rgns_gmw_1996 <- st_intersection(gmw_1996, ohi_regions) |>
   group_by(rgn_id) |>
   summarise(geometry = st_union(geometry), .groups = "drop") |>
@@ -150,14 +177,8 @@ rgns_gmw_1996 <- st_intersection(gmw_1996, ohi_regions) |>
     year = 1996
   ) |>
   st_drop_geometry()
-```
 
-```{r}
 # 2007
-# Clip mangrove data to the 20km buffer extent
-gmw_2007 <- st_intersection(gmw_2007, ohi_marine_plus_20km)
-
-# Find the mangrove area in each region
 rgns_gmw_2007 <- st_intersection(gmw_2007, ohi_regions) |>
   group_by(rgn_id) |>
   summarise(geometry = st_union(geometry), .groups = "drop") |>
@@ -166,14 +187,8 @@ rgns_gmw_2007 <- st_intersection(gmw_2007, ohi_regions) |>
     year = 2007
   ) |>
   st_drop_geometry()
-```
 
-```{r}
 # 2010
-# Clip mangrove data to the 20km buffer extent
-gmw_2010 <- st_intersection(gmw_2010, ohi_marine_plus_20km)
-
-# Find the mangrove area in each region
 rgns_gmw_2010 <- st_intersection(gmw_2010, ohi_regions) |>
   group_by(rgn_id) |>
   summarise(geometry = st_union(geometry), .groups = "drop") |>
@@ -183,14 +198,7 @@ rgns_gmw_2010 <- st_intersection(gmw_2010, ohi_regions) |>
   ) |>
   st_drop_geometry()
 
-```
-
-```{r}
 # 2015
-# Clip mangrove data to the 20km buffer extent
-gmw_2015 <- st_intersection(gmw_2015, ohi_marine_plus_20km)
-
-# Find the mangrove area in each region
 rgns_gmw_2015 <- st_intersection(gmw_2015, ohi_regions) |>
   group_by(rgn_id) |>
   summarise(geometry = st_union(geometry), .groups = "drop") |>
@@ -200,15 +208,7 @@ rgns_gmw_2015 <- st_intersection(gmw_2015, ohi_regions) |>
   ) |>
   st_drop_geometry()
 
-```
-
-```{r}
-
 # 2017
-# Clip mangrove data to the 20km buffer extent
-gmw_2017 <- st_intersection(gmw_2017, ohi_marine_plus_20km)
-
-# Find the mangrove area in each region
 rgns_gmw_2017 <- st_intersection(gmw_2017, ohi_regions) |>
   group_by(rgn_id) |>
   summarise(geometry = st_union(geometry), .groups = "drop") |>
@@ -218,15 +218,7 @@ rgns_gmw_2017 <- st_intersection(gmw_2017, ohi_regions) |>
   ) |>
   st_drop_geometry()
 
-```
-
-```{r}
-
 # 2020
-# Clip mangrove data to the 20km buffer extent
-gmw_2020 <- st_intersection(gmw_2020, ohi_marine_plus_20km)
-
-# Find the mangrove area in each region
 rgns_gmw_2020 <- st_intersection(gmw_2020, ohi_regions) |>
   group_by(rgn_id) |>
   summarise(geometry = st_union(geometry), .groups = "drop") |>
@@ -237,74 +229,145 @@ rgns_gmw_2020 <- st_intersection(gmw_2020, ohi_regions) |>
   st_drop_geometry()
 ```
 
-## Current Status — CONABIO
-
-```{r}
-# Combine all data into one dataframe
-gmw_area <- bind_rows(rgns_gmw_1996, rgns_gmw_2007, rgns_gmw_2010, rgns_gmw_2015, rgns_gmw_2017, rgns_gmw_2020) |>
+```{r Combine all data into one dataframe}
+# Merge:
+Mangrove_Area_gmw0 <- bind_rows(rgns_gmw_1996, rgns_gmw_2007, rgns_gmw_2010, rgns_gmw_2015, rgns_gmw_2017, rgns_gmw_2020) |>
   st_drop_geometry() |>
   group_by(rgn_id, year) |>
   summarise(area_km2 = sum(area_km2), .groups = "drop")
 
-# Calculate current status
-mangrove_condition <- gmw_area |>
-  pivot_wider(names_from = year, values_from = area_km2) |>
-  mutate(condition = `2020` / `1996`,
-         condition = pmin(condition, 1),   # cap values > 1 at 1
-         condition = round(condition, 3) * 100,
-         year = 2020) |>
-  select(rgn_id, year, condition)
+# 42 obs.,  3 vars.
+```
 
-mangrove_condition <- left_join(select(rgns_hem, c("rgn_id", "area_km2")), mangrove_condition, by="rgn_id") %>%
-  mutate(condition = ifelse(area_km2 == 0, NA, condition)) %>%
-  mutate(year = max(mangrove_condition$year)) %>%
-  select(-area_km2)
+
+## GAPFILL BETWEEN OBSERVED YEARS:
+```{r Gapfill Mangrove_Area_gmw0}
+
+# First, expand the NRSI dataframe to include one row per year per region, even if that region has no data: 
+Mangrove_Area_gmw <- Mangrove_Area_gmw0 %>%
+  complete(
+    rgn_id = c(paste0("Region_", 1:9)),
+    year = full_seq(year, 1)
+  )
+# 225 obs., 3 vars.
+
+# Keep track of what was originally observed:
+Mangrove_Area_gmw<- Mangrove_Area_gmw %>%
+  rename(observed_area_km2= area_km2) %>%
+  mutate(
+    estimated_area_km2 = observed_area_km2
+  )
+
+# Gapfill area_km2 in missing years using the zoo package:
+Mangrove_Area_gmw <- Mangrove_Area_gmw %>%
+  group_by(rgn_id) %>%
+  fill(rgn_id, .direction = "downup") %>%
+  mutate(
+
+    # Gap-fill missing values
+    estimated_area_km2 = zoo::na.approx(
+      estimated_area_km2,
+      x = year,
+      na.rm = FALSE
+    ),
+
+    # Classify provenance
+    provenance = case_when(
+      !is.na(observed_area_km2) ~ "observed",
+      is.na(observed_area_km2) & !is.na(estimated_area_km2) ~ "gapfilled",
+      is.na(estimated_area_km2) ~ NA_character_
+    )
+  ) %>%
+  ungroup()
+
+# 225 obs., 5 vars.
+```
+
+## CALCULATE SCORE:
+```{r Calculate MANG_Scores0}
+colnames(Mangrove_Area_gmw)
+
+# Calculate MANG_Scores0 relative to 1996 baseline, where scores range from 0-100:
+MANG_Scores0 <- Mangrove_Area_gmw %>%
+  group_by(rgn_id) %>%
+  mutate(
+    MANG_current_status = (estimated_area_km2 / estimated_area_km2[year == 1996])*100,
+    MANG_current_status = pmin(MANG_current_status, 100),
+    MANG_current_status = round(MANG_current_status, 3)
+  ) %>%
+  select(rgn_id, year, estimated_area_km2, MANG_current_status)
+```
+
+```{r Merge to Hem's current extent}
+colnames(MANG_Scores0)
+colnames(MANG_current_extent)
+
+# Merge:
+MANG_Scores <- MANG_Scores0 %>%
+  left_join(select(MANG_current_extent,
+                   c("rgn_id", "area_km2")),
+            by="rgn_id") %>%
+  rename(
+    area_est_byCEDO.2025_km2 = area_km2,
+    area_est_byGMW_km2 = estimated_area_km2
+  )
+  
+# Make an include / exclude column based on the information reported by Hem / CEDO:
+MANG_Scores<- MANG_Scores %>%
+  mutate(MANG_include_exclude = ifelse(area_est_byCEDO.2025_km2 == 0, "EXCLUDE", 
+                                      "INCLUDE"))
+
+```
+
+```{r Make a nice Ktable}
+MANG_Scores |>
+  select(rgn_id, year, MANG_current_status) |>
+  kable(digits = 4, col.names = c("Region", "Year", "Current Status (vs. 1996)")) |>
+  kable_styling(bootstrap_options = c("striped", "bordered")) |>
+  add_header_above(
+    c('Mangrove Current Status' = 3))
 
 
 ```
 
-### Pressure
-```{r}
-mangrove_pressure <- mangrove_condition %>%
-  mutate(pressure = (100 - condition)/100) %>%
+```{r Save MANG_Scores}
+# Write CSVs to output_data directory
+write.csv(MANG_Scores,
+          here::here("_habitats/HAB_mangroves/MAN_outputs/MANG_Scores_1.1_Sep302026.csv"),
+          row.names = FALSE)
+```
+
+
+# STEP 4: ESTIMATE MANGROVE PRESSURE, the inverse of MANG_current_status ------------------------------
+```{r Estimate pressure as 100 minus current status}
+MANG_pressure <- MANG_Scores %>%
+  mutate(pressure = (100 - MANG_current_status)/100) %>%
   select(rgn_id, year, pressure)
 
 ```
 
 
-```{r}
-# Make a nice Ktable
-mangrove_condition |>
-  select(rgn_id, year, condition) |>
-  kable(digits = 4, col.names = c("Region", "Year", "Condition (2020/1996)")) |>
-  kable_styling(bootstrap_options = c("striped", "bordered")) |>
-  add_header_above(
-    c('Mangrove Condition' = 3))
-
-
-```
-
-## TREND — GMW 2010 → 2020
+# STEP 5: ESTIMATE MANGROVE TREND (source: GMW, 2010-2020) ------------------------------
+# NOTE TO SELF: Might want to adjust how trend is calculated.
 
 ```{r}
 # Calculate trend in each region
-mangrove_trend <- gmw_area |>
+MANG_trend <- Mangrove_Area_gmw |>
   pivot_wider(names_from = year, values_from = area_km2) |>
   mutate(trend = (`2020` / `2010`)^(1/10) - 1,
          trend = round(trend, 4) * 100,
          year = 2020) |>
   select(rgn_id, year, trend)
 
-mangrove_trend <- left_join(select(rgns_hem, c("rgn_id", "area_km2")), mangrove_trend, by="rgn_id") %>%
-   mutate(year = max(mangrove_trend$year)) %>%
+MANG_trend <- left_join(select(MANG_current_extent, c("rgn_id", "area_km2")), MANG_trend, by="rgn_id") %>%
+   mutate(year = max(MANG_trend$year)) %>%
   mutate(trend = ifelse(area_km2 == 0, NA, trend)) %>%
   select(-area_km2)
 
 ```
 
-```{r}
-# Make a nice Ktable
-mangrove_trend |>
+```{r Make a nice Ktable}
+MANG_trend |>
   select(rgn_id, year, trend) |>
   kable(digits = 4, col.names = c("Region", "Year", "Trend")) |>
   kable_styling(bootstrap_options = c("striped", "bordered")) |>
@@ -313,42 +376,45 @@ mangrove_trend |>
 ```
 
 
-```{r}
+# STEP 6: SAVE DATA ------------------------------
+
+```{r Save CSVs}
 # Write CSVs to output_data directory
-write.csv(rgns_hem,
-          here::here("_habitats/HAB_mangroves/MAN_outputs/mangrove_extent.csv"),
+write.csv(MANG_current_extent,
+          here::here("_habitats/HAB_mangroves/MAN_outputs/MANG_extent_Sep302026.csv"),
           row.names = FALSE)
 
-write.csv(mangrove_trend,
-          here::here("_habitats/HAB_mangroves/MAN_outputs/mangrove_trend.csv"),
+write.csv(MANG_trend,
+          here::here("_habitats/HAB_mangroves/MAN_outputs/MANG_trend_Sep302026.csv"),
           row.names = FALSE)
+# 
+# write.csv(MANG_Scores,
+#           here::here("_habitats/HAB_mangroves/MAN_outputs/MANG_Scores_Sep302026.csv"),
+#           row.names = FALSE)
 
-write.csv(mangrove_condition,
-          here::here("_habitats/HAB_mangroves/MAN_outputs/mangrove_condition.csv"),
-          row.names = FALSE)
-
-write.csv(mangrove_pressure,
-          here::here("_habitats/HAB_mangroves/MAN_outputs/mangrove_pressure.csv"),
+write.csv(MANG_pressure,
+          here::here("_habitats/HAB_mangroves/MAN_outputs/MANG_pressure_Sep302026.csv"),
           row.names = FALSE)
 ```
 
 
+# STEP 7: PLOT DATA ------------------------------
 
 ```{r}
-mangrove_condition_clean <- mangrove_condition |>
+MANG_Scores_clean <- MANG_Scores |>
   mutate(
-    condition_int = round(condition * 100, 1),
-    condition_int = ifelse(rgn_id %in% c("Region_2", "Region_3"), NA, condition_int)
+    MANG_current_status_int = round(MANG_current_status * 100, 1),
+    MANG_current_status_int = ifelse(rgn_id %in% c("Region_2", "Region_3"), NA, MANG_current_status_int)
   )
 
 
 # Join onto OHI polygons
-ohi_mangrove_condition <- ohi_regions |>
-  left_join(mangrove_condition_clean, by = "rgn_id")
+ohi_MANG_Scores <- ohi_regions |>
+  left_join(MANG_Scores_clean, by = "rgn_id")
 
 # Split marine vs land
-ohi_marine <- ohi_mangrove_condition |> filter(location == "marine")
-ohi_land   <- ohi_mangrove_condition |> filter(location == "land")
+ohi_marine <- ohi_MANG_Scores |> filter(location == "marine")
+ohi_land   <- ohi_MANG_Scores |> filter(location == "land")
 
 # Plot
 tmap_mode("plot")
@@ -364,23 +430,24 @@ tm_shape(ohi_land) +
 
 tm_shape(ohi_marine) +
   tm_polygons(
-    col = "condition_int",
+    col = "MANG_current_status_int",
     palette = "RdYlGn",
     alpha = 0.7,
-    title = "Current Status",
+    title = "MANG_current_status",
     border.col = "black",
     lwd = 1.2
   ) +
 
 tm_layout(
-  title = "Mangrove Current Status (2020)",
+  title = "Mangrove MANG_current_status (2020)",
   frame = FALSE,
   legend.outside = TRUE
 )
 
 ```
+
 ```{r}
-mangrove_condition_table <- mangrove_condition_clean |>
+MANG_Scores_table <- MANG_Scores_clean |>
   left_join(
     ohi_regions |> 
       filter(location == "marine") |> 
@@ -388,7 +455,7 @@ mangrove_condition_table <- mangrove_condition_clean |>
     by = "rgn_id"
   ) |>
   left_join(
-    rgns_hem |> 
+    MANG_current_extent |> 
       select(rgn_id, area_km2),
     by = "rgn_id"
   ) |>
@@ -412,26 +479,26 @@ mangrove_condition_table <- mangrove_condition_clean |>
     ),
 
     area_km2 = round(area_km2, 2),
-    condition_int = round(condition_int, 1)
+    MANG_current_status_int = round(MANG_current_status_int, 1)
   ) |>
   select(
     rgn_id,
     ecorgn,
     area_km2,
-    condition_int
+    MANG_current_status_int
   )
 
-mangrove_condition_table |>
+MANG_Scores_table |>
   filter(!rgn_id %in% c("Region 2", "Region 3")) |>   # <-- remove 2 & 3 here
   kable(
     digits = 1,
-    col.names = c("Region ID", "Region Name", "Extent (km²)", "Current Status (%)")
+    col.names = c("Region ID", "Region Name", "Extent (km²)", "MANG_current_status (%)")
   ) |>
   kable_styling(
     bootstrap_options = c("striped", "bordered", "condensed"),
     full_width = FALSE
   ) |>
-  add_header_above(c("Mangrove Current Status" = 4))
+  add_header_above(c("Mangrove MANG_current_status" = 4))
 
 
 ```
@@ -493,7 +560,7 @@ rgn_colors_clean <- setNames(
   gsub("_", " ", names(rgn_colors))
 )
 
-mangrove_all_years <- gmw_area |>
+mangrove_all_years <- Mangrove_Area_gmw |>
   mutate(
     region_clean = gsub("_", " ", rgn_id)
   )
