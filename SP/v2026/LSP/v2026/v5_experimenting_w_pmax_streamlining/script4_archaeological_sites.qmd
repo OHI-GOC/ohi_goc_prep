@@ -24,6 +24,8 @@ editor_options:
 
 ## Script 4: archaeological and cultural sites
 
+> **v5_pmax_streamlining note:** this copy adds explicit Ramsar `pmax` with SIMEC / script 2 park scores for overlapping ANPs. Outputs write to `v2026/output_v5_pmax/` so the original `v3_most_updated_scripts` results stay untouched.
+
 In this script I will score sites the EWG flagged as special when protection should run through INAH. First I will pull those rows from the EWG list. Then I will check whether each site sits near an official INAH inventory point — if it does, I will set condition to 100. Next I will check whether the site falls inside a natural protected area and, if so, give it that protected area's SIMEC management score (or the score already stored in the script 2 protected area table). If a site is neither in the INAH inventory nor inside a scored protected area, I will assign a codified floor of 30, because paleontological and archaeological remains still have partial legal cover even when sites are not formally managed.
 
 **What I do in this script**
@@ -266,7 +268,7 @@ simec_bounds_by_year <- i_efectividad_by_year %>%
 # condition scores by protected area name and year (from script 2)
 protected_area_condition_table <- read_csv(
   here(
-    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output",
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output_v5_pmax",
     "condition_lsp_protected_areas.csv"
   ),
   show_col_types = FALSE
@@ -345,10 +347,39 @@ arch_sites_matched <- bind_rows(
     by = c("year", "protected_area_norm" = "name_norm")
   )
 
-# prefer the script 2 score when i have it; otherwise use simec; then apply a few special cases
+# prefer the better of script 2 score, simec, and ramsar for each overlapping park; then keep the site max.
+# this matches the habitats pmax pattern so alto golfo vs humedales delta overlaps take the higher score.
+ramsar_management_plans <- read_csv(
+  here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets",
+    "ramsar_site_management_plan_presence.csv"
+  ),
+  show_col_types = FALSE
+)
+
 arch_sites_w_SIMEC <- arch_sites_matched %>%
+  left_join(simec_bounds_by_year, by = "ano_reporte") %>%
+  left_join(
+    ramsar_management_plans,
+    by = c("protected_area_name" = "wdpa_orig_name")
+  ) %>%
   mutate(
-    protected_area_condition = ifelse(!is.na(pa_table_score), pa_table_score, i_efectividad),
+    simec_score = ifelse(!is.na(i_efectividad), as.numeric(i_efectividad), NA_real_),
+    ramsar_score = case_when(
+      if_ramsar_has_management_plan == "y" ~ simec_max,
+      if_ramsar_has_management_plan == "in_progress" ~ 60,
+      if_ramsar_has_management_plan == "n" ~ simec_min,
+      TRUE ~ NA_real_
+    ),
+    # start from script 2 score when present, else simec
+    base_park_score = ifelse(!is.na(pa_table_score), pa_table_score, simec_score),
+    protected_area_condition = case_when(
+      !is.na(base_park_score) | !is.na(ramsar_score) ~ pmax(
+        tidyr::replace_na(base_park_score, -Inf),
+        tidyr::replace_na(ramsar_score, -Inf)
+      ),
+      TRUE ~ NA_real_
+    ),
     # humedales de bahia adair does not have a management plan in place
     protected_area_condition = ifelse(
       protected_area_name == "Humedales de Bahía Adaír",
@@ -362,7 +393,11 @@ arch_sites_w_SIMEC <- arch_sites_matched %>%
       100,
       protected_area_condition
     ), # "In November 2008, Tatei Haramara, along with other Wixarika sacred sites, was protected by governments through the signing of a common agreement called the ‘Hauxa Manaka Pact for the Preservation and Development of Wixarika Culture.’ A total of 6 hectares of this site were protected, committing to ‘prevent the Wixaritari and/or individuals not of their culture from using elements of the same for purposes contrary to the ceremonial and tradition of the Wixárika People." https://visitnayarit.travel/en/blog-nayarit-en/tatei-haramara-the-origin-of-the-world-according-to-the-wixarika-worldview/ https://www.wixarika.org/pronouncement-wixarika-sacred-site-route-wirikuta-cultural-and-natural-world-heritage-unesco https://www.wixarika.org/recognition-wixarika-sacred-route-will-avoid-pillage-peyote 
-    protected_area_condition = ifelse(is.na(protected_area_condition), 0, protected_area_condition)
+    protected_area_condition = ifelse(
+      is.infinite(protected_area_condition) | is.na(protected_area_condition),
+      0,
+      protected_area_condition
+    )
   ) %>%
   group_by(year, lasting_special_place_lsp) %>%
   # if a site overlaps several protected areas, keep the highest score
@@ -425,11 +460,11 @@ Finally, I will write the site-level and region-level tables to the shared outpu
 ```{r}
 write_csv(
   final_ewg_archaeological_sites_condition,
-  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_lsp_archaeological_sites.csv")
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output_v5_pmax", "condition_lsp_archaeological_sites.csv")
 )
 write_csv(
   rgn_final_ewg_archaeological_sites_condition,
-  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_region_archaeological_sites.csv")
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output_v5_pmax", "condition_region_archaeological_sites.csv")
 )
 ```
 

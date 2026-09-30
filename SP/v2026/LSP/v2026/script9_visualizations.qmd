@@ -1,0 +1,540 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Sentido de Pertenencia: Lasting Special Places
+
+## Script 9: choropleth maps for 2020 and 2023
+
+Alrighty, now that script 8 has written region status for both years, I will make static choropleth maps for GitHub and the update note. First I will map overall LSP current status for **2020** and **2023**. Then I will map each LSP type the same way so we can see which pathways pull a region up or down. White means that pathway has no score for that region.
+
+The map style follows the earlier Sense of Place choropleths: Gulf states underlay, OHI marine regions filled 0 to 100, white for missing values.
+
+**What I do**
+
+1. Read `lsp_goal_current_status_by_region.csv` and each `condition_region_*.csv` from the v2026 output folder.
+2. Join scores to the OHI marine region polygons.
+3. Save PNG (and PDF) choropleths for overall status and for each LSP type, for 2020 and 2023.
+
+```{r}
+library(tidyverse)
+library(sf)
+library(here)
+library(ggplot2)
+```
+
+## Paths and map styling
+
+```{r}
+out_dir <- here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output")
+fig_dir <- here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/figures_choropleth")
+
+
+normalize_rgn_id <- function(x) {
+  x %>%
+    as.character() %>%
+    str_squish() %>%
+    str_replace_all(" ", "_")
+}
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Eastern Central Gulf",
+  "Region_8" = "Eastern Southern Gulf",
+  "Region_9" = "Southeast Gulf / Nayarit"
+)
+
+# tr / access style ramp: low scores dark red, high scores dark blue
+lsp_palette <- c(
+  "#8a0032", "#A50026", "#A50026", "#D73027", "#F46D43",
+  "#FDAE61", "#FEE090", "#FEE090", "#ABD9E9", "#4575B4", "#313695"
+)
+lsp_na_fill <- "white"
+```
+
+## Read regions and status tables
+
+I only keep marine OHI polygons for the choropleth fill. The region shapefile also has inland buffer rows, and plotting both was stacking outlines and duplicating score labels. I also transform the states layer to the same CRS so the `#d6cac0` underlay lines up under the Gulf regions.
+
+```{r}
+ohi_marine <- st_read(here("spatial/ohi_regions/goc_ohi_rgns.shp"), quiet = TRUE) %>%
+  filter(location == "marine") %>%
+  mutate(rgn_id = normalize_rgn_id(rgn_id)) %>%
+  dplyr::select(rgn_id, geometry) %>%
+  # one polygon per region so each score is labeled once
+  group_by(rgn_id) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop") %>%
+  st_make_valid()
+
+states <- st_read(here("spatial/ohi_regions/states.shp"), quiet = TRUE) %>%
+  st_transform(st_crs(ohi_marine)) %>%
+  st_make_valid()
+
+table(ohi_marine$rgn_id)
+
+clean_rgn <- function(path, value_col = "condition") {
+  read_csv(path, show_col_types = FALSE) %>%
+    mutate(
+      rgn_id = normalize_rgn_id(rgn_id),
+      year = as.integer(year)
+    ) %>%
+    dplyr::select(year, rgn_id, score = all_of(value_col))
+}
+
+lsp_current_status <- clean_rgn(
+  here(out_dir, "lsp_goal_current_status_by_region.csv"),
+  value_col = "current_status"
+)
+
+score_layers <- list(
+  overall = lsp_current_status,
+  protected_areas = clean_rgn(here(out_dir, "condition_region_protected_areas.csv")),
+  dive_sites = clean_rgn(here(out_dir, "condition_region_dive_sites.csv")),
+  archaeological_sites = clean_rgn(here(out_dir, "condition_region_archaeological_sites.csv")),
+  fishing_sites = clean_rgn(here(out_dir, "condition_region_fishing_sites.csv")),
+  special_habitats = clean_rgn(here(out_dir, "condition_region_special_habitats.csv")),
+  other_marine_places = clean_rgn(here(out_dir, "condition_region_other_marine_places.csv"))
+)
+
+lapply(score_layers, function(x) table(x$year, useNA = "ifany"))
+```
+
+## Choropleth helpers
+
+```{r}
+join_scores_to_ohi <- function(score_df) {
+  ohi_marine %>%
+    left_join(score_df, by = "rgn_id") %>%
+    mutate(
+      rgn_label = unname(rgn_labels[rgn_id]),
+      score = ifelse(is.nan(score), NA_real_, score),
+      label = ifelse(is.na(score), "NA", as.character(round(score)))
+    )
+}
+
+# place one label toward the outer gulf edge so west and east scores do not stack in the middle.
+# western regions (1 to 4) sit near the west side of each polygon; eastern regions (5 to 9) sit near the east side.
+edge_label_points <- function(dat, west_frac = 0.22, east_frac = 0.78) {
+  crs_dat <- st_crs(dat)
+  west_ids <- paste0("Region_", 1:4)
+
+  pts <- lapply(seq_len(nrow(dat)), function(i) {
+    g <- st_geometry(dat)[[i]]
+    bb <- st_bbox(g)
+    x_frac <- if (dat$rgn_id[i] %in% west_ids) west_frac else east_frac
+    x <- bb["xmin"] + x_frac * (bb["xmax"] - bb["xmin"])
+    y <- bb["ymin"] + 0.50 * (bb["ymax"] - bb["ymin"])
+    st_point(c(x, y))
+  })
+
+  st_sf(
+    dat %>% st_drop_geometry(),
+    geometry = st_sfc(pts, crs = crs_dat)
+  )
+}
+
+make_lsp_choropleth <- function(score_df, plot_title = NULL, label_scores = TRUE) {
+  dat <- join_scores_to_ohi(score_df)
+  label_pts <- edge_label_points(dat)
+
+  p <- ggplot() +
+    # states underlay first so #d6cac0 shows on land behind the marine regions
+    geom_sf(
+      data = states,
+      fill = "#d6cac0",
+      color = "grey40",
+      linewidth = 0.15
+    ) +
+    geom_sf(
+      data = dat,
+      aes(fill = score),
+      color = "grey20",
+      linewidth = 0.25
+    ) +
+    scale_fill_gradientn(
+      colours = lsp_palette,
+      limits = c(0, 100),
+      na.value = lsp_na_fill,
+      name = "Score",
+      breaks = seq(0, 100, by = 25)
+    ) +
+    labs(title = plot_title) +
+    coord_sf(expand = TRUE) +
+    theme_void(base_size = 12) +
+    theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
+      plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.key.height = unit(0.35, "cm"),
+      legend.key.width = unit(1.2, "cm"),
+      legend.title = element_text(size = 10),
+      legend.text = element_text(size = 9),
+      plot.margin = margin(10, 14, 10, 14)
+    )
+
+  if (isTRUE(label_scores)) {
+    p <- p +
+      geom_label(
+        data = label_pts,
+        aes(label = label, geometry = geometry),
+        stat = "sf_coordinates",
+        size = 3.2,
+        fontface = "bold",
+        color = "grey10",
+        fill = "white",
+        label.size = 0.15,
+        label.padding = unit(0.12, "lines"),
+        alpha = 0.92
+      )
+  }
+
+  p
+}
+
+save_lsp_map <- function(gg, stem, width = 7.5, height = 7.5, dpi = 200) {
+  png_path <- here(fig_dir, paste0(stem, ".png"))
+  pdf_path <- here(fig_dir, paste0(stem, ".pdf"))
+  ggsave(png_path, gg, width = width, height = height, dpi = dpi, bg = "white")
+  tryCatch(
+    ggsave(pdf_path, gg, width = width, height = height, device = cairo_pdf, bg = "white"),
+    error = function(e) {
+      ggsave(pdf_path, gg, width = width, height = height, device = "pdf", bg = "white")
+    }
+  )
+  message("wrote ", png_path)
+  invisible(png_path)
+}
+```
+
+## Overall LSP status: 2020 and 2023
+
+Now I will map the merged current status for each year. These two PNGs are the ones I would attach first in the GitHub update comment.
+
+```{r fig.width=7.5, fig.height=7.5}
+map_overall_2020 <- make_lsp_choropleth(
+  score_layers$overall %>% filter(year == 2020L),
+  plot_title = "LSP current status by region (2020)"
+)
+map_overall_2023 <- make_lsp_choropleth(
+  score_layers$overall %>% filter(year == 2023L),
+  plot_title = "LSP current status by region (2023)"
+)
+
+print(map_overall_2020)
+print(map_overall_2023)
+
+save_lsp_map(map_overall_2020, "lsp_current_status_choropleth_2020")
+save_lsp_map(map_overall_2023, "lsp_current_status_choropleth_2023")
+```
+
+### Side by side overall comparison
+
+```{r fig.width=12, fig.height=6.5}
+overall_facet_df <- score_layers$overall %>%
+  filter(year %in% c(2020L, 2023L)) %>%
+  mutate(year_label = paste0("LSP current status (", year, ")"))
+
+overall_facet_sf <- ohi_marine %>%
+  left_join(overall_facet_df, by = "rgn_id") %>%
+  mutate(
+    score = ifelse(is.nan(score), NA_real_, score),
+    label = ifelse(is.na(score), "NA", as.character(round(score)))
+  )
+
+overall_facet_labels <- edge_label_points(overall_facet_sf)
+
+map_overall_facet <- ggplot() +
+  geom_sf(data = states, fill = "#d6cac0", color = "grey40", linewidth = 0.15) +
+  geom_sf(data = overall_facet_sf, aes(fill = score), color = "grey20", linewidth = 0.25) +
+  geom_label(
+    data = overall_facet_labels,
+    aes(label = label, geometry = geometry),
+    stat = "sf_coordinates",
+    size = 2.9,
+    fontface = "bold",
+    color = "grey10",
+    fill = "white",
+    label.size = 0.15,
+    label.padding = unit(0.12, "lines"),
+    alpha = 0.92
+  ) +
+  scale_fill_gradientn(
+    colours = lsp_palette,
+    limits = c(0, 100),
+    na.value = lsp_na_fill,
+    name = "Score",
+    breaks = seq(0, 100, by = 25)
+  ) +
+  facet_wrap(~year_label, ncol = 2) +
+  coord_sf(expand = TRUE) +
+  theme_void(base_size = 12) +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    strip.text = element_text(size = 12, face = "bold"),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.key.height = unit(0.35, "cm"),
+    legend.key.width = unit(1.2, "cm"),
+    plot.margin = margin(10, 14, 10, 14)
+  )
+
+print(map_overall_facet)
+save_lsp_map(map_overall_facet, "lsp_current_status_choropleth_2020_2023_side_by_side", width = 12, height = 6.5)
+```
+
+### Change from 2020 to 2023
+
+```{r fig.width=7.5, fig.height=7.5}
+status_change <- score_layers$overall %>%
+  pivot_wider(names_from = year, values_from = score, names_prefix = "y") %>%
+  mutate(score = y2023 - y2020) %>%
+  dplyr::select(rgn_id, score)
+
+change_sf <- join_scores_to_ohi(status_change) %>%
+  mutate(label = ifelse(is.na(score), "NA", as.character(round(score, 1))))
+
+change_labels <- edge_label_points(change_sf)
+
+map_change <- ggplot() +
+  geom_sf(data = states, fill = "#d6cac0", color = "grey40", linewidth = 0.15) +
+  geom_sf(data = change_sf, aes(fill = score), color = "grey20", linewidth = 0.25) +
+  geom_label(
+    data = change_labels,
+    aes(label = label, geometry = geometry),
+    stat = "sf_coordinates",
+    size = 3.2,
+    fontface = "bold",
+    color = "grey10",
+    fill = "white",
+    label.size = 0.15,
+    label.padding = unit(0.12, "lines"),
+    alpha = 0.92
+  ) +
+  scale_fill_gradient2(
+    low = "#8a0032",
+    mid = "white",
+    high = "#313695",
+    midpoint = 0,
+    limits = c(-15, 15),
+    na.value = lsp_na_fill,
+    name = "Change",
+    breaks = seq(-15, 15, by = 5)
+  ) +
+  labs(title = "Change in LSP current status (2023 minus 2020)") +
+  coord_sf(expand = TRUE) +
+  theme_void(base_size = 12) +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.key.height = unit(0.35, "cm"),
+    legend.key.width = unit(1.2, "cm"),
+    plot.margin = margin(10, 14, 10, 14)
+  )
+
+print(map_change)
+save_lsp_map(map_change, "lsp_current_status_change_2020_to_2023")
+```
+
+## Choropleths by LSP type
+
+Now I will make the same 2020 and 2023 maps for each pathway, side by side like the overall status figure. First I will build and `print()` every map so I can review them. Saving happens in the next chunk. Regions with no sites of that type stay white.
+
+```{r fig.width=12, fig.height=6.5}
+type_titles <- c(
+  protected_areas = "Protected areas",
+  dive_sites = "Dive sites",
+  archaeological_sites = "Archaeological sites",
+  fishing_sites = "Fishing sites",
+  special_habitats = "Special habitats",
+  other_marine_places = "Other marine places"
+)
+
+make_type_side_by_side <- function(layer, title_base) {
+  facet_df <- layer %>%
+    filter(year %in% c(2020L, 2023L)) %>%
+    mutate(year_label = paste0(title_base, " (", year, ")"))
+
+  facet_sf <- ohi_marine %>%
+    left_join(facet_df, by = "rgn_id") %>%
+    mutate(
+      score = ifelse(is.nan(score), NA_real_, score),
+      label = ifelse(is.na(score), "NA", as.character(round(score)))
+    )
+
+  facet_labels <- edge_label_points(facet_sf)
+
+  ggplot() +
+    geom_sf(data = states, fill = "#d6cac0", color = "grey40", linewidth = 0.15) +
+    geom_sf(data = facet_sf, aes(fill = score), color = "grey20", linewidth = 0.25) +
+    geom_label(
+      data = facet_labels,
+      aes(label = label, geometry = geometry),
+      stat = "sf_coordinates",
+      size = 2.9,
+      fontface = "bold",
+      color = "grey10",
+      fill = "white",
+      label.size = 0.15,
+      label.padding = unit(0.12, "lines"),
+      alpha = 0.92
+    ) +
+    scale_fill_gradientn(
+      colours = lsp_palette,
+      limits = c(0, 100),
+      na.value = lsp_na_fill,
+      name = "Score",
+      breaks = seq(0, 100, by = 25)
+    ) +
+    facet_wrap(~year_label, ncol = 2) +
+    coord_sf(expand = TRUE) +
+    theme_void(base_size = 12) +
+    theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
+      strip.text = element_text(size = 12, face = "bold"),
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.key.height = unit(0.35, "cm"),
+      legend.key.width = unit(1.2, "cm"),
+      plot.margin = margin(10, 14, 10, 14)
+    )
+}
+
+# build all type maps and print them for review
+type_maps <- list()
+
+for (stem in names(type_titles)) {
+  layer <- score_layers[[stem]]
+  title_base <- type_titles[[stem]]
+
+  type_maps[[paste0(stem, "_2020")]] <- make_lsp_choropleth(
+    layer %>% filter(year == 2020L),
+    plot_title = paste0(title_base, " condition by region (2020)")
+  )
+  type_maps[[paste0(stem, "_2023")]] <- make_lsp_choropleth(
+    layer %>% filter(year == 2023L),
+    plot_title = paste0(title_base, " condition by region (2023)")
+  )
+  type_maps[[paste0(stem, "_side_by_side")]] <- make_type_side_by_side(layer, title_base)
+}
+
+print(type_maps$protected_areas_2020)
+print(type_maps$protected_areas_2023)
+print(type_maps$protected_areas_side_by_side)
+
+print(type_maps$dive_sites_2020)
+print(type_maps$dive_sites_2023)
+print(type_maps$dive_sites_side_by_side)
+
+print(type_maps$archaeological_sites_2020)
+print(type_maps$archaeological_sites_2023)
+print(type_maps$archaeological_sites_side_by_side)
+
+print(type_maps$fishing_sites_2020)
+print(type_maps$fishing_sites_2023)
+print(type_maps$fishing_sites_side_by_side)
+
+print(type_maps$special_habitats_2020)
+print(type_maps$special_habitats_2023)
+print(type_maps$special_habitats_side_by_side)
+
+print(type_maps$other_marine_places_2020)
+print(type_maps$other_marine_places_2023)
+print(type_maps$other_marine_places_side_by_side)
+```
+
+### Save the type choropleths
+
+After I am happy with the printed maps above, I will save each one.
+
+```{r}
+save_lsp_map(type_maps$protected_areas_2020, "lsp_protected_areas_choropleth_2020")
+save_lsp_map(type_maps$protected_areas_2023, "lsp_protected_areas_choropleth_2023")
+save_lsp_map(
+  type_maps$protected_areas_side_by_side,
+  "lsp_protected_areas_choropleth_2020_2023_side_by_side",
+  width = 12,
+  height = 6.5
+)
+
+save_lsp_map(type_maps$dive_sites_2020, "lsp_dive_sites_choropleth_2020")
+save_lsp_map(type_maps$dive_sites_2023, "lsp_dive_sites_choropleth_2023")
+save_lsp_map(
+  type_maps$dive_sites_side_by_side,
+  "lsp_dive_sites_choropleth_2020_2023_side_by_side",
+  width = 12,
+  height = 6.5
+)
+
+save_lsp_map(type_maps$archaeological_sites_2020, "lsp_archaeological_sites_choropleth_2020")
+save_lsp_map(type_maps$archaeological_sites_2023, "lsp_archaeological_sites_choropleth_2023")
+save_lsp_map(
+  type_maps$archaeological_sites_side_by_side,
+  "lsp_archaeological_sites_choropleth_2020_2023_side_by_side",
+  width = 12,
+  height = 6.5
+)
+
+save_lsp_map(type_maps$fishing_sites_2020, "lsp_fishing_sites_choropleth_2020")
+save_lsp_map(type_maps$fishing_sites_2023, "lsp_fishing_sites_choropleth_2023")
+save_lsp_map(
+  type_maps$fishing_sites_side_by_side,
+  "lsp_fishing_sites_choropleth_2020_2023_side_by_side",
+  width = 12,
+  height = 6.5
+)
+
+save_lsp_map(type_maps$special_habitats_2020, "lsp_special_habitats_choropleth_2020")
+save_lsp_map(type_maps$special_habitats_2023, "lsp_special_habitats_choropleth_2023")
+save_lsp_map(
+  type_maps$special_habitats_side_by_side,
+  "lsp_special_habitats_choropleth_2020_2023_side_by_side",
+  width = 12,
+  height = 6.5
+)
+
+save_lsp_map(type_maps$other_marine_places_2020, "lsp_other_marine_places_choropleth_2020")
+save_lsp_map(type_maps$other_marine_places_2023, "lsp_other_marine_places_choropleth_2023")
+save_lsp_map(
+  type_maps$other_marine_places_side_by_side,
+  "lsp_other_marine_places_choropleth_2020_2023_side_by_side",
+  width = 12,
+  height = 6.5
+)
+```
+
+## Where the figures were written
+
+```{r}
+list.files(fig_dir, pattern = "choropleth|change", full.names = FALSE) %>%
+  sort()
+```

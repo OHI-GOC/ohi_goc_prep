@@ -24,6 +24,8 @@ editor_options:
 
 ## Script 3: dive sites
 
+> **v5_pmax_streamlining note:** this copy adds Ramsar `pmax` with SIMEC for overlapping parks. Outputs write to `v2026/output_v5_pmax/` so the original `v3_most_updated_scripts` results stay untouched.
+
 In this script I will score dive sites as lasting special places. People travel far to see wildlife and underwater habitats, so if those sites are not protected they can lose what makes them special.
 
 When a dive site sits inside a protected area, I will give it that park's SIMEC management score. When it sits outside any park, I will still use the agreed NOM-012-TUR-2016 legal floor of **58**, which is the minimum management score experts set for dive tourism rules that apply inside and outside ANPs.
@@ -181,9 +183,9 @@ mapview(dive_sites_protected, zcol = "in_protected_area") +
 
 Note: if a buffer hits more than one park, I will get one row per park. I will collapse those later by taking the best score.
 
-## Match each park name to SIMEC
+## Match each park name to SIMEC and Ramsar
 
-Now that I know which parks each dive site touches, I will prepare SIMEC for **2020 and 2023** the same way as in script 0 (averaging 2020 island-by-state rows). WDPA names and SIMEC `nombre` values rarely match character for character, so next I will normalize strings and use a fuzzy match, then score each dive site in both years.
+Now that I know which parks each dive site touches, I will prepare SIMEC for **2020 and 2023** the same way as in script 0 (averaging 2020 island-by-state rows). WDPA names and SIMEC `nombre` values rarely match character for character, so next I will normalize strings and use a fuzzy match. I will also join Ramsar management plan presence so that when a dive site overlaps several parks (for example Alto Golfo and Humedales del Delta), each park gets `pmax(SIMEC, Ramsar)` and the site keeps the highest of those park scores.
 
 ```{r}
 # status years i want lsp scores for
@@ -269,7 +271,17 @@ dive_sites_matched %>%
   distinct(protected_area_name, protected_area_norm, nombre_matched) %>%
   print(n = Inf)
 
-# expand each dive site to both status years, then join that year's simec score
+# ramsar management plan presence (same sheet as scripts 6 and 7)
+ramsar_management_plans <- read_csv(
+  here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets",
+    "ramsar_site_management_plan_presence.csv"
+  ),
+  show_col_types = FALSE
+)
+
+# expand each dive site to both status years, then join that year's simec and ramsar scores.
+# for each overlapping park, take pmax(simec, ramsar). later i collapse parks with max().
 dive_sites_base <- dive_sites_matched %>%
   st_drop_geometry()
 
@@ -282,20 +294,43 @@ dive_sites_w_SIMEC <- bind_rows(
     by = c("nombre_matched" = "nombre", "ano_reporte")
   ) %>%
   left_join(simec_bounds_by_year, by = "ano_reporte") %>%
+  left_join(
+    ramsar_management_plans,
+    by = c("protected_area_name" = "wdpa_orig_name")
+  ) %>%
   mutate(
-    protected_area_condition = ifelse(!is.na(i_efectividad), i_efectividad, NA_real_),
-    year = ano_reporte
+    year = ano_reporte,
+    simec_score = ifelse(!is.na(i_efectividad), as.numeric(i_efectividad), NA_real_),
+    ramsar_score = case_when(
+      if_ramsar_has_management_plan == "y" ~ simec_max,
+      if_ramsar_has_management_plan == "in_progress" ~ 60,
+      if_ramsar_has_management_plan == "n" ~ simec_min,
+      TRUE ~ NA_real_
+    ),
+    protected_area_condition = case_when(
+      !is.na(simec_score) | !is.na(ramsar_score) ~ pmax(
+        tidyr::replace_na(simec_score, -Inf),
+        tidyr::replace_na(ramsar_score, -Inf)
+      ),
+      TRUE ~ NA_real_
+    ),
+    protected_area_condition = ifelse(
+      is.infinite(protected_area_condition),
+      NA_real_,
+      protected_area_condition
+    )
   ) %>%
   dplyr::select(
     year, rgn_id, nombre_sitio_de_buceo, protected_area_name, protected_area_condition,
-    simec_min, popularidad_de_los_sitios, riqueza_de_especies, amenaza_de_cambio_climatico,
+    simec_score, ramsar_score, simec_min,
+    popularidad_de_los_sitios, riqueza_de_especies, amenaza_de_cambio_climatico,
     valor_turistico, estado, latitud, longitud
   )
 ```
 
 ## Condition for each dive site and year
 
-Now that I have SIMEC matches, I will set the condition: if SIMEC is present I will use it; if not, I will use the agreed NOM-012 legal floor of **58**. Experts chose 58 as the minimum management score for dive sites outside a scored park (it matched the lowest SIMEC among dive sites inside parks when the pathway was set). This floor is the same in 2020 and 2023; only park SIMEC scores change by year.
+Now that I have SIMEC and Ramsar scores per overlapping park, I will collapse to one score per dive site with `max()`, then set overall condition: if a park score exists I will use it; if not, I will use the agreed NOM-012 legal floor of **58**. Experts chose 58 as the minimum management score for dive sites outside a scored park. This floor is the same in 2020 and 2023; only park SIMEC and Ramsar rule scores change by year.
 
 ```{r}
 # agreed nom-012 floor for dive sites outside a scored park (expert decision; not the global simec min).
@@ -348,6 +383,6 @@ rgn_dive_sites_condition <- dive_sites_condition %>%
   group_by(year, rgn_id) %>%
   summarize(condition = mean(overall_condition, na.rm = TRUE), .groups = "drop")
 
-write_csv(dive_sites_condition, here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_lsp_dive_sites.csv"))
-write_csv(rgn_dive_sites_condition, here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_region_dive_sites.csv"))
+write_csv(dive_sites_condition, here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output_v5_pmax", "condition_lsp_dive_sites.csv"))
+write_csv(rgn_dive_sites_condition, here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output_v5_pmax", "condition_region_dive_sites.csv"))
 ```

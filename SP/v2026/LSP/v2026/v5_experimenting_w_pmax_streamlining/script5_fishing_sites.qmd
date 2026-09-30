@@ -24,6 +24,8 @@ editor_options:
 
 ## Script 5: fishing sites
 
+> **v5_pmax_streamlining note:** this copy replaces the hard-coded Humedales Delta rule with general Ramsar `pmax` vs SIMEC for overlapping parks. Outputs write to `v2026/output_v5_pmax/` so the original `v3_most_updated_scripts` results stay untouched.
+
 In this script, I will score fishing grounds the EWG flagged as iconic. I will check whether each site sits in a fishing refuge (ZRP), a cooperative TURF, or a federal protected area. Those institutional layers tell me the place has some form of stewardship beyond open access.
 
 **What I do**
@@ -172,9 +174,9 @@ mapview(ewg_fishing_site_condition_ANP, zcol = "in_protected_area") +
   mapview(all_protected, col.regions = "pink")
 ```
 
-## Match overlapping parks to SIMEC
+## Match overlapping parks to SIMEC and Ramsar
 
-Alrighty, now that I know which parks each fishing site touches, I will prepare SIMEC for **2020 and 2023** the same way as in script 0 (averaging 2020 island-by-state rows). Then I will fuzzy-match park names and assign scores for each year.
+Alrighty, now that I know which parks each fishing site touches, I will prepare SIMEC for **2020 and 2023** the same way as in script 0 (averaging 2020 island-by-state rows). Then I will fuzzy-match park names and also join Ramsar management plan presence. For each overlapping park I will take `pmax(SIMEC, Ramsar)`, then keep the highest park score per fishing site. That replaces the older hard-coded Humedales Delta rule with the same general logic used in habitats.
 
 ```{r}
 # status years i want lsp scores for
@@ -255,7 +257,17 @@ fishing_sites_base <- fishing_sites_norm %>%
   ) %>%
   st_drop_geometry()
 
-# expand to both status years, then join that year's simec score
+# ramsar management plan presence (same sheet as scripts 6 and 7)
+ramsar_management_plans <- read_csv(
+  here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2025/google_sheets",
+    "ramsar_site_management_plan_presence.csv"
+  ),
+  show_col_types = FALSE
+)
+
+# expand to both status years, then join that year's simec and ramsar scores.
+# for each overlapping park, take pmax(simec, ramsar), then max across parks per site.
 fishing_sites_w_SIMEC <- bind_rows(
   fishing_sites_base %>% mutate(ano_reporte = 2020L),
   fishing_sites_base %>% mutate(ano_reporte = 2023L)
@@ -265,21 +277,32 @@ fishing_sites_w_SIMEC <- bind_rows(
     by = c("nombre_matched" = "nombre", "ano_reporte")
   ) %>%
   left_join(simec_bounds_by_year, by = "ano_reporte") %>%
+  left_join(
+    ramsar_management_plans,
+    by = c("protected_area_name" = "wdpa_orig_name")
+  ) %>%
   mutate(
-    protected_area_condition = ifelse(!is.na(i_efectividad), i_efectividad, NA_real_),
-    # ramsar with a management plan: high score for that year
-    protected_area_condition = ifelse(
-      protected_area_name == "Humedales del Delta del Río Colorado",
-      simec_max,
-      protected_area_condition
+    year = ano_reporte,
+    simec_score = ifelse(!is.na(i_efectividad), as.numeric(i_efectividad), NA_real_),
+    ramsar_score = case_when(
+      if_ramsar_has_management_plan == "y" ~ simec_max,
+      if_ramsar_has_management_plan == "in_progress" ~ 60,
+      if_ramsar_has_management_plan == "n" ~ simec_min,
+      TRUE ~ NA_real_
+    ),
+    protected_area_condition = case_when(
+      !is.na(simec_score) | !is.na(ramsar_score) ~ pmax(
+        tidyr::replace_na(simec_score, -Inf),
+        tidyr::replace_na(ramsar_score, -Inf)
+      ),
+      TRUE ~ NA_real_
     ),
     # cabo pulmo is no take; leave it for careful manual handling
     protected_area_condition = ifelse(
       nombre_matched == "CABO PULMO",
       0,
       protected_area_condition
-    ),
-    year = ano_reporte
+    )
   ) %>%
   group_by(year, lasting_special_place_lsp) %>%
   summarize(
@@ -297,7 +320,7 @@ fishing_sites_w_SIMEC <- bind_rows(
 
 ## Final site condition and region average
 
-Now that I have ZRP, TURF, and SIMEC scores, I will start from ZRP or TURF (same in both years). When that is still 0, I will fill in that year's SIMEC. Today all sites have some of these layers, so I do not need a separate codified floor (though NOM links for clams and squid are useful if empty sites appear later). After that I will average site conditions within each OHI region for each status year and write the tables to Mazu.
+Now that I have ZRP, TURF, and park scores (`pmax` of SIMEC and Ramsar when both apply), I will start from ZRP or TURF (same in both years). When that is still 0, I will fill in that year's best park score. Today all sites have some of these layers, so I do not need a separate codified floor (though NOM links for clams and squid are useful if empty sites appear later). After that I will average site conditions within each OHI region for each status year and write the tables to Mazu.
 
 ```{r}
 # zrp / turf scores do not change by year, so i expand them to 2020 and 2023
@@ -322,16 +345,13 @@ final_ewg_fishing_site_condition <- fishing_base_by_year %>%
 rgn_final_ewg_fishing_site_condition <- final_ewg_fishing_site_condition %>%
   group_by(year, rgn_id) %>%
   summarize(condition = mean(overall_condition, na.rm = TRUE), .groups = "drop")
-```
 
-
-```{r}
 write_csv(
   final_ewg_fishing_site_condition,
-  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_lsp_fishing_sites.csv")
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output_v5_pmax", "condition_lsp_fishing_sites.csv")
 )
 write_csv(
   rgn_final_ewg_fishing_site_condition,
-  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output", "condition_region_fishing_sites.csv")
+  here("/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/output_v5_pmax", "condition_region_fishing_sites.csv")
 )
 ```

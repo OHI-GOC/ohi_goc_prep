@@ -1,0 +1,180 @@
+---
+title: 'OHI GoC 2024: Lasting Special Places (LSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Script 0: Prepare multi-year SIMEC i-efectividad
+
+In this script I prepare CONANP's SIMEC i-efectividad scores for **two status years**: **2020** and **2023**. Scripts 2 through 7 join those year-specific scores onto lasting special places, and script 8 averages them into LSP current status for each year.
+
+**What I do**
+
+1. Read the multi-year SIMEC extract (2020 regional reports and 2023 park reports).
+2. Average **Islas del Golfo de California** when the 2020 reports split that park by state / region.
+3. Keep both 2020 and 2023 as clean one-row-per-park tables.
+4. Write the timeseries and the year-specific tables to Mazu.
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+## Why this prep is needed
+
+CONANP published i-efectividad scores in **2020 regional reports** and again in **2023 park reports**. That gives us two time points for management effectiveness.
+
+The awkward case is **Islas del Golfo de California**:
+
+- In 2020, the islands are scored separately for different states / OHI regions.
+- In 2023, there is one park-wide score.
+
+So if I join the raw 2020 rows as-is, I get three island scores for one park name. I average those island rows within 2020 into one park-level score, the same way the 2023 report treats the park.
+
+## Read the multi-year extract
+
+I start from the SIMEC csv. `janitor::clean_names()` makes the headers easier to work with in tidyverse.
+
+```{r}
+# status years i want lsp scores for
+status_years <- c(2020L, 2023L)
+
+i_efectividad_multi_year <- read_csv(
+  here(
+    "/home/shares/ohi/OHI_GOC/_raw_data/SIMEC",
+    "simec_i_efectividad_anp_2026.csv"
+  ),
+  show_col_types = FALSE,
+  na = c("", "NA", "N/A")
+) %>%
+  janitor::clean_names() %>%
+  mutate(
+    nombre = str_squish(as.character(nombre)),
+    ano_reporte = suppressWarnings(as.integer(ano_reporte)),
+    i_efectividad = suppressWarnings(as.numeric(i_efectividad)),
+    mett = suppressWarnings(as.numeric(mett)),
+    # unify island spelling (some rows have a trailing space)
+    nombre = if_else(
+      str_to_upper(nombre) == "ISLAS DEL GOLFO DE CALIFORNIA",
+      "ISLAS DEL GOLFO DE CALIFORNIA",
+      nombre
+    )
+  ) %>%
+  # drop rows with no usable score (for example constitucion de 1857 in 2020)
+  filter(
+    !is.na(ano_reporte),
+    !is.na(nombre),
+    nombre != "",
+    !is.na(i_efectividad),
+    ano_reporte %in% status_years
+  )
+
+summary(i_efectividad_multi_year)
+
+# quick look at the island rows before i average them
+i_efectividad_multi_year %>%
+  filter(nombre == "ISLAS DEL GOLFO DE CALIFORNIA") %>%
+  select(ano_reporte, nombre, rgn_id, i_efectividad, vinculo_reporte)
+```
+
+## Average parks that have more than one row in the same year
+
+For most parks this does nothing. For **Islas del Golfo de California** in 2020, this turns the Region_2 / Region_4 / Region_8 scores into one park-level mean. I also set `rgn_id` to `"all"` when more than one region contributed, matching the 2023 reporting style.
+
+```{r}
+i_efectividad_by_year <- i_efectividad_multi_year %>%
+  group_by(ano_reporte, nombre) %>%
+  summarize(
+    i_efectividad = mean(i_efectividad, na.rm = TRUE),
+    mett = mean(mett, na.rm = TRUE),
+    ano_decreto = dplyr::first(ano_decreto),
+    vinculo_reporte = dplyr::first(vinculo_reporte),
+    rgn_id = if_else(
+      n_distinct(rgn_id) > 1 | any(rgn_id == "all", na.rm = TRUE),
+      "all",
+      as.character(dplyr::first(rgn_id))
+    ),
+    n_rows_averaged = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(nombre, ano_reporte)
+
+# check that 2020 islands are now one averaged row, and 2023 is still one row
+i_efectividad_by_year %>%
+  filter(nombre == "ISLAS DEL GOLFO DE CALIFORNIA") %>%
+  select(ano_reporte, nombre, rgn_id, i_efectividad, n_rows_averaged)
+
+i_efectividad_by_year %>%
+  count(ano_reporte)
+```
+
+## Split into year-specific tables
+
+Scripts 2 through 7 can either join the full `i_efectividad_by_year` table (two rows per park) or read the year-specific csvs below.
+
+```{r}
+i_efectividad_2020 <- i_efectividad_by_year %>%
+  filter(ano_reporte == 2020L) %>%
+  arrange(nombre)
+
+i_efectividad_2023 <- i_efectividad_by_year %>%
+  filter(ano_reporte == 2023L) %>%
+  arrange(nombre)
+
+i_efectividad_2020 %>%
+  select(nombre, ano_reporte, i_efectividad) %>%
+  print(n = Inf)
+
+i_efectividad_2023 %>%
+  select(nombre, ano_reporte, i_efectividad) %>%
+  print(n = Inf)
+
+# parks present in 2020 but missing in 2023 (expect none)
+setdiff(unique(i_efectividad_2020$nombre), unique(i_efectividad_2023$nombre)) # character(0)
+```
+
+## Write prepared tables to Mazu
+
+```{r}
+write_csv(
+  i_efectividad_by_year,
+  here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/int",
+    "simec_i_efectividad_timeseries.csv"
+  )
+)
+
+write_csv(
+  i_efectividad_2020,
+  here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/int",
+    "simec_i_efectividad_2020.csv"
+  )
+)
+
+write_csv(
+  i_efectividad_2023,
+  here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/sp/lsp/v2026/int",
+    "simec_i_efectividad_2023.csv"
+  )
+)
+```
+
+Next I run scripts 2 through 7. Each of those scripts prepares the same 2020 and 2023 SIMEC tables inline, scores lasting special places for both years, and writes a `year` column so script 8 can build LSP status for 2020 and 2023.
