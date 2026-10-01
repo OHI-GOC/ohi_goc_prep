@@ -1,0 +1,339 @@
+---
+title: 'OHI GoC 2025: LE tables for pressures (informality-adjusted jobs)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Prep LIV jobs and ECO revenue for pressures
+
+I wrote this script to make two simple tables for pressures work: one for livelihoods jobs and one for economies revenue. Each table has the OHI region, the year, the sector group, and either the number of jobs or the revenue amount.
+
+I started from the cleaned Economic Census file we already use in the livelihoods and economies scripts. I applied the same coastal adjustments we used before, so places that straddle the Gulf and Pacific, and sectors like tourism that are only partly coastal, are treated the same way. For jobs, I also applied the same informality adjustment we built earlier, which scales Economic Census job counts up using the household survey rates. I did not apply that informality adjustment to revenue, because we decided earlier that informal jobs should not automatically inflate reported revenue.
+
+The saved livelihoods and economies score files are already summed to the whole region for each year, so they no longer keep sector detail. That is why I went back to the cleaned census data and rebuilt the sector-level totals here, instead of reading the final score files.
+
+I then grouped the original Economic Census sectors into three broader categories for pressures:
+
+- marine tourism stays marine tourism
+- food provisioning stays food provisioning
+- infrastructure combines infrastructure, tidal energy, marine coastal shipping, and marine research and consulting
+
+Finally, I summed the values to region, year, and those three sector groups, filled any missing combinations with zero, and saved four CSV files. Two keep the raw job and revenue totals. The other two turn those totals into relative weights within each region and year, so the three sectors add to 1 for that region and year.
+
+```{r}
+library(tidyverse)
+library(here)
+library(priceR)
+
+liv_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/le/liv"
+le_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/le"
+
+coastal_sectors <- c(
+  "coastal_recreation",
+  "travel_planners",
+  "accommodations_food_drink",
+  "environmental_research_consulting"
+)
+
+pressure_sector_lookup <- c(
+  "marine_tourism" = "marine_tourism",
+  "food_provisioning" = "food_provisioning",
+  "infrastructure" = "infrastructure",
+  "tidal_energy" = "infrastructure",
+  "marine_coastal_shipping" = "infrastructure",
+  "marine_research_consulting" = "infrastructure"
+)
+
+pressure_sector_levels <- c(
+  "food_provisioning",
+  "infrastructure",
+  "marine_tourism"
+)
+
+state_name_lookup <- c(
+  "baja california" = "Baja California",
+  "baja california sur" = "Baja California Sur",
+  "sonora" = "Sonora",
+  "sinaloa" = "Sinaloa",
+  "nayarit" = "Nayarit",
+  "jalisco" = "Jalisco"
+)
+
+normalize_goc_state <- function(x) {
+  key <- stringr::str_to_lower(stringr::str_squish(as.character(x)))
+  unname(state_name_lookup[key])
+}
+
+ce_year_to_enoe_year <- function(ce_year) {
+  dplyr::if_else(as.numeric(ce_year) <= 2018, 2019, as.numeric(ce_year))
+}
+
+recategorize_pressure_sector <- function(general_sector) {
+  factor(
+    unname(pressure_sector_lookup[as.character(general_sector)]),
+    levels = pressure_sector_levels
+  )
+}
+```
+
+```{r}
+ce_cleaned <- read_csv(
+  here::here(
+    "/home/shares/ohi/OHI_GOC/goal_prep/le/ce_int",
+    "ce_cleaned_totals_per_yr_municipio_activity.csv"
+  ),
+  show_col_types = FALSE
+) %>%
+  filter(!(municipio == "MEXICALI" & ano_censal == "2023")) %>%
+  mutate(
+    state = normalize_goc_state(estado),
+    year = as.numeric(ano_censal)
+  )
+
+if (!"estado" %in% names(ce_cleaned)) {
+  stop("`estado` is missing from the cleaned CE file; needed for informality joins.")
+}
+
+coastal_population_multipliers <- read_csv(
+  here::here(le_dir, "coastal_adjustment_multiplier_2020.csv"),
+  show_col_types = FALSE
+)
+
+informality_state <- read_csv(
+  here::here(liv_dir, "enoe_yearly_avg_n_informality_multiplier_by_state.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    enoe_year = as.numeric(enoe_year),
+    state = normalize_goc_state(state)
+  ) %>%
+  dplyr::select(
+    enoe_year,
+    state,
+    jobs_multiplier_state = jobs_multiplier,
+    low_n_state = low_n
+  )
+
+informality_sector <- read_csv(
+  here::here(liv_dir, "enoe_yearly_avg_n_informality_multiplier_by_state_category.csv"),
+  show_col_types = FALSE
+) %>%
+  filter(!is.na(suggested_ce_specific_sector), suggested_ce_specific_sector != "") %>%
+  mutate(
+    enoe_year = as.numeric(enoe_year),
+    state = normalize_goc_state(state)
+  ) %>%
+  group_by(enoe_year, state, specific_sector = suggested_ce_specific_sector) %>%
+  summarize(
+    pct_informal_sector = stats::weighted.mean(pct_informal, n_unweighted, na.rm = TRUE),
+    n_unweighted_sector = sum(n_unweighted, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    jobs_multiplier_sector = ifelse(
+      !is.na(pct_informal_sector) & pct_informal_sector < 1,
+      1 / (1 - pct_informal_sector),
+      NA_real_
+    ),
+    low_n_sector = n_unweighted_sector < 30,
+    extreme_rate_sector = pct_informal_sector %in% c(0, 1) | is.na(jobs_multiplier_sector)
+  )
+```
+
+## LIV: informality-adjusted jobs by region, year, and pressure sector
+
+```{r}
+ce_by_rgn_state_sector <- ce_cleaned %>%
+  group_by(year, rgn_id, state, general_sector, specific_sector) %>%
+  summarize(
+    jobs_per_act = sum(h000a, na.rm = TRUE),
+    revenue_mxn = sum(coalesce(m000a, 0) * 1e6, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(coastal_population_multipliers, by = "rgn_id") %>%
+  mutate(
+    coastal_pop_adjustment = ifelse(
+      rgn_id %in% "Region_1" & year == 2023,
+      1,
+      coastal_pop_adjustment
+    ),
+    first_adj_jobs = ifelse(
+      rgn_id %in% c("Region_3", "Region_4"),
+      jobs_per_act * coastal_pop_adjustment,
+      jobs_per_act
+    ),
+    coastal_jobs = ifelse(
+      specific_sector %in% coastal_sectors,
+      jobs_per_act * coastal_pop_adjustment,
+      first_adj_jobs
+    ),
+    first_adj_revenue = ifelse(
+      rgn_id %in% c("Region_3", "Region_4"),
+      revenue_mxn * coastal_pop_adjustment,
+      revenue_mxn
+    ),
+    coastal_revenue_mxn = ifelse(
+      specific_sector %in% coastal_sectors,
+      revenue_mxn * coastal_pop_adjustment,
+      first_adj_revenue
+    ),
+    enoe_year = ce_year_to_enoe_year(year)
+  ) %>%
+  left_join(informality_sector, by = c("enoe_year", "state", "specific_sector")) %>%
+  left_join(informality_state, by = c("enoe_year", "state")) %>%
+  mutate(
+    sector_ok = !is.na(jobs_multiplier_sector) &
+      !low_n_sector %in% TRUE &
+      !extreme_rate_sector %in% TRUE,
+    jobs_multiplier = dplyr::case_when(
+      sector_ok ~ jobs_multiplier_sector,
+      !is.na(jobs_multiplier_state) ~ jobs_multiplier_state,
+      TRUE ~ 1
+    ),
+    coastal_jobs_informality = coastal_jobs * jobs_multiplier,
+    sector = recategorize_pressure_sector(general_sector)
+  ) %>%
+  filter(!is.na(rgn_id), !is.na(sector))
+
+liv_jobs_by_rgn_year_sector <- ce_by_rgn_state_sector %>%
+  group_by(rgn_id, year, sector) %>%
+  summarize(jobs = sum(coastal_jobs_informality, na.rm = TRUE), .groups = "drop") %>%
+  mutate(jobs = round(jobs)) %>%
+  complete(
+    rgn_id,
+    year,
+    sector = pressure_sector_levels,
+    fill = list(jobs = 0)
+  ) %>%
+  arrange(rgn_id, year, sector)
+
+liv_jobs_by_rgn_year_sector
+```
+
+## ECO: coastal-adjusted revenue by region, year, and pressure sector
+
+Revenue is deflated to constant 2023 MXN, then coastal-adjusted. It is **not** multiplied by the informality factor.
+
+```{r}
+eco_revenue_by_rgn_year_sector <- ce_by_rgn_state_sector %>%
+  mutate(
+    revenue_real_2023_mxn = adjust_for_inflation(
+      price = coastal_revenue_mxn,
+      from_date = year,
+      country = "Mexico",
+      to_date = 2023
+    )
+  ) %>%
+  group_by(rgn_id, year, sector) %>%
+  summarize(
+    revenue_real_2023_mxn = sum(revenue_real_2023_mxn, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  complete(
+    rgn_id,
+    year,
+    sector = pressure_sector_levels,
+    fill = list(revenue_real_2023_mxn = 0)
+  ) %>%
+  arrange(rgn_id, year, sector)
+
+eco_revenue_by_rgn_year_sector
+```
+
+## Relative sector weights within each region and year
+
+For each region and year, I divide each sector total by that region-year total. The three sector weights for a given region and year add to 1. If a region-year total is zero, the weights are left as missing.
+
+```{r}
+liv_jobs_weights_by_rgn_year_sector <- liv_jobs_by_rgn_year_sector %>%
+  group_by(rgn_id, year) %>%
+  mutate(
+    jobs_total = sum(jobs, na.rm = TRUE),
+    weight = ifelse(jobs_total > 0, jobs / jobs_total, NA_real_)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(rgn_id, year, sector, weight) %>%
+  arrange(rgn_id, year, sector)
+
+liv_jobs_weights_by_rgn_year_sector
+
+## check: weights should sum to 1 within each region-year (or be NA if total jobs are 0)
+liv_jobs_weights_by_rgn_year_sector %>%
+  group_by(rgn_id, year) %>%
+  summarize(weight_sum = sum(weight, na.rm = FALSE), .groups = "drop") %>%
+  summarize(
+    n_rows = n(),
+    n_sum_to_one = sum(abs(weight_sum - 1) < 1e-10, na.rm = TRUE),
+    n_all_na = sum(is.na(weight_sum))
+  )
+```
+
+```{r}
+eco_revenue_weights_by_rgn_year_sector <- eco_revenue_by_rgn_year_sector %>%
+  group_by(rgn_id, year) %>%
+  mutate(
+    revenue_total = sum(revenue_real_2023_mxn, na.rm = TRUE),
+    weight = ifelse(
+      revenue_total > 0,
+      revenue_real_2023_mxn / revenue_total,
+      NA_real_
+    )
+  ) %>%
+  ungroup() %>%
+  dplyr::select(rgn_id, year, sector, weight) %>%
+  arrange(rgn_id, year, sector)
+
+eco_revenue_weights_by_rgn_year_sector
+
+## check: weights should sum to 1 within each region-year (or be NA if total revenue is 0)
+eco_revenue_weights_by_rgn_year_sector %>%
+  group_by(rgn_id, year) %>%
+  summarize(weight_sum = sum(weight, na.rm = FALSE), .groups = "drop") %>%
+  summarize(
+    n_rows = n(),
+    n_sum_to_one = sum(abs(weight_sum - 1) < 1e-10, na.rm = TRUE),
+    n_all_na = sum(is.na(weight_sum))
+  )
+```
+
+## Save
+
+```{r}
+pressures_out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/spreadsheets_for_mel"
+
+write_csv(
+  liv_jobs_by_rgn_year_sector,
+  here::here(pressures_out_dir, "liv_jobs_by_rgn_year_sector_informality.csv")
+)
+
+write_csv(
+  eco_revenue_by_rgn_year_sector,
+  here::here(pressures_out_dir, "eco_revenue_by_rgn_year_sector.csv")
+)
+
+write_csv(
+  liv_jobs_weights_by_rgn_year_sector,
+  here::here(pressures_out_dir, "liv_jobs_weights_by_rgn_year_sector_informality.csv")
+)
+
+write_csv(
+  eco_revenue_weights_by_rgn_year_sector,
+  here::here(pressures_out_dir, "eco_revenue_weights_by_rgn_year_sector.csv")
+)
+```
