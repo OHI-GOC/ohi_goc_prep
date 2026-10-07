@@ -34,8 +34,11 @@ Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Spatia
 colnames(Region_Key0)
 
 Region_Key<- Region_Key0 %>%
-  select(OHI_region= OHI_region_est, OHI_region_name) %>%
+  select(rgn_id= OHI_region_est, rgn_name= OHI_region_name) %>%
   distinct()
+
+# Make uppercase:
+Region_Key$rgn_id <- sub("^r", "R", Region_Key$rgn_id)
 ```
 
 ```{r Read in OHI region boundaries}
@@ -442,14 +445,14 @@ hem_wetland_5km_minus_aqua <- st_difference(hem_wetland_5km, Aquaculture_area_co
 ```
 
 ```{r Assign the WETL extent to each OHI region}
-# Compute area per OHI region:
+# Assign the wetland scrubland extent to each OHI region:
 hem_wetland_5km_minus_aqua_perOHI <- st_intersection(hem_wetland_5km_minus_aqua, ohi_regions) %>%
   group_by(rgn_id) %>%
   summarise(geometry = st_union(geometry), .groups = "drop") %>%
   mutate(
     area_km2 = as.numeric(st_area(geometry)) / 1e6,
     area_km2 = round(area_km2, 1),
-    year = 2021 # The year could be 2021 as that's when the aquaculture layer was produced. The layer could also be 2025 (since Hem's layer doesn't have a year)
+    year = 2021 # The year could be 2021 as that's when the aquaculture layer was produced. The layer could also be 2025, since Hem's layer doesn't have a year assigned.
   ) %>%
   st_drop_geometry()
 
@@ -459,18 +462,19 @@ all_rgns <- tibble(
   year = 2021
 )
 
-
 WETL_Current_Extent <- all_rgns %>%
   left_join(hem_wetland_5km_minus_aqua_perOHI, by = c("rgn_id", "year")) %>%
   mutate(area_km2 = replace_na(area_km2, 0)) %>%
-  select(rgn_id, area_km2, year)
+  select(rgn_id, 
+         area_est_byCEDO.2025_km2= area_km2, 
+         year)
 
-# Make a nice Ktable
+# Make a nice Ktable:
 WETL_Current_Extent %>%
-  kable(digits = 4, col.names = c("Region", "Extent (km²)", "Year")) %>%
+  kable(digits = 4, col.names = c("Region", "Extent (km²) (CEDO data, 2025; CONABIO Aquaculture data, 2021)", "Year")) %>%
   kable_styling(bootstrap_options = c("striped", "bordered")) %>%
   add_header_above(
-    c('Mangrove Extent' = 3))
+    c('Wetland, Dune, & Scrubland Extent' = 3))
 ```
 
 ## Save WETL_Current_Extent
@@ -617,7 +621,7 @@ WETL_Scores <- WETL_Scores0 %>%
                    c("rgn_id", "area_km2")),
             by="rgn_id") %>%
   rename(
-    area_est_byCEDO.2025_km2 = area_km2,
+    area_est_byCEDO.2025_km2,
     area_est_byCONABIO_km2 = estimated_area_km2
   )
   
@@ -639,9 +643,21 @@ WETL_Scores %>%
 
 ```
 
+```{r Join rgn_name to scores}
+colnames(Region_Key)
+colnames(WETL_Scores)
+
+WETL_Scores <- WETL_Scores %>%
+  left_join(Region_Key, by = "rgn_id")
+  
+WETL_Scores<- WETL_Scores %>%
+  relocate(rgn_name, .before = rgn_id)
+```
+
+
 ## Save WETL_Scores
 ```{r Save WETL_Scores}
-write.csv(WETL_Current_Extent,
+write.csv(WETL_Scores,
           here::here("_habitats/HAB_wetlands/WET_outputs/WETL_Scores_1.1_df_Oct052026.csv"),
           row.names = FALSE)
 ```
@@ -652,7 +668,7 @@ write.csv(WETL_Current_Extent,
 ```{r Estimate pressure as 100 minus current status}
 WETL_Pressure <- WETL_Scores %>%
   mutate(pressure = (100 - WETL_current_status)/100) %>%
-  select(rgn_id, year, pressure)
+  select(rgn_name, rgn_id, year, pressure)
 
 ```
 
@@ -665,44 +681,165 @@ write.csv(WETL_Pressure,
 
 
 # STEP 7: ESTIMATE WETL TREND (source: CONABIO, 2010-2020) ------------------------------
-# NOTE TO SELF: Might want to adjust how trend is calculated.
 
-```{r Calculate WETL_Trend in each OHI region}
-colnames(WETL_area_conabio)
+```{r Plot wetland trends}
+colnames(WETL_Scores)
+unique(WETL_Scores$rgn_name)
 
-WETL_Trend <- WETL_area_conabio %>%
-  filter(year %in% c(2013, 2021)) %>%
-  pivot_wider(names_from = year, values_from = observed_area_km2) %>%
-  mutate(
-    trend = ((`2021` / `2013`)^(1/8) - 1)*100,   # annual % change
-    trend = round(trend, 2),
-    year = 2021,
-    rgn_id = gsub("_", " ", rgn_id)
-  ) %>%
-  select(rgn_id, year, trend)
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
 
+WETL_Area_OverTime<- WETL_Scores %>%
+  filter(year >= 2000, year <= 2025) %>%
+  filter(provenance == "observed") %>%
+  
+  ggplot(aes(
+    x = year,
+    y = area_est_byCONABIO_km2,
+    color = rgn_name
+  )) +
+  
 
-WETL_Trend <- WETL_area_conabio %>%
-  filter(year %in% c(2013, 2021)) %>%
-  select(rgn_id, year, observed_area_km2) %>%
-  pivot_wider(
-    id_cols = rgn_id,
-    names_from = year,
-    values_from = observed_area_km2
-  ) %>%
-  mutate(
-    trend = ((`2021` / `2013`)^(1/8) - 1) * 100,
-    trend = round(trend, 2),
-    year = 2021,
-    rgn_id = gsub("_", " ", rgn_id)
-  ) %>%
-  select(rgn_id, year, trend)
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  labs(
+    title = "WETL (Wetland, Scrubland, Dune) Area by Region",
+    subtitle = "Source: CONABIO land-use data 2001-2021",
+    caption = "updated: Oct 7 2026",
+    y = "Area (km2)",
+    x = "Year"
+  ) +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+WETL_Area_OverTime
+
 ```
 
+
+# NOTE TO SELF: Might want to adjust how trend is calculated.
+
+```{r Calculate WETL_Trend using METHOD 1}
+colnames(WETL_Scores)
+
+# METHOD A: 
+# sSee GitHub issue, Oct 7 2026, for more details: https://github.com/OHI-GOC/OHI_GOC_issues/issues/127#issuecomment-6041025924
+# slope <- (condition_end - condition_start) / n_years
+# trend_pct_yr <- (slope / condition_start) * 100
+
+# Calculate the trend as the linear annualized percent change between the most recent year (i.e., 2021) and 5-10 years prior (i.e., 2013)
+WETL_Trend0 <- WETL_Scores %>%
+  # filter(WETL_include_exclude == "INCLUDE") %>%
+  filter(provenance == "observed") %>%
+  group_by(rgn_name, rgn_id) %>%
+  mutate(
+    recent_year = max(year, na.rm = TRUE),
+    comparison_year = min(
+      year[year < recent_year &
+           year >= recent_year - 10 &
+           year <= recent_year - 5]
+    ),
+    recent_area = area_est_byCONABIO_km2[year == recent_year][1],
+    comparison_area = area_est_byCONABIO_km2[year == comparison_year][1],
+    n_years = recent_year - comparison_year,
+    slope = (recent_area - comparison_area) / n_years,
+    trend = round((slope / comparison_area) * 100, 2)
+  ) %>%
+  filter(year == recent_year) %>%
+  ungroup() %>%
+  select(
+    rgn_name,
+    rgn_id,
+    comparison_year,
+    comparison_area,
+    most_recent_year= recent_year,
+    most_recent_area= recent_area,
+    trend_linear_pct_year_opA = trend
+  )
+
+WETL_Trend0
+
+```
+
+```{r Calculate WETL_Trend using METHOD B}
+# METHOD B: 
+# See GitHub issue, Oct 7 2026, for more details: https://github.com/OHI-GOC/OHI_GOC_issues/issues/127#issuecomment-6041025924
+# slope = fit a linear model: lm(area ~ year), grab the slope estimate
+# trend_pct_year <- (1 + slope/earliest_area_in_lm)
+
+# Pull the most recent year and the comparison year:
+most_recent_year = max(WETL_Scores$year, na.rm = TRUE)
+comparison_year <- min(
+  WETL_Scores$year[
+    WETL_Scores$provenance == "observed" &
+    WETL_Scores$year < most_recent_year &
+    WETL_Scores$year >= most_recent_year - 10 &
+    WETL_Scores$year <= most_recent_year - 5
+  ],
+  na.rm = TRUE
+)
+
+WETL_area_lm <- WETL_Scores %>%
+  # filter(WETL_include_exclude == "INCLUDE") %>%
+  filter(
+    year >= comparison_year,
+    year <= most_recent_year,
+    provenance == "observed"
+  ) %>%
+  group_by(rgn_id) %>%
+  summarise(
+    model = list(
+      lm(area_est_byCONABIO_km2 ~ year, data = pick(everything()))
+    ),
+    comparison_area = area_est_byCONABIO_km2[year == comparison_year][1],
+    .groups = "drop"
+  ) %>%
+  mutate(
+    slope = sapply(model, function(x) coef(x)[["year"]]),
+    p_value = sapply(
+      model,
+      function(x) summary(x)$coefficients["year", "Pr(>|t|)"]
+    ),
+    trend_pct_year = round((slope / comparison_area) * 100, 2)
+  ) %>%
+  select(rgn_id, 
+         trend_linear_pct_year_opB = trend_pct_year,
+         lm_slope= slope, 
+         p_value)
+
+```
+
+```{r Merge options A and B}
+WETL_Trend<- WETL_Trend0 %>%
+  left_join(
+    WETL_area_lm, 
+    by= "rgn_id"
+  )
+```
+
+
 ```{r Make a nice Ktable for WETL_Trend}
+colnames(WETL_Trend)
+
 WETL_Trend %>%
-  select(rgn_id, year, trend) %>%
-  kable(digits = 4, col.names = c("Region", "Year", "Trend")) %>%
+  select(rgn_id, trend_linear_pct_year_opA, trend_linear_pct_year_opB) %>%
+  kable(digits = 4, col.names = c("Region", "Trend (method A)", "Trend (method B)")) %>%
   kable_styling(bootstrap_options = c("striped", "bordered")) %>%
   add_header_above(
     c('Wetland & Scrubland Trend' = 3))
