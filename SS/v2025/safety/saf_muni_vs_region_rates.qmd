@@ -1,0 +1,554 @@
+---
+title: 'OHI GoC 2026: SAF municipal vs regional crime-rate aggregation'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    theme: cerulean
+editor:
+  chunk_output_type: console
+---
+
+# Overview
+
+The main safety script aggregates crimes and population to the **region** first, then divides:
+
+`region_rate = sum(muni crimes) / sum(muni population)`
+
+That is a population-weighted regional rate. A few large, low-crime municipalities (for example along the Sinaloa Coast) can pull the regional rate down even if smaller municipalities have higher rates.
+
+This script compares that approach with the **unweighted mean of municipal rates** within each region:
+
+`mean_muni_rate = mean(crime_i / pop_i)` across municipalities in the region
+
+Region_2, Region_3, and Region_4 use the same LE `coastal_pop_adjustment` crime scaling as the main safety script (crimes × coastal share; full municipal population denominator).
+
+Municipal population uses **CONAPO** annual mid-year totals (`pobproy_ggrupos.csv`, 1990–2040), not interpolated INEGI census anchors. That includes San Felipe and San Quintín as their own municipios.
+
+# 1. Paths and packages
+
+```{r}
+#| label: setup
+
+library(tidyverse)
+library(here)
+library(scales)
+library(plotly)
+
+safety_int <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int"
+safety_output <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output"
+
+annual_sesnsp_path <- here::here(safety_int, "sesnsp_anual_coastal_excl_mexicali_w2025.csv")
+type_of_crimes_path <- here::here(safety_output, "types_of_crimes_goc_sesnsp_excl_mexicali_w2025.csv")
+matrix_path <- here::here(safety_int, "saf_collapsed_crime_categories_matrix.csv")
+coastal_adj_path <- "/home/shares/ohi/OHI_GOC/goal_prep/le/coastal_adjustment_multiplier_2020.csv"
+# CONAPO municipal reconstruction/projections 1990-2040 (annual POB_TOTAL)
+conapo_path <- "/home/shares/ohi/OHI_GOC/_raw_data/CONAPO_demographic_indicators/d2026/pobproy_ggrupos.csv"
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+goal_code_lookup <- tibble::tribble(
+  ~goal_code, ~ohi_goal,
+  "FP-FIS", "food_provisioning_fisheries",
+  "FP-MAR", "food_provisioning_mariculture",
+  "AO-AFO", "coastal_opportunities_artisanal_fishing_opportunities",
+  "AO-LCA", "coastal_opportunities_coastal_access",
+  "NP", "natural_products",
+  "BD", "biodiversity",
+  "HS-PRO", "habitat_services_coastal_protection",
+  "HS-SEQ", "habitat_services_carbon_storage",
+  "HS-FIL", "habitat_services_filtration",
+  "CW", "clean_waters",
+  "TR", "tourism_recreation",
+  "SP", "sentido_de_pertenencia",
+  "LE-LIV", "livelihoods_economies_livelihoods",
+  "LE-ECO", "livelihoods_economies_economies"
+)
+
+subtipo_name_fixes <- c(
+  "Violencia de género distinta a la violencia familiar" =
+    "Violencia de género en todas sus modalidades distinta a la violencia familiar",
+  "Otros delitos contra la libertad y la seguridad sexual" =
+    "Otros delitos que atentan contra la libertad y la seguridad sexual",
+  "Otros delitos contra la vida y la integridad corporal" =
+    "Otros delitos que atentan contra la vida y la integridad corporal",
+  "Otros delitos contra la libertad personal" =
+    "Otros delitos que atentan contra la libertad personal"
+)
+```
+
+# 2. Build municipal crime counts by goal
+
+```{r}
+#| label: muni_crimes
+
+types_of_crime <- read_csv(type_of_crimes_path, show_col_types = FALSE)
+sesnsp_goc <- read_csv(annual_sesnsp_path, show_col_types = FALSE) %>%
+  mutate(
+    cve_municipio_int = as.integer(cve_municipio),
+    municipio_norm = stringi::stri_trans_general(municipio, "Latin-ASCII") %>%
+      toupper() %>% stringr::str_squish()
+  ) %>%
+  filter(!(municipio_norm == "MEXICALI" | cve_municipio_int == 2002))
+
+collapsed_matrix <- read_csv(matrix_path, show_col_types = FALSE)
+
+crimes_affecting_ohi <- collapsed_matrix %>%
+  mutate(
+    subtipo_de_delito = dplyr::recode(subtipo_de_delito_es, !!!subtipo_name_fixes)
+  ) %>%
+  left_join(types_of_crime, by = "subtipo_de_delito") %>%
+  tidyr::pivot_longer(
+    cols = all_of(goal_code_lookup$goal_code),
+    names_to = "goal_code",
+    values_to = "is_affecting"
+  ) %>%
+  left_join(goal_code_lookup, by = "goal_code") %>%
+  mutate(is_affecting = as.integer(is_affecting)) %>%
+  filter(is_affecting == 1)
+
+stopifnot(!any(is.na(crimes_affecting_ohi$crime_id)))
+
+sesnsp_goc_wid <- left_join(sesnsp_goc, types_of_crime) %>%
+  dplyr::select(ano, rgn_id, cve_municipio, municipio, crime_id, annual_total)
+
+# municipal totals by goal
+muni_crimes <- left_join(crimes_affecting_ohi, sesnsp_goc_wid, by = "crime_id") %>%
+  filter(!is.na(rgn_id), !is.na(cve_municipio)) %>%
+  group_by(rgn_id, ano, cve_municipio, municipio, ohi_goal) %>%
+  summarise(total_crimes = sum(annual_total, na.rm = TRUE), .groups = "drop")
+
+# Option B: LE coastal-share scaling for Region_2, Region_3, Region_4
+regions_with_coastal_adj <- c("Region_2", "Region_3", "Region_4")
+coastal_adj <- read_csv(coastal_adj_path, show_col_types = FALSE) %>%
+  mutate(
+    rgn_id = as.character(rgn_id),
+    coastal_pop_adjustment = dplyr::coalesce(coastal_pop_adjustment, 1)
+  )
+
+muni_crimes <- muni_crimes %>%
+  mutate(rgn_id = as.character(rgn_id)) %>%
+  left_join(coastal_adj, by = "rgn_id") %>%
+  mutate(
+    coastal_pop_adjustment = dplyr::coalesce(coastal_pop_adjustment, 1),
+    total_crimes_raw = total_crimes,
+    total_crimes = dplyr::if_else(
+      rgn_id %in% regions_with_coastal_adj,
+      total_crimes_raw * coastal_pop_adjustment,
+      total_crimes_raw
+    )
+  )
+
+muni_crimes %>%
+  count(rgn_id, municipio) %>%
+  arrange(rgn_id, municipio) %>%
+  knitr::kable(caption = "Municipalities present in coastal SESNSP by region")
+```
+
+# 3. Municipal population from CONAPO (annual, no interpolation)
+
+CONAPO provides mid-year municipal population for every year 1990–2040, including post-split municipios (San Felipe `02007`, San Quintín `02006`). We sum `HOMBRES` + `MUJERES` `POB_TOTAL` and join on SESNSP `cve_municipio` = CONAPO `CLAVE`.
+
+```{r}
+#| label: muni_pop
+
+conapo_raw <- read_csv(conapo_path, show_col_types = FALSE)
+
+muni_pop_conapo <- conapo_raw %>%
+  mutate(
+    cve_municipio = as.integer(CLAVE),
+    ano = as.integer(ANO),
+    pob_total = as.numeric(POB_TOTAL)
+  ) %>%
+  group_by(cve_municipio, ano, municipio_conapo = NOM_MUN, entidad_conapo = NOM_ENT) %>%
+  summarise(population = sum(pob_total, na.rm = TRUE), .groups = "drop")
+
+# Restrict to years present in the crime series
+years_needed <- sort(unique(muni_crimes$ano))
+muni_pop_interp <- muni_pop_conapo %>%
+  filter(ano %in% years_needed) %>%
+  rename(municipio_pop = municipio_conapo)
+
+# Coverage check: should include San Felipe (2007) and San Quintín (2006)
+muni_pop_interp %>%
+  filter(cve_municipio %in% c(2006L, 2007L)) %>%
+  group_by(cve_municipio, municipio_pop) %>%
+  summarise(
+    min_ano = min(ano),
+    max_ano = max(ano),
+    pop_2020 = population[ano == 2020][1],
+    pop_2025 = population[ano == 2025][1],
+    .groups = "drop"
+  ) %>%
+  knitr::kable(caption = "CONAPO population for San Quintín (2006) and San Felipe (2007)")
+
+muni_pop_interp %>%
+  summarise(
+    min_ano = min(ano),
+    max_ano = max(ano),
+    n_years = dplyr::n_distinct(ano),
+    n_muni = dplyr::n_distinct(cve_municipio)
+  ) %>%
+  knitr::kable(caption = "CONAPO municipal population coverage (crime years)")
+
+summary(muni_pop_interp$population)
+```
+
+# 4. Municipal rates and both regional aggregations
+
+```{r}
+#| label: compare_methods
+
+muni_rates <- muni_crimes %>%
+  mutate(
+    rgn_id = as.character(rgn_id),
+    cve_municipio = as.integer(cve_municipio)
+  ) %>%
+  left_join(
+    muni_pop_interp %>% dplyr::select(cve_municipio, ano, population, municipio_pop),
+    by = c("cve_municipio", "ano")
+  ) %>%
+  filter(!is.na(population), population > 0) %>%
+  mutate(
+    muni_crime_rate = total_crimes / population,
+    muni_crime_rate_unscaled = total_crimes_raw / population
+  )
+
+# Which coastal crime municipios failed to match CONAPO?
+muni_crimes %>%
+  mutate(cve_municipio = as.integer(cve_municipio)) %>%
+  distinct(rgn_id, cve_municipio, municipio) %>%
+  anti_join(muni_pop_interp %>% distinct(cve_municipio), by = "cve_municipio") %>%
+  knitr::kable(caption = "Coastal SESNSP municipios with no CONAPO population match (should be empty)")
+
+# Method A: region aggregate first (matches main script logic at muni resolution)
+rate_region_aggregate <- muni_rates %>%
+  group_by(rgn_id, ano, ohi_goal) %>%
+  summarise(
+    n_muni = dplyr::n(),
+    total_crimes = sum(total_crimes, na.rm = TRUE),
+    total_population = sum(population, na.rm = TRUE),
+    rate_region_aggregate = total_crimes / total_population,
+    .groups = "drop"
+  )
+
+# Method B: mean of municipal rates (unweighted)
+rate_muni_mean <- muni_rates %>%
+  group_by(rgn_id, ano, ohi_goal) %>%
+  summarise(
+    n_muni = dplyr::n(),
+    rate_muni_mean = mean(muni_crime_rate, na.rm = TRUE),
+    rate_muni_median = median(muni_crime_rate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+rate_compare <- rate_region_aggregate %>%
+  left_join(rate_muni_mean, by = c("rgn_id", "ano", "ohi_goal", "n_muni")) %>%
+  mutate(
+    ratio_muni_mean_over_aggregate = rate_muni_mean / rate_region_aggregate,
+    rgn_label = dplyr::recode(rgn_id, !!!rgn_labels, .default = rgn_id)
+  )
+
+# mean across goals for region-year overview
+compare_by_region <- rate_compare %>%
+  group_by(rgn_id, rgn_label, ano) %>%
+  summarise(
+    mean_rate_region_aggregate = mean(rate_region_aggregate, na.rm = TRUE),
+    mean_rate_muni_mean = mean(rate_muni_mean, na.rm = TRUE),
+    mean_ratio = mean(ratio_muni_mean_over_aggregate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+latest_ano <- max(compare_by_region$ano, na.rm = TRUE)
+
+compare_by_region %>%
+  filter(ano == latest_ano) %>%
+  arrange(desc(mean_rate_region_aggregate)) %>%
+  knitr::kable(
+    digits = 4,
+    caption = paste0(
+      "Region rates in ", latest_ano,
+      ": population-weighted aggregate vs mean of municipal rates"
+    )
+  )
+
+# Sinaloa Coast detail: municipal rates in latest year (mean across goals)
+muni_rates %>%
+  filter(as.character(rgn_id) == "Region_8", ano == latest_ano) %>%
+  group_by(municipio, cve_municipio, population) %>%
+  summarise(
+    mean_muni_rate = mean(muni_crime_rate, na.rm = TRUE),
+    mean_crimes = mean(total_crimes, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_muni_rate)) %>%
+  knitr::kable(
+    digits = 4,
+    caption = paste0("Sinaloa Coast (Region_8) municipal rates in ", latest_ano, " (mean across goals)")
+  )
+
+write_csv(rate_compare, here::here(safety_output, "rate_compare_muni_mean_vs_region_aggregate.csv"))
+write_csv(compare_by_region, here::here(safety_output, "rate_compare_by_region_overview.csv"))
+write_csv(muni_rates, here::here(safety_output, "muni_crime_rates_by_goal.csv"))
+```
+
+# 5. Plots
+
+```{r}
+#| label: plots
+#| fig-width: 10
+#| fig-height: 6
+
+compare_long <- compare_by_region %>%
+  tidyr::pivot_longer(
+    cols = c(mean_rate_region_aggregate, mean_rate_muni_mean),
+    names_to = "method",
+    values_to = "mean_rate"
+  ) %>%
+  mutate(
+    method = dplyr::recode(
+      method,
+      mean_rate_region_aggregate = "Region aggregate (sum crimes / sum pop)",
+      mean_rate_muni_mean = "Mean of municipal rates"
+    ),
+    rgn_id = factor(rgn_id, levels = names(rgn_labels))
+  )
+
+ggplot(
+  compare_long,
+  aes(x = ano, y = mean_rate, color = method, group = method)
+) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.3) +
+  facet_wrap(~ rgn_id, ncol = 3, scales = "free_y", labeller = labeller(rgn_id = rgn_labels)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Regional crime rates: aggregate vs mean of municipalities",
+    subtitle = "Mean across OHI goals; R2/R3/R4 use LE coastal-share crime scaling",
+    x = "Year",
+    y = "Mean crime rate",
+    color = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 9),
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 7)
+  )
+
+ggplot(
+  compare_long,
+  aes(x = ano, y = mean_rate, color = method, group = method)
+) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.3) +
+  facet_wrap(~ rgn_id, ncol = 3, scales = "fixed", labeller = labeller(rgn_id = rgn_labels)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Regional crime rates: aggregate vs mean of municipalities",
+    subtitle = "Shared y-axis",
+    x = "Year",
+    y = "Mean crime rate",
+    color = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 9),
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 7)
+  )
+```
+
+# 6. Interactive municipal rates over time
+
+```{r}
+#| label: plotly_muni_rates
+#| fig-width: 11
+#| fig-height: 7
+
+muni_rates_overview <- muni_rates %>%
+  mutate(
+    rgn_label = dplyr::recode(rgn_id, !!!rgn_labels, .default = rgn_id),
+    rgn_id = factor(rgn_id, levels = names(rgn_labels))
+  ) %>%
+  group_by(rgn_id, rgn_label, ano, cve_municipio, municipio, population) %>%
+  summarise(
+    mean_muni_rate = mean(muni_crime_rate, na.rm = TRUE),
+    mean_crimes = mean(total_crimes, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    hover = paste0(
+      municipio, "<br>",
+      rgn_label, "<br>",
+      "Year: ", ano, "<br>",
+      "Mean rate: ", scales::number(mean_muni_rate, accuracy = 0.0001), "<br>",
+      "Population: ", scales::comma(round(population))
+    )
+  )
+
+p_muni_plotly <- plot_ly(
+  muni_rates_overview,
+  x = ~ano,
+  y = ~mean_muni_rate,
+  color = ~municipio,
+  colors = "Set2",
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~hover,
+  hoverinfo = "text",
+  marker = list(size = 5),
+  line = list(width = 1.5)
+) %>%
+  layout(
+    title = list(
+      text = "Municipal crime rates over time<br><sup>Mean across OHI goals; R2/R3/R4 coastal-share scaled</sup>",
+      x = 0
+    ),
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "Mean crime rate"),
+    legend = list(title = list(text = "Municipality"), font = list(size = 9)),
+    hovermode = "closest"
+  )
+
+p_muni_plotly
+
+# Faceted by region (easier to compare within region)
+p_muni_by_rgn <- ggplot(
+  muni_rates_overview,
+  aes(
+    x = ano,
+    y = mean_muni_rate,
+    color = municipio,
+    group = municipio,
+    text = hover
+  )
+) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.2) +
+  facet_wrap(~ rgn_id, ncol = 3, scales = "free_y", labeller = labeller(rgn_id = rgn_labels)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Municipal crime rates by region",
+    subtitle = "Mean across OHI goals; hover for municipality detail",
+    x = "Year",
+    y = "Mean crime rate",
+    color = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold", size = 9),
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 7)
+  )
+
+ggplotly(p_muni_by_rgn, tooltip = "text")
+```
+
+# 7. Interactive municipal rates over time (no coastal-share scaling)
+
+Same plots as section 6, but using raw municipal crimes / municipal population (no LE `coastal_pop_adjustment`). Regions other than R2/R3/R4 are identical to section 6.
+
+```{r}
+#| label: plotly_muni_rates_unscaled
+#| fig-width: 11
+#| fig-height: 7
+
+muni_rates_overview_unscaled <- muni_rates %>%
+  mutate(
+    rgn_label = dplyr::recode(rgn_id, !!!rgn_labels, .default = rgn_id),
+    rgn_id = factor(rgn_id, levels = names(rgn_labels))
+  ) %>%
+  group_by(rgn_id, rgn_label, ano, cve_municipio, municipio, population) %>%
+  summarise(
+    mean_muni_rate = mean(muni_crime_rate_unscaled, na.rm = TRUE),
+    mean_crimes = mean(total_crimes_raw, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    hover = paste0(
+      municipio, "<br>",
+      rgn_label, "<br>",
+      "Year: ", ano, "<br>",
+      "Mean rate (unscaled): ", scales::number(mean_muni_rate, accuracy = 0.0001), "<br>",
+      "Population: ", scales::comma(round(population))
+    )
+  )
+
+p_muni_plotly_unscaled <- plot_ly(
+  muni_rates_overview_unscaled,
+  x = ~ano,
+  y = ~mean_muni_rate,
+  color = ~municipio,
+  colors = "Set2",
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~hover,
+  hoverinfo = "text",
+  marker = list(size = 5),
+  line = list(width = 1.5)
+) %>%
+  layout(
+    title = list(
+      text = "Municipal crime rates over time<br><sup>Mean across OHI goals; no coastal-share scaling</sup>",
+      x = 0
+    ),
+    xaxis = list(title = "Year", dtick = 1),
+    yaxis = list(title = "Mean crime rate"),
+    legend = list(title = list(text = "Municipality"), font = list(size = 9)),
+    hovermode = "closest"
+  )
+
+p_muni_plotly_unscaled
+
+p_muni_by_rgn_unscaled <- ggplot(
+  muni_rates_overview_unscaled,
+  aes(
+    x = ano,
+    y = mean_muni_rate,
+    color = municipio,
+    group = municipio,
+    text = hover
+  )
+) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.2) +
+  facet_wrap(~ rgn_id, ncol = 3, scales = "free_y", labeller = labeller(rgn_id = rgn_labels)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Municipal crime rates by region (no coastal-share scaling)",
+    subtitle = "Raw municipal crimes / municipal population; hover for detail",
+    x = "Year",
+    y = "Mean crime rate",
+    color = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold", size = 9),
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 7)
+  )
+
+ggplotly(p_muni_by_rgn_unscaled, tooltip = "text")
+```
+
+# Interpretation notes
+
+- If **mean of municipal rates >> region aggregate**, large low-crime municipalities are dominating the regional denominator (plausible for Sinaloa Coast).
+- If the two methods are similar, municipalities within the region have similar rates.
+- This script does not change the main SAF scores; it is diagnostic only.
+- Region_2, Region_3, and Region_4 crimes are scaled by LE `coastal_pop_adjustment` to down-weight Pacific-side incidence (section 6). Section 7 shows the unscaled municipal rates for comparison.
+- Municipal denominators are CONAPO annual `POB_TOTAL` (HOMBRES + MUJERES). The main SAF scores in `ss_safety_goal_specific.qmd` still use the regional INEGI interpolated population file unless that is updated separately.

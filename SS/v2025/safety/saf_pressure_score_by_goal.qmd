@@ -1,0 +1,1168 @@
+---
+title: 'OHI GoC 2026: SS Safety Data Preparation (SESNSP)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Overview
+
+THINGS TO ADD: none for now
+
+In this script, we will take the annual crime incidents for each coastal municipality that we cleaned in `SS/v2025/safety/ss_safety_dataprep.qmd` and create individual subsets for each goal. This will be based on the collapsed crime category matrix (`saf_collapsed_crime_categories_matrix.csv`), which groups SESNSP subtypes into plain-language categories and marks which OHI GoC goals each subtype affects.
+
+Rates use CONAPO municipal population summed to region, severity weights aligned with TR quality (person/harm = 2, property = 1), and LE coastal share scaling for Region_2, Region_3, and Region_4. Safety is kept as a **pressure** score (0 to 1, higher = more pressure), averaging two subcomponents: comparative incidence (top 5 mean within the GoC panel) and historical change using Semáforo methods (zero pressure at a 25% or larger reduction from the fixed 2015 to 2020 mean; pressure 1 at or above that mean).
+
+1. **Load packages.** We load the tidyverse and spatial libraries used throughout the script.
+2. **Read cleaned SESNSP municipal data through 2025.** 
+
+Intermediate files are saved to `/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int`. Final outputs are saved to `/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output`.
+
+# Background on SESNSP
+
+The **Secretariado Ejecutivo del Sistema Nacional de Seguridad Publica** (SESNSP) is the federal agency responsible for coordinating public security policy in México. Among its core functions, SESNSP compiles and publishes official statistics on crime incidence nationwide. These data are derived from **averiguaciones previas** and **carpetas de investigacion** (preliminary inquiries and case files) registered by state and federal prosecutors.
+
+For the Safety and Security (SS) pressure, specifically Safety, we use the municipal level open data series, which reports the count of registered crimes by municipality, year, month, and crime classification. The official portal is here:
+
+<https://www.gob.mx/sesnsp/acciones-y-programas/datos-abiertos-de-incidencia-delictiva>
+
+For this update we use the 2015 through 2025 methodology series. The data dictionary and full methodology are documented here:
+
+<https://sspcgob-my.sharepoint.com/:x:/g/personal/cni_sspc_gob_mx/Eft_H-La80NInrfnyRu9PCkBfyIyy-yr9hl8imxAyeLXMg?e=xvI38U>
+
+**Incidencia Delictiva Fuero Común: Nueva Metodología**
+
+| Campo | Descripción |
+|:---|:---|
+| Año | Año de registro de las averiguaciones previas y/o carpetas de investigación. |
+| Clave_Ent | Clave de la entidad, según el Marco Geoestadístico Nacional (MGN) del Instituto Nacional de Geografía y Estadística (INEGI). |
+| Entidad | Entidad federativa de registro de las averiguaciones previas y/o carpetas de investigación. |
+| Bien jurídico afectado | Primera clasificación de los delitos en las averiguaciones previas y/o carpetas de investigación. |
+| Tipo de delito | Segunda clasificación de los delitos. |
+| Subtipo de delito | Tercera clasificación de los delitos. |
+| Modalidad | Cuarta clasificación de los delitos. |
+| Enero through diciembre | Mes de registro de las averiguaciones previas y/o carpetas de investigación. |
+
+## 1. Load packages
+
+```{r}
+#| label: step_01_load_packages
+
+library(tidyverse) # data manipulation and visualization
+library(magrittr) # pipe operators
+library(here) # project relative paths
+library(janitor) # clean column names
+library(readr) # read csv files
+library(purrr) # functional programming tools
+library(mapview) # interactive maps
+library(sf) # spatial data handling
+library(stringi) # normalize spanish place names
+
+safety_int <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int" # intermediate files
+safety_output <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output" # final outputs
+annual_sesnsp_path <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int/sesnsp_anual_coastal_excl_mexicali_w2025.csv" # coastal SESNSP; Mexicali dropped, San Felipe ONLY for Rregion_1
+annual_sesnsp_sf_path <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output/sesnsp_coastal_municipios_excl_mexicali_w2025.gpkg"
+matrix_path <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int/saf_collapsed_crime_categories_matrix.csv" # collapsed crime category matrix
+type_of_crimes_path <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output/types_of_crimes_goc_sesnsp_excl_mexicali_w2025.csv" # has crimeID
+conapo_path <- "/home/shares/ohi/OHI_GOC/_raw_data/CONAPO_demographic_indicators/d2026/pobproy_ggrupos.csv" # annual municipal pop 1990-2040
+coastal_adj_path <- "/home/shares/ohi/OHI_GOC/goal_prep/le/coastal_adjustment_multiplier_2020.csv" # LE coastal share (inland 50km / total pop)
+```
+
+## 2. Read cleaned municipal data through 2025
+
+```{r}
+#| label: step_02_read_sesnsp
+
+sesnsp_goc <- read_csv(here::here(annual_sesnsp_path))
+sesnsp_goc_sf <- st_read(here::here(annual_sesnsp_sf_path))
+```
+
+
+```{r}
+# read in the type of crimes and join with the data to give each crime an identifier
+types_of_crime <- read_csv(here(type_of_crimes_path))
+
+# Drop Mexicali by name and code. After the San Felipe split, Mexicali is inland/border
+# and must not enter Region_1. Prefer fixing this upstream in ss_safety_dataprep.qmd.
+sesnsp_goc_wid <- left_join(sesnsp_goc, types_of_crime) %>%
+  dplyr::select(c(ano, rgn_id, clave_ent, entidad, cve_municipio, municipio, crime_id, annual_total)) %>%
+  mutate(
+    cve_municipio_int = as.integer(cve_municipio),
+    municipio_norm = stringi::stri_trans_general(municipio, "Latin-ASCII") %>%
+      toupper() %>%
+      stringr::str_squish()
+  ) %>%
+  filter(
+    !(municipio_norm == "MEXICALI" | cve_municipio_int == 2002)
+  ) %>%
+  dplyr::select(-cve_municipio_int, -municipio_norm)
+```
+
+### 2a. Region_1 / Mexicali–San Felipe diagnostic
+
+Region_1 population is San Felipe scale (CONAPO ~20k). Mexicali reports ~30k to 40k crimes per year. Putting Mexicali crimes over San Felipe population produces crime rates near 1.0 and makes Western Upper Gulf dominate every plot. San Felipe (`cve` 2007) only appears in SESNSP from 2022 onward.
+
+```{r}
+#| label: step_02a_region1_mexicali_check
+
+region1_composition <- sesnsp_goc %>%
+  filter(rgn_id %in% c("Region_1", "1")) %>%
+  mutate(
+    cve_municipio_int = as.integer(cve_municipio),
+    municipio_norm = stringi::stri_trans_general(municipio, "Latin-ASCII") %>%
+      toupper() %>%
+      stringr::str_squish()
+  ) %>%
+  group_by(ano, municipio, municipio_norm, cve_municipio_int) %>%
+  summarise(total_crimes = sum(annual_total, na.rm = TRUE), .groups = "drop") %>%
+  arrange(ano, municipio)
+
+region1_composition
+
+# if Mexicali is still present upstream, flag it clearly
+if (any(region1_composition$municipio_norm == "MEXICALI" |
+        region1_composition$cve_municipio_int == 2002,
+        na.rm = TRUE)) {
+  warning(
+    "Region_1 still includes Mexicali in sesnsp_anual_coastal_excl_mexicali_w2025.csv. ",
+    "Re-run ss_safety_dataprep.qmd after excluding ID 02002, then regenerate rates."
+  )
+}
+
+# compare raw annual totals for BC Mexicali vs San Felipe in the coastal file
+bc_split_check <- sesnsp_goc %>%
+  filter(
+    as.integer(cve_municipio) %in% c(2002, 2007) |
+      stringi::stri_trans_general(municipio, "Latin-ASCII") %>%
+        toupper() %>%
+        stringr::str_squish() %in% c("MEXICALI", "SAN FELIPE")
+  ) %>%
+  group_by(ano, municipio, cve_municipio) %>%
+  summarise(total_crimes = sum(annual_total, na.rm = TRUE), .groups = "drop") %>%
+  arrange(ano, municipio)
+
+bc_split_check
+```
+
+
+## 3. Clean collapsed crime category matrix
+
+The collapsed matrix marks which SESNSP subtypes affect each OHI goal (`1` = affects, `0` = does not). Goal columns use short codes (for example `FP-FIS`, `AO-LCA`, `HS-SEQ`). We join to `types_of_crime` on Spanish subtype names, then pivot to one row per crime and goal.
+
+```{r}
+#| label: step_03_collapsed_matrix
+
+# map short matrix codes to the snake_case goal names used downstream
+goal_code_lookup <- tibble::tribble(
+  ~goal_code, ~ohi_goal,
+  "FP-FIS", "food_provisioning_fisheries",
+  "FP-MAR", "food_provisioning_mariculture",
+  "AO-AFO", "coastal_opportunities_artisanal_fishing_opportunities",
+  "AO-LCA", "coastal_opportunities_coastal_access",
+  "NP", "natural_products",
+  "BD", "biodiversity",
+  "HS-PRO", "habitat_services_coastal_protection",
+  "HS-SEQ", "habitat_services_carbon_storage",
+  "HS-FIL", "habitat_services_filtration",
+  "CW", "clean_waters",
+  "TR", "tourism_recreation",
+  "SP", "sentido_de_pertenencia",
+  "LE-LIV", "livelihoods_economies_livelihoods",
+  "LE-ECO", "livelihoods_economies_economies"
+)
+
+# a few Spanish labels in the collapsed matrix are shortened relative to SESNSP wording
+subtipo_name_fixes <- c(
+  "Violencia de género distinta a la violencia familiar" =
+    "Violencia de género en todas sus modalidades distinta a la violencia familiar",
+  "Otros delitos contra la libertad y la seguridad sexual" =
+    "Otros delitos que atentan contra la libertad y la seguridad sexual",
+  "Otros delitos contra la vida y la integridad corporal" =
+    "Otros delitos que atentan contra la vida y la integridad corporal",
+  "Otros delitos contra la libertad personal" =
+    "Otros delitos que atentan contra la libertad personal"
+)
+
+collapsed_matrix <- read_csv(here::here(matrix_path))
+
+collapsed_matrix_clean <- collapsed_matrix %>%
+  mutate(
+    subtipo_de_delito = dplyr::recode(subtipo_de_delito_es, !!!subtipo_name_fixes)
+  ) %>%
+  left_join(types_of_crime, by = "subtipo_de_delito") %>%
+  tidyr::pivot_longer(
+    cols = all_of(goal_code_lookup$goal_code),
+    names_to = "goal_code",
+    values_to = "is_affecting"
+  ) %>%
+  left_join(goal_code_lookup, by = "goal_code") %>%
+  mutate(is_affecting = as.integer(is_affecting))
+
+# confirm every matrix subtype matched a SESNSP crime_id
+stopifnot(!any(is.na(collapsed_matrix_clean$crime_id)))
+
+crimes_affecting_ohi <- collapsed_matrix_clean %>%
+  filter(is_affecting == 1)
+
+unique(crimes_affecting_ohi$crime_id)
+unique(crimes_affecting_ohi$ohi_goal)
+
+# write_csv(collapsed_matrix_clean, here::here(safety_int, "saf_collapsed_matrix_clean.csv"))
+# write_csv(crimes_affecting_ohi, here::here(safety_int, "crimes_affecting_ohi_collapsed.csv"))
+```
+
+## 4. Annual crimes per goal
+
+Crime counts are **severity-weighted** the same way as TR quality (`tr_quality.qmd`): crimes that involve death, bodily harm, sexual violence, kidnapping, coercion, or personal exposure count as **2**; property / other crimes count as **1**. Weighted total = `sum(annual_total * crime_weight)`.
+
+```{r}
+#| label: step_04_crime_weights
+
+# Match TR quality: person/harm = 2, property = 1
+crimes_against_person <- c(
+  # sexual crimes
+  "Abuso sexual",
+  "Acoso sexual",
+  "Hostigamiento sexual",
+  "Otros delitos que atentan contra la libertad y la seguridad sexual",
+  "Violación equiparada",
+  "Violación simple",
+  # violence and bodily harm
+  "Feminicidio",
+  "Homicidio doloso",
+  "Lesiones dolosas",
+  "Otros delitos que atentan contra la vida y la integridad corporal",
+  "Homicidio culposo",
+  "Lesiones culposas",
+  # deprivation of liberty
+  "Otros delitos que atentan contra la libertad personal",
+  "Rapto",
+  "Secuestro",
+  "Tráfico de menores",
+  # coercion and threats
+  "Amenazas",
+  "Extorsión",
+  "Violencia de género en todas sus modalidades distinta a la violencia familiar",
+  # robbery with personal exposure
+  "Robo a transeúnte en espacio abierto al público",
+  "Robo a transeúnte en vía pública",
+  "Robo en transporte individual",
+  "Robo en transporte público colectivo",
+  "Robo en transporte público individual",
+  # linked to direct personal harm
+  "Corrupción de menores",
+  "Otros delitos contra la sociedad",
+  "Trata de personas",
+  "Narcomenudeo",
+  # household physical / sexual harm (SS matrix; not in TR list)
+  "Violencia familiar",
+  "Incesto"
+)
+
+crimes_against_property <- c(
+  "Daño a la propiedad",
+  "Fraude",
+  "Otros delitos contra el patrimonio",
+  "Otros robos",
+  "Robo a casa habitación",
+  "Robo a institución bancaria",
+  "Robo a negocio",
+  "Robo a transportista",
+  "Robo de autopartes",
+  "Robo de vehículo automotor",
+  "Contra el medio ambiente",
+  # additional property-like subtypes in the SS matrix
+  "Abuso de confianza",
+  "Despojo",
+  "Robo de ganado",
+  "Robo de maquinaria"
+)
+
+crime_weights <- tibble::tibble(
+  subtipo_de_delito = c(crimes_against_person, crimes_against_property),
+  crime_weight = c(
+    rep(2, length(crimes_against_person)),
+    rep(1, length(crimes_against_property))
+  )
+)
+
+crime_weights %>%
+  count(crime_weight) %>%
+  knitr::kable(caption = "Crime severity weights (2 = person/harm, 1 = property/other)")
+```
+
+```{r}
+#| label: step_04_annual_incidences
+
+annual_incidences_per_crime_and_yr <- left_join(crimes_affecting_ohi, sesnsp_goc_wid) %>%
+  left_join(crime_weights, by = "subtipo_de_delito") %>%
+  mutate(
+    # default 1 for remaining subtypes (e.g. corruption, electoral) not listed above
+    crime_weight = dplyr::coalesce(crime_weight, 1L)
+  )
+
+unique(annual_incidences_per_crime_and_yr$crime_id)
+unique(annual_incidences_per_crime_and_yr$is_affecting)
+
+# subtypes relying on the default weight of 1
+annual_incidences_per_crime_and_yr %>%
+  distinct(subtipo_de_delito, crime_category, crime_weight) %>%
+  filter(!subtipo_de_delito %in% crime_weights$subtipo_de_delito) %>%
+  arrange(subtipo_de_delito) %>%
+  knitr::kable(caption = "Subtypes using default weight = 1 (not in TR person/property lists)")
+```
+
+
+```{r}
+#| label: step_04_incidences_per_goal
+
+incidences_per_goal <- annual_incidences_per_crime_and_yr %>%
+  group_by(rgn_id, ano, ohi_goal) %>%
+  summarize(
+    total_crimes_unweighted = sum(annual_total, na.rm = TRUE),
+    total_crimes_reported = sum(annual_total * crime_weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+unique(incidences_per_goal$ano)
+unique(incidences_per_goal$rgn_id)
+```
+
+## 5. Standardize by population
+
+Regional population is the sum of CONAPO mid-year municipal totals (`POB_TOTAL`, HOMBRES + MUJERES) for coastal municipios in each OHI region. CONAPO provides annual reconstruction/projections 1990–2040, including San Felipe and San Quintín.
+
+Rates use the **region aggregate** of severity-weighted crimes: `sum(annual_total * crime_weight) / sum(CONAPO municipal population)`, with person/harm crimes weighted 2× (same as TR quality). Municipal-mean vs aggregate comparison is in `ss_safety_muni_vs_region_rates.qmd`.
+
+**Coastal-share scaling (aligned with LE):** Regions that span Pacific and Gulf coasts get the same LE `coastal_pop_adjustment` (2020 inland-50 km Gulf population / total regional population) applied to crime counts before dividing by the full regional population. LE applies this region-wide to Region_3 and Region_4; we also apply it to Region_2 (San Quintín). Population denominator stays full municipal / regional population.
+
+```{r}
+# CONAPO annual municipal population, summed to OHI region using coastal SESNSP munis
+coastal_muni_rgn <- sesnsp_goc_wid %>%
+  mutate(
+    rgn_id = as.character(rgn_id),
+    cve_municipio = as.integer(cve_municipio)
+  ) %>%
+  filter(!is.na(rgn_id), !is.na(cve_municipio)) %>%
+  distinct(rgn_id, cve_municipio)
+
+conapo_population_by_rgn <- read_csv(here::here(conapo_path), show_col_types = FALSE) %>%
+  mutate(
+    cve_municipio = as.integer(CLAVE),
+    ano = as.integer(ANO),
+    pob_total = as.numeric(POB_TOTAL)
+  ) %>%
+  group_by(cve_municipio, ano) %>%
+  summarise(population_muni = sum(pob_total, na.rm = TRUE), .groups = "drop") %>%
+  inner_join(coastal_muni_rgn, by = "cve_municipio") %>%
+  group_by(rgn_id, ano) %>%
+  summarise(
+    population = sum(population_muni, na.rm = TRUE),
+    n_muni = dplyr::n(),
+    .groups = "drop"
+  )
+
+conapo_population_by_rgn %>%
+  filter(ano %in% c(2020L, 2025L)) %>%
+  arrange(ano, rgn_id) %>%
+  knitr::kable(caption = "CONAPO regional population (coastal municipios) for 2020 and 2025")
+
+coastal_population_multipliers <- read_csv(
+  here::here(coastal_adj_path),
+  show_col_types = FALSE
+)
+
+# Regions that receive the LE coastal-share multiplier (plus Region_2 for SAF)
+regions_with_coastal_adj <- c("Region_2", "Region_3", "Region_4")
+```
+
+
+```{r}
+# divide the number of crimes by the population for every region, year, and ohi goal
+# Option B: crimes x coastal_pop_adjustment for R2/R3/R4; population unchanged
+rate_of_incidence_per_goal <- incidences_per_goal %>%
+  mutate(rgn_id = as.character(rgn_id)) %>%
+  left_join(conapo_population_by_rgn, by = c("rgn_id", "ano")) %>%
+  left_join(coastal_population_multipliers, by = "rgn_id") %>%
+  mutate(
+    coastal_pop_adjustment = dplyr::coalesce(coastal_pop_adjustment, 1),
+    total_crimes_raw = total_crimes_reported,
+    total_crimes_reported = dplyr::if_else(
+      rgn_id %in% regions_with_coastal_adj,
+      total_crimes_raw * coastal_pop_adjustment,
+      total_crimes_raw
+    ),
+    crime_rate = total_crimes_reported / population
+  )
+
+write_csv(
+  rate_of_incidence_per_goal,
+  here::here(safety_output, "rate_of_incidence_per_goal_2015_2025.csv")
+)
+
+write_csv(
+  conapo_population_by_rgn,
+  here::here(safety_output, "conapo_population_by_rgn_coastal_2015_2025.csv")
+)
+```
+
+### 5a. Viz
+
+```{r}
+library(tidyverse)
+library(here)
+library(scales)
+library(systemfonts) # for checking/registering fonts
+library(showtext) # renders text with the requested font
+
+# ---- region labels & colors ------------------------------------------
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+# ---- goal acronyms for facet strips ---------------------------------
+goal_labels <- c(
+  "food_provisioning_fisheries" = "FP-FIS",
+  "food_provisioning_mariculture" = "FP-MAR",
+  "coastal_opportunities_artisanal_fishing_opportunities" = "AO-AFO",
+  "coastal_opportunities_coastal_access" = "AO-LCA",
+  "natural_products" = "NP",
+  "biodiversity" = "BD",
+  "habitat_services_coastal_protection" = "HS-PRO",
+  "habitat_services_carbon_storage" = "HS-SEQ",
+  "habitat_services_filtration" = "HS-FIL",
+  "clean_waters" = "CW",
+  "tourism_recreation" = "TR",
+  "sentido_de_pertenencia" = "SP",
+  "livelihoods_economies_livelihoods" = "LE-LIV",
+  "livelihoods_economies_economies" = "LE-ECO"
+)
+
+# ---- 1. use rates from step 5 (do not reload a stale saved csv) ------
+# If you need to re-plot without re-running steps 1-5, uncomment the read_csv below.
+# rate_of_incidence_per_goal <- read_csv(
+#   here::here(safety_output, "rate_of_incidence_per_goal_2015_2025.csv")
+# )
+
+# make sure types are right (adjust column names if yours differ)
+rate_of_incidence_per_goal <- rate_of_incidence_per_goal %>%
+  mutate(
+    ano = as.integer(ano),
+    rgn_id = as.factor(rgn_id),
+    ohi_goal = as.factor(ohi_goal)
+  )
+
+# a consistent theme for everything below
+theme_set(
+  theme_minimal(base_family = "Calibri") +
+  theme(
+    plot.title = element_text(face = "bold", size = 5),
+    strip.text = element_text(face = "bold", size = 4),
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 3),
+    axis.text.y = element_text(size = 3),
+    axis.title.y = element_text(size = 3) 
+  )
+)
+theme_set(theme_minimal())  # or theme_minimal(), whatever your normal default is
+
+# ---- 2. overall crime rate trend (all regions/goals pooled) -------
+overall_trend <- rate_of_incidence_per_goal %>%
+  group_by(ano) %>%
+  summarise(
+    total_crimes = sum(total_crimes_reported, na.rm = TRUE),
+    total_pop    = sum(population, na.rm = TRUE),
+    mean_rate    = mean(crime_rate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_overall <- ggplot(overall_trend, aes(x = ano, y = mean_rate)) +
+  geom_line(linewidth = 1, color = "#2C6E9E") +
+  geom_point(size = 2, color = "#2C6E9E") +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  labs(
+    title = "Overall Crime Rate Over Time",
+    subtitle = "Mean crime rate across all regions and OHI goals",
+    x = "Year", y = "Mean crime rate"
+  )
+p_overall
+
+# ggsave(here::here(safety_output, "plot_overall_trend.png"),
+#        p_overall, width = 8, height = 5, dpi = 300)
+
+# ---- 3. trend by ohi goal (small multiples) ------------------------
+by_goal <- rate_of_incidence_per_goal %>%
+  group_by(ano, ohi_goal) %>%
+  summarise(mean_rate = mean(crime_rate, na.rm = TRUE), .groups = "drop")
+
+p_by_goal <- ggplot(by_goal, aes(x = ano, y = mean_rate)) +
+  geom_line(color = "#2C6E9E", linewidth = 1) +
+  geom_point(color = "#2C6E9E", size = 1.5) +
+  facet_wrap(~ ohi_goal, scales = "free_y", ncol = 4, labeller = labeller(ohi_goal = goal_labels)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Crime Rate Over Time by OHI Goal",
+    subtitle = "Free y-axis (shape of each trend)",
+    x = "Year", y = "Mean crime rate"
+  )
+p_by_goal
+
+# ggsave(here::here(safety_output, "plot_by_goal.png"),
+#        p_by_goal, width = 12, height = 8, dpi = 300)
+
+p_by_goal_fixed_y <- ggplot(by_goal, aes(x = ano, y = mean_rate)) +
+  geom_line(color = "#2C6E9E", linewidth = 1) +
+  geom_point(color = "#2C6E9E", size = 1.5) +
+  facet_wrap(~ ohi_goal, scales = "fixed", ncol = 4, labeller = labeller(ohi_goal = goal_labels)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Crime Rate Over Time by OHI Goal",
+    subtitle = "Shared y-axis (compare relative levels across goals)",
+    x = "Year", y = "Mean crime rate"
+  )
+p_by_goal_fixed_y
+
+# ggsave(here::here(safety_output, "plot_by_goal_fixed_y.png"),
+#        p_by_goal_fixed_y, width = 12, height = 8, dpi = 300)
+
+# ---- 4. trend by region (small multiples) --------------------------
+by_region <- rate_of_incidence_per_goal %>%
+  group_by(ano, rgn_id) %>%
+  summarise(mean_rate = mean(crime_rate, na.rm = TRUE), .groups = "drop")
+
+p_by_region <- ggplot(by_region, aes(x = ano, y = mean_rate, color = rgn_id)) +
+  geom_line(linewidth = 1, show.legend = FALSE) +
+  geom_point(size = 1.5, show.legend = FALSE) +
+  facet_wrap(~ rgn_id, scales = "free_y", labeller = labeller(rgn_id = rgn_labels)) +
+  scale_color_manual(values = rgn_colors) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Crime Rate Over Time by Region",
+    subtitle = "Free y-axis (shape of each trend)",
+    x = "Year", y = "Mean crime rate"
+  )
+p_by_region
+
+# ggsave(here::here(safety_output, "plot_by_region.png"),
+#        p_by_region, width = 12, height = 8, dpi = 300)
+
+p_by_region_fixed_y <- ggplot(by_region, aes(x = ano, y = mean_rate, color = rgn_id)) +
+  geom_line(linewidth = 1, show.legend = FALSE) +
+  geom_point(size = 1.5, show.legend = FALSE) +
+  facet_wrap(~ rgn_id, scales = "fixed", labeller = labeller(rgn_id = rgn_labels)) +
+  scale_color_manual(values = rgn_colors) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Crime Rate Over Time by Region",
+    subtitle = "Shared y-axis (compare relative levels across regions)",
+    x = "Year", y = "Mean crime rate"
+  )
+p_by_region_fixed_y
+
+# ggsave(here::here(safety_output, "plot_by_region_fixed_y.png"),
+#        p_by_region_fixed_y, width = 12, height = 8, dpi = 300)
+
+# ---- 5. all regions on one plot, colored, faceted by goal ----------
+p_region_lines_by_goal <- ggplot(
+  rate_of_incidence_per_goal,
+  aes(x = ano, y = crime_rate, color = rgn_id, group = rgn_id)
+) +
+  geom_line(alpha = 0.8) +
+  facet_wrap(~ ohi_goal, scales = "free_y", ncol = 4, labeller = labeller(ohi_goal = goal_labels)) +
+  scale_color_manual(values = rgn_colors, labels = rgn_labels) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Crime Rate Trajectories by Region, Faceted by OHI Goal",
+    subtitle = "Free y-axis (shape of each trend)",
+    x = "Year", y = "Crime rate", color = "Region"
+  ) +
+  theme(legend.position = "bottom")
+p_region_lines_by_goal
+
+# ggsave(here::here(safety_output, "plot_region_lines_by_goal.png"),
+#        p_region_lines_by_goal, width = 14, height = 9, dpi = 300)
+
+p_region_lines_by_goal_fixed_y <- ggplot(
+  rate_of_incidence_per_goal,
+  aes(x = ano, y = crime_rate, color = rgn_id, group = rgn_id)
+) +
+  geom_line(alpha = 0.8) +
+  facet_wrap(~ ohi_goal, scales = "fixed", ncol = 4, labeller = labeller(ohi_goal = goal_labels)) +
+  scale_color_manual(values = rgn_colors, labels = rgn_labels) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Crime Rate Trajectories by Region, Faceted by OHI Goal",
+    subtitle = "Shared y-axis (compare relative levels across goals and regions)",
+    x = "Year", y = "Crime rate", color = "Region"
+  ) +
+  theme(legend.position = "bottom")
+p_region_lines_by_goal_fixed_y
+
+# ggsave(here::here(safety_output, "plot_region_lines_by_goal_fixed_y.png"),
+#        p_region_lines_by_goal_fixed_y, width = 14, height = 9, dpi = 300)
+
+# ---- 6. heatmap: region x year, faceted by goal --------------------
+p_heatmap <- ggplot(
+  rate_of_incidence_per_goal,
+  aes(x = ano, y = rgn_id, fill = crime_rate)
+) +
+  geom_tile(color = "white", linewidth = 0.2) +
+  facet_wrap(~ ohi_goal, ncol = 4, labeller = labeller(ohi_goal = goal_labels)) +
+  scale_fill_viridis_c(option = "magma", name = "Crime rate") +
+  scale_y_discrete(labels = rgn_labels) +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  labs(
+    title = "Crime Rate Heatmap: Region x Year, by OHI Goal",
+    x = "Year", y = "Region"
+  )
+p_heatmap
+
+# ggsave(here::here(safety_output, "plot_heatmap.png"),
+#        p_heatmap, width = 14, height = 9, dpi = 300)
+
+# ---- 7. single-goal / single-region deep dive (example) ------------
+# swap "food_provisioning_fisheries" for whatever goal you want
+p_single_goal <- rate_of_incidence_per_goal %>%
+  filter(ohi_goal == "food_provisioning_fisheries") %>%
+  ggplot(aes(x = ano, y = crime_rate, color = rgn_id, group = rgn_id)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  scale_color_manual(values = rgn_colors, labels = rgn_labels) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  labs(
+    title = "Crime Rate Over Time: FP-FIS",
+    subtitle = "By region",
+    x = "Year", y = "Crime rate", color = "Region"
+  )
+p_single_goal
+
+# ggsave(here::here(safety_output, "plot_single_goal_example.png"),
+#        p_single_goal, width = 9, height = 6, dpi = 300)
+```
+
+### 5b. Coastal-share scaling and population source
+
+Crime scaling by LE `coastal_pop_adjustment` for Region_2, Region_3, and Region_4 is built into the main `rate_of_incidence_per_goal` table above. Denominators are CONAPO municipal populations summed to region (region aggregate). Numerator crimes are severity-weighted (person/harm = 2, property = 1), matching TR quality. Section 5a plots already use that series. A municipal-mean vs region-aggregate comparison lives in `ss_safety_muni_vs_region_rates.qmd`.
+
+## 6. Safety pressure score per goal
+
+There is no globally agreed bad / medium / good cutoff for crime rates that works across crime types and places. The UN’s International Classification of Crimes for Statistical Purposes improves how offenses are classified for comparison; it is not a set of acceptable-rate thresholds. UNODC also notes that legal definitions and reporting practices differ across places, so a single rate such as “X crimes per 100,000” cannot be read as equally serious everywhere. Police-recorded SESNSP counts are recorded incidence, not all crime experienced.
+
+For that reason, Safety here is kept as a **pressure** score (0 to 1, where higher means more pressure), built from **two transparent subcomponents**, rather than from one unsupported universal cutoff. We do not convert these to a current status score in this script; if a status is needed later, it is simply the inverse, `1 − pressure`.
+
+1. **Comparative crime incidence** places each region-year rate next to other Gulf of California coastal observations for the same OHI goal. The reference is the mean of the five highest crime rates for that goal across regions and years (top 5 mean). This answers: *how does this place compare with the worst observed burden in our GoC panel for this goal?*
+2. **Historical change** uses Semáforo Delictivo methods. For each region and goal, each year’s rate from 2015 to 2025 is compared with that same place’s **fixed 2015 to 2020 mean** crime rate. A 25% (or larger) reduction from that historical mean has pressure 0. Matching or exceeding the historical mean has pressure 1. This answers: *is recorded incidence lower than that place’s own 2015 to 2020 baseline?*
+
+Neither subcomponent claims a globally “safe” level. Comparative incidence is about relative burden within the GoC panel. Historical change is a trend / performance signal, not an absolute danger label. The overall **Safety pressure** for each region, year, and goal is the simple average of the two when both are available. When a region-goal series has no 2015 to 2020 observations (for example San Felipe only appears from 2022), historical pressure is missing and Safety uses the comparative pressure alone.
+
+### 6.1 Comparative crime incidence (top 5 mean)
+
+For each goal, the reference is the mean of the top 5 crime-rate observations across all regions and years:
+
+`pressure_comparative = crime_rate / mean_top5_crime_rate_for_that_goal`
+
+Pressures are capped at 1 when the crime rate is at or above the top 5 mean. A region-year with zero crime scores 0 pressure.
+
+### 6.2 Historical change (using Semáforo methods)
+
+For each region and goal:
+
+- Historical mean \(H\) = mean crime rate over **2015 to 2020** (fixed baseline)
+- Target \(T\) = \(0.75 \times H\) (at least a 25% reduction from the historical mean)
+- For every year from 2015 to 2025 with a crime rate: `pressure_historical = clamp((crime_rate - T) / (H - T), 0, 1)`
+
+So a 25% (or larger) decline from \(H\) has pressure 0, matching or exceeding \(H\) has pressure 1, and values between \(T\) and \(H\) map linearly (Semáforo yellow). Years inside the 2015 to 2020 window are still scored against that same fixed mean so the full 2015 to 2025 series can be plotted. If \(H = 0\), pressure is 0 when the current rate is also 0 and 1 otherwise. If a region-goal has no 2015 to 2020 rates, historical pressure is missing.
+
+### 6.2a Alternative: \(\pm 50\%\) historical band
+
+For comparison we also compute `pressure_historical_alt` on a wider band around the same \(H\):
+
+- Floor \(T_{\mathrm{alt}}\) = \(0.5 \times H\) (a 50% reduction; pressure 0)
+- Ceiling \(C_{\mathrm{alt}}\) = \(1.5 \times H\) (a 50% increase; pressure 1)
+- `pressure_historical_alt = clamp((crime_rate - T_alt) / (C_alt - T_alt), 0, 1)`
+
+Matching \(H\) scores 0.5 on this scale. This column is for sensitivity plots only (`p_pressure_historical_alt_list`); the default combined `pressure` still uses Semáforo-style `pressure_historical` from 6.2.
+
+### 6.3 Combined Safety pressure
+
+`pressure = mean(pressure_comparative, pressure_historical)` when both exist; otherwise `pressure = pressure_comparative` when only the comparative score is available.
+
+```{r}
+#| label: step_06_pressure
+
+rate_of_incidence_per_goal <- read_csv(
+  here::here(safety_output, "rate_of_incidence_per_goal_2015_2025.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    rgn_id = as.character(rgn_id),
+    ano = as.integer(ano),
+    ohi_goal = as.character(ohi_goal)
+  )
+
+summary(rate_of_incidence_per_goal$crime_rate)
+
+# ---- Subcomponent 1: comparative incidence (top 5 mean by goal) ----
+top5_ref_by_goal <- rate_of_incidence_per_goal %>%
+  group_by(ohi_goal) %>%
+  summarise(
+    ref_top5_mean = mean(
+      sort(crime_rate, decreasing = TRUE)[seq_len(min(5, dplyr::n()))],
+      na.rm = TRUE
+    ),
+    n_obs = dplyr::n(),
+    max_crime_rate = max(crime_rate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+top5_ref_by_goal %>%
+  knitr::kable(digits = 5, caption = "Top 5 mean crime-rate reference by OHI goal (comparative subcomponent)")
+
+# ---- Subcomponent 2: historical change vs fixed 2015 to 2020 mean ----
+hist_years <- 2015L:2020L
+
+hist_ref_by_rgn_goal <- rate_of_incidence_per_goal %>%
+  filter(ano %in% hist_years, !is.na(crime_rate)) %>%
+  group_by(rgn_id, ohi_goal) %>%
+  summarise(
+    hist_mean = mean(crime_rate, na.rm = TRUE),
+    n_hist_years = dplyr::n_distinct(ano),
+    hist_years_used = paste(sort(unique(ano)), collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    hist_target = 0.75 * hist_mean,
+    hist_floor_alt = 0.5 * hist_mean,
+    hist_ceiling_alt = 1.5 * hist_mean
+  )
+
+hist_ref_by_rgn_goal %>%
+  arrange(rgn_id, ohi_goal) %>%
+  knitr::kable(
+    digits = 5,
+    caption = "Fixed historical baseline: mean crime rate by region and goal, 2015 to 2020"
+  )
+
+pressure_per_goal <- rate_of_incidence_per_goal %>%
+  left_join(top5_ref_by_goal, by = "ohi_goal") %>%
+  left_join(hist_ref_by_rgn_goal, by = c("rgn_id", "ohi_goal")) %>%
+  mutate(
+    pressure_comparative = dplyr::if_else(
+      is.na(ref_top5_mean) | ref_top5_mean <= 0,
+      NA_real_,
+      pmin(1, pmax(0, crime_rate / ref_top5_mean))
+    ),
+    # Semáforo: 0 at -25% of H (hist_target), 1 at or above H
+    pressure_historical = dplyr::case_when(
+      is.na(hist_mean) ~ NA_real_,
+      hist_mean == 0 & crime_rate == 0 ~ 0,
+      hist_mean == 0 & crime_rate > 0 ~ 1,
+      TRUE ~ pmax(
+        0,
+        pmin(1, (crime_rate - hist_target) / (hist_mean - hist_target))
+      )
+    ),
+    # alternative: 0 at -50% of H, 1 at +50% of H (linear between)
+    pressure_historical_alt = dplyr::case_when(
+      is.na(hist_mean) ~ NA_real_,
+      hist_mean == 0 & crime_rate == 0 ~ 0,
+      hist_mean == 0 & crime_rate > 0 ~ 1,
+      TRUE ~ pmax(
+        0,
+        pmin(1, (crime_rate - hist_floor_alt) / (hist_ceiling_alt - hist_floor_alt))
+      )
+    ),
+    n_safety_components = as.integer(!is.na(pressure_comparative)) +
+      as.integer(!is.na(pressure_historical)),
+    pressure = dplyr::case_when(
+      !is.na(pressure_comparative) & !is.na(pressure_historical) ~
+        (pressure_comparative + pressure_historical) / 2,
+      !is.na(pressure_comparative) ~ pressure_comparative,
+      TRUE ~ NA_real_
+    ),
+    method_safety = dplyr::case_when(
+      !is.na(pressure_comparative) & !is.na(pressure_historical) ~
+        "Mean of comparative (top 5) and historical (2015 to 2020, using Semáforo methods) pressures",
+      !is.na(pressure_comparative) ~
+        "Comparative (top 5) pressure only; 2015 to 2020 historical baseline not available",
+      TRUE ~ NA_character_
+    )
+  )
+
+summary(pressure_per_goal$pressure_comparative)
+summary(pressure_per_goal$pressure_historical)
+summary(pressure_per_goal$pressure_historical_alt)
+summary(pressure_per_goal$pressure)
+
+pressure_per_goal %>%
+  count(method_safety) %>%
+  knitr::kable(caption = "How often each Safety pressure path is used")
+
+pressure_summary_table <- pressure_per_goal %>%
+  group_by(ohi_goal) %>%
+  summarise(
+    n = dplyr::n(),
+    min = min(pressure, na.rm = TRUE),
+    q1 = quantile(pressure, 0.25, na.rm = TRUE),
+    median = median(pressure, na.rm = TRUE),
+    mean = mean(pressure, na.rm = TRUE),
+    q3 = quantile(pressure, 0.75, na.rm = TRUE),
+    max = max(pressure, na.rm = TRUE),
+    mean_comparative = mean(pressure_comparative, na.rm = TRUE),
+    mean_historical = mean(pressure_historical, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+pressure_summary_table %>%
+  knitr::kable(digits = 3, caption = "Safety pressure summary by OHI goal (combined and subcomponents; 0 to 1)")
+
+write_csv(
+  pressure_per_goal,
+  here::here(safety_output, "pressure_per_goal_2015_2025.csv")
+)
+
+write_csv(
+  pressure_summary_table,
+  here::here(safety_output, "pressure_summary_by_goal_2015_2025.csv")
+)
+
+write_csv(
+  hist_ref_by_rgn_goal,
+  here::here(safety_output, "historical_baseline_2015_to_2020_by_rgn_goal.csv")
+)
+
+write_csv(
+  top5_ref_by_goal,
+  here::here(safety_output, "crime_rate_top5_reference_by_goal_2015_2025.csv")
+)
+```
+
+### 6a. Pressure plots by goal
+
+We reuse the same region colors and labels defined in section 5a. For convenience we redefine them here so this section can also be run on its own. Plots show the **combined** Safety pressure; subcomponent plots follow. Higher values mean more pressure.
+
+```{r}
+#| label: step_06a_pressure_plots
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
+
+library(scales)
+
+# turn off showtext if it was left on from section 5a; that dpi mismatch makes text huge in the plot pane
+if (requireNamespace("showtext", quietly = TRUE)) {
+  showtext::showtext_auto(FALSE)
+}
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+theme_pressure <- theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey40"),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    legend.position = "bottom",
+    legend.key.size = unit(0.5, "cm"),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(6, 8, 4, 6)
+  )
+
+pressure_per_goal <- read_csv(
+  here::here(safety_output, "pressure_per_goal_2015_2025.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    ano = as.integer(ano),
+    rgn_id = factor(rgn_id, levels = names(rgn_labels)),
+    ohi_goal = as.character(ohi_goal)
+  )
+
+goal_list <- sort(unique(pressure_per_goal$ohi_goal))
+
+# display names for plot titles (AO goals use Access Opportunities, not Coastal Opportunities)
+goal_display_names <- c(
+  "food_provisioning_fisheries" = "Food Provisioning: Fisheries",
+  "food_provisioning_mariculture" = "Food Provisioning: Mariculture",
+  "coastal_opportunities_artisanal_fishing_opportunities" =
+    "Access Opportunities: Artisanal Fishing Opportunities",
+  "coastal_opportunities_coastal_access" =
+    "Access Opportunities: Local Coastal Access",
+  "natural_products" = "Natural Products",
+  "biodiversity" = "Biodiversity",
+  "habitat_services_coastal_protection" = "Habitat Services: Coastal Protection",
+  "habitat_services_carbon_storage" = "Habitat Services: Carbon Storage",
+  "habitat_services_filtration" = "Habitat Services: Filtration",
+  "clean_waters" = "Clean Waters",
+  "tourism_recreation" = "Tourism & Recreation",
+  "sentido_de_pertenencia" = "Sentido de Pertenencia",
+  "livelihoods_economies_livelihoods" = "Livelihoods & Economies: Livelihoods",
+  "livelihoods_economies_economies" = "Livelihoods & Economies: Economies"
+)
+
+goal_display_name <- function(g) {
+  if (!is.null(goal_display_names[[g]])) {
+    goal_display_names[[g]]
+  } else {
+    stringr::str_replace_all(g, "_", " ") %>% stringr::str_to_title()
+  }
+}
+
+make_pressure_plot <- function(df, y_col, title_suffix, subtitle) {
+  p_list <- list()
+  for (g in goal_list) {
+    goal_title <- goal_display_name(g)
+
+    p_list[[g]] <- df %>%
+      filter(ohi_goal == g) %>%
+      ggplot(aes(x = ano, y = .data[[y_col]], color = rgn_id, group = rgn_id)) +
+      geom_line(linewidth = 1.1, alpha = 0.9, na.rm = TRUE) +
+      geom_point(size = 2, na.rm = TRUE) +
+      scale_color_manual(values = rgn_colors, labels = rgn_labels) +
+      scale_x_continuous(breaks = pretty_breaks(n = 6)) +
+      scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+      labs(
+        title = paste0(goal_title, title_suffix),
+        subtitle = subtitle,
+        x = NULL,
+        y = "Pressure (0 to 1; higher = worse)",
+        color = NULL
+      ) +
+      guides(color = guide_legend(nrow = 3, byrow = TRUE)) +
+      theme_pressure
+  }
+  p_list
+}
+
+p_pressure_list <- make_pressure_plot(
+  pressure_per_goal,
+  "pressure",
+  "",
+  "Combined Safety pressure: mean of comparative (top 5) and historical change when both exist"
+)
+
+p_pressure_comparative_list <- make_pressure_plot(
+  pressure_per_goal,
+  "pressure_comparative",
+  " (comparative)",
+  "Comparative incidence: the reference is the top 5 mean crime rate (1 = at or above reference)"
+)
+
+p_pressure_historical_list <- make_pressure_plot(
+  pressure_per_goal,
+  "pressure_historical",
+  " (historical)",
+  "Historical change using Semáforo methods; 0 = 25% or more below 2015 to 2020 mean, 1 = at or above that mean"
+)
+
+p_pressure_historical_alt_list <- make_pressure_plot(
+  pressure_per_goal,
+  "pressure_historical_alt",
+  " (historical alternative)",
+  "Historical change alternative; 0 = 50% or more below 2015 to 2020 mean, 1 = 50% or more above"
+)
+
+names(p_pressure_list)
+```
+
+#### Call individual pressure plots by goal
+
+```{r}
+#| label: step_06a_print_pressure_by_goal
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
+
+# Combined Safety pressure (default product)
+p_pressure_list[["biodiversity"]]
+p_pressure_list[["clean_waters"]]
+p_pressure_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
+p_pressure_list[["coastal_opportunities_coastal_access"]]
+p_pressure_list[["food_provisioning_fisheries"]]
+p_pressure_list[["food_provisioning_mariculture"]]
+p_pressure_list[["habitat_services_carbon_storage"]]
+p_pressure_list[["habitat_services_coastal_protection"]]
+p_pressure_list[["habitat_services_filtration"]]
+p_pressure_list[["livelihoods_economies_economies"]]
+p_pressure_list[["livelihoods_economies_livelihoods"]]
+p_pressure_list[["natural_products"]]
+p_pressure_list[["sentido_de_pertenencia"]]
+p_pressure_list[["tourism_recreation"]]
+```
+
+#### Comparative and historical subcomponent plots by goal
+
+```{r}
+#| label: step_06a_print_subcomponent_by_goal
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
+
+p_pressure_comparative_list[["biodiversity"]]
+p_pressure_historical_list[["biodiversity"]]
+p_pressure_comparative_list[["clean_waters"]]
+p_pressure_historical_list[["clean_waters"]]
+p_pressure_comparative_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
+p_pressure_historical_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
+p_pressure_comparative_list[["coastal_opportunities_coastal_access"]]
+p_pressure_historical_list[["coastal_opportunities_coastal_access"]]
+p_pressure_comparative_list[["food_provisioning_fisheries"]]
+p_pressure_historical_list[["food_provisioning_fisheries"]]
+p_pressure_comparative_list[["food_provisioning_mariculture"]]
+p_pressure_historical_list[["food_provisioning_mariculture"]]
+p_pressure_comparative_list[["habitat_services_carbon_storage"]]
+p_pressure_historical_list[["habitat_services_carbon_storage"]]
+p_pressure_comparative_list[["habitat_services_coastal_protection"]]
+p_pressure_historical_list[["habitat_services_coastal_protection"]]
+p_pressure_comparative_list[["habitat_services_filtration"]]
+p_pressure_historical_list[["habitat_services_filtration"]]
+p_pressure_comparative_list[["livelihoods_economies_economies"]]
+p_pressure_historical_list[["livelihoods_economies_economies"]]
+p_pressure_comparative_list[["livelihoods_economies_livelihoods"]]
+p_pressure_historical_list[["livelihoods_economies_livelihoods"]]
+p_pressure_comparative_list[["natural_products"]]
+p_pressure_historical_list[["natural_products"]]
+p_pressure_comparative_list[["sentido_de_pertenencia"]]
+p_pressure_historical_list[["sentido_de_pertenencia"]]
+p_pressure_comparative_list[["tourism_recreation"]]
+p_pressure_historical_list[["tourism_recreation"]]
+```
+
+#### Historical alternative (\(\pm 50\%\)) plots by goal
+
+```{r}
+#| label: step_06a_print_historical_alt_by_goal
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
+
+p_pressure_historical_alt_list[["biodiversity"]]
+p_pressure_historical_alt_list[["clean_waters"]]
+p_pressure_historical_alt_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
+p_pressure_historical_alt_list[["coastal_opportunities_coastal_access"]]
+p_pressure_historical_alt_list[["food_provisioning_fisheries"]]
+p_pressure_historical_alt_list[["food_provisioning_mariculture"]]
+p_pressure_historical_alt_list[["habitat_services_carbon_storage"]]
+p_pressure_historical_alt_list[["habitat_services_coastal_protection"]]
+p_pressure_historical_alt_list[["habitat_services_filtration"]]
+p_pressure_historical_alt_list[["livelihoods_economies_economies"]]
+p_pressure_historical_alt_list[["livelihoods_economies_livelihoods"]]
+p_pressure_historical_alt_list[["natural_products"]]
+p_pressure_historical_alt_list[["sentido_de_pertenencia"]]
+p_pressure_historical_alt_list[["tourism_recreation"]]
+```
+
+### 6b. Crimes included in each goal
+
+For each OHI goal, we list the crimes marked as affecting that goal in `saf_collapsed_crime_categories_matrix.csv`.
+
+```{r}
+#| label: step_06b_crimes_by_goal
+
+crimes_by_goal <- crimes_affecting_ohi %>%
+  dplyr::select(
+    ohi_goal,
+    goal_code,
+    crime_category,
+    crime_id,
+    bien_juridico_afectado,
+    tipo_de_delito,
+    subtipo_de_delito,
+    dplyr::any_of(c(
+      "subtipo_de_delito_en",
+      "eng_subtipo_de_delito",
+      "eng_subtipo_de_delito_2"
+    ))
+  ) %>%
+  distinct() %>%
+  arrange(ohi_goal, crime_id)
+
+# save the full lookup for reference
+write_csv(
+  crimes_by_goal,
+  here::here(safety_output, "crimes_included_per_goal_2015_2025.csv")
+)
+
+# print one table per goal
+for (g in goal_list) {
+  goal_title <- goal_display_name(g)
+
+  goal_crimes <- crimes_by_goal %>%
+    filter(ohi_goal == g) %>%
+    dplyr::select(-ohi_goal)
+
+  cat("\n\n#### ", goal_title, "\n\n", sep = "")
+  cat("Number of crimes included: ", nrow(goal_crimes), "\n\n", sep = "")
+
+  print(
+    knitr::kable(
+      goal_crimes,
+      caption = paste0("Crimes included in ", goal_title),
+      row.names = FALSE
+    )
+  )
+}
+```
+
+### 6c. Reference method note
+
+The multi-method reference exploration (per goal max, global max, quantiles, regional baseline) was retired. Safety is scored as a **pressure** on a 0 to 1 scale (higher = worse) using comparative top 5 and historical Semáforo methods (fixed 2015 to 2020 baseline, scored for 2015 to 2025) in section 6. An alternative \(\pm 50\%\) historical band is available as `pressure_historical_alt` for sensitivity plots. Downstream merge scripts should use `pressure_per_goal_2015_2025.csv`.
