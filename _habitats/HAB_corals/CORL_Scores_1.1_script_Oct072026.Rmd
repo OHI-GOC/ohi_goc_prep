@@ -1,46 +1,270 @@
----
-title: "Coral Reef Habitat Condition and Trend - Gulf of California OHI"
-author: "Austin Martinez"
-date: 5/7/2026
-format: 
-  html:
-    code-fold: show
-execute:
-  echo: true
-  message: false
-  warning: false
----
+################################################################################
 
-```{r}
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+original author: "Austin Martinez"
+
+################################################################################
+
+# PRE-WORK ------------------------------
+
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Load in Libraries
+library(sf)
 library(dplyr)
-library(ggplot2)
-library(readr)
+library(here)
+library(terra)
 library(tidyr)
-library(tibble)
+library(ggplot2)
+library(knitr)
 library(kableExtra)
+library(tmap)
+
 ```
 
 
-```{r}
-# Read in coral data
-reef_data <- read_csv("/home/shares/ohi/OHI_GOC/_raw_data/Coral_cover_lit_review/coral_reef_timeseries_averaged.csv")
-corals_extent <- read_csv(here("_habitats", "HAB_corals", "CRL_outputs", "corals_extent.csv"))
+```{r Load in the OHI Region_Key0}
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
 
+colnames(Region_Key0)
+
+Region_Key<- Region_Key0 %>%
+  select(rgn_id= OHI_region_est, rgn_name= OHI_region_name) %>%
+  distinct()
+
+# Make uppercase:
+Region_Key$rgn_id <- sub("^r", "R", Region_Key$rgn_id)
+```
+
+```{r Read in OHI region boundaries}
+# Read in OHI region boundaries
+ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) %>% 
+  st_make_valid()
+
+```
+
+# STEP 1: CALCULATE CORAL REEF "CURRENT EXTENT" (sources: Allen Coral Atlas [2020], dataMares [2016], Hem / CEDO coral data [2025]) ------------------------------
+Extent = Total area from dataMares - area from Allen Coral Atlas, with remainder split across all points identified in CEDO data.
+
+```{r Read in Coral Reef extent data sets}
+# Read in Allen polygon data (2018-2020):
+AllenAtlas_coral_raw <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/coral_datasets/ALLEN_coral_Atlas/Mexican-Exclusive-Economic-Zone-20230309211010/Reef-Extent/reefextent.gpkg") %>% 
+  st_make_valid()
+
+# Read in CEDO point data (2025):
+CEDO_coral_raw <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/coral/Arrecifes_de_coral_(Golfo_de_California).shp") %>% 
+  st_make_valid()
+
+# Total area of corals in the GOC according to dataMares (2016): https://datamares.org/stories/marine-habitat-distributions-in-the-gulf-of-california-2/
+CORL_area_dataMares_ha <- 657
+```
+
+```{r Match CRS to OHI regions}
+# Match CRS to OHI regions
+AllenAtlas_coral.data <- st_transform(AllenAtlas_coral_raw, st_crs(ohi_regions))
+CEDO_coral.data <- st_transform(CEDO_coral_raw, st_crs(ohi_regions))
+```
+
+```{r Clip data to the OHI boundies extent}
+# Clip data to the OHI boundies extent
+AllenAtlas_coral.data <- st_intersection(AllenAtlas_coral.data, ohi_regions)
+CEDO_coral.data   <- st_intersection(CEDO_coral.data, ohi_regions)
+```
+
+```{r Identify points from the CEDO data set that do / do not intersect the Allen Atlas polygons}
+# Identify points from the CEDO data set that intersect the Allen Atlas polygons
+corals_that_intersect <- st_intersects(CEDO_coral.data, AllenAtlas_coral.data)
+
+# Keep only the CEDO points that do NOT intersect Allen Atlas polygons
+corals_that_do_not_intersect <- CEDO_coral.data[lengths(corals_that_intersect) == 0,]
+
+# Find how many points don't intersect a polygon:
+non_intersect_coral_points <- as.numeric(nrow(corals_that_do_not_intersect))
+non_intersect_coral_points
+# n = 47 points
+
+```
+
+```{r Convert from m^2 to hectares}
+CORL_area_AllenAtlas_m2 <- sum(st_area(AllenAtlas_coral.data))
+CORL_area_AllenAtlas_ha <- as.numeric(CORL_area_AllenAtlas_m2) / 10000
+CORL_area_AllenAtlas_ha
+```
+
+```{r Find remainder and assign area to non intersecting points}
+# Subtract total coral area of CORL_area_AllenAtlas_ha from CORL_area_dataMares_ha
+remaining_coral_area_ha <- CORL_area_dataMares_ha - CORL_area_AllenAtlas_ha
+remaining_coral_area_ha
+
+# Find how much area each remaning points should be assigned
+area_per_point_ha = remaining_coral_area_ha / non_intersect_coral_points
+area_per_point_ha
+
+# NOTE TO SELF: 2.6, slightly different than Austin's 2.7 because of a CRS matching change. - Oct 7 2026
+```
+
+```{r Construct COMBINED coral reef dataset}
+
+# Rename AllenAtlas_coral.data$geom → geometry
+AllenAtlas_coral.data <- AllenAtlas_coral.data %>%
+  rename(geometry = geom)
+
+# Drop the unwanted columns to concat corals_that_do_not_intersect and AllenAtlas_coral.data
+AllenAtlas_coral.data <- AllenAtlas_coral.data %>%
+  select(-class)
+
+corals_that_do_not_intersect <- corals_that_do_not_intersect %>%
+  select(-Habitat)
+
+# Add an area_ha column For polygons (AllenAtlas_coral.data) and For points (corals_that_do_not_intersect)
+AllenAtlas_coral.data <- AllenAtlas_coral.data %>%
+  mutate(area_ha = as.numeric(st_area(geometry)) / 10000)
+
+corals_that_do_not_intersect <- corals_that_do_not_intersect %>%
+  mutate(area_ha = area_per_point_ha)
+
+# Bind the two datasets together
+COMBINED_coral.data_area <- bind_rows(AllenAtlas_coral.data, corals_that_do_not_intersect)
+```
+
+```{r SANITY CHECK on total area}
+# Check if it worked: All areas should sum to 657 ha (dataMares estimate)
+sum(COMBINED_coral.data_area$area_ha)
+```
+
+```{r Assign CORAL extent to each OHI region}
+# Assign the coral extent to each OHI region:
+CORL_Current_Extent <- COMBINED_coral.data_area %>%
+  st_drop_geometry() %>%
+  dplyr::group_by(rgn_id) %>%
+  dplyr::summarise(
+    area_ha = sum(area_ha, na.rm = TRUE),
+    year = 2025
+  )
+
+all_rgns <- tibble(
+  rgn_id = paste0("Region_", 1:9),
+  year = 2025
+)
+
+CORL_Current_Extent <- all_rgns %>%
+  left_join(CORL_Current_Extent, by = c("rgn_id", "year")) %>%
+  mutate(area_ha = replace_na(area_ha, 0)) %>%
+  select(rgn_id, 
+         area_est_2025_ha = area_ha, 
+         year)
+
+CORL_Current_Extent
+
+```
+
+```{r Ktable of Current Extent}
+CORL_Current_Extent %>%
+  kable(digits = 4, col.names = c("Region", "Extent (ha) (Allen Atlas data, 2020; CEDO data, 2025; dataMares, 2017)", "Year")) %>%
+  kable_styling(bootstrap_options = c("striped", "bordered")) %>%
+  add_header_above(
+    c('Coral Reef Extent' = 3))
+
+```
+
+## Save CORL_Current_Extent
+```{r Save CORL_Current_Extent}
+write.csv(
+  CORL_Current_Extent,
+  here::here("_habitats/HAB_corals/CRL_outputs/CORL_Current_Extent_Oct072026.csv"),
+  row.names = FALSE
+)
+```
+
+```{r Map of CORL_Current_Extent}
+tmap_mode("plot")
+
+# Add dummy habitat columns for legend control
+AllenAtlas_coral.data$habitat <- "Coral Reef"
+CEDO_coral.data$habitat   <- "Coral Reef"
+
+tm_shape(ohi_regions) +
+  tm_polygons(
+    col = "location",
+    palette = c(
+      "marine" = "#cceeff",   # light blue
+      "land"   = "#f5e6c8"    # light tan
+    ),
+    alpha = 0.5,
+    border.col = "gray",
+    border.lwd = 0.6,
+    legend.show = FALSE
+  ) +
+
+# Allen Coral polygons
+tm_shape(AllenAtlas_coral.data) +
+  tm_polygons(
+    col = "habitat",
+    palette = c("Allen Coral Polygons" = "#FF4500"),  # orange-red
+    alpha = 1,
+    border.col = "#FF4500",
+    border.lwd = 2.5,
+    title = "Habitat"
+  ) +
+
+# Hem Coral points
+tm_shape(CEDO_coral.data) +
+  tm_dots(
+    col = "habitat",
+    palette = c("Hem Coral Points" = "#FF4500"),       # blue
+    size = 0.05,
+    alpha = 1,
+    title = "Habitat"
+  ) +
+
+tm_layout(
+    title.size = 1.3,
+    title.fontface = "bold",
+    title.position = c(0.02, 0.98),
+    frame = FALSE
+  ) +
+
+tm_scale_bar(position = c("left", "bottom"))
+
+```
+
+
+# STEP 2: CALCULATE CORAL REEF "CURRENT STATUS", i.e. condition over time (source: literature review from 1980s-2024)  ------------------------------
+
+```{r Load in extent data as needed}
+# Extent data from 3 data sources:
+CORL_Current_Extent <- read_csv(here::here("_habitats/HAB_corals/CRL_outputs/CORL_Current_Extent_Oct072026.csv"))
+# 9 obs., 3 vars.
+```
+
+```{r Load in Coral Percent Cover data}
+# Percent cover data from literature review:
+CORL_percent.cover_data <- read_csv("/home/shares/ohi/OHI_GOC/_raw_data/coral_datasets/Coral_cover_lit_review/coral_reef_timeseries_averaged.csv")
+```
+
+## PLOT Region 4 Time series (all sites)
+
+```{r Filter by region to create figures}
 # Filter for region 4 data
-reef_region4 <- reef_data %>% 
+PercentCover_rgn4 <- CORL_percent.cover_data %>% 
   filter(rgn_id == "Region_4")
+
 # Filter for region 9 data
-reef_region9 <- reef_data %>% 
+PercentCover_rgn9 <- CORL_percent.cover_data %>% 
   filter(rgn_id == "Region_9")
 ```
 
-## Region 4 Time series (all sites)
 ```{r}
 # Make time series for region 4 data
-ggplot(reef_region4, aes(x = year, y = percent_coral_cover, color = reef_name)) +
+ggplot(PercentCover_rgn4, aes(x = year, y = percent_coral_cover, color = reef_name)) +
   geom_line() +
   geom_point() +
-  theme_minimal() +
+  theme_bw() +
   labs(
     x = "Year",
     y = "% Coral Cover",
@@ -52,7 +276,7 @@ ggplot(reef_region4, aes(x = year, y = percent_coral_cover, color = reef_name)) 
 
 ```{r}
 # make sure year is numeric and factors are set
-reef_region4 <- reef_region4 %>%
+PercentCover_rgn4 <- PercentCover_rgn4 %>%
   mutate(
     year = as.numeric(year),
     reef_name = factor(reef_name),
@@ -62,7 +286,7 @@ reef_region4 <- reef_region4 %>%
 
 ```{r}
 # Filter Region 4 for Cabo Pulmo only
-cabo <- reef_region4 %>% 
+cabo <- PercentCover_rgn4 %>% 
   filter(reef_name == "Cabo Pulmo")
 
 # Split into two time periods
@@ -131,7 +355,7 @@ ggplot() +
     title = "Cabo Pulmo Coral Cover Trends: 1991–2012 vs. 2013–2023",
     caption = "Figure 1"
   ) +
-  theme_minimal() +
+  theme_bw() +
   theme(
     plot.title = element_text(size = 16, face = "bold"),
     legend.title = element_text(size = 12),
@@ -145,7 +369,7 @@ ggplot() +
 # Region 9
 ```{r}
 # Remove sites that only have 1 year of data
-reef_region9_clean <- reef_region9 %>%
+PercentCover_rgn9_clean <- PercentCover_rgn9 %>%
   filter(!reef_name %in% c(
     "Las Iglesias (Bahía Banderas)",
     "Yelapa (Bahía Banderas)",
@@ -157,11 +381,11 @@ reef_region9_clean <- reef_region9 %>%
 
 ```{r}
 # Make time series for region 9 data
-ggplot(reef_region9_clean, aes(x = year, y = percent_coral_cover, color = reef_name)) +
+ggplot(PercentCover_rgn9_clean, aes(x = year, y = percent_coral_cover, color = reef_name)) +
   geom_line() +
   geom_point() +
   geom_vline(xintercept = 2013, linetype = "dashed", color = "grey50") +
-  theme_minimal() +
+  theme_bw() +
   labs(
     x = "Year",
     y = "% Coral Cover",
@@ -176,12 +400,12 @@ ggplot(reef_region9_clean, aes(x = year, y = percent_coral_cover, color = reef_n
 # Region 4
 
 # Filter reef data for Region 4 (Cabo Pulmo only)
-reef_region4_cabo <- reef_region4 %>%
+PercentCover_rgn4_cabo <- PercentCover_rgn4 %>%
   filter(reef_name == "Cabo Pulmo")
 
 # Split periods
-reef4_pre  <- reef_region4_cabo %>% filter(year < 2013)
-reef4_post <- reef_region4_cabo %>% filter(year >= 2013)
+reef4_pre  <- PercentCover_rgn4_cabo %>% filter(year < 2013)
+reef4_post <- PercentCover_rgn4_cabo %>% filter(year >= 2013)
 
 # Means
 avg_1991_2012 <- mean(reef4_pre$percent_coral_cover, na.rm = TRUE)
@@ -205,7 +429,7 @@ region4_condition <- tibble(
 ```{r}
 # Region 9
 
-reef_region9_avg <- reef_region9_clean %>%
+PercentCover_rgn9_avg <- PercentCover_rgn9_clean %>%
   group_by(year) %>%
   summarise(
     percent_coral_cover = mean(percent_coral_cover, na.rm = TRUE),
@@ -214,7 +438,7 @@ reef_region9_avg <- reef_region9_clean %>%
   arrange(year)
 
 # Only include sites that have multiple observations
-reef_region9_two <- reef_region9_clean %>%
+PercentCover_rgn9_two <- PercentCover_rgn9_clean %>%
   filter(reef_name %in% c(
     "Punta Mita (Bahía Banderas)",
     "Isla María Cleofas (Nayarit offshore)",
@@ -222,7 +446,7 @@ reef_region9_two <- reef_region9_clean %>%
   ))
 
 # Make Region 9 reefs into a single site by averaging percent cover for years with multiple observations.
-reef_region9_avg <- reef_region9_two %>%
+PercentCover_rgn9_avg <- PercentCover_rgn9_two %>%
   group_by(year) %>%
   summarise(
     percent_coral_cover = mean(percent_coral_cover, na.rm = TRUE),
@@ -231,8 +455,8 @@ reef_region9_avg <- reef_region9_two %>%
   arrange(year)
 
 
-reef9_pre  <- reef_region9_avg %>% filter(year < 2013)
-reef9_post <- reef_region9_avg %>% filter(year >= 2013)
+reef9_pre  <- PercentCover_rgn9_avg %>% filter(year < 2013)
+reef9_post <- PercentCover_rgn9_avg %>% filter(year >= 2013)
 
 mean_pre  <- mean(reef9_pre$percent_coral_cover, na.rm = TRUE)
 mean_post <- mean(reef9_post$percent_coral_cover, na.rm = TRUE)
@@ -256,8 +480,8 @@ coral_condition_combined <- bind_rows(
 )
 ```
 
-```{r}
-# Make a table
+```{r Make a table}
+
 coral_condition_combined %>%
   select(rgn_id, area_km2, year, current_status) %>%
   kable(
@@ -282,7 +506,7 @@ coral_condition_combined %>%
 
 ```{r}
 # Select necessary columns
-coral_condition_combined <- coral_condition_combined |>
+coral_condition_combined <- coral_condition_combined %>%
   select(rgn_id, year, current_status)
 
 #coral_condition_combined <- read_csv(here::here("_habitats/HAB_corals/CRL_outputs/coral_current_status.csv"))
@@ -293,11 +517,11 @@ all_rgns <- tibble(
 )
 
 coral_condition <- all_rgns %>% 
-  left_join(coral_condition_combined, by = c("rgn_id", "year")) |>
+  left_join(coral_condition_combined, by = c("rgn_id", "year")) %>%
   mutate(current_status = round(100*current_status, 0)) %>%
   select(rgn_id, year, current_status)
-coral_condition
 
+coral_condition
 
 ```
 
@@ -329,15 +553,15 @@ write.csv(
 
 ```{r}
 # Split into two time periods
-reef_region9_two <- reef_region9_clean %>%
+PercentCover_rgn9_two <- PercentCover_rgn9_clean %>%
   filter(reef_name %in% c(
     "Punta Mita (Bahía Banderas)",
     "Isla María Cleofas (Nayarit offshore)",
     "Islas Marietas"
   ))
 
-reef_pre2013 <- reef_region9_two %>% filter(year < 2013)
-reef_post2013 <- reef_region9_two %>% filter(year >= 2013)
+reef_pre2013 <- PercentCover_rgn9_two %>% filter(year < 2013)
+reef_post2013 <- PercentCover_rgn9_two %>% filter(year >= 2013)
 
 # Calculate averages
 mean_pre <- mean(reef_pre2013$percent_coral_cover, na.rm = TRUE)
@@ -397,7 +621,7 @@ ggplot() +
     title = "Region 9 Coral Cover Trends: 1991–2012 vs. 2013–2024",
     caption = "Figure 2"
   ) +
-  theme_minimal() +
+  theme_bw() +
   theme(
     plot.title = element_text(size = 16, face = "bold"),
     legend.title = element_text(size = 12),
@@ -409,7 +633,7 @@ ggplot() +
 
 ```{r}
 # Filter to the two reefs
-reef_region9_two <- reef_region9_clean %>%
+PercentCover_rgn9_two <- PercentCover_rgn9_clean %>%
   filter(reef_name %in% c(
     "Punta Mita (Bahía Banderas)",
     "Isla María Cleofas (Nayarit offshore)",
@@ -424,12 +648,12 @@ orig_colors <- c(
 )
 
 # Plot with same colors
-ggplot(reef_region9_two, aes(x = year, y = percent_coral_cover, color = reef_name)) +
+ggplot(PercentCover_rgn9_two, aes(x = year, y = percent_coral_cover, color = reef_name)) +
   geom_line() +
   geom_point() +
   scale_color_manual(values = orig_colors) +
   geom_vline(xintercept = 2013, linetype = "dashed", color = "grey50") +
-  theme_minimal() +
+  theme_bw() +
   labs(
     x = "Year",
     y = "% Coral Cover",
