@@ -1,0 +1,233 @@
+---
+title: "Direct human pressure on the Gulf coast"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+This notebook turns the 2020 population grid into a coastal pressure for the Gulf of California.
+
+It follows the global direct-human method used for Cumulative Human Impacts. Each cell is scored by how many people live within 10 km. That count is logged, because additional people add less impact once a shore is already crowded. The score is then kept on a narrow strip of shore: 1 km inland and 1 km offshore. Inside that strip, the 99.9th percentile is the top of the scale. Every cell is divided by that Gulf value, and anything higher is set to 1.
+
+The global analysis used only the offshore side of the shore, and it scaled to a worldwide percentile. Here both sides of the shore are kept, and the percentile is taken inside the Gulf.
+
+Two files are written to `output/`:
+
+- `direct_human_2020_rescaled.tif` — the 0–1 pressure on the shore strip
+- `direct_human_pressure.csv` — mean pressure in each OHI region (`rgn_id`, `year`, `pressure`)
+
+```{r setup}
+library(terra)
+library(sf)
+library(dplyr)
+library(readr)
+library(knitr)
+
+knitr::opts_chunk$set(fig.width = 8, fig.height = 7, message = FALSE, warning = FALSE)
+
+pop_path <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_rasters/pop_2020.tif"
+rgn_path <- "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/goc_ohi_rgns.shp"
+coast_path <- "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/goc_coastline.gpkg"
+
+out_dir <- "/home/frazier/ohi_goc_prep/_pressures/prs_population/output"
+dir.create(out_dir, showWarnings = FALSE)
+
+# Window of people around each cell, and the shore strip used for the score.
+radius_m <- 10000
+shore_m <- 1000
+quantile_p <- 0.999
+year <- 2020
+```
+
+## 1. Population in 2020
+
+Each cell is 1 km by 1 km. The value is the number of people placed in that cell from the INEGI 2020 locality census. Empty cells are 0.
+
+```{r read-population}
+pop <- rast(pop_path)
+pop <- ifel(is.na(pop), 0, pop)
+names(pop) <- "people"
+
+# Display only. Zeros are hidden so the towns are visible. The raster used below still has those zeros.
+pop_for_plot <- ifel(pop == 0, NA, pop)
+
+global(pop, "sum", na.rm = TRUE)
+plot(pop_for_plot, main = "People per 1 km cell, 2020", col = hcl.colors(50, "YlOrRd"))
+```
+
+## 2. People within 10 km
+
+For every cell, add up the people in a circle of radius 10 km.
+
+A circle of weights from `focalMat()` sums to 1, so feeding those weights to `focal()` would return an average per cell. The pressure used here is the count of people, so each cell inside the circle is given weight 1.
+
+```{r people-within-10km}
+weights <- focalMat(pop, radius_m, type = "circle")
+count_window <- matrix(as.integer(weights > 0), nrow = nrow(weights))
+
+people_10km <- focal(pop, w = count_window, fun = "sum", na.rm = TRUE)
+names(people_10km) <- "people_within_10km"
+
+summary(values(people_10km))
+plot(people_10km, main = "People within 10 km", col = hcl.colors(50, "YlOrRd"))
+```
+
+## 3. Log the counts
+
+`log(people + 1)` leaves empty areas at 0 and shrinks the gap between a town and a city. One person added to an empty shore still registers. One person added to a city barely moves the score.
+
+```{r log-counts}
+log_people <- log1p(people_10km)
+names(log_people) <- "log_people_10km"
+
+plot(log_people, main = "log(people within 10 km + 1)", col = hcl.colors(50, "YlOrRd"))
+```
+
+## 4. Keep 1 km of shore, on both sides
+
+The coastline is the Gulf shore, including islands. A 1 km buffer of that line is cut by the OHI regions.
+
+- The piece that falls in a **land** region is the inland side.
+- The piece that falls in a **marine** region is the offshore side.
+
+Cells outside this strip are dropped. Open water is not given a pressure of zero, because a later average would treat that water as unaffected coast.
+
+```{r shore-strip}
+regions <- st_read(rgn_path, quiet = TRUE) %>%
+  st_transform(crs(pop)) %>%
+  st_make_valid()
+
+coast <- st_read(coast_path, quiet = TRUE) %>%
+  st_transform(crs(pop))
+
+shore_band <- st_buffer(st_union(st_geometry(coast)), shore_m) %>%
+  st_make_valid()
+
+# Keep polygon pieces only. A touch along a boundary can return a line.
+as_polygons <- function(x) {
+  x <- st_collection_extract(st_make_valid(x), "POLYGON")
+  x[!st_is_empty(x), ]
+}
+
+inland <- regions %>%
+  filter(location == "land") %>%
+  st_intersection(shore_band) %>%
+  as_polygons()
+
+offshore <- regions %>%
+  filter(location == "marine") %>%
+  st_intersection(shore_band) %>%
+  as_polygons()
+
+# Region number is the integer in Region_1, Region_2, ...
+inland$rgn_num <- as.integer(sub("Region_", "", inland$rgn_id))
+offshore$rgn_num <- as.integer(sub("Region_", "", offshore$rgn_id))
+
+inland_r <- rasterize(vect(inland), pop, field = "rgn_num")
+offshore_r <- rasterize(vect(offshore), pop, field = "rgn_num")
+
+# One region layer for the whole strip. A cell is either inland or offshore.
+region_r <- cover(inland_r, offshore_r)
+names(region_r) <- "rgn_num"
+
+log_shore <- mask(log_people, region_r)
+
+n_inland <- global(!is.na(inland_r), "sum", na.rm = TRUE)[1, 1]
+n_offshore <- global(!is.na(offshore_r), "sum", na.rm = TRUE)[1, 1]
+n_shore <- global(!is.na(region_r), "sum", na.rm = TRUE)[1, 1]
+
+data.frame(
+  side = c("inland, within 1 km", "offshore, within 1 km", "both sides"),
+  cells = c(n_inland, n_offshore, n_shore)
+)
+```
+
+```{r plot-shore}
+plot(log_shore, main = "Logged pressure on the 1 km shore strip", col = hcl.colors(50, "YlOrRd"))
+plot(st_geometry(regions %>% filter(location == "marine")), add = TRUE, border = "grey30", lwd = 0.4)
+```
+
+## 5. Scale from 0 to 1 using the Gulf shore
+
+The reference is the 99.9th percentile of the logged values on this strip. A cell at that percentile scores 1. A cell at half of it scores 0.5. Cells above it are set to 1, so a few dense towns do not stretch the whole scale.
+
+```{r rescale}
+shore_values <- values(log_shore, na.rm = TRUE)
+stopifnot(length(shore_values) > 0)
+
+ref_point <- as.numeric(quantile(shore_values, quantile_p))
+stopifnot(ref_point > 0)
+
+pressure <- ifel(log_shore > ref_point, 1, log_shore / ref_point)
+pressure <- ifel(pressure < 0, 0, pressure)
+names(pressure) <- "pressure"
+
+n_at_one <- sum(values(pressure) == 1, na.rm = TRUE)
+
+data.frame(
+  quantile = quantile_p,
+  reference_log_people = ref_point,
+  reference_people_within_10km = exp(ref_point) - 1,
+  shore_cells = length(shore_values),
+  cells_at_one = n_at_one
+)
+```
+
+```{r plot-scale}
+hist(
+  shore_values,
+  breaks = 40,
+  main = "Logged values on the Gulf shore",
+  xlab = "log(people within 10 km + 1)",
+  col = "grey80",
+  border = "white"
+)
+abline(v = ref_point, col = "red", lwd = 2)
+legend("topright", legend = "99.9th percentile", col = "red", lwd = 2, bty = "n")
+```
+
+```{r write-map}
+map_path <- file.path(out_dir, "direct_human_2020_rescaled.tif")
+writeRaster(pressure, map_path, overwrite = TRUE)
+
+plot(pressure, main = "Direct human pressure, 2020 (0 to 1)", range = c(0, 1), col = hcl.colors(50, "YlOrRd"))
+plot(st_geometry(regions %>% filter(location == "marine")), add = TRUE, border = "grey30", lwd = 0.4)
+```
+
+The map file is `r map_path`.
+
+## 6. Average pressure in each region
+
+Each shore cell already carries its region number. The regional pressure is the mean of the rescaled cells on that region’s shore, inland and offshore together.
+
+```{r region-means}
+scores <- as.data.frame(c(region_r, pressure), na.rm = FALSE) %>%
+  filter(!is.na(rgn_num), !is.na(pressure)) %>%
+  group_by(rgn_num) %>%
+  summarise(
+    n_cells = n(),
+    pressure = round(mean(pressure), 2),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rgn_id = paste0("Region_", rgn_num),
+    year = year
+  ) %>%
+  arrange(rgn_num)
+
+# The saved table matches the other pressure files: one row per region and year.
+pressure_csv <- scores %>%
+  select(rgn_id, year, pressure)
+
+csv_path <- file.path(out_dir, "direct_human_pressure.csv")
+write_csv(pressure_csv, csv_path)
+
+kable(
+  scores %>% select(rgn_id, year, n_cells, pressure),
+  digits = 2,
+  caption = "Mean rescaled pressure on the 1 km shore strip"
+)
+```
+
+The table file is `r csv_path`.
