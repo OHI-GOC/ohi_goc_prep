@@ -1,0 +1,444 @@
+---
+title: "Aquaculture area and coastal risk in the Gulf of California"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+Aquaculture is measured as the area of ponds mapped in each OHI region.
+In the Gulf of California that class is almost entirely shrimp farms.
+
+The source is the INEGI land-use and vegetation inventory at 1:250,000, as
+distributed by CONABIO. Each polygon labeled `ACUÍCOLA` is an aquaculture
+area. The same files are used in the wetland analysis. There the 2021 ponds
+are cut out of the saltmarsh layer. Here every available year is kept, and
+the area is summed by region.
+
+The years follow the labels in the CONABIO folder readme:
+<http://www.conabio.gob.mx/informacion/gis/?vns=gis_root/usv/inegi/usv250s7gw>.
+
+The 1980–91 file has no `ACUÍCOLA` class, so it is not used. The years that
+remain are 2001, 2005, 2009, 2013, 2016, and 2021.
+
+The pressure is the recent growth of that pond area, scaled by the coastal
+area it could affect. Recent growth is the change from 2016 to 2021. The
+coastal area is the union of three layers: land within 1 km of the shore, the
+coastal wetland polygons, and the mangrove polygons. Ground that falls in more
+than one layer is counted once. That ratio is then divided by 0.10. New ponds
+equal to 10% of the coastal area score 1, and a larger share is held at 1.
+
+```{r setup}
+library(sf)
+library(tidyverse)
+library(knitr)
+
+sf_use_s2(FALSE)
+knitr::opts_chunk$set(fig.width = 8, fig.height = 5.5, message = FALSE, warning = FALSE)
+
+data_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/CONABIO_Saltmarsh_landuse_veg"
+rgn_path <- "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/goc_ohi_rgns.shp"
+coast_path <- "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/goc_coastline.gpkg"
+mangrove_path <- "/home/shares/ohi/OHI_GOC/_raw_data/mangrove_Hem/USV_AGRUPADO/USV_AGRUPADO.shp"
+out_dir <- "/home/frazier/ohi_goc_prep/_pressures/prs_mariculture/outputs"
+shore_m <- 1000
+marsh_buffer_m <- 5000
+mangrove_buffer_m <- 20000
+# New ponds equal to this share of the coastal area score 1.
+reference_share <- 0.10
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# File names are the CONABIO series. The year is the label used in this project.
+series <- tibble(
+  year = c(2001, 2005, 2009, 2013, 2016, 2021),
+  file = c(
+    "usv250ks2gw/usv250ks2gw.shp",
+    "usv250ks3gw/usv250ks3gw.shp",
+    "usv250ks4gw/usv250ks4gw.shp",
+    "usv250s5ugw/usv250s5ugw.shp",
+    "usv250s6gw/usv250s6gw.shp",
+    "usv250s7gw/usv250s7gw.shp"
+  )
+)
+```
+
+## 1. OHI regions
+
+Each region has a land polygon and a marine polygon. Shrimp ponds sit on
+land, often against the shore, so both parts are joined into one polygon per
+region. A pond that crosses the shoreline is then counted once.
+
+```{r regions}
+regions_raw <- st_read(rgn_path, quiet = TRUE) %>%
+  st_make_valid()
+
+# Land is kept separate so the 1 km strip can be cut to the inland side.
+land <- regions_raw %>%
+  filter(location == "land")
+
+marine <- regions_raw %>%
+  filter(location == "marine") %>%
+  st_union() %>%
+  st_make_valid()
+
+regions <- regions_raw %>%
+  group_by(rgn_id, estado, ecorgn) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop") %>%
+  st_make_valid() %>%
+  arrange(rgn_id) %>%
+  mutate(label = paste(rgn_id, estado, sep = "\n"))
+
+regions
+```
+
+```{r plot-regions}
+plot(st_geometry(regions), col = "grey90", main = "OHI regions, land and marine joined")
+```
+
+## 2. Aquaculture polygons
+
+Each year is read with a filter, so only the `ACUÍCOLA` polygons are loaded.
+The inventory is in longitude and latitude. It is transformed to the region
+projection, Mexico ITRF2008 / LCC, before the area is calculated. Area in
+that projection is square metres, which is stored as square kilometres.
+
+These polygons were drawn at 1:250,000. A small pond can be missing, and the
+edge of a large pond is approximate. The class is aquaculture, not a species.
+In this region it is almost all shrimp.
+
+```{r read-ponds}
+read_ponds <- function(year, file) {
+  layer <- tools::file_path_sans_ext(basename(file))
+  ponds <- st_read(
+    file.path(data_dir, file),
+    query = sprintf("SELECT * FROM \"%s\" WHERE DESCRIPCIO = 'ACUÍCOLA'", layer),
+    quiet = TRUE
+  )
+  ponds %>%
+    st_make_valid() %>%
+    st_transform(st_crs(regions)) %>%
+    mutate(year = year) %>%
+    select(year)
+}
+
+ponds <- map2(series$year, series$file, read_ponds) %>%
+  bind_rows()
+
+ponds %>%
+  st_drop_geometry() %>%
+  count(year, name = "n_polygons")
+```
+
+```{r plot-2021}
+plot(
+  st_geometry(regions),
+  col = "grey90",
+  main = "Aquaculture polygons, 2021"
+)
+plot(st_geometry(ponds %>% filter(year == 2021)), col = "#b2182b", border = NA, add = TRUE)
+```
+
+The red areas are the 2021 polygons. Most of them fall outside these nine
+regions, because the CONABIO file covers the whole country. The table below
+keeps only the area inside the Gulf regions.
+
+## 3. Area inside each region
+
+A polygon that crosses a region boundary is split, and each piece is given to
+the region it falls in. Pieces are then summed. A region with no ponds in a
+year is recorded as zero, so every region has a row in every year.
+
+```{r area}
+pieces <- st_intersection(ponds, regions)
+pieces$area_km2 <- as.numeric(st_area(pieces)) / 1e6
+pieces <- pieces %>%
+  st_drop_geometry() %>%
+  group_by(rgn_id, year) %>%
+  summarise(area_km2 = sum(area_km2), .groups = "drop")
+
+area <- regions %>%
+  st_drop_geometry() %>%
+  select(rgn_id, estado, ecorgn, label) %>%
+  crossing(year = series$year) %>%
+  left_join(pieces, by = c("rgn_id", "year")) %>%
+  mutate(area_km2 = replace_na(area_km2, 0)) %>%
+  arrange(rgn_id, year)
+
+pond_area <- ponds
+pond_area$area_km2 <- as.numeric(st_area(pond_area)) / 1e6
+national <- pond_area %>%
+  st_drop_geometry() %>%
+  group_by(year) %>%
+  summarise(national_km2 = sum(area_km2), .groups = "drop")
+
+gulf <- area %>%
+  group_by(year) %>%
+  summarise(gulf_km2 = sum(area_km2), .groups = "drop") %>%
+  left_join(national, by = "year") %>%
+  mutate(share_percent = 100 * gulf_km2 / national_km2)
+
+csv_path <- file.path(out_dir, "mariculture_area_km2.csv")
+write_csv(area %>% select(rgn_id, year, area_km2), csv_path)
+
+kable(
+  area %>% select(rgn_id, estado, ecorgn, year, area_km2),
+  digits = 1,
+  col.names = c("Region", "State", "Ecoregion", "Year", "Area, km2"),
+  caption = "Aquaculture area inside each OHI region"
+)
+
+kable(
+  gulf,
+  digits = 1,
+  col.names = c("Year", "Inside the nine regions, km2", "Whole CONABIO file, km2", "Percent inside the regions"),
+  caption = "How much of the national aquaculture layer falls inside the Gulf regions"
+)
+```
+
+```{r plot-area, fig.height = 6}
+ggplot(area, aes(year, area_km2, color = rgn_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.6) +
+  labs(
+    title = "Aquaculture area by OHI region",
+    subtitle = "CONABIO land-use class ACUÍCOLA, square kilometres",
+    x = NULL,
+    y = "Square kilometres",
+    color = NULL
+  ) +
+  theme_bw()
+```
+
+The table is `r csv_path`.
+
+## 4. Coastal area used to scale the pressure
+
+The denominator is the area where new shrimp ponds are treated as a risk to
+the coast. It has three parts.
+
+The first part is every piece of land within 1 km of the Gulf shoreline. The
+shoreline is the same line used for the direct-human pressure. The buffer is
+cut to the land side of the OHI regions, so open water is left out. This strip
+includes shore that has no mapped wetland.
+
+The second part is the 2021 coastal wetland layer from the habitat analysis.
+That layer keeps three CONABIO classes, and only where they fall within 5 km
+of the marine region:
+
+- `VEGETACIÓN HALÓFILA HIDRÓFILA` and its secondary shrub class, the tidal saltmarsh
+- `VEGETACIÓN DE DUNAS COSTERAS`, the coastal dunes
+- `VEGETACIÓN HALÓFILA XERÓFILA` and its secondary shrub class, the dry salt scrub
+
+The 5 km limit is what keeps inland salt flats out of the saltmarsh layer.
+The distance is measured from the marine region, which follows the lagoons,
+rather than from the outer beach alone.
+
+The third part is mangrove. The classes are `MANGLAR` and the secondary
+mangrove classes in the Hem land-cover layer. They are clipped to 20 km of
+the marine region, which is the same window used for the mangrove habitat
+score. Inside these regions that window keeps the mapped forest, including
+the lagoon mangrove set back from the outer beach.
+
+The three parts are merged, and the area of the merged polygon is measured
+inside each region. A shore cell that is also mangrove is counted once.
+
+```{r coastal-layers}
+# Lines and points can appear where a polygon only touches a boundary.
+as_polygons <- function(x) {
+  x <- st_collection_extract(st_make_valid(x), "POLYGON")
+  x[!st_is_empty(x), ]
+}
+
+# A ring around the marine region, joined back to the marine region.
+marine_plus <- function(distance_m) {
+  outer <- st_buffer(marine, distance_m)
+  ring <- st_difference(outer, marine) %>%
+    st_make_valid()
+  st_union(marine, ring) %>%
+    st_make_valid()
+}
+
+coast <- st_read(coast_path, quiet = TRUE) %>%
+  st_transform(st_crs(regions)) %>%
+  st_union() %>%
+  st_make_valid()
+
+shore_band <- st_buffer(coast, shore_m) %>%
+  st_make_valid()
+
+inland_1km <- land %>%
+  st_intersection(shore_band) %>%
+  as_polygons()
+
+wetland_classes <- c(
+  "VEGETACIÓN HALÓFILA HIDRÓFILA",
+  "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA HIDRÓFILA",
+  "VEGETACIÓN DE DUNAS COSTERAS",
+  "VEGETACIÓN HALÓFILA XERÓFILA",
+  "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA XERÓFILA"
+)
+
+quoted_classes <- paste0("'", wetland_classes, "'", collapse = ", ")
+marsh <- st_read(
+  file.path(data_dir, "usv250s7gw/usv250s7gw.shp"),
+  query = sprintf(
+    "SELECT * FROM \"usv250s7gw\" WHERE DESCRIPCIO IN (%s)",
+    quoted_classes
+  ),
+  quiet = TRUE
+) %>%
+  st_transform(st_crs(regions)) %>%
+  st_make_valid() %>%
+  st_crop(st_bbox(regions)) %>%
+  st_intersection(marine_plus(marsh_buffer_m)) %>%
+  as_polygons()
+
+mangrove_classes <- c(
+  "MANGLAR",
+  "VEGETACIÓN SECUNDARIA ARBÓREA DE MANGLAR",
+  "VEGETACIÓN SECUNDARIA ARBUSTIVA DE MANGLAR",
+  "VEGETACIÓN SECUNDARIA HERBÁCEA DE MANGLAR"
+)
+
+mangrove <- st_read(mangrove_path, quiet = TRUE) %>%
+  filter(DESCRIP_AG %in% mangrove_classes) %>%
+  st_transform(st_crs(regions)) %>%
+  st_make_valid() %>%
+  st_intersection(marine_plus(mangrove_buffer_m)) %>%
+  as_polygons()
+
+risk <- st_sf(
+  geometry = st_union(c(
+    st_geometry(inland_1km),
+    st_geometry(marsh),
+    st_geometry(mangrove)
+  )) %>%
+    st_make_valid()
+)
+
+area_in_regions <- function(layer) {
+  pieces <- st_intersection(st_make_valid(layer), regions) %>%
+    as_polygons()
+  pieces$area_km2 <- as.numeric(st_area(pieces)) / 1e6
+  pieces %>%
+    st_drop_geometry() %>%
+    group_by(rgn_id) %>%
+    summarise(area_km2 = sum(area_km2), .groups = "drop")
+}
+
+risk_parts <- regions %>%
+  st_drop_geometry() %>%
+  select(rgn_id, estado, ecorgn) %>%
+  left_join(area_in_regions(inland_1km) %>% rename(shore_km2 = area_km2), by = "rgn_id") %>%
+  left_join(area_in_regions(marsh) %>% rename(marsh_km2 = area_km2), by = "rgn_id") %>%
+  left_join(area_in_regions(mangrove) %>% rename(mangrove_km2 = area_km2), by = "rgn_id") %>%
+  left_join(area_in_regions(risk) %>% rename(risk_km2 = area_km2), by = "rgn_id") %>%
+  mutate(across(ends_with("_km2"), ~ replace_na(.x, 0))) %>%
+  arrange(rgn_id)
+
+kable(
+  risk_parts,
+  digits = 1,
+  col.names = c(
+    "Region", "State", "Ecoregion",
+    "1 km inland, km2", "Coastal wetland, km2", "Mangrove, km2", "Merged, km2"
+  ),
+  caption = "Parts of the coastal risk area. The merged column counts overlap once."
+)
+```
+
+```{r plot-risk-area}
+plot(
+  st_geometry(regions),
+  col = "grey95",
+  border = "grey70",
+  main = "Coastal area used to scale the pressure"
+)
+plot(st_geometry(inland_1km), col = "#9ecae1", border = NA, add = TRUE)
+plot(st_geometry(marsh), col = "#74c476", border = NA, add = TRUE)
+plot(st_geometry(mangrove), col = "#006d2c", border = NA, add = TRUE)
+legend(
+  "topleft",
+  legend = c("1 km inland", "Coastal wetland", "Mangrove"),
+  fill = c("#9ecae1", "#74c476", "#006d2c"),
+  bty = "n"
+)
+```
+
+Blue is the 1 km inland strip. Green is the coastal wetland. Dark green is
+mangrove. Where those layers overlap, the later colour is drawn on top. The
+area in the table is the union, so the drawing does not change the number.
+
+## 5. Pressure from recent pond growth
+
+Pond area in 2021 minus pond area in 2016 is the growth. Dividing by the
+merged coastal area puts that growth on a common scale. A region with a large
+mangrove coast can add many square kilometres of ponds and still receive a
+smaller score than a region with a short shore.
+
+Ponds on dry scrub, outside the wetland and mangrove polygons, remain in the
+numerator. The share is five years of new ponds divided by the coastal area.
+Dividing that share by 0.10 puts it on a 0 to 1 scale: new ponds equal to 10%
+of the coastal area score 1, and a larger share is held at 1. A difference
+smaller than 0.001 km² is stored as zero. That is what remains when an
+unchanged pond is intersected with the regions in two separate years.
+
+```{r pressure}
+score <- area %>%
+  filter(year %in% c(2016, 2021)) %>%
+  select(rgn_id, estado, ecorgn, year, area_km2) %>%
+  pivot_wider(names_from = year, values_from = area_km2, names_prefix = "pond_") %>%
+  left_join(risk_parts %>% select(rgn_id, risk_km2), by = "rgn_id") %>%
+  mutate(
+    change_km2 = pond_2021 - pond_2016,
+    # Separate intersections of an unchanged pond leave a trace well below 0.001 km2.
+    change_km2 = if_else(abs(change_km2) < 0.001, 0, change_km2),
+    share = change_km2 / risk_km2,
+    pressure = pmin(share / reference_share, 1),
+    year = 2021
+  ) %>%
+  arrange(rgn_id)
+
+risk_path <- file.path(out_dir, "mariculture_risk.csv")
+pressure_path <- file.path(out_dir, "mariculture_pressure.csv")
+
+write_csv(
+  score %>%
+    select(rgn_id, estado, ecorgn, pond_2016, pond_2021, change_km2, risk_km2, share, pressure),
+  risk_path
+)
+write_csv(
+  score %>% select(rgn_id, year, pressure),
+  pressure_path
+)
+
+kable(
+  score %>%
+    select(rgn_id, estado, ecorgn, pond_2016, pond_2021, change_km2, risk_km2, share, pressure),
+  digits = 3,
+  col.names = c(
+    "Region", "State", "Ecoregion",
+    "2016 ponds, km2", "2021 ponds, km2", "Change, km2",
+    "Coastal area, km2", "Share of coast", "Pressure"
+  ),
+  caption = "Pressure = share of coastal area / 0.10, held at 1. A share of 0.10 scores 1."
+)
+```
+
+```{r plot-pressure, fig.height = 5}
+ggplot(score, aes(reorder(rgn_id, pressure), pressure)) +
+  geom_col(fill = "#b2182b", width = 0.7) +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(
+    title = "Aquaculture pressure, 2016 to 2021",
+    subtitle = "1 means new ponds equal 10% of the coastal area",
+    x = NULL,
+    y = "Pressure"
+  ) +
+  theme_bw()
+```
+
+The full table is `r risk_path`. The pressure file used with the other
+pressure layers is `r pressure_path`, with one row per region and the year
+set to 2021.
