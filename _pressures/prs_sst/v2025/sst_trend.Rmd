@@ -1,0 +1,556 @@
+---
+title: "Sea surface temperature trend in the Gulf of California"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+The trend is the average change in sea surface temperature for each marine
+OHI region, in degrees Celsius per year. Yearly means from 2000 through 2025
+are fit with
+
+temperature = intercept + (trend × year) + (El Niño term × Oceanic Niño Index)
+
+The Oceanic Niño Index is positive in El Niño years and negative in La Niña
+years, so one term takes out both. The saved trend is the slope on year from
+that fit. A second slope, fit to year alone, is drawn on the same figure.
+The rise is that slope times 25 years.
+
+The pressure divides the rise since 2000 by 1°C. A rise of 1°C scores 1. A
+larger rise stays at 1, and a cooling stays at 0. The saved pressure table
+has one row per region, and the year on every row is 2025.
+
+One degree of sea-surface warming is the further rise associated with the
+world reaching 2°C of global warming, the higher end of the Paris Agreement.
+Cael and coauthors compared 1982–2020 with the decades centered on that 2°C
+level in 14 climate models. Global mean sea-surface temperature rises 0.91°C
+in that comparison, and the annual maximum rises 1.07°C. Almost all of the
+rise in the maximum is the rise in the mean. The reference used here rounds
+that mean rise to 1°C. The paper is Cael, B. B., Burger, F. A., Henson, S. A.,
+Britten, G. L., and Frölicher, T. L. (2024), Historical and future maximum
+sea surface temperatures, *Science Advances* 10, eadj5569,
+<https://doi.org/10.1126/sciadv.adj5569>.
+
+The temperatures are monthly means supplied as
+`sst_monthly_pft_grid_2000_2025.nc`. The notes that came with the file are
+below.
+
+The grid has 312 months, January 2000 through December 2025, on 432 rows of
+latitude and 360 columns of longitude. The latitude runs from about 18°N to
+36°N and the longitude from about 117°W to 102°W, so the Gulf sits inside
+the grid with a margin. Temperature is in degrees Celsius. Empty cells on
+land are missing values.
+
+The source is the Copernicus Marine Service reprocessed OSTIA analysis from
+the UK Met Office. The product is `SST_GLO_SST_L4_REP_OBSERVATIONS_010_011`,
+dataset `METOFFICE-GLO-SST-L4-REP-OBS-SST`, version `202003`, variable
+`analysed_sst`. The original fields are daily and gap-free at 0.05°. Daily
+values were converted from kelvin to °C by subtracting 273.15, averaged over
+each calendar month, and bilinearly interpolated onto the 4 km plankton grid
+(`cmems_obs-oc_glo_bgc-plankton_my_l3-multi-4km_P1D`). The month is stamped
+on the first day of the month.
+
+```{r setup}
+library(terra)
+library(sf)
+library(tidyverse)
+library(exactextractr)
+library(knitr)
+
+sf_use_s2(FALSE)
+knitr::opts_chunk$set(fig.width = 8, fig.height = 6, message = FALSE, warning = FALSE)
+
+nc_path <- "/home/shares/ohi/OHI_GOC/_raw_data/SST_Ricardo/sst_monthly_pft_grid_2000_2025.nc"
+rgn_path <- "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/goc_ohi_rgns.shp"
+out_dir <- "/home/frazier/ohi_goc_prep/_pressures/prs_sst/v2025/output"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+score_year <- 2025
+```
+
+## 1. Monthly temperature
+
+Land cells are stored as NaN. They are set to missing so later averages skip
+them.
+
+```{r read-monthly}
+monthly <- rast(nc_path)
+if (crs(monthly) == "") crs(monthly) <- "EPSG:4326"
+monthly <- ifel(is.nan(monthly), NA, monthly)
+
+if (is.null(time(monthly)) || any(is.na(time(monthly)))) {
+  time(monthly) <- seq(as.Date("2000-01-01"), by = "month", length.out = nlyr(monthly))
+}
+names(monthly) <- format(time(monthly), "%Y-%m")
+
+range(time(monthly))
+nlyr(monthly)
+res(monthly)
+```
+
+```{r plot-one-month}
+plot(monthly[[1]], main = "Sea surface temperature, January 2000 (°C)")
+plot(monthly[[nlyr(monthly)]], main = "Sea surface temperature, December 2025 (°C)")
+```
+
+January 2000 is a cool month and December 2025 is a warm month. The same
+land mask is present in every layer. The open Pacific west of Baja and the
+water south of the Gulf are inside the file and are left out of the regional
+means by the region polygons in the next section.
+
+## 2. Yearly mean in each marine region
+
+Each OHI region has a land polygon and a marine polygon. Temperature is
+taken from the marine polygon. A cell that straddles the region boundary is
+weighted by the fraction of the cell that sits in the water.
+
+The twelve monthly means in a year are averaged with equal weight. That
+yearly value is what the line is fit to. Twenty-six years, 2000 through
+2025, enter the fit.
+
+```{r regions}
+marine <- st_read(rgn_path, quiet = TRUE) %>%
+  st_make_valid() %>%
+  filter(location == "marine") %>%
+  st_transform(crs(monthly)) %>%
+  arrange(rgn_id) %>%
+  mutate(label = paste(rgn_id, estado, sep = "\n"))
+```
+
+```{r annual-mean}
+annual <- tapp(monthly, "years", fun = mean, na.rm = TRUE)
+names(annual) <- unique(format(time(monthly), "%Y"))
+names(annual)
+```
+
+```{r plot-regions}
+plot(annual[[1]], main = "Yearly mean temperature, 2000 (°C)")
+lines(vect(marine), col = "black", lwd = 1.2)
+```
+
+The black lines are the nine marine regions. Cells outside those lines stay
+in the map and stay out of the table.
+
+```{r region-series}
+region_month <- exact_extract(monthly, marine, "mean") %>%
+  as_tibble() %>%
+  mutate(rgn_id = marine$rgn_id, estado = marine$estado, ecorgn = marine$ecorgn) %>%
+  pivot_longer(
+    cols = starts_with("mean."),
+    names_to = "month",
+    names_prefix = "mean.",
+    values_to = "sst_c"
+  ) %>%
+  mutate(year = as.integer(substr(month, 1, 4)))
+
+annual_mean <- region_month %>%
+  group_by(rgn_id, estado, ecorgn, year) %>%
+  summarise(sst_c = mean(sst_c), .groups = "drop") %>%
+  arrange(rgn_id, year)
+
+kable(
+  annual_mean %>% filter(year %in% c(2000, 2015, 2025)),
+  digits = 2,
+  col.names = c("Region", "State", "Ecoregion", "Year", "Mean temperature, °C"),
+  caption = "Yearly mean sea surface temperature in three of the twenty-six years"
+)
+```
+
+## 3. Oceanic Niño Index
+
+The index is the NOAA Climate Prediction Center Oceanic Niño Index, from
+`oni.ascii.txt`. Each row is a three-month season. The season labeled DJF of
+a year includes December of the year before. The covariate used here is the
+mean of the twelve seasons labeled with that calendar year. Positive values
+are El Niño. Negative values are La Niña.
+
+```{r oni}
+oni_url <- "https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt"
+oni_raw_path <- file.path(out_dir, "oni_noaa_cpc.txt")
+download.file(oni_url, oni_raw_path, quiet = TRUE)
+
+oni <- read_table(oni_raw_path, show_col_types = FALSE) %>%
+  rename(year = YR) %>%
+  filter(year %in% unique(annual_mean$year)) %>%
+  group_by(year) %>%
+  summarise(oni = mean(ANOM), n_seasons = n(), .groups = "drop")
+
+stopifnot(oni$n_seasons == 12)
+
+write_csv(oni %>% select(year, oni), file.path(out_dir, "oni_annual_2000_2025.csv"))
+oni
+```
+
+```{r plot-oni, fig.height = 4.2}
+ggplot(oni, aes(year, oni, fill = oni >= 0)) +
+  geom_col(width = 0.8) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  scale_fill_manual(
+    values = c("TRUE" = "#b2182b", "FALSE" = "#2166ac"),
+    labels = c("TRUE" = "El Niño", "FALSE" = "La Niña"),
+    name = NULL
+  ) +
+  labs(
+    title = "Oceanic Niño Index, annual mean",
+    subtitle = "Mean of the twelve seasonal values labeled with that year",
+    x = NULL,
+    y = "Index"
+  ) +
+  theme_bw()
+```
+
+## 4. Average change per year
+
+Each region gets two ordinary linear regressions. The first is temperature
+on year. The second adds the Niño index. The coefficient on year in the
+second fit is the saved trend. The coefficient on the index is how many
+degrees the yearly mean moves for one unit of the index.
+
+```{r trend}
+fit_trend <- function(df) {
+  year_only <- lm(sst_c ~ year, data = df)
+  with_oni <- lm(sst_c ~ year + oni, data = df)
+  tibble(
+    trend_year = coef(year_only)[["year"]],
+    trend = coef(with_oni)[["year"]],
+    oni_c_per_unit = coef(with_oni)[["oni"]]
+  )
+}
+
+trends <- annual_mean %>%
+  left_join(oni %>% select(year, oni), by = "year") %>%
+  group_by(rgn_id, estado, ecorgn) %>%
+  group_modify(~ fit_trend(.x)) %>%
+  ungroup()
+
+series <- annual_mean %>%
+  left_join(oni %>% select(year, oni), by = "year") %>%
+  left_join(trends, by = c("rgn_id", "estado", "ecorgn")) %>%
+  mutate(
+    oni_centered = oni - mean(oni),
+    adjusted_c = sst_c - oni_c_per_unit * oni_centered,
+    line_year = mean(sst_c) + trend_year * (year - mean(year)),
+    line_oni = mean(sst_c) + trend * (year - mean(year)),
+    .by = rgn_id
+  )
+
+score <- trends %>%
+  mutate(year = score_year) %>%
+  arrange(rgn_id)
+
+csv_path <- file.path(out_dir, "sst_trend.csv")
+write_csv(score %>% select(rgn_id, year, trend), csv_path)
+
+kable(
+  score %>%
+    transmute(
+      rgn_id, estado, ecorgn, year,
+      trend_year,
+      trend,
+      rise_c = trend * (score_year - 2000),
+      oni_c_per_unit
+    ),
+  digits = 3,
+  col.names = c(
+    "Region", "State", "Ecoregion", "Year",
+    "Year only, °C per year", "With Niño index, °C per year",
+    "Rise along the saved line, °C", "°C per Niño unit"
+  ),
+  caption = "The saved trend is the slope on year from the fit that includes the Niño index. The rise is that slope times 25 years."
+)
+```
+
+```{r plot-series, fig.height = 8}
+ggplot(series, aes(year)) +
+  geom_line(aes(y = sst_c, color = "Annual mean"), linewidth = 0.4) +
+  geom_point(aes(y = adjusted_c, color = "Niño term removed"), size = 1.2) +
+  geom_line(aes(y = line_year, color = "Year only"), linewidth = 0.6) +
+  geom_line(aes(y = line_oni, color = "Year and Niño index"), linewidth = 0.8) +
+  scale_color_manual(
+    values = c(
+      "Annual mean" = "grey70",
+      "Niño term removed" = "grey20",
+      "Year only" = "#2166ac",
+      "Year and Niño index" = "#b2182b"
+    ),
+    breaks = c("Annual mean", "Niño term removed", "Year only", "Year and Niño index"),
+    name = NULL
+  ) +
+  facet_wrap(~ paste(rgn_id, estado), scales = "free_y", ncol = 3) +
+  labs(
+    title = "Yearly mean sea surface temperature",
+    subtitle = "Red line is the saved trend. Blue line is the fit on year alone.",
+    x = NULL,
+    y = "°C"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+The grey line is the yearly mean. The points are that mean with the Niño
+term taken off, so an El Niño year is moved down and a La Niña year is moved
+up. The blue line is the slope on year alone. The red line is the slope on
+year from the fit that includes the index, drawn through the same average
+temperature. That red slope is the saved trend.
+
+2014 is the hot point that remains after the Niño term is removed. The index
+that year is about 0.23, a weak El Niño, while 2015 is the strong event, with
+an index of about 1.5. The index accounts for 2015. It does not account for
+2014, which was a marine heatwave. That year also sits near the middle of
+2000–2025, so it lifts the line and barely tilts it. Leaving 2014 out changes
+the saved slope by less than 0.001°C per year. The saved trend keeps every
+year.
+
+```{r drop-2014}
+without_2014 <- annual_mean %>%
+  filter(year != 2014) %>%
+  left_join(oni %>% select(year, oni), by = "year") %>%
+  group_by(rgn_id) %>%
+  group_modify(~ tibble(trend_without_2014 = coef(lm(sst_c ~ year + oni, data = .x))[["year"]])) %>%
+  ungroup()
+
+kable(
+  score %>%
+    select(rgn_id, trend) %>%
+    left_join(without_2014, by = "rgn_id") %>%
+    mutate(difference = trend_without_2014 - trend),
+  digits = 4,
+  col.names = c("Region", "All years", "Without 2014", "Difference"),
+  caption = "Saved trend compared with the same fit after 2014 is left out. Both slopes include the Niño index."
+)
+```
+
+```{r plot-compare, fig.height = 5}
+compare <- score %>%
+  select(rgn_id, `Year only` = trend_year, `Year and Niño index` = trend) %>%
+  pivot_longer(-rgn_id, names_to = "fit", values_to = "trend")
+
+ggplot(compare, aes(rgn_id, trend, fill = fit)) +
+  geom_col(position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c("Year only" = "#2166ac", "Year and Niño index" = "#b2182b"), name = NULL) +
+  labs(
+    title = "The two slopes",
+    subtitle = "The red bars are the saved trend",
+    x = NULL,
+    y = "°C per year"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+```{r plot-trend}
+trend_map <- marine %>%
+  left_join(score %>% select(rgn_id, trend), by = "rgn_id")
+
+ggplot(trend_map) +
+  geom_sf(aes(fill = trend), color = "grey30", linewidth = 0.2) +
+  scale_fill_gradient(low = "#fee8c8", high = "#b30000", name = "°C per year") +
+  labs(
+    title = "Saved temperature trend, 2000–2025",
+    subtitle = "Slope on year after the Niño index is included"
+  ) +
+  theme_void()
+```
+
+## 5. The same line in every ocean cell
+
+The regional slope is the area-weighted mean of the cell slopes, because
+every ocean cell is present in every month and the Niño index is the same
+series in every cell. Fitting the cells makes the pattern inside a region
+visible. The equation in each cell is the saved one:
+
+temperature = intercept + (trend × year) + (El Niño term × Oceanic Niño Index)
+
+```{r cell-trend}
+year_index <- as.integer(names(annual))
+oni_for_cells <- oni %>%
+  filter(year %in% year_index) %>%
+  arrange(year)
+stopifnot(oni_for_cells$year == year_index)
+
+design <- model.matrix(
+  ~ year + oni,
+  data = tibble(year = year_index, oni = oni_for_cells$oni)
+)
+cell_values <- values(annual)
+keep <- complete.cases(cell_values)
+beta <- qr.coef(qr(design), t(cell_values[keep, , drop = FALSE]))
+
+trend_values <- rep(NA_real_, ncell(annual))
+trend_values[keep] <- beta["year", ]
+cell_trend <- setValues(annual[[1]], trend_values)
+names(cell_trend) <- "trend_c_per_year"
+
+cell_trend <- mask(cell_trend, vect(st_union(marine)))
+trend_path <- file.path(out_dir, "sst_cell_trend.tif")
+writeRaster(cell_trend, trend_path, overwrite = TRUE)
+
+cell_mean <- exact_extract(cell_trend, marine, "mean")
+kable(
+  score %>%
+    transmute(rgn_id, regional_fit = trend, mean_of_cells = cell_mean) %>%
+    mutate(difference = mean_of_cells - regional_fit),
+  digits = 4,
+  col.names = c("Region", "Fit to the regional mean", "Mean of the cell slopes", "Difference"),
+  caption = "The two routes to the regional trend. The difference is rounding."
+)
+```
+
+Mangrove is the Hem mangrove classes. The coastal wetland is the 2021
+saltmarsh, dune, and dry-salt-scrub classes, kept within 5 km of the marine
+regions, which is the same wetland layer used for the aquaculture pressure.
+
+```{r habitats}
+mangrove_classes <- c(
+  "MANGLAR",
+  "VEGETACIÓN SECUNDARIA ARBÓREA DE MANGLAR",
+  "VEGETACIÓN SECUNDARIA ARBUSTIVA DE MANGLAR",
+  "VEGETACIÓN SECUNDARIA HERBÁCEA DE MANGLAR"
+)
+mangrove <- st_read(
+  "/home/shares/ohi/OHI_GOC/_raw_data/mangrove_Hem/USV_AGRUPADO/USV_AGRUPADO.shp",
+  quiet = TRUE
+) %>%
+  filter(DESCRIP_AG %in% mangrove_classes) %>%
+  st_make_valid() %>%
+  st_transform(crs(cell_trend)) %>%
+  st_crop(st_bbox(marine))
+
+wetland_classes <- c(
+  "VEGETACIÓN HALÓFILA HIDRÓFILA",
+  "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA HIDRÓFILA",
+  "VEGETACIÓN DE DUNAS COSTERAS",
+  "VEGETACIÓN HALÓFILA XERÓFILA",
+  "VEGETACIÓN SECUNDARIA ARBUSTIVA DE VEGETACIÓN HALÓFILA XERÓFILA"
+)
+quoted_classes <- paste0("'", wetland_classes, "'", collapse = ", ")
+marine_lcc <- st_read(rgn_path, quiet = TRUE) %>%
+  st_make_valid() %>%
+  filter(location == "marine") %>%
+  st_union()
+wetland_zone <- st_buffer(marine_lcc, 5000) %>%
+  st_transform(crs(cell_trend))
+wetland <- st_read(
+  "/home/shares/ohi/OHI_GOC/_raw_data/CONABIO_Saltmarsh_landuse_veg/usv250s7gw/usv250s7gw.shp",
+  query = sprintf(
+    "SELECT * FROM \"usv250s7gw\" WHERE DESCRIPCIO IN (%s)",
+    quoted_classes
+  ),
+  quiet = TRUE
+) %>%
+  st_transform(crs(cell_trend)) %>%
+  st_make_valid() %>%
+  st_crop(st_bbox(marine)) %>%
+  st_intersection(wetland_zone)
+```
+
+```{r plot-cells}
+breaks <- seq(0, 0.05, by = 0.005)
+colors <- hcl.colors(length(breaks) - 1, "YlOrRd", rev = TRUE)
+plot(
+  cell_trend,
+  breaks = breaks,
+  col = colors,
+  main = "Cell trend, °C per year, inside the marine regions"
+)
+lines(vect(marine), col = "grey20", lwd = 0.8)
+lines(vect(st_union(wetland)), col = "#2c7fb8", lwd = 0.6)
+lines(vect(st_union(mangrove)), col = "#00441b", lwd = 0.7)
+legend(
+  "bottomleft",
+  legend = c("Marine region", "Coastal wetland", "Mangrove"),
+  col = c("grey20", "#2c7fb8", "#00441b"),
+  lwd = 1.5,
+  bty = "n"
+)
+```
+
+Yellow is a smaller increase and red is a larger one. Values above 0.05°C
+per year are drawn in the top color. The blue line is the coastal wetland.
+The dark green line is mangrove. Both sit on the water next to the coast, so
+the color under those lines is the trend in the cells those habitats face.
+
+## 6. Pressure
+
+The rise is the saved trend times 25, the change along the line from 2000 to
+2025. The pressure divides that rise by 1°C and holds the result between 0
+and 1. The same rescaling is applied to every ocean cell. The cell trend
+raster is the raw slope, in °C per year. The cell pressure raster is that
+slope times 25, divided by 1°C.
+
+One degree of sea-surface increase is the warming associated with a 2°C
+increase in global temperature, the higher end of the Paris Agreement. Cael
+and coauthors report a global mean sea-surface rise of 0.91°C, and a rise in
+the annual maximum of 1.07°C, between 1982–2020 and the decades centered on
+2°C of global warming. The reference here rounds the mean rise to 1°C.
+[Cael et al. 2024, Science Advances](https://doi.org/10.1126/sciadv.adj5569).
+
+```{r pressure}
+reference_c <- 1
+
+pressure <- score %>%
+  mutate(
+    rise_c = trend * (score_year - 2000),
+    pressure = round(pmin(pmax(rise_c / reference_c, 0), 1), 2)
+  ) %>%
+  arrange(rgn_id)
+
+pressure_path <- file.path(out_dir, "sst_pressure.csv")
+write_csv(
+  pressure %>% transmute(rgn_id, year, pressure = sprintf("%.2f", pressure)),
+  pressure_path
+)
+
+kable(
+  pressure %>%
+    select(rgn_id, estado, ecorgn, year, rise_c, pressure) %>%
+    mutate(pressure = sprintf("%.2f", pressure)),
+  digits = 3,
+  col.names = c(
+    "Region", "State", "Ecoregion", "Year",
+    "Rise, °C", "Pressure"
+  ),
+  caption = "Pressure = rise since 2000 / 1°C, held between 0 and 1. A 1°C sea-surface rise is the warming associated with 2°C of global warming, the higher end of the Paris Agreement (Cael et al. 2024)."
+)
+```
+
+```{r cell-pressure}
+cell_pressure_values <- as.numeric(values(cell_trend)) * (score_year - 2000) / reference_c
+cell_pressure_values[!is.finite(cell_pressure_values)] <- NA_real_
+cell_pressure_values <- round(pmin(pmax(cell_pressure_values, 0), 1), 2)
+
+cell_pressure <- setValues(cell_trend, cell_pressure_values)
+names(cell_pressure) <- "pressure"
+
+pressure_tif_path <- file.path(out_dir, "sst_cell_pressure.tif")
+writeRaster(cell_pressure, pressure_tif_path, overwrite = TRUE)
+```
+
+```{r plot-pressure-cells}
+pressure_breaks <- seq(0, 1, by = 0.05)
+pressure_colors <- hcl.colors(length(pressure_breaks) - 1, "YlOrRd", rev = TRUE)
+plot(
+  cell_pressure,
+  breaks = pressure_breaks,
+  col = pressure_colors,
+  main = "Temperature pressure, 2000–2025"
+)
+lines(vect(marine), col = "grey20", lwd = 0.8)
+lines(vect(st_union(wetland)), col = "#2c7fb8", lwd = 0.6)
+lines(vect(st_union(mangrove)), col = "#00441b", lwd = 0.7)
+legend(
+  "bottomleft",
+  legend = c("Marine region", "Coastal wetland", "Mangrove"),
+  col = c("grey20", "#2c7fb8", "#00441b"),
+  lwd = 1.5,
+  bty = "n"
+)
+```
+
+Pale yellow is a small rise relative to 1°C. Red is a rise that reaches 1°C.
+The same wetland and mangrove lines are drawn on top.
+
+The trend table is `r csv_path`. The pressure table is `r pressure_path`,
+with `rgn_id`, `year`, and `pressure`. The cell trend, in °C per year, is
+`r trend_path`. The rescaled cell pressure is `r pressure_tif_path`.
