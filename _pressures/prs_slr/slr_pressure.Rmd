@@ -1,0 +1,491 @@
+---
+title: "Sea level pressure in the Gulf of California"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+Sea level is scored as a pressure for the nine marine OHI regions of the Gulf
+of California. The measurement is the gridded satellite sea-level anomaly.
+
+The anomaly is a height in metres, already relative to the 1993–2012 mean.
+Each coastal cell is fit with an ordinary linear regression:
+
+anomaly = intercept + (rate × year) + (El Niño term × Oceanic Niño Index)
+
+The Oceanic Niño Index is positive in El Niño years and negative in La Niña
+years, so one term takes out both. The pressure uses the slope on year from
+2000 through 2025. A second slope, fit to every year from 1993 through 2025,
+is drawn on the same figure. The rate is stored in millimetres per year. The
+pressure is the 2000–2025 rate divided by 10. A rate of 0 is pressure 0. A
+rate of 10 mm per year is pressure 1. Faster than that stays at 1, and a
+falling sea surface stays at 0.
+
+Each region is saved once, for 2025. The cells that enter the regional mean
+are the ocean cells that share a side with land. Empty land cells stay empty.
+
+```{r setup}
+library(terra)
+library(sf)
+library(tidyverse)
+library(exactextractr)
+library(knitr)
+
+knitr::opts_chunk$set(fig.width = 8, fig.height = 6.5, message = FALSE, warning = FALSE)
+
+data_dir <- "/home/shares/ohi/fisheries_explore/data/SLR_CMEM"
+int_dir <- "/home/shares/ohi/fisheries_explore/int/prs_slr"
+out_dir <- "/home/frazier/ohi_goc_prep/_pressures/prs_slr/outputs"
+rgn_path <- "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/goc_ohi_rgns.shp"
+
+dir.create(file.path(int_dir, "annual_sla"), showWarnings = FALSE, recursive = TRUE)
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Drop rasters written by the earlier year-by-year score.
+unlink(file.path(int_dir, c("raw_rate", "rescaled", "coastal")), recursive = TRUE)
+unlink(file.path(int_dir, "sla_baseline_1993_2002.tif"))
+
+years <- 1993:2025
+trend_start <- 2000
+score_year <- 2025
+```
+
+## 1. Monthly sea level anomaly
+
+The fields are monthly means from the DUACS multi-satellite gridded sea level
+anomaly, product `SEALEVEL_GLO_PHY_L4_MY_008_047`, dataset
+`cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1M-m`, version
+`202411`. The variable is `sla`, in metres. Copernicus Marine Service
+distributes the global files. The Gulf subset was saved with
+`copernicusmarine.subset()` as `goc_duacs_sla_monthly_1993_2025.nc`.
+
+The box is longitude −115.5 to −104.5 and latitude 20.0 to 32.25, which
+covers the marine OHI regions with a small margin. January 1993 through
+December 2025 are included. 2026 is only a partial year, so it is left out.
+The grid is 0.125°, about 14 km north–south and 12–13 km east–west in the
+Gulf.
+
+```{r read-monthly}
+monthly <- rast(file.path(data_dir, "goc_duacs_sla_monthly_1993_2025.nc"))
+names(monthly) <- format(time(monthly), "%Y-%m")
+monthly <- ifel(is.nan(monthly), NA, monthly)
+
+range(time(monthly))
+nlyr(monthly)
+res(monthly)
+```
+
+```{r plot-one-month}
+plot(
+  monthly[["1993-01"]],
+  main = "Sea level anomaly, January 1993",
+  col = hcl.colors(50, "RdBu", rev = TRUE)
+)
+```
+
+## 2. Annual means
+
+Each year becomes the mean of its twelve months. The seasonal cycle averages
+out, and these 33 heights are what the line is fit to. They are written to
+`int/prs_slr/annual_sla` as `sla_<year>.tif`.
+
+```{r annual-means}
+year_index <- as.integer(format(time(monthly), "%Y"))
+annual <- tapp(monthly, year_index, fun = mean, na.rm = TRUE)
+annual <- ifel(is.nan(annual), NA, annual)
+names(annual) <- as.character(years)
+
+stopifnot(as.integer(names(annual)) == years)
+month_counts <- tibble(year = year_index) %>% count(year)
+stopifnot(all(month_counts$n == 12), all(month_counts$year == years))
+
+for (yr in names(annual)) {
+  writeRaster(
+    annual[[yr]],
+    file.path(int_dir, "annual_sla", sprintf("sla_%s.tif", yr)),
+    overwrite = TRUE
+  )
+}
+
+summary(values(annual[["2025"]]))
+```
+
+```{r plot-annual}
+plot(annual[["1995"]], main = "Mean sea level anomaly, 1995", col = hcl.colors(50, "RdBu", rev = TRUE))
+plot(annual[["2025"]], main = "Mean sea level anomaly, 2025", col = hcl.colors(50, "RdBu", rev = TRUE))
+```
+
+## 3. Cells against the land
+
+An ocean cell is kept when one of the four cells that share a side with it
+is land. Land is an empty cell. Every ocean cell in this grid has a value in
+all 33 years. Corner contact is left out, so the set is a single line of
+cells along the shore, including islands.
+
+The line is then limited to cells the marine OHI regions touch. That drops
+ocean cells on the Pacific side of the peninsula that happen to fall inside
+the download box. Nothing is interpolated onto land.
+
+```{r coastal-cells}
+n_obs <- app(annual, fun = function(v) sum(!is.na(v)))
+ocean <- ifel(n_obs == nlyr(annual), 1, 0)
+land <- ifel(ocean == 1, 0, 1)
+side <- matrix(c(
+  0, 1, 0,
+  1, 0, 1,
+  0, 1, 0
+), nrow = 3)
+n_land <- focal(land, w = side, fun = "sum", na.rm = TRUE)
+coast <- ifel(ocean == 1 & n_land >= 1, 1, NA)
+
+marine <- st_read(rgn_path, quiet = TRUE) %>%
+  filter(location == "marine") %>%
+  st_transform(4326) %>%
+  arrange(rgn_id) %>%
+  mutate(label = paste(rgn_id, estado, ecorgn, sep = "\n"))
+
+marine_cells <- rasterize(vect(marine), coast, touches = TRUE)
+coast <- mask(coast, marine_cells)
+names(coast) <- "coastal_cell"
+
+writeRaster(
+  coast,
+  file.path(int_dir, "coastal_cells.tif"),
+  overwrite = TRUE
+)
+
+global(coast, "sum", na.rm = TRUE)
+```
+
+```{r plot-coast}
+plot(coast, col = "steelblue", legend = FALSE, main = "Ocean cells that share a side with land")
+lines(vect(marine), col = "grey30")
+```
+
+## 4. Oceanic Niño Index
+
+The index is the NOAA Climate Prediction Center Oceanic Niño Index, from
+`oni.ascii.txt`. Each row is a three-month season. The season labeled DJF of
+a year includes December of the year before. The covariate used here is the
+mean of the twelve seasons labeled with that calendar year. Positive values
+are El Niño. Negative values are La Niña. The raw table and the annual means
+are saved under `int/prs_slr`.
+
+```{r oni}
+oni_url <- "https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt"
+oni_raw_path <- file.path(int_dir, "oni_noaa_cpc.txt")
+download.file(oni_url, oni_raw_path, quiet = TRUE)
+
+oni <- read_table(oni_raw_path, show_col_types = FALSE) %>%
+  rename(year = YR) %>%
+  filter(year %in% years) %>%
+  group_by(year) %>%
+  summarise(oni = mean(ANOM), n_seasons = n(), .groups = "drop")
+
+stopifnot(oni$year == years, oni$n_seasons == 12)
+
+oni_path <- file.path(int_dir, "oni_annual_1993_2025.csv")
+write_csv(oni %>% select(year, oni), oni_path)
+oni
+```
+
+```{r plot-oni, fig.height = 4.2}
+ggplot(oni, aes(year, oni, fill = oni >= 0)) +
+  geom_col(width = 0.8) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  scale_fill_manual(
+    values = c("TRUE" = "#b2182b", "FALSE" = "#2166ac"),
+    labels = c("TRUE" = "El Niño", "FALSE" = "La Niña"),
+    name = NULL
+  ) +
+  labs(
+    title = "Oceanic Niño Index, annual mean",
+    subtitle = "Mean of the twelve seasonal values labeled with that year",
+    x = NULL,
+    y = "Index"
+  ) +
+  theme_bw()
+```
+
+## 5. Rate, with El Niño and La Niña removed
+
+Each coastal cell gets two ordinary linear regressions. The anomaly is in
+metres. `year` runs from 1993 through 2025. `oni` is the Oceanic Niño Index
+for that year.
+
+anomaly = intercept + (rate × year) + (El Niño term × oni)
+
+The coefficient on `year` is the rise in metres per year. Multiplying by
+1000 stores it as millimetres per year. The pressure uses the regression fit
+only to 2000–2025. Dividing that rate by 10 and holding the result between 0
+and 1 gives the pressure. The regression fit to all 33 years is kept for the
+comparison line.
+
+A third regression, 2000–2025 with the year alone, shows the rate before the
+Niño index is added. The saved pressure uses the 2000–2025 regression that
+includes the index.
+
+A steady 3 mm per year scores 0.3.
+
+```{r rate}
+cell_sla <- values(mask(annual, coast))
+complete <- which(rowSums(!is.na(cell_sla)) == ncol(cell_sla))
+
+fit_table <- map(complete, function(cell) {
+  series <- tibble(
+    year = years,
+    anomaly_m = cell_sla[cell, ],
+    oni = oni$oni
+  )
+  full <- lm(anomaly_m ~ year + oni, data = series)
+  recent <- series %>% filter(year >= trend_start)
+  from_2000 <- lm(anomaly_m ~ year + oni, data = recent)
+  year_only <- lm(anomaly_m ~ year, data = recent)
+  tibble(
+    cell = cell,
+    rate_full_mm_yr = coef(full)[["year"]] * 1000,
+    rate_mm_yr = coef(from_2000)[["year"]] * 1000,
+    rate_year_only_mm_yr = coef(year_only)[["year"]] * 1000,
+    enso_m = coef(from_2000)[["oni"]]
+  )
+}) %>%
+  list_rbind()
+
+empty <- rast(annual[[1]])
+values(empty) <- NA
+
+rate <- empty
+rate[fit_table$cell] <- fit_table$rate_mm_yr
+names(rate) <- "mm_per_year_2000_2025"
+
+rate_full <- empty
+rate_full[fit_table$cell] <- fit_table$rate_full_mm_yr
+names(rate_full) <- "mm_per_year_1993_2025"
+
+rate_year_only <- empty
+rate_year_only[fit_table$cell] <- fit_table$rate_year_only_mm_yr
+names(rate_year_only) <- "mm_per_year_2000_2025_year_only"
+
+enso <- empty
+enso[fit_table$cell] <- fit_table$enso_m
+names(enso) <- "metres_per_oni"
+
+unlink(file.path(int_dir, "slr_rate_mm_yr.tif"))
+
+pressure <- clamp(rate / 10, lower = 0, upper = 1, values = TRUE)
+names(pressure) <- "pressure"
+
+writeRaster(rate, file.path(int_dir, "slr_rate_2000_2025_mm_yr.tif"), overwrite = TRUE)
+writeRaster(rate_full, file.path(int_dir, "slr_rate_1993_2025_mm_yr.tif"), overwrite = TRUE)
+writeRaster(pressure, file.path(int_dir, "slr_pressure.tif"), overwrite = TRUE)
+writeRaster(enso, file.path(int_dir, "slr_enso_m_per_oni.tif"), overwrite = TRUE)
+
+summary(values(rate))
+summary(values(pressure))
+summary(values(enso) * 100)
+```
+
+```{r plot-rate-maps}
+pressure_colors <- colorRampPalette(c("#2166ac", "#67a9cf", "#f7f7f7", "#ef8a62", "#b2182b"))(100)
+plot(rate, main = "Coastal rise, 2000–2025, mm per year")
+plot(enso * 100, main = "Centimetres of sea level for one unit of the Niño index")
+plot(
+  pressure,
+  main = "Coastal pressure, 2025",
+  range = c(0, 1),
+  col = pressure_colors
+)
+```
+
+The middle map is the El Niño term from the 2000–2025 fit. One unit of the
+index is a moderate event. A strong El Niño is closer to 1.5 or 2, and a La
+Niña is the same size with the opposite sign. The southern Gulf moves more
+with the index than the upper Gulf does.
+
+On the pressure map, blue is 0 and red is 1. These coastal pressures sit in
+the lower part of that scale.
+
+## 6. Mean pressure in each marine region
+
+Each coastal cell is weighted by how much of it sits inside the region.
+The saved pressure is the mean of the cell pressures, after each cell has
+been held between 0 and 1. The year on every row is 2025.
+
+```{r regional-means}
+regional <- tibble(
+  rgn_id = marine$rgn_id,
+  estado = marine$estado,
+  ecorgn = marine$ecorgn,
+  label = marine$label,
+  year = score_year,
+  n_cells = exact_extract(pressure, marine, "count"),
+  rate_mm_yr = exact_extract(rate, marine, "mean"),
+  rate_full_mm_yr = exact_extract(rate_full, marine, "mean"),
+  rate_year_only_mm_yr = exact_extract(rate_year_only, marine, "mean"),
+  enso_cm = exact_extract(enso, marine, "mean") * 100,
+  pressure = exact_extract(pressure, marine, "mean")
+) %>%
+  arrange(rgn_id)
+
+annual_cm <- mask(annual, coast) * 100
+names(annual_cm) <- as.character(years)
+anom_mean <- exact_extract(annual_cm, marine, "mean")
+anomaly_scores <- anom_mean %>%
+  as_tibble() %>%
+  mutate(rgn_id = marine$rgn_id, label = marine$label) %>%
+  pivot_longer(
+    cols = starts_with("mean."),
+    names_to = "year",
+    names_prefix = "mean.",
+    names_transform = list(year = as.integer),
+    values_to = "anomaly_cm"
+  ) %>%
+  left_join(regional %>% select(rgn_id, rate_mm_yr, rate_full_mm_yr, enso_cm), by = "rgn_id") %>%
+  left_join(oni %>% transmute(year, oni_c = oni - mean(oni)), by = "year") %>%
+  mutate(
+    adjusted_cm = anomaly_cm - enso_cm * oni_c,
+    trend_full_cm = mean(anomaly_cm) + (rate_full_mm_yr / 10) * (year - mean(years)),
+    trend_2000_cm = if_else(
+      year >= trend_start,
+      mean(anomaly_cm[year >= trend_start]) +
+        (rate_mm_yr / 10) * (year - mean(year[year >= trend_start])),
+      NA_real_
+    ),
+    .by = rgn_id
+  )
+
+pressure_csv <- regional %>%
+  select(rgn_id, year, pressure) %>%
+  arrange(rgn_id)
+
+csv_path <- file.path(out_dir, "slr_pressure.csv")
+write_csv(pressure_csv, csv_path)
+
+kable(
+  regional %>%
+    select(
+      rgn_id, estado, ecorgn, n_cells,
+      rate_mm_yr, rate_full_mm_yr, rate_year_only_mm_yr, enso_cm, pressure
+    ),
+  digits = 3,
+  col.names = c(
+    "Region", "State", "Ecoregion", "Cells",
+    "Rate, 2000–2025", "Rate, 1993–2025", "Rate, 2000–2025, year only",
+    "cm per Niño unit", "Pressure"
+  ),
+  caption = "Coastal rate and pressure for 2025. The pressure uses the 2000–2025 rate, in mm per year, from the fit that includes the Niño index."
+)
+```
+
+The figure below draws both slopes. The blue line is the fit to every year
+from 1993 through 2025. The red line is the fit to 2000–2025, which is the
+slope used for the pressure, and it is drawn only from 2000 onward. The
+points have the Niño term from that 2000–2025 fit removed.
+
+The year-only rate leaves El Niño and La Niña in the 2000–2025 slope.
+Including the index lowers that rate by
+`r sprintf("%.2f", min(regional$rate_year_only_mm_yr - regional$rate_mm_yr))`
+to
+`r sprintf("%.2f", max(regional$rate_year_only_mm_yr - regional$rate_mm_yr))`
+mm per year. The upper Gulf rests on about one cell in Baja California and
+about two in Sonora.
+
+```{r plot-anomaly, fig.height = 8}
+ggplot(anomaly_scores, aes(year)) +
+  geom_line(aes(y = anomaly_cm), color = "grey70", linewidth = 0.4) +
+  geom_point(aes(y = adjusted_cm), size = 1.1, color = "grey20") +
+  geom_line(aes(y = trend_full_cm, color = "1993–2025"), linewidth = 0.6) +
+  geom_line(aes(y = trend_2000_cm, color = "2000–2025"), linewidth = 0.8) +
+  scale_color_manual(
+    values = c("1993–2025" = "#2166ac", "2000–2025" = "#b2182b"),
+    name = "Slope"
+  ) +
+  facet_wrap(vars(label), ncol = 3) +
+  labs(
+    title = "Coastal sea level, with both slopes",
+    subtitle = "Grey: annual anomaly. Points: Niño term removed. Blue: 1993–2025. Red: 2000–2025, used for the pressure.",
+    x = NULL,
+    y = "Centimetres"
+  ) +
+  theme_bw()
+```
+
+```{r plot-pressure, fig.height = 4.5}
+ggplot(regional, aes(reorder(rgn_id, rgn_id), pressure, fill = ecorgn)) +
+  geom_col(width = 0.7) +
+  scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
+  labs(
+    title = "Sea level pressure, 2025",
+    subtitle = "Rate divided by 10, held between 0 and 1, then averaged over coastal cells",
+    x = NULL,
+    y = "Pressure",
+    fill = NULL
+  ) +
+  theme_bw()
+```
+
+The table is `r csv_path`.
+
+## 7. Comparison with other sea-level rates
+
+Three other rates were examined while this pressure was being chosen.
+
+The CryoSat-2 study of the Gulf entrance compared coastal altimetry with tide
+gauges at Cabo San Lucas and Mazatlán for 2011–2020
+([Valle-Rodríguez, Gómez-Enri, and Trasviña-Castro, Advances in Space Research, 2023](https://doi.org/10.1016/j.asr.2023.08.048)).
+Both shores gave a trend of about 3.1 mm per year. San Blas, farther south,
+agreed less well with its gauge. That study did not cover the upper Gulf.
+
+An earlier pass used the GLORYS ocean model for the same Gulf regions. Those
+rates are the 2025 coastal endpoint, the rise from the 1993–2002 mean divided
+by the years since 1997.5. They are not a regression, and they are not the
+pressure saved here. At the southern mouth the model was about 1.1 to 1.4 mm
+per year, while the upper Gulf was about 3.2. Global altimetry over the
+satellite era is about 3.3 mm per year, and that model is known to run slower
+than the satellites, near 2.7 mm per year.
+
+The habitat threshold examined in the stressors rescaling treats 4 mm per year
+as the start of pressure and 10 mm per year as pressure 1. Every regional
+rate here is below 4, so that scale would score them all as 0. This pressure
+uses the straight line from 0 to 10 instead.
+
+```{r comparison}
+references <- tibble(
+  rgn_id = paste0("Region_", 1:9),
+  glorys_mm_yr = c(3.19, 2.04, 1.61, 1.36, 3.22, 2.35, 1.65, 1.07, 1.28),
+  cryosat_gauge_mm_yr = c(NA, NA, NA, 3.1, NA, NA, NA, 3.1, NA)
+)
+
+comparison <- regional %>%
+  select(rgn_id, estado, ecorgn, rate_mm_yr, rate_full_mm_yr) %>%
+  left_join(references, by = "rgn_id")
+
+kable(
+  comparison,
+  digits = 2,
+  col.names = c(
+    "Region", "State", "Ecoregion",
+    "This pressure, 2000–2025", "This grid, 1993–2025",
+    "GLORYS endpoint", "CryoSat and gauges, 2011–2020"
+  ),
+  caption = "Rates in mm per year. CryoSat and the gauges are reported for Cabo San Lucas (Region 4) and Mazatlán (Region 8)."
+)
+```
+
+At the entrance, the 2000–2025 satellite rates are
+`r sprintf("%.1f", comparison$rate_mm_yr[comparison$rgn_id == "Region_4"])`
+mm per year in southern Baja and
+`r sprintf("%.1f", comparison$rate_mm_yr[comparison$rgn_id == "Region_8"])`
+mm per year in Sinaloa. Those sit next to the CryoSat and gauge trend of
+about 3.1 mm per year. The windows differ, and one estimate is a regional
+mean of coastal cells while the other is a trend at two docks, so the
+agreement is a check rather than a formal test. Nayarit, which includes San
+Blas, is
+`r sprintf("%.1f", comparison$rate_mm_yr[comparison$rgn_id == "Region_9"])`
+mm per year. The upper Gulf is lower, about
+`r sprintf("%.1f", comparison$rate_mm_yr[comparison$rgn_id == "Region_1"])`
+and
+`r sprintf("%.1f", comparison$rate_mm_yr[comparison$rgn_id == "Region_5"])`
+mm per year, on about one and two cells. CryoSat was not analyzed there, and
+the GLORYS rates there ran the other way, near 3.2 mm per year.
