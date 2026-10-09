@@ -1,0 +1,697 @@
+---
+title: "Coastal air temperature in the Gulf of California"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+Coastal air temperature is the temperature felt on shore, where intertidal
+animals, mangroves, nesting sea turtles, and marine birds live. The shore
+record bends, so it is summarized as a departure from a reference climate
+rather than as a straight line.
+
+The temperature is the daily mean of Daymet maximum and minimum air
+temperature. Daymet Version 4 R1 places those values on a 1 km grid for
+North America, including the Mexican coast of the Gulf, for 1980 through
+2025. The source is Thornton, M. M., R. Shrestha, Y. Wei, P. E. Thornton,
+S-C. Kao, and B. E. Wilson (2022), Daymet: Daily Surface Weather Data on a
+1-km Grid for North America, Version 4 R1, ORNL DAAC,
+<https://doi.org/10.3334/ORNLDAAC/2129>. Each file below is the public
+single-pixel extract for one coastal cell.
+
+The cells are the land within 1 km of the Gulf shoreline, inside the OHI
+land regions. One kilometer is the width of a Daymet cell, so the average
+stays on the shore instead of mixing the beach with the desert behind it.
+
+The reference climate is the mean of 1980–2000. Each later year is the
+difference from that mean. Because single years jump around, each plotted
+value is then the mean of that year and the four years before it. The last
+value, for 2025, is the mean of 2021–2025 minus the 1980–2000 mean. The
+same summary is then repeated for the three warmest months in the Gulf,
+chosen from the 1980–2000 climate and held fixed.
+
+The saved pressure divides that five-year anomaly by 3°C. A departure of
+3°C scores 1. A larger departure stays at 1, and a cooling stays at 0.
+Each region keeps a pressure for every year from 2000 through 2025. The
+value dated 2025 is the mean of 2021–2025, not the single year 2025.
+
+Raw cell files are written to `/home/shares/ohi/OHI_GOC/_raw_data/Temp_daymet`.
+The shoreline sample is written to
+`/home/shares/ohi/OHI_GOC/goal_prep/pressures/air_temp`. The pressure tables,
+the summary spreadsheet, and the 2025 rasters are written to
+`_pressures/prs_air_temp/output`.
+
+```{r setup}
+library(sf)
+library(terra)
+library(tidyverse)
+library(knitr)
+library(writexl)
+
+# Area calculations below use the region projection, in meters.
+sf_use_s2(FALSE)
+knitr::opts_chunk$set(fig.width = 8, fig.height = 6, message = FALSE, warning = FALSE)
+
+rgn_path <- "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/goc_ohi_rgns.shp"
+coast_path <- "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/goc_coastline.gpkg"
+raw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/Temp_daymet"
+int_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/air_temp"
+out_dir <- "/home/frazier/ohi_goc_prep/_pressures/prs_air_temp/output"
+dir.create(raw_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(int_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# A 3°C departure from 1980–2000 is a pressure of 1.
+reference_rise_c <- 3
+
+# How far inland a cell may sit and still count as the coast.
+shore_m <- 1000
+```
+
+## 1. The coastal cells
+
+Each OHI region has a land polygon and a marine polygon. Air temperature is
+taken from the land polygon. The shoreline is sampled every kilometer, and
+each sample is moved a short distance inland so it lands in a Daymet land
+cell rather than in the water. Samples that miss the land regions are
+dropped. A circle that touches two regions keeps the piece with the larger
+area.
+
+```{r coastal-cells}
+sites_path <- file.path(int_dir, "coastal_cells.gpkg")
+
+if (file.exists(sites_path)) {
+  sites <- st_read(sites_path, quiet = TRUE)
+} else {
+  land <- st_read(rgn_path, quiet = TRUE) %>%
+    st_make_valid() %>%
+    filter(location == "land")
+
+  # The coastline is already stored in the same projection as the regions.
+  coast <- st_read(coast_path, quiet = TRUE) %>%
+    st_transform(st_crs(land)) %>%
+    st_cast("LINESTRING")
+
+  # A vertex at least every kilometer. Shared corners are kept once.
+  samples <- st_segmentize(st_union(st_geometry(coast)), dfMaxLength = shore_m) %>%
+    st_cast("POINT") %>%
+    st_sf()
+  xy <- st_coordinates(samples)
+  samples <- samples %>%
+    mutate(x = round(xy[, 1]), y = round(xy[, 2])) %>%
+    distinct(x, y, .keep_all = TRUE) %>%
+    mutate(sample_id = seq_len(n())) %>%
+    select(sample_id)
+
+  # A point that starts on the shoreline is moved inland by taking the
+  # centroid of its overlap with the land region.
+  pieces <- st_buffer(samples, shore_m / 2) %>%
+    st_intersection(land) %>%
+    mutate(piece_km2 = as.numeric(st_area(geometry)) / 1e6) %>%
+    group_by(sample_id) %>%
+    slice_max(piece_km2, n = 1, with_ties = FALSE) %>%
+    ungroup()
+
+  sites <- st_centroid(pieces) %>%
+    st_transform(4326) %>%
+    mutate(
+      lon = st_coordinates(geometry)[, 1],
+      lat = st_coordinates(geometry)[, 2]
+    ) %>%
+    select(sample_id, rgn_id, estado, ecorgn, lon, lat)
+
+  st_write(sites, sites_path, quiet = TRUE)
+}
+
+sites %>%
+  st_drop_geometry() %>%
+  count(rgn_id, estado, ecorgn, name = "n_cells") %>%
+  kable(
+    col.names = c("Region", "State", "Ecoregion", "Coastal cells"),
+    caption = "Shoreline cells within 1 km of the coast, one per kilometer of shoreline"
+  )
+```
+
+```{r plot-sites}
+land_outline <- st_read(rgn_path, quiet = TRUE) %>%
+  st_make_valid() %>%
+  filter(location == "land") %>%
+  st_transform(4326)
+
+ggplot() +
+  geom_sf(data = land_outline, fill = "grey92", color = "grey40", linewidth = 0.2) +
+  geom_sf(data = sites, aes(color = estado), size = 0.15) +
+  coord_sf(expand = FALSE) +
+  labs(
+    title = "Daymet cells along the Gulf shoreline",
+    subtitle = "Each point is one kilometer of shore, placed just inland",
+    color = NULL
+  ) +
+  theme_bw()
+```
+
+## 2. Download the Daymet record
+
+Each cell is requested from the Daymet single-pixel service for 1 January
+1980 through 31 December 2025. The service returns the 1 km cell that
+contains the point. A cell that falls in the water comes back as a short
+error message and is left out. Files already on disk are kept, so a second
+knit continues where the first one stopped.
+
+```{r download-daymet}
+# Read the first line and decide whether this file is a real Daymet table.
+daymet_ok <- function(path) {
+  if (!file.exists(path) || file.info(path)$size < 1000) return(FALSE)
+  !startsWith(readLines(path, n = 1, warn = FALSE), "{")
+}
+
+download_one <- function(sample_id, lat, lon) {
+  dest <- file.path(raw_dir, sprintf("daymet_%05d.csv", sample_id))
+  if (daymet_ok(dest)) return(dest)
+  url <- sprintf(
+    "https://daymet.ornl.gov/single-pixel/api/data?lat=%s&lon=%s&vars=tmax,tmin&start=1980-01-01&end=2025-12-31",
+    format(lat, scientific = FALSE, trim = TRUE),
+    format(lon, scientific = FALSE, trim = TRUE)
+  )
+  status <- system2(
+    "curl",
+    c("-s", "-L", "--retry", "2", "--max-time", "120", "-o", dest, shQuote(url))
+  )
+  if (status != 0 || !daymet_ok(dest)) {
+    if (file.exists(dest)) file.remove(dest)
+    return(NA_character_)
+  }
+  dest
+}
+
+# A handful of requests at once. Forked workers only run curl, then return.
+paths <- parallel::mcmapply(
+  download_one,
+  sites$sample_id,
+  sites$lat,
+  sites$lon,
+  mc.cores = 8,
+  USE.NAMES = FALSE
+)
+
+sites <- sites %>%
+  mutate(path = paths) %>%
+  filter(!is.na(path))
+
+cat(
+  "Cells with a temperature record:", nrow(sites),
+  "of", length(paths), "shoreline samples\n"
+)
+```
+
+## 3. Daily values to a yearly mean
+
+The file header carries the Daymet cell coordinate. Two shoreline samples
+can fall in the same 1 km cell where the shore bends; those duplicates are
+removed so the bend is not counted twice. The value for a day is the
+average of the maximum and the minimum. The value for a year is the average
+of the days, with each day weighted equally.
+
+```{r read-cells}
+read_cell <- function(path, sample_id) {
+  header <- readLines(path, n = 2, warn = FALSE)
+  xy <- strsplit(sub(".*: ", "", header[2]), " ", fixed = TRUE)[[1]]
+  daily <- read_csv(path, skip = 6, show_col_types = FALSE)
+  names(daily) <- c("year", "yday", "tmax", "tmin")
+  daily %>%
+    mutate(
+      sample_id = sample_id,
+      cell_x = round(as.numeric(xy[1])),
+      cell_y = round(as.numeric(xy[2])),
+      tmean = (tmax + tmin) / 2
+    )
+}
+
+# Read in batches so the daily tables do not all sit in memory at once.
+batch_size <- 400
+batch_id <- ceiling(seq_len(nrow(sites)) / batch_size)
+annual_cell <- vector("list", max(batch_id))
+month_cell <- vector("list", max(batch_id))
+year_month <- vector("list", max(batch_id))
+
+for (b in sort(unique(batch_id))) {
+  keep <- which(batch_id == b)
+  daily <- map2(sites$path[keep], sites$sample_id[keep], read_cell) %>%
+    list_rbind()
+  # One row per Daymet cell. The first sample that landed in the cell is kept.
+  daily <- daily %>%
+    group_by(cell_x, cell_y) %>%
+    filter(sample_id == min(sample_id)) %>%
+    ungroup() %>%
+    mutate(month = as.integer(format(as.Date(sprintf("%d-%03d", year, yday), "%Y-%j"), "%m")))
+  annual_cell[[b]] <- daily %>%
+    group_by(sample_id, cell_x, cell_y, year) %>%
+    summarise(tmean = mean(tmean), .groups = "drop")
+  month_cell[[b]] <- daily %>%
+    group_by(sample_id, month) %>%
+    summarise(tmean = mean(tmean), .groups = "drop")
+  # Year and month together, so the warm-season summary can use the same days.
+  year_month[[b]] <- daily %>%
+    group_by(sample_id, year, month) %>%
+    summarise(tmean = mean(tmean), .groups = "drop")
+}
+
+annual_cell <- list_rbind(annual_cell)
+month_cell <- list_rbind(month_cell)
+year_month <- list_rbind(year_month)
+
+# The same Daymet cell can appear in more than one batch where the shore bends.
+annual_cell <- annual_cell %>%
+  group_by(cell_x, cell_y) %>%
+  filter(sample_id == min(sample_id)) %>%
+  ungroup()
+
+month_cell <- month_cell %>%
+  filter(sample_id %in% unique(annual_cell$sample_id))
+
+year_month <- year_month %>%
+  filter(sample_id %in% unique(annual_cell$sample_id))
+
+# Attach the region after collapsing duplicate cells.
+annual_cell <- annual_cell %>%
+  inner_join(st_drop_geometry(sites), by = "sample_id")
+
+month_region <- month_cell %>%
+  inner_join(st_drop_geometry(sites) %>% select(sample_id, rgn_id, estado), by = "sample_id") %>%
+  group_by(rgn_id, estado, month) %>%
+  summarise(tmean = mean(tmean), .groups = "drop")
+
+cat("Unique Daymet cells:", n_distinct(paste(annual_cell$cell_x, annual_cell$cell_y)), "\n")
+cat("Years:", min(annual_cell$year), "through", max(annual_cell$year), "\n")
+```
+
+```{r plot-season, fig.height = 4.5}
+ggplot(month_region, aes(month, tmean, color = estado)) +
+  geom_line(linewidth = 0.7) +
+  scale_x_continuous(breaks = 1:12) +
+  labs(
+    title = "Average seasonal cycle along the shore",
+    subtitle = "Mean of every day in that month, then the mean of the coastal cells",
+    x = "Month",
+    y = "Air temperature, °C",
+    color = NULL
+  ) +
+  theme_bw()
+```
+
+The seasonal cycle is the check that the cells are on land in this climate.
+Summers are hot and winters are mild, and the upper Gulf has the wider swing.
+
+```{r annual-region}
+annual_region <- annual_cell %>%
+  group_by(rgn_id, estado, ecorgn, year) %>%
+  summarise(
+    tmean = mean(tmean),
+    n_cells = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(rgn_id, year)
+
+kable(
+  annual_region %>% filter(year %in% c(1980, 2000, 2025)),
+  digits = 2,
+  col.names = c("Region", "State", "Ecoregion", "Year", "Mean air temperature, °C", "Cells"),
+  caption = "Yearly mean coastal air temperature in three years of the record"
+)
+```
+
+## 4. Departure from 1980–2000
+
+The reference for a region is the mean of its yearly values from 1980
+through 2000. The anomaly in any year, including those reference years, is
+the yearly mean minus that reference. A warm year is positive.
+
+The five-year value for a year is the mean of that year's anomaly and the
+anomalies from the four years before it. The window is trailing, so 2025
+uses 2021–2025 and can be updated without waiting for later years. The
+first complete window is 1984. The years 1980–1983 stay blank.
+
+```{r anomaly}
+# Mean of this year and the four years before it. The first four years of
+# a complete series are left missing.
+trailing_five <- function(x) {
+  (x + lag(x, 1) + lag(x, 2) + lag(x, 3) + lag(x, 4)) / 5
+}
+
+anomaly <- annual_region %>%
+  group_by(rgn_id, estado, ecorgn) %>%
+  arrange(year, .by_group = TRUE) %>%
+  mutate(
+    reference_c = mean(tmean[year >= 1980 & year <= 2000]),
+    anomaly_c = tmean - reference_c,
+    roll5_c = trailing_five(anomaly_c)
+  ) %>%
+  ungroup()
+
+latest <- anomaly %>%
+  filter(year == 2025) %>%
+  arrange(rgn_id)
+
+kable(
+  latest %>%
+    transmute(rgn_id, estado, ecorgn, reference_c, anomaly_c, roll5_c),
+  digits = 2,
+  col.names = c(
+    "Region", "State", "Ecoregion",
+    "1980–2000 mean, °C", "2025 anomaly, °C", "2021–2025 anomaly, °C"
+  ),
+  caption = "The 2021–2025 column is the trailing five-year anomaly. It is the summary used for the shore."
+)
+```
+
+```{r plot-anomaly, fig.height = 9}
+ggplot(anomaly, aes(year)) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_point(aes(y = anomaly_c), color = "grey65", size = 0.9) +
+  geom_line(aes(y = roll5_c), color = "#b2182b", linewidth = 0.7) +
+  facet_wrap(vars(paste(rgn_id, estado, sep = ", ")), ncol = 3) +
+  labs(
+    title = "Coastal air temperature relative to 1980–2000",
+    subtitle = "Points are single years. The line is that year and the four years before it.",
+    x = NULL,
+    y = "Anomaly, °C"
+  ) +
+  theme_bw()
+```
+
+During 1980–2000 the line stays near zero, because those years are the
+reference. After 2000 it shows whether the shore has stayed warm, cooled
+back, or kept rising.
+
+```{r plot-latest, fig.height = 4.5}
+ggplot(latest, aes(rgn_id, roll5_c, fill = roll5_c > 0)) +
+  geom_col(width = 0.7) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  scale_fill_manual(values = c("TRUE" = "#b2182b", "FALSE" = "#2166ac"), guide = "none") +
+  labs(
+    title = "2021–2025 mean relative to 1980–2000",
+    x = NULL,
+    y = "Anomaly, °C"
+  ) +
+  theme_bw()
+```
+
+```{r cell-anomaly}
+# The same two means, taken inside each coastal cell, so the map shows
+# whether the whole shore of a region moved together.
+cell_anomaly <- annual_cell %>%
+  group_by(sample_id) %>%
+  summarise(
+    anomaly_2025 = mean(tmean[year >= 2021 & year <= 2025]) -
+      mean(tmean[year >= 1980 & year <= 2000]),
+    .groups = "drop"
+  )
+
+cell_sf <- sites %>%
+  select(sample_id) %>%
+  inner_join(cell_anomaly, by = "sample_id")
+```
+
+```{r plot-cell-anomaly}
+ggplot() +
+  geom_sf(data = land_outline, fill = "grey92", color = "grey70", linewidth = 0.15) +
+  geom_sf(data = cell_sf, aes(color = anomaly_2025), size = 0.25) +
+  scale_color_gradient2(
+    low = "#2166ac",
+    mid = "grey92",
+    high = "#b2182b",
+    midpoint = 0,
+    name = "Anomaly, °C"
+  ) +
+  coord_sf(expand = FALSE) +
+  labs(
+    title = "2021–2025 air temperature relative to 1980–2000",
+    subtitle = "Each point is one coastal Daymet cell"
+  ) +
+  theme_bw()
+```
+
+The cell map is the spatial check. A shore drawn in one color moved
+together. A shore with both colors has a recent climate that depends on
+where you stand.
+
+## 5. The three warmest months
+
+The three months are chosen once, from the mean of every coastal cell in
+1980–2000, and then used for every region and every later year. A warmer
+year does not get to pick a different season. Within those months the
+summary is the same one used for the full year: the 1980–2000 mean, the
+anomaly, and the trailing five-year average.
+
+```{r warm-months}
+# One Gulf-wide season, not a different trio in each region.
+warm_months <- year_month %>%
+  filter(year >= 1980, year <= 2000) %>%
+  group_by(month) %>%
+  summarise(tmean = mean(tmean), .groups = "drop") %>%
+  slice_max(tmean, n = 3) %>%
+  arrange(month)
+
+kable(
+  warm_months,
+  digits = 2,
+  col.names = c("Month", "1980–2000 coastal mean, °C"),
+  caption = "The three warmest months along the Gulf shore in the reference years"
+)
+```
+
+```{r warm-anomaly}
+warm_region <- year_month %>%
+  filter(month %in% warm_months$month) %>%
+  group_by(sample_id, year) %>%
+  summarise(tmean = mean(tmean), n_months = n(), .groups = "drop") %>%
+  filter(n_months == 3) %>%
+  inner_join(
+    st_drop_geometry(sites) %>% select(sample_id, rgn_id, estado, ecorgn),
+    by = "sample_id"
+  ) %>%
+  group_by(rgn_id, estado, ecorgn, year) %>%
+  summarise(tmean = mean(tmean), .groups = "drop") %>%
+  group_by(rgn_id, estado, ecorgn) %>%
+  arrange(year, .by_group = TRUE) %>%
+  mutate(
+    reference_c = mean(tmean[year >= 1980 & year <= 2000]),
+    anomaly_c = tmean - reference_c,
+    roll5_c = trailing_five(anomaly_c)
+  ) %>%
+  ungroup()
+
+warm_latest <- warm_region %>%
+  filter(year == 2025) %>%
+  arrange(rgn_id)
+
+kable(
+  warm_latest %>%
+    transmute(rgn_id, estado, ecorgn, reference_c, anomaly_c, roll5_c) %>%
+    left_join(
+      latest %>% select(rgn_id, full_year = roll5_c),
+      by = "rgn_id"
+    ),
+  digits = 2,
+  col.names = c(
+    "Region", "State", "Ecoregion",
+    "Warm-season reference, °C", "2025 warm anomaly, °C",
+    "2021–2025 warm anomaly, °C", "2021–2025 full-year anomaly, °C"
+  ),
+  caption = "Warm-season departure beside the full-year departure. Both are 2021–2025 minus 1980–2000."
+)
+```
+
+```{r plot-warm, fig.height = 9}
+ggplot(warm_region, aes(year)) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_point(aes(y = anomaly_c), color = "grey65", size = 0.9) +
+  geom_line(aes(y = roll5_c), color = "#b2182b", linewidth = 0.7) +
+  facet_wrap(vars(paste(rgn_id, estado, sep = ", ")), ncol = 3) +
+  labs(
+    title = "Warm-season air temperature relative to 1980–2000",
+    subtitle = "The three warmest months only. Points are single years. The line is that year and the four years before it.",
+    x = NULL,
+    y = "Anomaly, °C"
+  ) +
+  theme_bw()
+```
+
+```{r warm-cells}
+warm_cell <- year_month %>%
+  filter(month %in% warm_months$month) %>%
+  group_by(sample_id, year) %>%
+  summarise(tmean = mean(tmean), .groups = "drop") %>%
+  group_by(sample_id) %>%
+  summarise(
+    anomaly_2025 = mean(tmean[year >= 2021 & year <= 2025]) -
+      mean(tmean[year >= 1980 & year <= 2000]),
+    .groups = "drop"
+  )
+
+warm_sf <- sites %>%
+  select(sample_id) %>%
+  inner_join(warm_cell, by = "sample_id")
+```
+
+```{r plot-warm-cells}
+ggplot() +
+  geom_sf(data = land_outline, fill = "grey92", color = "grey70", linewidth = 0.15) +
+  geom_sf(data = warm_sf, aes(color = anomaly_2025), size = 0.25) +
+  scale_color_gradient2(
+    low = "#2166ac",
+    mid = "grey92",
+    high = "#b2182b",
+    midpoint = 0,
+    name = "Anomaly, °C"
+  ) +
+  coord_sf(expand = FALSE) +
+  labs(
+    title = "2021–2025 warm-season air temperature relative to 1980–2000",
+    subtitle = "Each point is one coastal Daymet cell"
+  ) +
+  theme_bw()
+```
+
+## 6. Pressure since 2000
+
+The pressure for a year is the trailing five-year anomaly divided by 3°C,
+held between 0 and 1, and rounded to two decimal places. The full-year
+series and the three warmest months are saved separately. Both run from
+2000 through 2025, so 2000 is the mean of 1996–2000 and 2025 is the mean
+of 2021–2025.
+
+The spreadsheet keeps the reference climate, the single year 2025, and the
+2021–2025 anomaly, once for the full year and once for July–September. The
+rasters are the cell version of the 2025 row: the raw 2021–2025 anomaly,
+and that anomaly divided by 3°C. They are written on Daymet’s 1 km Lambert
+grid. Where the shore bends, more than one sample can fall in the same
+pixel, and that pixel is their mean.
+
+```{r pressure}
+pressure_score <- function(series) {
+  series %>%
+    filter(year >= 2000, year <= 2025) %>%
+    transmute(
+      rgn_id,
+      year,
+      pressure = round(pmin(pmax(roll5_c / reference_rise_c, 0), 1), 2)
+    ) %>%
+    arrange(rgn_id, year)
+}
+
+annual_pressure <- pressure_score(anomaly)
+warm_pressure <- pressure_score(warm_region)
+
+annual_pressure_path <- file.path(out_dir, "air_temp_annual_pressure.csv")
+warm_pressure_path <- file.path(out_dir, "air_temp_warm_pressure.csv")
+write_csv(
+  annual_pressure %>% mutate(pressure = sprintf("%.2f", pressure)),
+  annual_pressure_path
+)
+write_csv(
+  warm_pressure %>% mutate(pressure = sprintf("%.2f", pressure)),
+  warm_pressure_path
+)
+
+summary_table <- function(latest_rows) {
+  latest_rows %>%
+    transmute(
+      Region = rgn_id,
+      State = estado,
+      Ecoregion = ecorgn,
+      `1980–2000 mean, °C` = round(reference_c, 2),
+      `2025 anomaly, °C` = round(anomaly_c, 2),
+      `2021–2025 anomaly, °C` = round(roll5_c, 2)
+    )
+}
+
+summary_path <- file.path(out_dir, "air_temp_summary.xlsx")
+write_xlsx(
+  list(
+    full_year = summary_table(latest),
+    warm_months = summary_table(warm_latest)
+  ),
+  summary_path
+)
+
+kable(
+  annual_pressure %>%
+    filter(year == 2025) %>%
+    left_join(
+      warm_pressure %>% filter(year == 2025) %>% select(rgn_id, warm = pressure),
+      by = "rgn_id"
+    ),
+  digits = 2,
+  col.names = c("Region", "Year", "Full-year pressure", "Warm-season pressure"),
+  caption = "2025 pressure. The anomaly behind each score is 2021–2025 minus 1980–2000, divided by 3°C."
+)
+```
+
+```{r cell-rasters}
+# Daymet V4 Lambert conformal conic, in meters. The header coordinate is
+# the shoreline sample on that grid, so nearby samples can share a 1 km pixel.
+daymet_crs <- paste(
+  "+proj=lcc +lat_0=42.5 +lon_0=-100 +lat_1=25 +lat_2=60",
+  "+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+)
+
+cells_to_raster <- function(cells, field) {
+  xy <- cells %>%
+    transmute(cell_x, cell_y, value = .data[[field]]) %>%
+    filter(is.finite(value))
+  grid <- rast(
+    xmin = min(xy$cell_x) - 500,
+    xmax = max(xy$cell_x) + 500,
+    ymin = min(xy$cell_y) - 500,
+    ymax = max(xy$cell_y) + 500,
+    resolution = 1000,
+    crs = daymet_crs
+  )
+  pts <- vect(xy, geom = c("cell_x", "cell_y"), crs = daymet_crs)
+  rasterize(pts, grid, field = "value", fun = "mean")
+}
+
+annual_cells_2025 <- annual_cell %>%
+  group_by(sample_id, cell_x, cell_y) %>%
+  summarise(
+    anomaly_c = mean(tmean[year >= 2021 & year <= 2025]) -
+      mean(tmean[year >= 1980 & year <= 2000]),
+    .groups = "drop"
+  ) %>%
+  mutate(pressure = round(pmin(pmax(anomaly_c / reference_rise_c, 0), 1), 2))
+
+warm_cells_2025 <- year_month %>%
+  filter(month %in% warm_months$month) %>%
+  group_by(sample_id, year) %>%
+  summarise(tmean = mean(tmean), n_months = n(), .groups = "drop") %>%
+  filter(n_months == 3) %>%
+  group_by(sample_id) %>%
+  summarise(
+    anomaly_c = mean(tmean[year >= 2021 & year <= 2025]) -
+      mean(tmean[year >= 1980 & year <= 2000]),
+    .groups = "drop"
+  ) %>%
+  inner_join(
+    annual_cell %>% distinct(sample_id, cell_x, cell_y),
+    by = "sample_id"
+  ) %>%
+  mutate(pressure = round(pmin(pmax(anomaly_c / reference_rise_c, 0), 1), 2))
+
+annual_anomaly_tif <- file.path(out_dir, "air_temp_annual_anomaly_2025.tif")
+annual_pressure_tif <- file.path(out_dir, "air_temp_annual_pressure_2025.tif")
+warm_anomaly_tif <- file.path(out_dir, "air_temp_warm_anomaly_2025.tif")
+warm_pressure_tif <- file.path(out_dir, "air_temp_warm_pressure_2025.tif")
+
+writeRaster(cells_to_raster(annual_cells_2025, "anomaly_c"), annual_anomaly_tif, overwrite = TRUE)
+writeRaster(cells_to_raster(annual_cells_2025, "pressure"), annual_pressure_tif, overwrite = TRUE)
+writeRaster(cells_to_raster(warm_cells_2025, "anomaly_c"), warm_anomaly_tif, overwrite = TRUE)
+writeRaster(cells_to_raster(warm_cells_2025, "pressure"), warm_pressure_tif, overwrite = TRUE)
+```
+
+The full-year pressure is `r annual_pressure_path`. The warm-season pressure
+is `r warm_pressure_path`. The comparison spreadsheet is `r summary_path`,
+with one sheet for the full year and one for July–September. The 2025 cell
+anomaly and cell pressure are `r annual_anomaly_tif`,
+`r annual_pressure_tif`, `r warm_anomaly_tif`, and `r warm_pressure_tif`.
