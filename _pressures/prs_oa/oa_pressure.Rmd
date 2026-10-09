@@ -1,0 +1,279 @@
+---
+title: "Aragonite pressure in the Gulf of California"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+Surface aragonite saturation state is scored as a pressure for the nine marine
+OHI regions of the Gulf of California.
+
+The score uses one equation everywhere. The baseline at each cell is the mean
+of 1985–1994, the first ten complete years in the record. For a later year:
+
+- if the saturation state is 1 or below, the pressure is 1, because aragonite
+  can dissolve
+- otherwise the pressure is the share of the gap between the baseline and 1
+  that has been lost: (baseline − year) / (baseline − 1)
+- if the saturation state has risen, the pressure is 0
+
+A cell whose baseline is above 3 is scored with this same equation. A decline
+that stays above 3 still counts.
+
+The value saved for each region is not the single year. Section 5 shows why:
+the annual means jump, so the saved pressure is the mean of that year and the
+four years before it.
+
+```{r setup}
+library(terra)
+library(sf)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(exactextractr)
+library(knitr)
+
+knitr::opts_chunk$set(fig.width = 8, fig.height = 6.5, message = FALSE, warning = FALSE)
+
+data_dir <- "/home/shares/ohi/fisheries_explore/data/OA_Chau"
+int_dir <- "/home/shares/ohi/fisheries_explore/int/prs_oa"
+out_dir <- "/home/frazier/ohi_goc_prep/_pressures/prs_oa/output"
+rgn_path <- "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/goc_ohi_rgns.shp"
+
+dir.create(int_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# First ten complete years are the reference. 2026 is only a partial year, so it is left out.
+baseline_years <- 1985:1994
+score_years <- 1985:2025
+```
+
+## 1. Monthly fields
+
+The values are monthly surface aragonite saturation state (Ω) from the
+Copernicus surface-ocean carbon reconstruction, on a 0.25° grid. The box is
+the marine OHI regions plus a half-degree margin.
+
+The multi-year dataset covers January 1985 through December 2024. The
+near-real-time dataset covers 2025. Both were saved with
+`copernicusmarine.subset()` for the variable `omega_ar`:
+
+- `goc_omega_ar_monthly_my_1985_2024.nc` from `cmems_obs-mob_glo_bgc-car_my_irr-i`
+- `goc_omega_ar_monthly_nrt_2025.nc` from `cmems_obs-mob_glo_bgc-car_nrt_irr-i`
+
+Longitude −115.5 to −104.5, latitude 20.0 to 32.25.
+
+```{r read-monthly}
+monthly <- c(
+  rast(file.path(data_dir, "goc_omega_ar_monthly_my_1985_2024.nc")),
+  rast(file.path(data_dir, "goc_omega_ar_monthly_nrt_2025.nc"))
+)
+names(monthly) <- format(time(monthly), "%Y-%m")
+
+# Land cells are empty. Keep them empty rather than treating them as zero.
+monthly <- ifel(is.nan(monthly), NA, monthly)
+
+range(time(monthly))
+nlyr(monthly)
+```
+
+```{r plot-month}
+# One summer month, so the map is a saturation state and not yet a pressure.
+june_2020 <- monthly[[format(time(monthly), "%Y-%m") == "2020-06"]]
+plot(june_2020, main = "Aragonite saturation, June 2020", range = c(2, 4), col = hcl.colors(50, "YlGnBu"))
+```
+
+## 2. Annual means
+
+Each year becomes the mean of its twelve months. These rasters are the raw
+values used later. They are written to `int/prs_oa` as `oa_annual_<year>.tif`.
+
+```{r annual-means}
+year_index <- as.integer(format(time(monthly), "%Y"))
+annual <- tapp(monthly, year_index, fun = mean, na.rm = TRUE)
+annual <- ifel(is.nan(annual), NA, annual)
+names(annual) <- as.character(sort(unique(year_index)))
+
+stopifnot(as.integer(names(annual)) == score_years)
+
+for (yr in score_years) {
+  writeRaster(
+    annual[[as.character(yr)]],
+    file.path(int_dir, sprintf("oa_annual_%s.tif", yr)),
+    overwrite = TRUE
+  )
+}
+
+summary(values(annual[["2025"]]))
+```
+
+```{r plot-annual}
+plot(annual[["1990"]], main = "Mean aragonite saturation, 1990", range = c(2, 4), col = hcl.colors(50, "YlGnBu"))
+plot(annual[["2025"]], main = "Mean aragonite saturation, 2025", range = c(2, 4), col = hcl.colors(50, "YlGnBu"))
+```
+
+## 3. Baseline, 1985–1994
+
+The baseline is the mean of the ten annual rasters, cell by cell. A later
+decline is measured from this map, not from a single year.
+
+```{r baseline}
+baseline <- mean(annual[[as.character(baseline_years)]], na.rm = TRUE)
+baseline <- ifel(is.nan(baseline), NA, baseline)
+names(baseline) <- "omega_baseline"
+
+writeRaster(
+  baseline,
+  file.path(int_dir, "oa_baseline_1985_1994.tif"),
+  overwrite = TRUE
+)
+
+# The denominator of the score is baseline − 1. It must stay positive.
+stopifnot(minmax(baseline)[1, ] > 1)
+
+data.frame(
+  min = minmax(baseline)[1, ],
+  max = minmax(baseline)[2, ]
+)
+```
+
+```{r plot-baseline}
+plot(baseline, main = "Baseline aragonite saturation, 1985–1994", range = c(2, 4), col = hcl.colors(50, "YlGnBu"))
+```
+
+## 4. Rescale to a pressure
+
+```{r rescale}
+# Share of the gap from the baseline down to 1 that has been lost.
+delta <- (baseline - annual) / (baseline - 1)
+
+pressure <- ifel(annual <= 1, 1, delta)
+pressure <- ifel(pressure < 0, 0, pressure)
+pressure <- ifel(pressure > 1, 1, pressure)
+pressure <- mask(pressure, annual)
+names(pressure) <- names(annual)
+
+for (yr in score_years) {
+  writeRaster(
+    pressure[[as.character(yr)]],
+    file.path(int_dir, sprintf("oa_rescaled_%s.tif", yr)),
+    overwrite = TRUE
+  )
+}
+
+summary(values(pressure[["2025"]]))
+```
+
+```{r plot-pressure}
+plot(pressure[["1990"]], main = "Aragonite pressure, 1990", range = c(0, 1), col = hcl.colors(50, "YlOrRd"))
+plot(pressure[["2025"]], main = "Aragonite pressure, 2025", range = c(0, 1), col = hcl.colors(50, "YlOrRd"))
+```
+
+## 5. Mean pressure in each marine region
+
+Each 0.25° cell is weighted by how much of it sits inside the region. These
+are the annual pressures, before any smoothing.
+
+```{r annual-region-scores}
+marine <- st_read(rgn_path, quiet = TRUE) %>%
+  filter(location == "marine") %>%
+  st_transform(4326) %>%
+  arrange(rgn_id)
+
+annual_scores <- lapply(score_years, function(yr) {
+  layer <- pressure[[as.character(yr)]]
+  tibble(
+    rgn_id = marine$rgn_id,
+    year = yr,
+    pressure = exact_extract(layer, marine, "mean")
+  )
+}) %>%
+  bind_rows() %>%
+  arrange(rgn_id, year)
+
+# How large is a typical year-to-year jump, compared with the rise since the baseline decade?
+year_steps <- annual_scores %>%
+  group_by(rgn_id) %>%
+  arrange(year) %>%
+  mutate(step = abs(pressure - lag(pressure))) %>%
+  ungroup()
+
+mean_step <- mean(year_steps$step, na.rm = TRUE)
+max_step <- max(year_steps$step, na.rm = TRUE)
+rise_to_2025 <- annual_scores %>%
+  filter(year == 2025) %>%
+  summarise(rise = mean(pressure)) %>%
+  pull(rise)
+```
+
+```{r plot-annual-regions, fig.height=5.5}
+ymax <- max(annual_scores$pressure, na.rm = TRUE) * 1.08
+
+ggplot(annual_scores, aes(year, pressure, color = rgn_id)) +
+  geom_line(linewidth = 0.6) +
+  scale_y_continuous(limits = c(0, ymax)) +
+  labs(
+    title = "Annual aragonite pressure by marine region",
+    subtitle = "One year at a time, before the five-year mean",
+    x = NULL,
+    y = "Pressure",
+    color = NULL
+  ) +
+  theme_bw()
+```
+
+The lines rise, and they also jump. The average step from one year to the next
+is `r round(mean_step, 3)`. The largest step is `r round(max_step, 3)`. The
+mean pressure in 2025, still unsmoothed, is only `r round(rise_to_2025, 3)`.
+One odd year can therefore erase or double the change that accumulated over
+the whole record. Those jumps come from upwelling, El Niño, and noise in the
+reconstruction. They are not the persistent acidification signal.
+
+The saved pressure is the mean of the current year and the four years before
+it. For 2025 that is the mean of 2021–2025. The first year with five years of
+history is 1989, so the table starts there. A real shift then shows up over a
+couple of years rather than all at once.
+
+```{r five-year-means}
+# lag() stays inside the region, so each window is that region's own previous years.
+pressure_csv <- annual_scores %>%
+  group_by(rgn_id) %>%
+  mutate(
+    pressure = (
+      pressure +
+        lag(pressure, 1) +
+        lag(pressure, 2) +
+        lag(pressure, 3) +
+        lag(pressure, 4)
+    ) / 5
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(pressure)) %>%
+  arrange(year, rgn_id)
+
+csv_path <- file.path(out_dir, "oa_pressure.csv")
+write_csv(pressure_csv, csv_path)
+
+kable(
+  pressure_csv %>% filter(year %in% c(1990, 2010, 2025)),
+  digits = 3,
+  caption = "Five-year mean regional pressure"
+)
+```
+
+```{r plot-five-year, fig.height=5.5}
+ggplot(pressure_csv, aes(year, pressure, color = rgn_id)) +
+  geom_line(linewidth = 0.6) +
+  scale_y_continuous(limits = c(0, ymax)) +
+  labs(
+    title = "Five-year mean aragonite pressure by marine region",
+    subtitle = "Saved score: the year and the four years before it",
+    x = NULL,
+    y = "Pressure",
+    color = NULL
+  ) +
+  theme_bw()
+```
+
+The table is `r csv_path`.
