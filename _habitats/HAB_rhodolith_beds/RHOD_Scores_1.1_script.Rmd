@@ -1,0 +1,353 @@
+---
+title: "Rhodolith beds - Gulf of California OHI"
+author: "Austin Martinez"
+date: 07/10/2026
+format: 
+  html:
+    code-fold: show
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+
+
+```{r}
+# Load in Libraries
+library(sf)
+library(dplyr)
+library(here)
+library(terra)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tmap)
+library(readr)
+```
+
+```{r}
+# Target CRS (matches OHI regions + soft-bottom pressure rasters)
+target_crs <- "EPSG:6372"  # Mexico ITRF2008 / LCC
+years <- 2007:2025
+
+# Soft-bottom fishing pressure (0–1) from soft_bottom.qmd
+prop_disturbed <- rast(
+  here("_habitats/HAB_soft_bottom/int/prop_disturbed_soft_bottom_1km.tif")
+)
+nlyr(prop_disturbed)
+```
+
+```{r}
+# Read OHI regions and transform to Mexico ITRF2008 / LCC
+ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |>
+  st_make_valid() |>
+  st_transform(target_crs)
+
+ohi_land   <- ohi_regions |> dplyr::filter(location == "land")
+ohi_marine <- ohi_regions |> dplyr::filter(location == "marine")
+```
+
+```{r}
+# Read rhodolith polygons and transform to EPSG:6372
+rodoliths <- st_read(
+  here("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/rodoliths/rodolith_merge.shp")
+) |>
+  st_make_valid() |>
+  st_transform(target_crs)
+
+stopifnot(st_crs(rodoliths) == st_crs(ohi_regions))
+print(st_crs(rodoliths)$Name)
+```
+
+Plot rhodolith locations as points (for visibility).
+```{r}
+rodolith_pts <- rodoliths |>
+  st_point_on_surface()
+
+# Land first (gray), then soft-bottom fishing pressure, then marine borders + points
+year_map <- 2025
+lyr <- which(years == year_map)
+plot(
+  vect(ohi_land),
+  col = "gray85",
+  border = "gray60",
+  lwd = 0.5,
+  main = paste0("Rhodolith beds (points) — soft-bottom pressure ", year_map),
+  axes = FALSE,
+  box = FALSE
+)
+plot(
+  prop_disturbed[[lyr]],
+  add = TRUE,
+  col = hcl.colors(100, "viridis"),
+  range = c(0, 1),
+  legend = TRUE,
+  axes = FALSE,
+  box = FALSE
+)
+plot(vect(ohi_marine), add = TRUE, border = "gray70", lwd = 0.7, col = NA)
+plot(
+  vect(rodolith_pts),
+  add = TRUE,
+  pch = 16,
+  cex = 0.2,
+  col = "red"
+)
+```
+
+```{r}
+# Assign each rhodolith polygon (piece) to a marine OHI region; drop land overlaps
+rodoliths <- st_intersection(rodoliths, ohi_marine) |>
+  st_collection_extract("POLYGON") |>
+  mutate(
+    poly_id   = dplyr::row_number(),
+    region_id = as.integer(id),
+    area_km2  = as.numeric(st_area(geometry)) / 1e6
+  ) |>
+  filter(area_km2 > 0)
+
+rodoliths
+```
+
+## Extract soft-bottom pressure under rhodolith beds
+
+Pressure under each bed = area-weighted mean of `prop_disturbed` cells overlapping the polygon.
+No recovery scaling applied for now (same 0–1 exposure scale as soft bottom).
+```{r}
+# Weighted mean pressure per rhodolith polygon × year
+ex <- terra::extract(
+  prop_disturbed,
+  vect(rodoliths),
+  fun = mean,
+  weights = TRUE,
+  na.rm = TRUE,
+  ID = TRUE
+)
+
+# Layer names → year; join polygon region + area
+pressure_cols <- setdiff(names(ex), "ID")
+df_poly <- as_tibble(ex) |>
+  rename(poly_id = ID) |>
+  left_join(
+    st_drop_geometry(rodoliths) |> select(poly_id, region_id, area_km2),
+    by = "poly_id"
+  ) |>
+  pivot_longer(
+    cols = all_of(pressure_cols),
+    names_to = "layer",
+    values_to = "prop"
+  ) |>
+  mutate(
+    year = as.integer(sub("prop_disturbed_", "", layer))
+  )
+
+df_poly
+```
+
+```{r}
+# Area-weighted average pressure per region × year
+pressure_df <- df_poly |>
+  filter(!is.na(prop), !is.na(region_id), area_km2 > 0) |>
+  group_by(region_id, year) |>
+  summarise(
+    area_sum  = sum(area_km2, na.rm = TRUE),
+    Pressure  = sum(prop * area_km2, na.rm = TRUE) / area_sum,
+    RHO_score = 1 - Pressure,
+    Pressure  = Pressure * 100,
+    RHO_score = RHO_score * 100,
+    .groups = "drop"
+  )
+
+pressure_df
+
+dir.create(here("_habitats/HAB_rhodolith_beds/RHO_outputs"), showWarnings = FALSE)
+write_csv(
+  pressure_df,
+  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_region_scores_per_year.csv")
+)
+```
+
+## Current RHO
+```{r}
+# Select a single year
+year_to_show <- 2025   # <-- change this to any year you want
+
+# Filter for selected year
+pressure_year <- pressure_df |>
+  filter(year == year_to_show) |>
+  arrange(region_id)
+
+# Make a kable table
+pressure_year |>
+  select(region_id, Pressure, RHO_score) |>
+  kable(
+    digits = 4,
+    col.names = c("Region ID", "Pressure", "RHO_score"),
+    align = c("c", "r", "r")
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "bordered", "hover"),
+    full_width = FALSE
+  ) |>
+  add_header_above(
+    setNames(3, paste0("Rhodolith Pressure & RHO — Year ", year_to_show))
+  )
+```
+
+```{r}
+ohi_rho <- ohi_regions |>
+  left_join(
+    pressure_year |> transmute(id = as.integer(region_id), RHO_score),
+    by = "id"
+  )
+ohi_land_map   <- ohi_rho |> filter(location == "land")
+ohi_marine_map <- ohi_rho |> filter(location == "marine")
+ggplot() +
+  geom_sf(data = ohi_land_map, fill = "#f5e6c8", color = "gray40", linewidth = 0.3) +
+  geom_sf(data = ohi_marine_map, aes(fill = RHO_score), color = "gray20", linewidth = 0.4) +
+  scale_fill_distiller(
+    palette = "RdYlGn",
+    direction = 1,
+    name = "RHO score",
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    na.value = "gray90"
+  ) +
+  labs(title = "Rhodolith habitat status (2025)") +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+```
+
+```{r, fig.width=12, fig.height=7}
+# Define region colors
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+# Clean region names in pressure_df to match color names
+pressure_df <- pressure_df |>
+  mutate(
+    region_clean = paste0("Region_", region_id),   # numeric → Region_#
+    region_clean = gsub("_", " ", region_clean)    # Region_1 → Region 1
+  )
+
+# Clean color names to match cleaned labels ("Region 1", etc.)
+rgn_colors_clean <- setNames(
+  rgn_colors,
+  gsub("_", " ", names(rgn_colors))                # Region_1 → Region 1
+)
+
+# RHO time series plot with custom colors
+ggplot(
+  pressure_df,
+  aes(
+    x = year,
+    y = RHO_score,
+    group = region_clean,
+    color = region_clean
+  )
+) +
+  geom_point(size = 2) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = rgn_colors_clean) +
+  labs(
+    title = "RHO Score Over Time",
+    x = "Year",
+    y = "RHO Score",
+    color = "Region ID"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+## Format and save data
+
+```{r}
+# Calculate condition score (0–100), same pattern as soft bottom
+condition_df <- pressure_df |>
+  select(region_id, year, condition = RHO_score) |>
+  mutate(
+    condition = pmin(condition, 100)
+  )
+condition_df
+
+write_csv(
+  condition_df,
+  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_status.csv")
+)
+
+condition_df <- condition_df |>
+  mutate(region_id = factor(region_id, levels = 1:9))
+ggplot(condition_df, aes(x = year, y = condition)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~ region_id, ncol = 3, labeller = labeller(region_id = function(x) paste("Region", x))) +
+  scale_x_continuous(breaks = pretty(condition_df$year)) +
+  labs(
+    x = "Year",
+    y = "Condition",
+    title = "Condition by region and year"
+  ) +
+  theme_bw()
+```
+
+## Trend Calculation
+
+```{r}
+# Trend Calculation: lm for most recent 5 years of data
+year_end <- max(condition_df$year, na.rm = TRUE)
+year_start <- year_end - 4
+calc_trends <- function(d) {
+  ys <- min(d$year)
+  ye <- max(d$year)
+  cs <- d$condition[d$year == ys][1]
+  fit_lin <- lm(condition ~ year, data = d)
+  fit_log <- lm(log(pmax(condition, 1e-6)) ~ year, data = d)
+  slope_lin <- unname(coef(fit_lin)["year"])
+  slope_log <- unname(coef(fit_log)["year"])
+  tibble(
+    year = ye,
+    year_start = ys,
+    year_end = ye,
+    condition_start = cs,
+    trend_pct_linear = (slope_lin / cs) * 100,
+    trend_pct_cagr   = (exp(slope_log) - 1) * 100
+  )
+}
+trend_df <- condition_df |>
+  filter(year >= year_start, year <= year_end) |>
+  group_by(region_id) |>
+  group_modify(~ calc_trends(.x)) |>
+  ungroup()
+
+trend_df
+
+write_csv(
+  trend_df,
+  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_trend.csv")
+)
+```
+
+## Pressure
+
+```{r}
+pressure_df_score <- pressure_df %>%
+  mutate(pressure = Pressure / 100) %>%
+  select(region_id, year, pressure)
+
+write_csv(
+  pressure_df_score,
+  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_pressure.csv")
+)
+```
