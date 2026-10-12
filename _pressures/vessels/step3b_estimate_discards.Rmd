@@ -1,0 +1,539 @@
+---
+title: "Discard tonnes on slow VMS pings"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+Reported catch is already placed on slow VMS pings in
+[`step3_allocate_catch_to_pings.Rmd`](step3_allocate_catch_to_pings.Rmd).
+This notebook turns that catch into discard tonnes.
+
+The discard rate is tonnes discarded per tonne of total catch, from
+`gear_fao_b1_crosswalk.csv`. Total catch is landings plus discards, and the
+ping table holds landings. Discard tonnes on a ping are
+
+`catch_tonnes × discard_rate / (1 − discard_rate)`.
+
+One rate is applied to the whole permit. The catch on the ping is already
+that vessel's share of its business's landings, summed across species.
+
+Landings with no slow ping are left out. Most of those vessel IDs are not
+in the permit registry, so they have no gear or target to join. They stay
+in the comparison below, as the part of each region's catch that does not
+receive a discard estimate.
+
+```{r setup}
+library(tidyverse)
+library(terra)
+library(sf)
+library(knitr)
+
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+ping_path <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/vessels/catch_allocation/catch_tonnes_by_ping.csv"
+comparison_path <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/vessels/catch_allocation/catch_allocation_vs_records.csv"
+rate_path <- "/home/frazier/ohi_goc_prep/_pressures/vessels/data/gear_fao_b1_crosswalk.csv"
+marine_path <- "/home/frazier/ohi_goc_prep/spatial/ohi_regions/ohi_marine_raster_1km.tif"
+landings_path <- "/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"
+region_path <- "/home/frazier/ohi_goc_prep/spatial/ohi_regions/goc_ohi_rgns.shp"
+
+out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/vessels/catch_allocation"
+fig_dir <- "/home/frazier/ohi_goc_prep/_pressures/vessels/figures"
+data_dir <- "/home/frazier/ohi_goc_prep/_pressures/vessels/data"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Same sector list used to build the catch file in the CPUE notebook.
+sectors <- c(
+  "marine: fishery sector yet to be classified",
+  "marine: small-scale capture",
+  "marine: large-scale capture",
+  "freshwater or marine: large-scale capture",
+  "freshwater or marine: small-scale capture",
+  "freshwater or marine: fishery sector yet to be classified"
+)
+
+ohi_id <- rast(marine_path)
+ohi_marine <- ifel(ohi_id >= 1, 1, NA)
+```
+
+## 1. Attach a discard rate to each ping
+
+A permit with both gear and target missing is a real row in the crosswalk
+(the mixed rate). A normal join does not match missing to missing, so the
+blank pair is given its own key.
+
+```{r rates}
+permit_key <- function(gear, target) {
+  paste(coalesce(gear, "BLANK"), coalesce(target, "BLANK"), sep = " || ")
+}
+
+rates <- read_csv(
+  rate_path,
+  col_types = cols(
+    gear_type = col_character(),
+    target_species = col_character(),
+    discard_category = col_character(),
+    discard_rate = col_double(),
+    .default = col_skip()
+  )
+) %>%
+  mutate(permit_key = permit_key(gear_type, target_species)) %>%
+  select(permit_key, discard_category, discard_rate)
+
+stopifnot(anyDuplicated(rates$permit_key) == 0)
+
+pings <- read_csv(
+  ping_path,
+  col_types = cols(
+    year = col_integer(),
+    eu_rnpa = col_character(),
+    lat = col_double(),
+    lon = col_double(),
+    gear_type = col_character(),
+    target_species = col_character(),
+    catch_tonnes = col_double(),
+    .default = col_skip()
+  )
+) %>%
+  mutate(
+    permit_key = permit_key(gear_type, target_species),
+    eu_rnpa = as.character(eu_rnpa)
+  ) %>%
+  left_join(rates, by = "permit_key") %>%
+  mutate(
+    discard_tonnes = catch_tonnes * discard_rate / (1 - discard_rate)
+  )
+
+unmatched <- pings %>%
+  filter(is.na(discard_rate)) %>%
+  count(gear_type, target_species, name = "n_pings")
+
+stopifnot(nrow(unmatched) == 0)
+stopifnot(all(pings$discard_rate < 1))
+
+cat(
+  "Pings:", nrow(pings), "\n",
+  "Landings on pings, t:", round(sum(pings$catch_tonnes)), "\n",
+  "Discards on pings, t:", round(sum(pings$discard_tonnes)), "\n"
+)
+```
+
+## 2. Region of each ping, and the discard map
+
+The region is the marine-grid cell the ping falls in. Cells are numbered 1
+to 9. Pings outside those nine regions keep a discard estimate and stay off
+the map.
+
+```{r region-and-raster}
+region_labels <- st_read(region_path, quiet = TRUE) %>%
+  st_drop_geometry() %>%
+  filter(location == "marine") %>%
+  arrange(rgn_id) %>%
+  transmute(
+    ohi_rgn = rgn_id,
+    region_label = paste(rgn_id, str_replace_all(estado, "_", " "), str_replace_all(ecorgn, "_", " "), sep = " · "),
+    trend_label = paste0(rgn_id, " · ", ecorgn)
+  )
+
+region_palette <- setNames(
+  hcl.colors(nrow(region_labels), palette = "Zissou1"),
+  region_labels$trend_label
+)
+
+discard_raster <- ifel(!is.na(ohi_marine), 0, NA)
+names(discard_raster) <- "discard_tonnes"
+discard_raster_2024 <- NULL
+
+years <- sort(unique(pings$year))
+placed_units <- pings %>% distinct(year, eu_rnpa)
+region_parts <- vector("list", length(years))
+
+for (i in seq_along(years)) {
+  yr <- years[[i]]
+  d <- pings %>% filter(year == yr)
+  pts <- vect(as.matrix(d[, c("lon", "lat")]), crs = "EPSG:4326")
+  pts <- project(pts, crs(ohi_id))
+  d$cell <- cellFromXY(ohi_id, crds(pts))
+  d$rgn_num <- values(ohi_id)[d$cell]
+
+  inside <- d %>% filter(!is.na(rgn_num))
+  cell_sum <- inside %>%
+    group_by(cell) %>%
+    summarise(discard_tonnes = sum(discard_tonnes), .groups = "drop")
+  discard_raster[cell_sum$cell] <- discard_raster[cell_sum$cell] + cell_sum$discard_tonnes
+  if (yr == 2024) {
+    discard_raster_2024 <- ifel(!is.na(ohi_marine), 0, NA)
+    discard_raster_2024[cell_sum$cell] <- cell_sum$discard_tonnes
+    names(discard_raster_2024) <- "discard_tonnes"
+  }
+
+  region_parts[[i]] <- d %>%
+    mutate(ohi_rgn = if_else(is.na(rgn_num), NA_character_, paste0("Region_", rgn_num))) %>%
+    group_by(year, ohi_rgn) %>%
+    summarise(
+      catch_tonnes = sum(catch_tonnes),
+      discard_tonnes = sum(discard_tonnes),
+      .groups = "drop"
+    )
+
+  message(
+    yr, ": ", round(sum(inside$discard_tonnes)), " t discards inside the grid, ",
+    round(sum(d$discard_tonnes[is.na(d$rgn_num)])), " t outside"
+  )
+  rm(d, pts, inside, cell_sum)
+  gc(verbose = FALSE)
+}
+
+ping_by_region <- list_rbind(region_parts)
+```
+
+```{r save-raster}
+raster_path <- file.path(out_dir, "discard_tonnes_2018_2024_1km.tif")
+discard_plot_raster <- ifel(discard_raster > 0, discard_raster, NA)
+names(discard_plot_raster) <- "discard_tonnes"
+writeRaster(discard_plot_raster, raster_path, overwrite = TRUE)
+
+cat("Discard tonnes inside the grid:", round(global(discard_plot_raster, "sum", na.rm = TRUE)[1, 1]), "\n")
+
+raster_2024_path <- file.path(out_dir, "discard_tonnes_2024_1km.tif")
+discard_2024_plot_raster <- ifel(discard_raster_2024 > 0, discard_raster_2024, NA)
+names(discard_2024_plot_raster) <- "discard_tonnes"
+writeRaster(discard_2024_plot_raster, raster_2024_path, overwrite = TRUE)
+```
+
+```{r plot-raster}
+plot_df <- as.data.frame(discard_plot_raster, xy = TRUE, na.rm = TRUE)
+names(plot_df)[3] <- "discard_tonnes"
+
+raster_plot <- ggplot(plot_df, aes(x, y, fill = discard_tonnes)) +
+  geom_raster() +
+  scale_fill_viridis_c(
+    trans = "sqrt",
+    name = "Tonnes",
+    labels = scales::label_comma()
+  ) +
+  coord_equal() +
+  labs(
+    title = "Discard tonnes on slow VMS pings, 2018–2024",
+    subtitle = "Landings on the ping, converted with the permit discard rate. Color scale is square-root.",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+
+print(raster_plot)
+ggsave(
+  file.path(fig_dir, "discard_tonnes_2018_2024_1km.png"),
+  raster_plot,
+  width = 8,
+  height = 7,
+  dpi = 150,
+  bg = "white"
+)
+```
+
+```{r plot-raster-2024}
+plot_2024 <- as.data.frame(discard_2024_plot_raster, xy = TRUE, na.rm = TRUE)
+names(plot_2024)[3] <- "discard_tonnes"
+
+raster_2024_plot <- ggplot(plot_2024, aes(x, y, fill = discard_tonnes)) +
+  geom_raster() +
+  scale_fill_viridis_c(
+    trans = "sqrt",
+    name = "Tonnes",
+    labels = scales::label_comma()
+  ) +
+  coord_equal() +
+  labs(
+    title = "Discard tonnes on slow VMS pings, 2024",
+    subtitle = "Landings on the ping, converted with the permit discard rate. Color scale is square-root.",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+
+print(raster_2024_plot)
+ggsave(
+  file.path(fig_dir, "discard_tonnes_2024_1km.png"),
+  raster_2024_plot,
+  width = 8,
+  height = 7,
+  dpi = 150,
+  bg = "white"
+)
+```
+
+## 3. Landings with no slow ping
+
+These landings are in the catch file and are not on the ping table. The
+region is the landing site's `OHI_region_est`, not a fishing position. That
+is the only region available for boats that were not tracked. They are used
+here as the denominator of the coverage share, and they are not given
+discard tonnes.
+
+```{r untracked}
+landings <- readRDS(landings_path)
+landings <- landings[
+  landings$year %in% years & landings$sector_estimate_draft %in% sectors,
+  c("year", "eu_rnpa", "OHI_region_est", "weight_kg_corrected")
+]
+landings$eu_rnpa <- as.character(landings$eu_rnpa)
+landings$placed <- paste(landings$year, landings$eu_rnpa) %in%
+  paste(placed_units$year, placed_units$eu_rnpa)
+
+untracked <- landings %>%
+  filter(!placed) %>%
+  group_by(year, ohi_rgn = OHI_region_est) %>%
+  summarise(untracked_catch_tonnes = sum(weight_kg_corrected, na.rm = TRUE) / 1000, .groups = "drop")
+
+rm(landings)
+gc(verbose = FALSE)
+
+# The gap in the catch comparison should equal these landings.
+gap <- read_csv(
+  comparison_path,
+  col_types = cols(
+    year = col_integer(),
+    record_tonnes = col_double(),
+    allocated_tonnes = col_double(),
+    .default = col_skip()
+  )
+) %>%
+  mutate(gap_tonnes = record_tonnes - allocated_tonnes) %>%
+  left_join(
+    untracked %>% group_by(year) %>% summarise(untracked_catch_tonnes = sum(untracked_catch_tonnes), .groups = "drop"),
+    by = "year"
+  )
+
+stopifnot(max(abs(gap$gap_tonnes - gap$untracked_catch_tonnes)) < 1)
+```
+
+## 4. Discard tonnes by region, and the share of catch they cover
+
+For each region and year, discard tonnes are the sum of the ping estimates
+that fall in that region. The share is
+
+`ping catch in the region / (ping catch in the region + untracked landings assigned to the region)`.
+
+Ping catch is where the tracked boats were fishing. Untracked landings are
+where those other boats landed. A region can therefore mix the two. Regions
+where most boats are small and untracked have a low share, because most of
+their landings have no permit to score.
+
+Pings that miss the nine regions are listed under the regional tables. They
+have a discard estimate and no region.
+
+```{r summary}
+regions <- tibble(ohi_rgn = paste0("Region_", 1:9))
+
+by_region <- regions %>%
+  crossing(year = years) %>%
+  left_join(ping_by_region %>% filter(!is.na(ohi_rgn)), by = c("year", "ohi_rgn")) %>%
+  left_join(untracked %>% filter(!is.na(ohi_rgn)), by = c("year", "ohi_rgn")) %>%
+  mutate(
+    catch_tonnes = coalesce(catch_tonnes, 0),
+    discard_tonnes = coalesce(discard_tonnes, 0),
+    untracked_catch_tonnes = coalesce(untracked_catch_tonnes, 0),
+    pct_catch_with_discard_estimate = 100 * catch_tonnes / (catch_tonnes + untracked_catch_tonnes),
+    discard_per_catch = discard_tonnes / catch_tonnes
+  ) %>%
+  left_join(region_labels, by = "ohi_rgn") %>%
+  arrange(year, ohi_rgn)
+
+summary_path <- file.path(data_dir, "discard_tonnes_by_ohi_rgn.csv")
+write_csv(
+  by_region %>%
+    select(
+      year, ohi_rgn, region_label, catch_tonnes, discard_tonnes,
+      discard_per_catch, untracked_catch_tonnes, pct_catch_with_discard_estimate
+    ),
+  summary_path
+)
+
+# Catch-weighted discard rate: discards / (landings + discards). Same columns
+# as the other files in vessels/output.
+output_dir <- "/home/frazier/ohi_goc_prep/_pressures/vessels/output"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+discards_pressure_path <- file.path(output_dir, "discards_pressure.csv")
+discards_pressure <- by_region %>%
+  transmute(
+    rgn_id = ohi_rgn,
+    year = year,
+    pressure = discard_tonnes / (catch_tonnes + discard_tonnes)
+  ) %>%
+  arrange(year, rgn_id)
+write_csv(discards_pressure, discards_pressure_path)
+
+outside <- ping_by_region %>%
+  filter(is.na(ohi_rgn)) %>%
+  select(year, catch_tonnes, discard_tonnes)
+
+no_region_landings <- untracked %>%
+  filter(is.na(ohi_rgn)) %>%
+  select(year, untracked_catch_tonnes)
+```
+
+### 2024
+
+```{r table-2024}
+kable(
+  by_region %>%
+    filter(year == 2024) %>%
+    select(region_label, catch_tonnes, discard_tonnes, untracked_catch_tonnes, pct_catch_with_discard_estimate),
+  digits = c(0, 0, 0, 0, 0),
+  col.names = c(
+    "Region",
+    "Ping catch, t",
+    "Discards, t",
+    "Untracked landings, t",
+    "Share of catch with a discard estimate, %"
+  ),
+  caption = "2024. Discards are estimated for the ping catch only. The share is ping catch divided by ping catch plus untracked landings assigned to that region."
+)
+```
+
+```{r plot-share-2024}
+share_plot <- by_region %>%
+  filter(year == 2024) %>%
+  ggplot(aes(reorder(region_label, pct_catch_with_discard_estimate), pct_catch_with_discard_estimate)) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20)) +
+  labs(
+    title = "Share of 2024 catch with a discard estimate",
+    subtitle = "Ping catch in the region, divided by ping catch plus untracked landings at sites in the region.",
+    x = NULL,
+    y = "Percent"
+  ) +
+  theme_bw()
+
+print(share_plot)
+ggsave(
+  file.path(fig_dir, "discard_catch_share_by_region_2024.png"),
+  share_plot,
+  width = 8,
+  height = 5,
+  dpi = 150,
+  bg = "white"
+)
+```
+
+Across the whole Gulf in 2024, the discard estimate covers the catch placed
+on slow pings, including pings that miss the nine regions. Untracked
+landings are the rest.
+
+```{r gulf-2024}
+gulf_2024 <- gap %>% filter(year == 2024)
+cat(
+  "Gulf landings:", round(gulf_2024$record_tonnes), "t\n",
+  "Catch with a discard estimate:", round(gulf_2024$allocated_tonnes), "t (",
+  round(100 * gulf_2024$allocated_tonnes / gulf_2024$record_tonnes), "%)\n",
+  "Untracked landings, no discard estimate:", round(gulf_2024$untracked_catch_tonnes), "t\n"
+)
+```
+
+### All years
+
+```{r table-all-years}
+kable(
+  by_region %>%
+    select(year, region_label, catch_tonnes, discard_tonnes, untracked_catch_tonnes, pct_catch_with_discard_estimate),
+  digits = c(0, 0, 0, 0, 0, 0),
+  col.names = c(
+    "Year",
+    "Region",
+    "Ping catch, t",
+    "Discards, t",
+    "Untracked landings, t",
+    "Share with a discard estimate, %"
+  ),
+  caption = "Discard tonnes and the share of catch they are estimated from. Untracked landings are not converted to discards."
+)
+```
+
+### Catch on pings that miss the nine regions
+
+```{r outside}
+kable(
+  outside,
+  digits = 0,
+  col.names = c("Year", "Ping catch, t", "Discards, t"),
+  caption = "Slow pings outside the marine grid. These discards are in the Gulf total and are not in a regional sum or on the map."
+)
+
+kable(
+  no_region_landings,
+  digits = 0,
+  col.names = c("Year", "Untracked landings with no region, t"),
+  caption = "Untracked landings whose landing site has no OHI region. They are in the Gulf gap and in no regional share."
+)
+```
+
+## 5. Discard trends by region
+
+One line per marine region. Points mark each year. Discard tonnes are the sum inside the region. Discards per catch are those tonnes divided by the ping catch in the same region.
+
+```{r plot-trends, fig.height=5.5, fig.width=9}
+trend <- by_region %>%
+  mutate(trend_label = factor(trend_label, levels = region_labels$trend_label))
+
+plot_region_lines <- function(tbl, y, title, ylab) {
+  ggplot(tbl, aes(x = year, y = .data[[y]], color = trend_label, group = trend_label)) +
+    geom_line(linewidth = 0.85, alpha = 0.95) +
+    geom_point(size = 2.4, alpha = 0.95) +
+    scale_x_continuous(breaks = scales::breaks_width(1)) +
+    scale_color_manual(values = region_palette, name = "OHI region") +
+    labs(
+      title = title,
+      x = "Year",
+      y = ylab
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 13),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = "grey92"),
+      legend.key.height = grid::unit(0.45, "cm"),
+      legend.text = element_text(size = 9)
+    )
+}
+
+tonnes_plot <- plot_region_lines(
+  trend,
+  "discard_tonnes",
+  "Discard tonnes by OHI region",
+  "Discard tonnes"
+)
+print(tonnes_plot)
+ggsave(
+  file.path(fig_dir, "discard_tonnes_by_ohi_rgn_trend.png"),
+  tonnes_plot,
+  width = 9,
+  height = 5.5,
+  dpi = 300,
+  bg = "white"
+)
+
+ratio_plot <- plot_region_lines(
+  trend,
+  "discard_per_catch",
+  "Discards per tonne of catch by OHI region",
+  "Discards / catch"
+)
+print(ratio_plot)
+ggsave(
+  file.path(fig_dir, "discard_per_catch_by_ohi_rgn_trend.png"),
+  ratio_plot,
+  width = 9,
+  height = 5.5,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+The regional table is `r summary_path`. The 2018–2024 map is `r raster_path`. The 2024 map is `r raster_2024_path`.

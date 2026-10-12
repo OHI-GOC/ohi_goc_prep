@@ -38,6 +38,12 @@ Every permit combo is assigned a Gilman gear category using one of three methods
    across mapped component categories. `OTRO` and `PESCA MULTIPLE` tokens are **ignored**
    for compositing (e.g. `ARRASTRE | PALANGRE | PESCA MULTIPLE` → mean of trawl + longline).
 
+Three permit groups are aligned with the discard classification:
+
+- **Shark longline** (`PALANGRE` and `TIBURÓN`, without escama, shrimp, tuna, or sardine) is **Longline, pelagic**. These are the Ensenada pelagic fleet, not bottom longlines. `OTRAS` may be listed as well.
+- **Shrimp on a longline, purse seine, or pole-and-line** (`PALANGRE`, `CERCO`, or `VARA` with `CAMARÓN` and no arrastre) is **Trawl, bottom**. The boats match the industrial shrimp-trawl fleet; the gear word does not.
+- **Arrastre with tuna and without shrimp** is **Trawl, midwater**, including when escama is also listed. Tuna on an arrastre permit is the midwater signal. Sardine arrastre was already midwater.
+
 **Ghost gear index used in pressure rasters:**
 
 - `H_gear` = R × O (general gear hazard; not used for ghost pressure)
@@ -145,21 +151,25 @@ map_single_mexican_gear <- function(mex_gear, target_species) {
   has_sardine <- str_detect(target_chr, "SARDINA")
   has_tuna <- str_detect(target_chr, "ATÚN")
   has_shark <- str_detect(target_chr, "TIBURÓN")
-  has_tuna_only <- has_tuna & !has_shrimp & !has_finfish & !has_shark & !has_sardine
 
   case_when(
     mex_gear == "ARRASTRE" & has_sardine ~ "Trawl, midwater",
-    mex_gear == "ARRASTRE" & has_tuna_only ~ "Trawl, midwater",
+    mex_gear == "ARRASTRE" & has_tuna & !has_shrimp ~ "Trawl, midwater",
     mex_gear == "ARRASTRE" ~ "Trawl, bottom",
+    mex_gear == "CERCO" & has_shrimp ~ "Trawl, bottom",
     mex_gear == "CERCO" & has_tuna & !has_sardine ~
       "Purse seine, tuna, including drifting and anchored FADs",
     mex_gear == "CERCO" & has_tuna & has_sardine ~ "Purse seine, non-tuna",
     mex_gear == "CERCO" & has_tuna ~
       "Purse seine, tuna, including drifting and anchored FADs",
     mex_gear == "CERCO" ~ "Purse seine, non-tuna",
+    mex_gear == "PALANGRE" & has_shrimp ~ "Trawl, bottom",
     mex_gear == "PALANGRE" & has_tuna ~ "Longline, pelagic",
+    mex_gear == "PALANGRE" & has_shark & !has_finfish & !has_sardine ~
+      "Longline, pelagic",
     mex_gear == "PALANGRE" & has_shark ~ "Longline, demersal",
     mex_gear == "PALANGRE" ~ "Longline, demersal",
+    mex_gear == "VARA" & has_shrimp ~ "Trawl, bottom",
     mex_gear == "VARA" ~ "Pole-and-line, including anchored FADs",
     TRUE ~ NA_character_
   )
@@ -230,7 +240,6 @@ map_gilman_dominant <- function(gear_type, target_species) {
   has_tuna <- str_detect(target_chr, "ATÚN")
   has_shark <- str_detect(target_chr, "TIBURÓN")
   has_otras <- str_detect(target_chr, "OTRAS")
-  has_tuna_only <- has_tuna & !has_shrimp & !has_finfish & !has_shark & !has_sardine
   gear_missing <- is.na(gear_type) | gear_chr == ""
   target_missing <- is.na(target_species) | target_chr == ""
   ambiguous_gear <- gear_missing | gear_chr == "OTRO" | gear_chr == "PESCA MULTIPLE"
@@ -241,12 +250,15 @@ map_gilman_dominant <- function(gear_type, target_species) {
     has_sardine & !has_trawl & !has_purse & !has_longline ~ "Purse seine, non-tuna",
     has_tuna & has_purse & !has_trawl ~
       "Purse seine, tuna, including drifting and anchored FADs",
+    has_shrimp & gear_chr %in% c("PALANGRE", "CERCO", "VARA") ~ "Trawl, bottom",
     has_vara & !str_detect(gear_chr, "\\|") ~ "Pole-and-line, including anchored FADs",
     has_shrimp & (has_trawl | ambiguous_gear) ~ "Trawl, bottom",
     has_trawl & has_sardine ~ "Trawl, midwater",
-    has_trawl & has_tuna_only ~ "Trawl, midwater",
+    has_trawl & has_tuna & !has_shrimp ~ "Trawl, midwater",
     has_trawl ~ "Trawl, bottom",
     has_longline & has_tuna ~ "Longline, pelagic",
+    has_longline & has_shark & !has_finfish & !has_shrimp & !has_sardine ~
+      "Longline, pelagic",
     has_longline & has_shark ~ "Longline, demersal",
     has_longline ~ "Longline, demersal",
     has_purse & has_tuna ~ "Purse seine, tuna, including drifting and anchored FADs",
@@ -271,6 +283,8 @@ map_gilman_dominant <- function(gear_type, target_species) {
     str_detect(gear_chr, "\\|") & has_tuna & has_purse ~
       "Purse seine, tuna, including drifting and anchored FADs",
     str_detect(gear_chr, "\\|") & has_tuna & has_longline ~ "Longline, pelagic",
+    str_detect(gear_chr, "\\|") & has_shark & has_longline &
+      !has_finfish & !has_shrimp & !has_tuna & !has_sardine ~ "Longline, pelagic",
     str_detect(gear_chr, "\\|") & has_shark & has_longline ~ "Longline, demersal",
     str_detect(gear_chr, "\\|") & has_shrimp & has_longline ~ "Trawl, bottom",
     str_detect(gear_chr, "\\|") & has_vara ~ "Pole-and-line, including anchored FADs",
@@ -307,10 +321,12 @@ map_gilman_dominant <- function(gear_type, target_species) {
       "Permit gear ambiguous; mapped from target. Artisanal gillnets not in registry.",
     has_tuna & has_purse ~
       "Tuna purse seine mapped with FAD category; FAD use not recorded in registry.",
-    has_shrimp & has_longline & !has_trawl ~
-      "Shrimp on longline permit uncommon; verify against fishery.",
-    has_shrimp & has_purse & !has_trawl ~
-      "Shrimp + purse seine; may understate risk if trawl also used.",
+    has_shrimp & gear_chr %in% c("PALANGRE", "CERCO", "VARA") ~
+      "Gear word is longline, purse seine, or pole-and-line, but the vessel matches the industrial shrimp-trawl fleet. Mapped to Trawl, bottom.",
+    has_longline & has_shark & !has_finfish & !has_shrimp & !has_tuna & !has_sardine ~
+      "Shark longline in this fleet is pelagic, based in Ensenada, not a bottom longline.",
+    has_trawl & has_tuna & has_finfish & !has_shrimp ~
+      "Arrastre with tuna and escama mapped to midwater. Tuna on the permit is the midwater signal.",
     TRUE ~ NA_character_
   )
 

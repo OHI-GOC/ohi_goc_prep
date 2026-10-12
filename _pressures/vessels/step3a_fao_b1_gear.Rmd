@@ -1,0 +1,276 @@
+---
+title: "FAO Table B.1 gear names for vessel permits"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+Each row is one permit pair, `gear_type` by `target_species`, from the Gilman
+crosswalk. `fao_b1_gear` is the matching gear name in Table B.1 of Pérez Roda
+et al. 2019, FAO Fisheries and Aquaculture Technical Paper 633. That table is
+the source of the gear-specific discard rates in Gilman et al. 2020,
+Figure 2.
+
+Only the single-gear permits with one clear fishery are filled in. A permit
+that lists two gears, or shrimp together with another target, is left blank
+for a later decision.
+
+The names used here, copied from Table B.1, are:
+
+- `Trawl, shrimp` for `ARRASTRE` and target `CAMARÓN` alone
+- `Otter trawl, midwater` for `ARRASTRE` and target `SARDINA Y ANCHOVETA` alone, or `ATÚN` alone
+- `Longline, bottom` for `PALANGRE` and a target made only of `ESCAMA` and `TIBURÓN`
+- `Longline, pelagic` for `PALANGRE` and target `ATÚN` alone
+- `Purse seine` for `CERCO` and target `ATÚN` alone, or `SARDINA Y ANCHOVETA` alone
+
+```{r setup}
+library(tidyverse)
+library(here)
+library(knitr)
+
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+crosswalk_path <- here("_pressures/vessels/data/gear_gilman_crosswalk.csv")
+out_path <- here("_pressures/vessels/data/gear_fao_b1_crosswalk.csv")
+```
+
+## 1. Permit pairs
+
+```{r combos}
+combos <- read_csv(
+  crosswalk_path,
+  col_types = cols(
+    gear_type = col_character(),
+    target_species = col_character(),
+    n_vessels = col_double(),
+    gilman_gear_category = col_character(),
+    .default = col_skip()
+  )
+) %>%
+  arrange(desc(n_vessels))
+
+cat("Permit pairs:", nrow(combos), "\n")
+```
+
+## 2. Easy matches
+
+A gear string with `|` is more than one gear, so it stays blank. A target
+string is read as its pieces split on `|`.
+
+```{r match}
+# One named gear, with no second gear on the same permit.
+single_gear <- function(gear) {
+  !is.na(gear) & !str_detect(gear, "\\|")
+}
+
+# Target pieces, dropping a blank piece from a missing target.
+target_pieces <- function(target) {
+  if (is.na(target) || target == "") character(0) else str_split(target, " \\| ")[[1]]
+}
+
+fao_b1_gear <- function(gear, target) {
+  if (!single_gear(gear)) return(NA_character_)
+  pieces <- target_pieces(target)
+  if (length(pieces) == 0) return(NA_character_)
+
+  only <- function(names) setequal(pieces, names)
+  demersal_longline <- all(pieces %in% c("ESCAMA", "TIBURÓN")) &&
+    any(pieces %in% c("ESCAMA", "TIBURÓN"))
+
+  case_when(
+    gear == "ARRASTRE" & only("CAMARÓN") ~ "Trawl, shrimp",
+    gear == "ARRASTRE" & only("SARDINA Y ANCHOVETA") ~ "Otter trawl, midwater",
+    gear == "ARRASTRE" & only("ATÚN") ~ "Otter trawl, midwater",
+    gear == "PALANGRE" & demersal_longline ~ "Longline, bottom",
+    gear == "PALANGRE" & only("ATÚN") ~ "Longline, pelagic",
+    gear == "CERCO" & only("ATÚN") ~ "Purse seine",
+    gear == "CERCO" & only("SARDINA Y ANCHOVETA") ~ "Purse seine",
+    TRUE ~ NA_character_
+  )
+}
+
+matched <- combos %>%
+  rowwise() %>%
+  mutate(fao_b1_gear = fao_b1_gear(gear_type, target_species)) %>%
+  ungroup()
+```
+
+## 3. Discard rate for the categories decided so far
+
+Labels below are filled. The first matching rule wins. The rate is tonnes discarded per tonne of total catch.
+
+- **Shrimp trawl**, rate 0.549, when the target includes `CAMARÓN`, whatever the gear. A shrimp permit that also lists escama, shark, or otras keeps this rate. Permits coded `OTRO`, blank, `PESCA MULTIPLE`, longline, purse seine, or pole-and-line are the same large steel boats as the arrastre shrimp fleet, based in the shrimp-trawl ports. The rate is tonnes discarded per tonne of total catch for shrimp trawl, from FAO Table B.1 (Pérez Roda et al. 2019), which Gilman et al. 2020 show in Figure 2.
+- **Pelagic fishes**, rate 0.062, when the target includes `SARDINA Y ANCHOVETA`, alone or with otras or atún. The rate is from FAO Table 2, which Gilman et al. 2020 show in Figure 4.
+- **Tunas**, rate 0.054, when `ATÚN` is the only target. Same Figure 4 source.
+- **Pelagic fishes**, same 0.062 rate, when the target includes `ATÚN` together with any other target. Tuna on the permit is the pelagic signal, including when the gear is `OTRO` or `PESCA MULTIPLE`. A permit that also lists `CAMARÓN` stays a shrimp trawl, because that gear is the bottom fishery. `ATÚN` alone keeps the tuna rate.
+- **Demersal fishes**, rate 0.167, when the target includes `ESCAMA` and does not include shrimp, tuna, or sardine. Shark or otras may be listed with the escama. Same Figure 4 source.
+- **Pelagic fishes**, same 0.062 rate, when the gear includes `PALANGRE` and the target includes `TIBURÓN`, with or without `OTRAS`, and without escama, shrimp, tuna, or sardine. Shark longline in this fleet is the pelagic fishery.
+- **Shark**, rate 0.114, when the target includes `TIBURÓN`, with or without `OTRAS`, the gear does not include `PALANGRE`, and the permit does not list shrimp, escama, tuna, or sardine. These boats are not the pelagic longline fleet and they are not demersal fishes. A blank rate would enter the pressure as zero, so the rate is the unweighted mean of the two neighbouring Figure 4 rates: pelagic fishes 0.062 and demersal fishes 0.167.
+- **Other species**, rate 0.151, when `OTRAS` is the only target. `OTRAS` is the residual permit after shrimp, escama, shark, tuna, and sardine. It can be other molluscs, cephalopods, or crab and lobster in pots, and the landings do not say which. The rate is the unweighted mean of those three: molluscs excluding cephalopods 0.132 and cephalopods 0.156 from FAO Table 2, and pots 0.166 from FAO Table B.1. The Figure 4 crustacean rate is not used, because it includes shrimp trawls. The Figure 4 mixed rate is not used, because mixed means one fishery targets two or more groups.
+- **Mixed**, rate 0.098, when both gear and target are missing. Those 222 vessels have no fishery name in any permit field. The rate is the Figure 4 mixed category from FAO Table 2, used here as the fallback for an unknown permit.
+- **Pelagic fishes**, same 0.062 rate, when the gear is `CERCO` and the target is missing. The one such boat is a 25 m seiner in Guaymas. Every Guaymas purse seiner with a target is sardine, and the tuna seiners are much larger and are based in Mazatlán and Ensenada.
+
+```{r discard}
+matched <- matched %>%
+  mutate(
+    has_shrimp = !is.na(target_species) & str_detect(target_species, "CAMARÓN"),
+    has_sardine = !is.na(target_species) & str_detect(target_species, "SARDINA Y ANCHOVETA"),
+    has_tuna = !is.na(target_species) & str_detect(target_species, "ATÚN"),
+    has_escama = !is.na(target_species) & str_detect(target_species, "ESCAMA"),
+    has_shark = !is.na(target_species) & str_detect(target_species, "TIBURÓN"),
+    has_longline = !is.na(gear_type) & str_detect(gear_type, "PALANGRE"),
+    tuna_alone = target_species == "ATÚN",
+    otras_only = !is.na(target_species) & str_detect(target_species, "OTRAS") &
+      !has_shrimp & !has_sardine & !has_tuna & !has_escama & !has_shark,
+    permit_missing = is.na(gear_type) & is.na(target_species),
+    cerco_no_target = !is.na(gear_type) & gear_type == "CERCO" & is.na(target_species),
+    discard_category = case_when(
+      has_shrimp ~ "Shrimp trawl",
+      has_sardine ~ "Pelagic fishes",
+      tuna_alone ~ "Tunas",
+      has_tuna & !tuna_alone ~ "Pelagic fishes",
+      has_escama & !has_shrimp & !has_tuna & !has_sardine ~ "Demersal fishes",
+      has_longline & has_shark & !has_escama & !has_shrimp & !has_tuna & !has_sardine ~
+        "Pelagic fishes",
+      has_shark & !has_longline & !has_escama & !has_shrimp & !has_tuna & !has_sardine ~
+        "Shark",
+      otras_only ~ "Other species",
+      permit_missing ~ "Mixed",
+      cerco_no_target ~ "Pelagic fishes",
+      TRUE ~ NA_character_
+    ),
+    discard_rate = case_when(
+      discard_category == "Shrimp trawl" ~ 0.549,
+      discard_category == "Pelagic fishes" ~ 0.062,
+      discard_category == "Tunas" ~ 0.054,
+      discard_category == "Demersal fishes" ~ 0.167,
+      discard_category == "Other species" ~ round(mean(c(0.132, 0.156, 0.166)), 3),
+      discard_category == "Mixed" ~ 0.098,
+      discard_category == "Shark" ~ round(mean(c(0.062, 0.167)), 3),
+      TRUE ~ NA_real_
+    ),
+    discard_source = case_when(
+      discard_category == "Shrimp trawl" ~
+        "FAO Table B.1, Trawl, shrimp (Pérez Roda et al. 2019); Gilman et al. 2020 Figure 2",
+      discard_category %in% c("Pelagic fishes", "Tunas", "Demersal fishes", "Mixed") ~
+        "FAO Table 2 (Pérez Roda et al. 2019); Gilman et al. 2020 Figure 4",
+      discard_category == "Other species" ~
+        paste(
+          "Unweighted mean of molluscs excluding cephalopods (0.132), cephalopods (0.156),",
+          "and pots (0.166). Molluscs and cephalopods: FAO Table 2 (Pérez Roda et al. 2019;",
+          "Gilman et al. 2020 Figure 4). Pots: FAO Table B.1.",
+          "Placeholder for the unnamed OTRAS permit, not the Figure 4 mixed rate."
+        ),
+      discard_category == "Shark" ~
+        paste(
+          "Unweighted mean of pelagic fishes (0.062) and demersal fishes (0.167).",
+          "Both rates are FAO Table 2 (Pérez Roda et al. 2019; Gilman et al. 2020 Figure 4).",
+          "Placeholder for a shark permit that is not a longline."
+        ),
+      TRUE ~ NA_character_
+    ),
+    rule = case_when(
+      has_shrimp ~ "1",
+      has_sardine ~ "2",
+      tuna_alone ~ "3",
+      has_tuna & !tuna_alone ~ "4",
+      has_escama & !has_shrimp & !has_tuna & !has_sardine ~ "5",
+      has_longline & has_shark & !has_escama & !has_shrimp & !has_tuna & !has_sardine ~ "6",
+      has_shark & !has_longline & !has_escama & !has_shrimp & !has_tuna & !has_sardine ~ "7",
+      otras_only ~ "8",
+      permit_missing ~ "9",
+      cerco_no_target ~ "10"
+    )
+  )
+
+rule_counts <- matched %>%
+  group_by(rule) %>%
+  summarise(rows = n(), vessels = sum(n_vessels), .groups = "drop")
+
+matched <- matched %>%
+  select(
+    gear_type, target_species, n_vessels, gilman_gear_category, fao_b1_gear,
+    discard_category, discard_rate, discard_source
+  )
+
+write_csv(matched, out_path)
+
+rule_labels <- tribble(
+  ~rule, ~category, ~rate, ~applies, ~source,
+  "1", "Shrimp trawl", 0.549,
+    "Target includes CAMARÓN, whatever the gear. Escama, shark, or otras on the same permit keep this rate.",
+    "FAO Table B.1, Trawl, shrimp; Gilman et al. 2020 Figure 2",
+  "2", "Pelagic fishes", 0.062,
+    "Target includes SARDINA Y ANCHOVETA.",
+    "FAO Table 2; Gilman et al. 2020 Figure 4",
+  "3", "Tunas", 0.054,
+    "ATÚN is the only target.",
+    "FAO Table 2; Gilman et al. 2020 Figure 4",
+  "4", "Pelagic fishes", 0.062,
+    "Target includes ATÚN plus any other target, and does not include shrimp.",
+    "FAO Table 2; Gilman et al. 2020 Figure 4",
+  "5", "Demersal fishes", 0.167,
+    "Target includes ESCAMA, and not shrimp, tuna, or sardine. Shark or otras may be listed too.",
+    "FAO Table 2; Gilman et al. 2020 Figure 4",
+  "6", "Pelagic fishes", 0.062,
+    "Gear includes PALANGRE and target includes TIBURÓN, with or without otras, and without escama, shrimp, tuna, or sardine.",
+    "FAO Table 2; Gilman et al. 2020 Figure 4",
+  "7", "Shark", 0.114,
+    "Target includes TIBURÓN, the gear is not a longline, and shrimp, escama, tuna, and sardine are absent. Average of pelagic fishes (0.062) and demersal fishes (0.167).",
+    "Placeholder from those two Figure 4 rates",
+  "8", "Other species", 0.151,
+    "OTRAS is the only target. Average of other molluscs (0.132), cephalopods (0.156), and pots (0.166).",
+    "Placeholder from FAO Table 2 and Table B.1",
+  "9", "Mixed", 0.098,
+    "Gear and target are both missing.",
+    "FAO Table 2 mixed category, used as the fallback",
+  "10", "Pelagic fishes", 0.062,
+    "Gear is CERCO and the target is missing. The one boat is the 25 m Guaymas seiner.",
+    "FAO Table 2; Gilman et al. 2020 Figure 4"
+)
+
+rule_table <- rule_labels %>%
+  left_join(rule_counts, by = "rule") %>%
+  select(rule, category, rate, rows, vessels, applies, source)
+
+kable(
+  rule_table,
+  col.names = c("Order", "Category", "Rate", "Rows", "Vessels", "When it applies", "Source"),
+  caption = "Discard rules. The first match wins. Pelagic fishes in rows 2, 4, 6, and 10 are one category."
+)
+```
+
+## 4. Review
+
+Filled rows are the easy matches. Blank rows are still open.
+
+```{r review}
+review <- matched %>%
+  mutate(fao_b1_gear = coalesce(fao_b1_gear, "—")) %>%
+  select(gear_type, target_species, n_vessels, gilman_gear_category, fao_b1_gear)
+
+kable(
+  review %>% filter(fao_b1_gear != "—"),
+  col.names = c("Gear", "Target", "Vessels", "Gilman 2021 category", "FAO Table B.1"),
+  caption = "Permit pairs matched to a Table B.1 gear."
+)
+
+kable(
+  review %>% filter(fao_b1_gear == "—"),
+  col.names = c("Gear", "Target", "Vessels", "Gilman 2021 category", "FAO Table B.1"),
+  caption = "Permit pairs left blank for the next round of matches."
+)
+
+discard_review <- matched %>%
+  filter(!is.na(discard_category)) %>%
+  select(gear_type, target_species, n_vessels, discard_category, discard_rate, discard_source)
+
+kable(
+  discard_review,
+  col.names = c("Gear", "Target", "Vessels", "Discard category", "Discard rate", "Source"),
+  caption = "Permit pairs with a discard rate assigned."
+)
+```
+
+The table is `r out_path`.

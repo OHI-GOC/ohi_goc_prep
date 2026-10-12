@@ -7,8 +7,8 @@ date: "2026-06-01"
 Getting pressure layers for vessel traffic.
 
 **Yearly GeoTIFF outputs** (uncapped + capped) for each pressure are built in the
-chunks below. A standalone batch script also exists at
-[`scripts/build_vessel_pressure_rasters.R`](scripts/build_vessel_pressure_rasters.R).
+chunks below. Set `OHI_SKIP_TRAFFIC_GHOST=1` to rebuild the bottom-trawl
+rasters without rewriting vessel traffic or ghost gear.
 
 ```{r}
 library(tidyverse)
@@ -66,6 +66,12 @@ rasterize_to_marine <- function(pings, field, layer_name) {
   out
 }
 
+write_pressure_pair <- function(r, uncapped_path, capped_path, cap_value) {
+  dir.create(dirname(uncapped_path), recursive = TRUE, showWarnings = FALSE)
+  writeRaster(r, uncapped_path, overwrite = TRUE)
+  writeRaster(ifel(r > cap_value, cap_value, r), capped_path, overwrite = TRUE)
+}
+
 
 ```
 
@@ -99,13 +105,7 @@ ggplot(vessel_pressure, aes(x = lon, y = lat)) +
 ## Sum of VMS hours per 1 km cell; hours capped at 3 h per ping.
 ## Capped rasters use the 2024 99th-percentile value (fixed across years).
 
-```{r build_vessel_traffic_rasters}
-
-write_pressure_pair <- function(r, uncapped_path, capped_path, cap_value) {
-  dir.create(dirname(uncapped_path), recursive = TRUE, showWarnings = FALSE)
-  writeRaster(r, uncapped_path, overwrite = TRUE)
-  writeRaster(ifel(r > cap_value, cap_value, r), capped_path, overwrite = TRUE)
-}
+```{r build_vessel_traffic_rasters, eval=Sys.getenv("OHI_SKIP_TRAFFIC_GHOST") != "1"}
 
 ## Cap from 2024
 message("Computing 99th-percentile cap from ", CAP_YEAR, " (vessel traffic)")
@@ -150,10 +150,12 @@ plot(log1p(hours_count), main = "VMS hours per 1 km cell (2024, capped)", col = 
 
 All unique pairs in the GoC vessel registry (six states), with vessel counts.
 `bottom_destructive` flags combinations likely to include **bottom trawling** with benthic
-impact (permit-level inference). Rules: **sardine/anchovy** and **tuna-only** targets never
-bottom trawl; **shrimp** with ambiguous gear (`OTRO`, missing gear, `PESCA MULTIPLE`) **is**
-bottom trawl; `NA` + `NA` is unclassified (`bottom_destructive` = NA → excluded from
-bottom-trawl layers; all other combos have TRUE or FALSE).
+impact (permit-level inference). Rules:
+
+- **Sardine/anchovy** never bottom trawl, even if the gear is arrastre.
+- **Tuna without shrimp** never bottom trawl, even if the gear is arrastre and escama is also listed. That permit can be a midwater trawl.
+- **Shrimp** is bottom trawl, including when the gear is `OTRO`, missing, `PESCA MULTIPLE`, longline, purse seine, or pole-and-line. Those boats match the industrial shrimp-trawl fleet.
+- `NA` + `NA` is unclassified (`bottom_destructive` = NA → excluded from bottom-trawl layers).
 
 ```{r}
 gear_target_combos <- vessels %>%
@@ -180,14 +182,14 @@ gear_target_combos <- vessels %>%
       gear_missing & target_missing ~ NA,
       ## Sardine/anchovy: never bottom trawl (even if ARRASTRE on permit)
       has_sardine_target ~ FALSE,
-      ## Tuna-only target: never bottom trawl (pelagic fishery; even if ARRASTRE on permit)
-      has_tuna_only ~ FALSE,
+      ## Tuna without shrimp: never bottom trawl, even if arrastre also lists escama
+      has_tuna_target & !has_shrimp_target ~ FALSE,
       ## Shrimp + ambiguous gear (OTRO, NA gear, PESCA MULTIPLE): treat as bottom trawl
       has_shrimp_target & ambiguous_gear ~ TRUE,
-      ## Trawl on permit (non-sardine targets)
+      ## Trawl on permit (non-sardine, non-tuna targets)
       has_trawl ~ TRUE,
-      ## Shrimp with explicit non-trawl gear (e.g. PALANGRE + CAMARÓN)
-      has_shrimp_target ~ FALSE,
+      ## Shrimp on longline, purse seine, or pole-and-line: same industrial trawl fleet
+      has_shrimp_target ~ TRUE,
       ## Pelagic / hook gear without trawl
       !has_trawl & (has_purse_seine | has_longline) ~ FALSE,
       ## Unspecified buckets without shrimp
@@ -230,9 +232,9 @@ gear_target_combos
 ## Get 99th-percentile cap value (from 2024) 
 ### Filter pings for potential bottom-destructive trawling
 
-Keep VMS pings that plausibly reflect **bottom trawling on the continental shelf**,
-using permit metadata (`gear_target_combos`), depth, and speed. Each step below
-drops pings that fail that step; the table shows how many rows remain.
+Keep VMS pings that plausibly reflect **bottom trawling**, using permit metadata
+(`gear_target_combos`) and speed. Depth is not a cutoff. Each step below drops
+pings that fail that step; the table shows how many rows remain.
 
 **Permit rule:** we only require a **`bottom_destructive` assessment** on the permit
 (gear × target combo). Pings are dropped when `bottom_destructive` is **NA** (unclassified
@@ -282,25 +284,19 @@ pings_destructive <- pings_assessed %>%
   filter(bottom_destructive == TRUE)
 filter_step("2. Bottom-destructive permit combo", nrow(pings_assessed), nrow(pings_destructive))
 
-## 3) Shelf only: depth_m is negative below sea level → water depth = -depth_m. Not doing this at this time. Seems that hake might be bottom fished deeper than 200 m.
-pings_shelf <- pings_destructive 
-#%>%
-#  mutate(water_depth_m = -depth_m) %>%
-#  filter(!is.na(water_depth_m), water_depth_m <= 200)
-filter_step("3. Water depth ≤ 200 m", nrow(pings_destructive), nrow(pings_shelf))
-
-## 4) Drop fast transit legs (speed between consecutive pings, in knots).
-pings_trawling_speed <- pings_shelf %>%
+## 3) Drop fast transit legs (speed between consecutive pings, in knots).
+## No depth cutoff: pings deeper than 100 m stay in the layer.
+pings_trawling_speed <- pings_destructive %>%
   filter(!is.na(implied_speed_knots), implied_speed_knots <= 6)
-filter_step("4. Implied speed ≤ 6 knots", nrow(pings_shelf), nrow(pings_trawling_speed))
+filter_step("3. Implied speed ≤ 6 knots", nrow(pings_destructive), nrow(pings_trawling_speed))
 
-## 5) Valid positions and positive time step (for later sum(hours) rasters).
+## 4) Valid positions and positive time step (for later sum(hours) rasters).
 pings_valid <- pings_trawling_speed %>%
   filter(!is.na(lat), !is.na(lon), !is.na(hours), hours > 0)
 
-filter_step("5. Valid lat/lon and hours > 0", nrow(pings_trawling_speed), nrow(pings_valid))
+filter_step("4. Valid lat/lon and hours > 0", nrow(pings_trawling_speed), nrow(pings_valid))
 
-## 6) Cap hours at 3 h so one long gap between pings cannot add >3 vessel-hours to a cell.
+## 5) Cap hours at 3 h so one long gap between pings cannot add >3 vessel-hours to a cell.
 n_capped <- sum(pings_valid$hours > 3, na.rm = TRUE)
 
 vessel_pressure_bottom <- pings_valid %>%
@@ -308,7 +304,7 @@ vessel_pressure_bottom <- pings_valid %>%
 
 message(
   sprintf(
-    "6. Cap hours at 3 h: %s pings had hours > 3 before cap (all %s rows kept)",
+    "5. Cap hours at 3 h: %s pings had hours > 3 before cap (all %s rows kept)",
     format(n_capped, big.mark = ","),
     format(nrow(vessel_pressure_bottom), big.mark = ",")
   )
@@ -320,7 +316,6 @@ tibble(
     "All pings (with bottom_destructive joined)",
     "After: bottom_destructive assessed (not NA)",
     "After: bottom-destructive permit (TRUE)",
-    "After: depth ≤ 200 m",
     "After: speed ≤ 6 kn",
     "After: valid position and hours > 0",
     "Final: hours capped at 3 h per ping"
@@ -329,7 +324,6 @@ tibble(
     n_start,
     nrow(pings_assessed),
     nrow(pings_destructive),
-    nrow(pings_shelf),
     nrow(pings_trawling_speed),
     nrow(pings_valid),
     nrow(vessel_pressure_bottom)
@@ -338,7 +332,6 @@ tibble(
     n_start,
     nrow(pings_assessed),
     nrow(pings_destructive),
-    nrow(pings_shelf),
     nrow(pings_trawling_speed),
     nrow(pings_valid),
     nrow(vessel_pressure_bottom)
@@ -353,8 +346,8 @@ quantile(vessel_pressure_bottom$reported_speed, c(0.1, 0.5, 0.9), na.rm=TRUE)
 ```
 
 ## Build yearly bottom-destructive GeoTIFFs (Pressure 2 only).
-## Same filters as above: permit TRUE, depth ≤ 200 m, implied speed ≤ 6 kn,
-## hours capped at 3 h. Capped rasters use the 2024 99th-percentile value.
+## Same filters as above: permit TRUE, implied speed ≤ 6 kn, hours capped at 3 h.
+## No depth cutoff. Capped rasters use the 2024 99th-percentile value.
 
 ```{r build_bottom_destructive_rasters}
 destructive_lookup <- gear_target_combos %>%
@@ -364,8 +357,6 @@ filter_bottom_destructive <- function(vms_year) {
   vms_year %>%
     left_join(destructive_lookup, by = c("gear_type", "target_species")) %>%
     filter(!is.na(bottom_destructive), bottom_destructive == TRUE) %>%
-    mutate(water_depth_m = -depth_m) %>%
- #   filter(!is.na(water_depth_m), water_depth_m <= 200) %>%
     filter(!is.na(implied_speed_knots), implied_speed_knots <= 6) %>%
     filter(!is.na(lat), !is.na(lon), !is.na(hours), hours > 0) %>%
     mutate(hours = pmin(hours, HOURS_CAP))
@@ -562,7 +553,7 @@ ghost_pressure
 ## Same filters as above: ghost score present, speed ≤ 6 kn, hours capped at 3 h.
 ## Capped rasters use the 2024 99th-percentile value.
 
-```{r build_ghost_gear_rasters}
+```{r build_ghost_gear_rasters, eval=Sys.getenv("OHI_SKIP_TRAFFIC_GHOST") != "1"}
 gilman_lookup <- gilman_by_permit %>%
   select(gear_type, target_species, H_gear_ghost)
 

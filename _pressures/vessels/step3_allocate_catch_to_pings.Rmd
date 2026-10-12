@@ -1,0 +1,541 @@
+---
+title: "Allocate reported catch to VMS fishing pings"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+The catch is already Gulf of California landings. CONAPESCA records were
+kept when the landing site fell in an OHI region, and every site in Sonora,
+Sinaloa, and Nayarit was kept. The summary used here adds those landings by
+business, year, and taxonomic group for 2018–2024. It has no coordinates of
+its own.
+
+VMS stores where that business's vessels were. This notebook puts the year's
+Gulf landings onto the pings that are slow enough to count as fishing, in
+proportion to the hours in each ping. The home state on the permit is not
+used. A vessel with a blank state still receives its business's catch.
+
+Slow pings on the Pacific side of Baja are removed before those hours are
+summed. The saved tracks reach 115°W, so they include the Pacific coast of
+the peninsula, and a longitude cut would also remove the northern Gulf. North
+of 22.75°N the divider is the western edge of the Gulf marine cells, which
+there is the Gulf coast of Baja. A ping west of that coast, and outside the
+marine cells, is left out of the weighting. From 22.75°N south to the bottom
+of the download, the divider is the meridian at 110.0°W. West of that line
+is the open Pacific southwest of Cabo and is removed the same way. East of
+it, the mouth and the approaches toward Sinaloa and Nayarit stay in the
+hours.
+
+A ping is one vessel at one time. `hours` is the time since that vessel's
+previous ping. Gaps longer than 3 hours are capped at 3 hours, so a long
+silence does not become a long stretch of fishing. A ping counts as fishing
+when `implied_speed_knots` is at most 6. That speed is the distance from the
+previous ping divided by the time gap. Faster pings are treated as transit
+and receive none of the catch.
+
+For one economic unit in one year, the fishing hours are the sum of those
+capped hours across every vessel in the unit. Each fishing ping then receives
+
+`catch on the ping = (capped hours on the ping / fishing hours of the unit) × catch of the unit`.
+
+The shares for a unit add to 1, so the catch placed on its remaining pings
+adds back to the catch recorded for that unit. Catch from a unit with no
+vessel in the VMS registry, no slow ping in these files, or only Pacific
+pings, stays in the comparison table and off the map.
+
+The catch file is split by taxonomic group. Those groups are added together
+before the split, so every species from a unit is placed with the same hour
+shares. A business that runs two gears therefore has both catches painted
+along both vessels' slow tracks.
+
+Gear and target travel with the vessel permit, joined on `vessel_rnpa`. That
+is the same join used for ghost-gear risk. Discard rates are a different
+Gilman table, with a finer split of trawl gears, so this notebook stops
+before converting catch into discards.
+
+```{r setup}
+library(terra)
+library(tidyverse)
+library(knitr)
+
+knitr::opts_chunk$set(fig.width = 8, fig.height = 6, message = FALSE, warning = FALSE)
+
+vms_root <- "/home/shares/ohi/OHI_GOC/_raw_data/vms_juan_carlos"
+# Identifiers are kept as text. Reading them as numbers drops a leading zero
+# and the economic-unit join fails.
+vessel_path <- file.path(vms_root, "vessel.csv")
+catch_path <- file.path(
+  "/home/frazier/ohi_goc_prep/FP/v2026/FP_Scores_1.0/FIS_Scores_1.0",
+  "FIS_CPUE_SubScores/CPUE_In_Progress",
+  "CatchPerEconomicUnit_group_summary_Jun102026.csv"
+)
+
+# Same 1 km marine grid used for the other vessel-effort rasters.
+marine_path <- "/home/frazier/ohi_goc_prep/spatial/ohi_regions/ohi_marine_raster_1km.tif"
+out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/vessels/catch_allocation"
+fig_dir <- "/home/frazier/ohi_goc_prep/_pressures/vessels/figures"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Rules shared with the bottom-trawl and ghost-gear filters.
+hours_cap <- 3
+fishing_speed_knots <- 6
+
+ohi_marine <- rast(marine_path)
+ohi_marine <- ifel(ohi_marine >= 1, 1, NA)
+
+# Western edge of the Gulf marine cells, in 0.25° latitude bands.
+# From 22.75°N north this edge follows the Gulf coast of Baja.
+peninsula_lat_min <- 22.75
+pacific_buffer_deg <- 0.05
+# South of the peninsula, the Pacific cut is this meridian.
+pacific_meridian_lon <- -110
+marine_xy <- as.data.frame(rast(marine_path), xy = TRUE, na.rm = TRUE)
+marine_ll <- crds(project(vect(marine_xy, geom = c("x", "y"), crs = crs(ohi_marine)), "EPSG:4326"))
+pacific_edge <- tibble(lon = marine_ll[, 1], lat = marine_ll[, 2]) %>%
+  mutate(lat_band = floor(lat * 4) / 4) %>%
+  filter(lat_band >= peninsula_lat_min) %>%
+  group_by(lat_band) %>%
+  summarise(west_lon = min(lon), .groups = "drop")
+```
+
+## 1. Vessel permits
+
+Each row of the registry is one vessel. `eu_rnpa` is the business that owns
+it. `gear_type` and `target_species` are the gear and target on the permit.
+Home state is ignored, including rows where that field is blank. A vessel
+identifier occurs once, so the join does not duplicate pings.
+
+```{r registry}
+vessels <- read_csv(
+  vessel_path,
+  col_types = cols(
+    vessel_rnpa = col_character(),
+    eu_rnpa = col_character(),
+    gear_type = col_character(),
+    target_species = col_character(),
+    .default = col_guess()
+  )
+) %>%
+  filter(!is.na(eu_rnpa), eu_rnpa != "") %>%
+  select(vessel_rnpa, eu_rnpa, gear_type, target_species)
+
+# One row per vessel. A repeated identifier would copy pings and double-count catch.
+stopifnot(anyDuplicated(vessels$vessel_rnpa) == 0)
+
+cat(
+  "Vessels:", nrow(vessels), "\n",
+  "Economic units:", n_distinct(vessels$eu_rnpa), "\n"
+)
+```
+
+## 2. Reported catch
+
+Catch is kilograms landed by an economic unit, a year, and a taxonomic
+group, from landing sites already kept as Gulf sites. The groups are summed
+so each unit has one catch for the year. The tonnes in this table are the
+Gulf landings the map has to account for.
+
+```{r catch}
+catch_groups <- read_csv(
+  catch_path,
+  col_types = cols(
+    year = col_integer(),
+    eu_rnpa = col_character(),
+    Major_Functional_Group = col_character(),
+    total_catch_kg = col_double()
+  )
+)
+
+catch_by_unit <- catch_groups %>%
+  group_by(year, eu_rnpa) %>%
+  summarise(eu_catch_tonnes = sum(total_catch_kg, na.rm = TRUE) / 1000, .groups = "drop")
+
+# Every tonne in the catch file, whether or not the unit has a VMS vessel.
+catch_records <- catch_by_unit %>%
+  group_by(year) %>%
+  summarise(record_tonnes = sum(eu_catch_tonnes), .groups = "drop")
+
+years <- sort(unique(catch_by_unit$year))
+
+kable(
+  catch_records,
+  digits = 0,
+  col.names = c("Year", "Reported catch, tonnes"),
+  caption = "Gulf landings in the catch file, all economic units, before any VMS match."
+)
+```
+
+## 3. Place each year's catch on its fishing pings
+
+The VMS files are large, so one year is read, allocated, written, and
+released before the next year starts. Within a year the steps are:
+
+1. Join each ping to the vessel permit. Home state is not a filter.
+2. Keep pings with a position, a positive time gap, and implied speed at or below 6 knots.
+3. Cap the time gap at 3 hours.
+4. Remove slow pings on the Pacific side of Baja. North of 22.75°N those pings are west of the Gulf coast of the peninsula. South of 22.75°N they are west of 110.0°W. Either way they are outside the marine cells. This happens before the hours are summed, so a Pacific trip does not take a share of the landings.
+5. Sum the remaining hours for the economic unit.
+6. Give each remaining ping its share of the unit's catch.
+
+A unit that landed fish and has no slow ping left after that filter contributes nothing to the map. Its tonnes remain in the record total. A unit with both Pacific and Gulf pings keeps its full landings, placed only on the Gulf-side pings.
+
+```{r allocate}
+ping_path <- file.path(out_dir, "catch_tonnes_by_ping.csv")
+if (file.exists(ping_path)) file.remove(ping_path)
+
+# Sum of yearly catch rasters. Built up one year at a time.
+catch_raster <- NULL
+year_check <- vector("list", length(years))
+# 0.1° bins of every saved ping, for the location map.
+ping_map <- vector("list", length(years))
+marine_values <- values(ohi_marine)[, 1]
+
+for (i in seq_along(years)) {
+  yr <- years[[i]]
+  vms_path <- file.path(vms_root, "vms", sprintf("vms_%s.csv", yr))
+  stopifnot(file.exists(vms_path))
+
+  # Text identifiers again, so vessel_rnpa keeps its leading zeros.
+  pings <- read_csv(
+    vms_path,
+    col_select = c(vessel_rnpa, datetime, lat, lon, year, hours, implied_speed_knots),
+    col_types = cols(
+      vessel_rnpa = col_character(),
+      datetime = col_character(),
+      lat = col_double(),
+      lon = col_double(),
+      year = col_integer(),
+      hours = col_double(),
+      implied_speed_knots = col_double()
+    )
+  ) %>%
+    filter(!is.na(lat), !is.na(lon))
+
+  # North of 22.75°N, west of the Gulf coast of Baja. A small buffer keeps a
+  # ping just outside a marine cell on the Gulf side. South of 22.75°N, west
+  # of 110.0°W. A ping already inside a marine cell is kept.
+  ping_pts <- vect(pings, geom = c("lon", "lat"), crs = "EPSG:4326")
+  ping_pts <- project(ping_pts, crs(ohi_marine))
+  ping_cell <- cellFromXY(ohi_marine, crds(ping_pts))
+  in_marine <- !is.na(ping_cell) & !is.na(marine_values[ping_cell])
+  west_lon <- approx(
+    pacific_edge$lat_band,
+    pacific_edge$west_lon,
+    xout = pings$lat,
+    rule = 2
+  )$y
+  pings$pacific <- !in_marine & (
+    (pings$lat >= peninsula_lat_min & pings$lon < (west_lon - pacific_buffer_deg)) |
+      (pings$lat < peninsula_lat_min & pings$lon < pacific_meridian_lon)
+  )
+
+  ping_map[[i]] <- pings %>%
+    mutate(
+      lat_r = round(lat, 1),
+      lon_r = round(lon, 1),
+      side = if_else(pacific, "Pacific side of Baja", "Other VMS pings")
+    ) %>%
+    count(lat_r, lon_r, side, name = "n")
+
+  pings <- pings %>%
+    inner_join(vessels, by = "vessel_rnpa") %>%
+    filter(
+      !is.na(hours), hours > 0,
+      !is.na(implied_speed_knots),
+      implied_speed_knots <= fishing_speed_knots
+    ) %>%
+    mutate(hours_capped = pmin(hours, hours_cap))
+
+  # Businesses whose only slow pings are on the Pacific side drop out.
+  # Their landings are not given to any other business.
+  kept_units <- pings %>%
+    group_by(eu_rnpa) %>%
+    summarise(any_kept = any(!pacific), .groups = "drop")
+  pacific_only_tonnes <- catch_by_unit %>%
+    filter(year == yr, eu_rnpa %in% kept_units$eu_rnpa[!kept_units$any_kept]) %>%
+    summarise(tonnes = sum(eu_catch_tonnes)) %>%
+    pull(tonnes)
+  if (length(pacific_only_tonnes) == 0) pacific_only_tonnes <- 0
+  n_pacific_pings <- sum(pings$pacific)
+
+  pings <- pings %>%
+    filter(!pacific)
+
+  unit_hours <- pings %>%
+    group_by(year, eu_rnpa) %>%
+    summarise(eu_fishing_hours = sum(hours_capped), .groups = "drop")
+
+  allocated <- pings %>%
+    inner_join(unit_hours, by = c("year", "eu_rnpa")) %>%
+    inner_join(filter(catch_by_unit, year == yr), by = c("year", "eu_rnpa")) %>%
+    mutate(
+      effort_ratio = hours_capped / eu_fishing_hours,
+      catch_tonnes = effort_ratio * eu_catch_tonnes
+    ) %>%
+    select(
+      year, vessel_rnpa, eu_rnpa, datetime, lat, lon,
+      gear_type, target_species, implied_speed_knots,
+      hours, hours_capped, eu_fishing_hours, eu_catch_tonnes,
+      effort_ratio, catch_tonnes
+    )
+
+  # The shares for each unit should add to 1, and the tonnes should add
+  # back to that unit's recorded catch.
+  closure <- allocated %>%
+    group_by(eu_rnpa) %>%
+    summarise(
+      ratio_sum = sum(effort_ratio),
+      tonnes_sum = sum(catch_tonnes),
+      eu_catch_tonnes = first(eu_catch_tonnes),
+      .groups = "drop"
+    )
+  stopifnot(nrow(closure) == 0 || max(abs(closure$ratio_sum - 1)) < 1e-6)
+  stopifnot(nrow(closure) == 0 || max(abs(closure$tonnes_sum - closure$eu_catch_tonnes)) < 1e-4)
+
+  # The first year writes the header. Later years append rows only.
+  write_csv(
+    allocated,
+    ping_path,
+    append = i > 1,
+    col_names = i == 1
+  )
+
+  # Drop the ping locations onto the marine grid. Cells outside the Gulf
+  # mask stay empty. Background zero marks water with no catch this year.
+  pts <- vect(allocated, geom = c("lon", "lat"), crs = "EPSG:4326")
+  pts <- project(pts, crs(ohi_marine))
+  year_raster <- rasterize(
+    pts,
+    y = ohi_marine,
+    field = "catch_tonnes",
+    fun = "sum",
+    background = 0
+  )
+  year_raster <- ifel(is.na(ohi_marine), NA, year_raster)
+
+  catch_raster <- if (is.null(catch_raster)) year_raster else catch_raster + year_raster
+
+  matched_units <- catch_by_unit %>%
+    filter(year == yr, eu_rnpa %in% vessels$eu_rnpa)
+
+  year_check[[i]] <- tibble(
+    year = yr,
+    record_tonnes = catch_records$record_tonnes[catch_records$year == yr],
+    vms_registry_tonnes = sum(matched_units$eu_catch_tonnes),
+    pacific_only_tonnes = pacific_only_tonnes,
+    allocated_tonnes = sum(allocated$catch_tonnes),
+    raster_tonnes = as.numeric(global(year_raster, "sum", na.rm = TRUE)[1, 1]),
+    n_pings = nrow(allocated),
+    n_pacific_pings = n_pacific_pings
+  )
+
+  message(
+    yr, ": ", nrow(allocated), " fishing pings, ",
+    round(sum(allocated$catch_tonnes)), " tonnes allocated, ",
+    n_pacific_pings, " Pacific pings removed"
+  )
+  rm(pings, allocated, pts, year_raster, closure, ping_pts)
+  gc(verbose = FALSE)
+}
+
+year_check <- list_rbind(year_check)
+names(catch_raster) <- "catch_tonnes"
+```
+
+## 4. Where the VMS pings are
+
+Every saved ping with a position is counted in 0.1° cells. Red cells are
+west of the black line and are removed before the weighting. North of
+22.75°N that line is the Gulf coast of Baja. From there south it is the
+meridian at 110.0°W. Blue cells stay in the weighting, including the mouth
+and the approaches toward Sinaloa and Nayarit.
+
+```{r plot-pings}
+ping_map_all <- list_rbind(ping_map) %>%
+  group_by(lat_r, lon_r, side) %>%
+  summarise(n = sum(n), .groups = "drop")
+
+coast <- pacific_edge %>%
+  transmute(lon = west_lon - pacific_buffer_deg, lat = lat_band + 0.125) %>%
+  arrange(lat)
+divider <- bind_rows(
+  tibble(lon = pacific_meridian_lon, lat = c(20, peninsula_lat_min)),
+  coast
+)
+
+ping_plot <- ggplot() +
+  geom_tile(
+    data = filter(ping_map_all, side == "Other VMS pings"),
+    aes(lon_r, lat_r, alpha = n),
+    fill = "#2c7fb8"
+  ) +
+  geom_tile(
+    data = filter(ping_map_all, side == "Pacific side of Baja"),
+    aes(lon_r, lat_r, alpha = n),
+    fill = "#e34a33"
+  ) +
+  geom_path(data = divider, aes(lon, lat), linewidth = 0.4) +
+  scale_alpha_continuous(range = c(0.15, 1), trans = "sqrt", guide = "none") +
+  coord_fixed(xlim = c(-115.2, -105), ylim = c(20, 32.2)) +
+  labs(
+    title = "VMS ping locations, 2018–2024",
+    subtitle = "Blue stays in the weighting. Red is west of the line and is removed first.",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme_bw()
+
+print(ping_plot)
+ggsave(
+  file.path(fig_dir, "vms_ping_locations_2018_2024.png"),
+  ping_plot,
+  width = 8,
+  height = 8,
+  dpi = 150,
+  bg = "white"
+)
+```
+
+## 5. Compare the map with the catch records
+
+The record total is every tonne of Gulf landings in the catch file. The VMS
+registry total is the part whose business has a vessel in the registry,
+whatever the home state says. The Pacific-only total is the part whose slow
+pings were all on the Pacific side of Baja, so nothing remained to weight.
+The allocated total is the part placed on the remaining slow pings. The
+raster total is the allocated catch that lands inside the Gulf marine grid.
+Pings east of 110.0°W and south of 22.75°N stay in the weighting and can
+still fall outside that grid.
+
+```{r compare}
+kable(
+  year_check %>%
+    mutate(off_raster_tonnes = allocated_tonnes - raster_tonnes),
+  digits = 0,
+  col.names = c(
+    "Year",
+    "Gulf landings, t",
+    "Businesses with a VMS vessel, t",
+    "Only Pacific pings, t",
+    "Placed on remaining slow pings, t",
+    "Inside the marine grid, t",
+    "Fishing pings kept",
+    "Pacific pings removed",
+    "Pings outside the grid, t"
+  ),
+  caption = "Each row is one year. Placed tonnes equal the recorded catch of units that still had a slow ping after the Pacific pings were removed."
+)
+
+compare_long <- year_check %>%
+  select(year, record_tonnes, vms_registry_tonnes, allocated_tonnes, raster_tonnes) %>%
+  pivot_longer(-year, names_to = "source", values_to = "tonnes") %>%
+  mutate(
+    source = recode(
+      source,
+      record_tonnes = "Gulf landings",
+      vms_registry_tonnes = "VMS vessel",
+      allocated_tonnes = "Slow pings",
+      raster_tonnes = "Marine grid"
+    ),
+    source = factor(
+      source,
+      levels = c("Gulf landings", "VMS vessel", "Slow pings", "Marine grid")
+    )
+  )
+
+compare_plot <- ggplot(compare_long, aes(year, tonnes, fill = source)) +
+  geom_col(position = "dodge") +
+  scale_x_continuous(breaks = years) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "Gulf landings and the part placed on VMS pings",
+    x = NULL,
+    y = "Tonnes",
+    fill = NULL
+  ) +
+  theme_bw()
+
+print(compare_plot)
+ggsave(
+  file.path(fig_dir, "catch_allocation_vs_records.png"),
+  compare_plot,
+  width = 8,
+  height = 5,
+  dpi = 150,
+  bg = "white"
+)
+```
+
+```{r save-comparison}
+comparison_path <- file.path(out_dir, "catch_allocation_vs_records.csv")
+write_csv(year_check, comparison_path)
+```
+
+## 6. Where the catch was placed
+
+The raster is the sum of 2018–2024. Empty water is left blank. The color
+scale is square-root, so a cell with a modest catch is still visible next
+to the sardine and shrimp grounds.
+
+```{r save-raster}
+raster_path <- file.path(out_dir, "catch_tonnes_2018_2024_1km.tif")
+# Zeros are water with no allocated catch. Store them as empty cells.
+catch_plot_raster <- ifel(catch_raster > 0, catch_raster, NA)
+names(catch_plot_raster) <- "catch_tonnes"
+writeRaster(catch_plot_raster, raster_path, overwrite = TRUE)
+```
+
+```{r plot-raster}
+plot_df <- as.data.frame(catch_plot_raster, xy = TRUE, na.rm = TRUE)
+names(plot_df)[3] <- "catch_tonnes"
+
+raster_plot <- ggplot(plot_df, aes(x, y, fill = catch_tonnes)) +
+  geom_raster() +
+  scale_fill_viridis_c(
+    trans = "sqrt",
+    name = "Tonnes",
+    labels = scales::label_comma()
+  ) +
+  coord_equal() +
+  labs(
+    title = "Reported catch placed on slow VMS pings, 2018–2024",
+    subtitle = "Sum of ping shares inside each 1 km marine cell. Color scale is square-root.",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+
+print(raster_plot)
+ggsave(
+  file.path(fig_dir, "catch_tonnes_2018_2024_1km.png"),
+  raster_plot,
+  width = 8,
+  height = 7,
+  dpi = 150,
+  bg = "white"
+)
+```
+
+## 7. The ping table
+
+`r ping_path` has one row per slow ping that received catch. `catch_tonnes`
+is that ping's share of its economic unit's landings. `gear_type` and
+`target_species` are the permit fields, joined on `vessel_rnpa` in the same
+way as the ghost-gear layer.
+
+The raster is `r raster_path`. The year-by-year comparison is
+`r comparison_path`.
+
+## 8. Discards
+
+Discard tonnes are estimated in
+[`step3b_estimate_discards.Rmd`](step3b_estimate_discards.Rmd). That
+notebook joins each ping's permit to `gear_fao_b1_crosswalk.csv`, converts
+the landing share to discard tonnes, sums the result by OHI region, and
+writes the 1 km map. Landings with no slow ping are left out. The same page
+reports, for each region, the share of catch those discards are estimated
+from.
