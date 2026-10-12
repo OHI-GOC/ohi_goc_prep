@@ -1,0 +1,217 @@
+---
+title: "OHI regions — land and marine, 1 km"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+This raster gives every 1 km cell in an OHI region a region number from 1 to 9.
+Land and marine of the same region share that number. Region 1 is 1 on the
+peninsula and 1 on the water, and the same is true through Region 9.
+
+The grid is the marine region raster: Mexico ITRF2008 / LCC (EPSG:6372),
+1 km cells, and the same extent and origin. A cell that already has a marine
+region number keeps it. A cell that the marine raster leaves empty is filled
+when its center falls inside a land polygon, using that polygon's region
+number. Cells outside all nine regions stay empty.
+
+The lookup table has one row per region: the number stored in the raster, the
+region name, the state, and the ecoregion. Land and marine of a region share
+those names. The table also records how many square kilometres of each region
+are marine and how many were filled from the land polygons.
+
+```{r setup}
+library(tidyverse)
+library(terra)
+library(sf)
+library(knitr)
+library(writexl)
+
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+marine_path <- "/home/frazier/ohi_goc_prep/spatial/ohi_regions/ohi_marine_raster_1km.tif"
+region_path <- "/home/frazier/ohi_goc_prep/spatial/ohi_regions/goc_ohi_rgns.shp"
+out_dir <- "/home/frazier/ohi_goc_prep/spatial/marine_land_raster"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+## 1. The marine grid
+
+Cell values in this raster are already the marine region numbers 1–9. Land and
+water outside the nine marine regions are empty. The combined raster is built
+on this object, so the two files share resolution, CRS, extent, and origin.
+
+```{r template}
+marine <- rast(marine_path)
+names(marine) <- "marine_id"
+
+cat(
+  "CRS:", crs(marine, describe = TRUE)$code, "\n",
+  "Resolution, m:", paste(res(marine), collapse = " × "), "\n",
+  "Rows × columns:", paste(dim(marine)[1:2], collapse = " × "), "\n",
+  "Marine cells:", as.numeric(global(!is.na(marine), "sum", na.rm = TRUE)[1, 1]), "\n"
+)
+```
+
+## 2. Land polygons on the same grid
+
+Land polygons carry the same `Region_1`–`Region_9` names as the marine
+polygons. The number written into a land cell is that region number. Rasterizing
+uses the cell center, which is the rule used for the marine raster. A land
+value is kept only where the marine raster is empty, so the marine numbers do
+not move.
+
+```{r land}
+regions <- st_read(region_path, quiet = TRUE) %>%
+  st_make_valid() %>%
+  st_transform(crs(marine))
+
+land <- regions %>%
+  filter(location == "land") %>%
+  mutate(rgn_num = as.integer(str_remove(rgn_id, "Region_")))
+
+stopifnot(sort(unique(land$rgn_num)) == 1:9)
+
+# Cell center inside a land polygon. Empty where the center is not on land.
+land_id <- rasterize(vect(land), marine, field = "rgn_num", background = NA)
+names(land_id) <- "land_id"
+
+combined <- ifel(!is.na(marine), marine, land_id)
+names(combined) <- "rgn_id"
+
+# Every marine cell keeps the value from the marine raster.
+marine_unchanged <- ifel(is.na(marine), 1, ifel(combined == marine, 1, 0))
+stopifnot(as.numeric(global(marine_unchanged, "sum", na.rm = TRUE)[1, 1]) == ncell(marine))
+stopifnot(compareGeom(combined, marine, stopOnError = FALSE))
+```
+
+## 3. Region lookup
+
+One row per region number. `marine_km2` counts cells that were already in the
+marine raster. `land_km2` counts cells filled from the land polygons. Each
+1 km cell is 1 km².
+
+```{r lookup}
+region_info <- regions %>%
+  st_drop_geometry() %>%
+  filter(location == "marine") %>%
+  transmute(
+    id = as.integer(id),
+    rgn_id = rgn_id,
+    estado = estado,
+    ecorgn = ecorgn,
+    region_label = paste(
+      rgn_id,
+      str_replace_all(estado, "_", " "),
+      str_replace_all(ecorgn, "_", " "),
+      sep = " · "
+    )
+  ) %>%
+  arrange(id)
+
+# Land contribution: combined id where the marine raster was empty.
+land_cells <- ifel(is.na(marine), combined, NA)
+area_cells <- c(marine, land_cells)
+names(area_cells) <- c("marine_id", "land_id")
+
+area_by_id <- as.data.frame(area_cells, na.rm = FALSE) %>%
+  pivot_longer(everything(), names_to = "part", values_to = "id") %>%
+  filter(!is.na(id)) %>%
+  count(id, part, name = "km2") %>%
+  pivot_wider(names_from = part, values_from = km2, values_fill = 0) %>%
+  rename(marine_km2 = marine_id, land_km2 = land_id)
+
+region_table <- region_info %>%
+  left_join(area_by_id, by = "id") %>%
+  mutate(
+    marine_km2 = replace_na(marine_km2, 0),
+    land_km2 = replace_na(land_km2, 0),
+    total_km2 = marine_km2 + land_km2
+  )
+
+kable(
+  region_table %>%
+    select(id, rgn_id, estado, ecorgn, marine_km2, land_km2, total_km2),
+  digits = 0,
+  col.names = c("Raster id", "Region", "State", "Ecoregion", "Marine, km²", "Land, km²", "Total, km²"),
+  caption = "Region attributes for the land-and-marine raster. The raster id is the same on land and on the water."
+)
+
+write_csv(region_table, file.path(out_dir, "ohi_regions_land_marine.csv"))
+write_xlsx(region_table, file.path(out_dir, "ohi_regions_land_marine.xlsx"))
+```
+
+## 4. Map
+
+Each color is one region, on land and on the water.
+
+```{r map-data}
+rgn_colors <- c(
+  "Region 1" = "#C03729",
+  "Region 2" = "#E68C7C",
+  "Region 3" = "#FC8F24",
+  "Region 4" = "#dcaa38",
+  "Region 5" = "#cbd2a0",
+  "Region 6" = "#98a25a",
+  "Region 7" = "#747428",
+  "Region 8" = "#627391",
+  "Region 9" = "#8d61a9"
+)
+
+map_df <- as.data.frame(combined, xy = TRUE, na.rm = TRUE)
+names(map_df)[3] <- "id"
+map_df <- map_df %>%
+  left_join(region_info %>% select(id, rgn_id), by = "id") %>%
+  mutate(
+    region_label = factor(
+      str_replace(rgn_id, "_", " "),
+      levels = names(rgn_colors)
+    )
+  )
+```
+
+```{r plot-regions, fig.width=8, fig.height=9}
+region_plot <- ggplot(map_df, aes(x, y, fill = region_label)) +
+  geom_raster() +
+  scale_fill_manual(values = rgn_colors, name = NULL) +
+  coord_equal() +
+  labs(
+    title = "OHI regions, land and marine",
+    subtitle = "1 km cells. Land and marine of a region share one id.",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+
+print(region_plot)
+ggsave(
+  file.path(out_dir, "ohi_land_marine_regions_1km.png"),
+  region_plot,
+  width = 8,
+  height = 9,
+  dpi = 150,
+  bg = "white"
+)
+```
+
+## 5. Saved raster
+
+Values are the region numbers 1–9. Empty cells are outside the nine regions.
+Where the marine raster has a value, this raster has the same value.
+
+```{r save}
+raster_path <- file.path(out_dir, "ohi_land_marine_raster_1km.tif")
+writeRaster(combined, raster_path, overwrite = TRUE, datatype = "INT1U", NAflag = 255)
+
+cat("Raster:", raster_path, "\n")
+cat("Lookup:", file.path(out_dir, "ohi_regions_land_marine.xlsx"), "\n")
+cat("File, KB:", round(file.size(raster_path) / 1024), "\n")
+cat(
+  "Cells with a region id:",
+  as.numeric(global(!is.na(combined), "sum", na.rm = TRUE)[1, 1]), "\n"
+)
+```
+
+The raster is `r raster_path`.

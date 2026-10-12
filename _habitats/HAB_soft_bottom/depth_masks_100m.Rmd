@@ -1,0 +1,290 @@
+---
+title: "Soft-bottom depth masks — 100 m"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+These two masks split the Gulf marine grid into a shelf class and a deep class.
+They do not change the soft-bottom fraction. That fraction is still the share of
+each 1 km cell that is not rocky reef or seamount. A later step can multiply the
+fraction by each mask so soft bottom shallower than 100 m and soft bottom deeper
+than 100 m are separate habitats.
+
+**Shelf mask.** A 1 km cell is 100 m or shallower when any bathymetry sample
+inside it has a water depth of 100 m or less. One shallow sample is enough, so
+cells that straddle the 100 m line go entirely to the shelf class. A marine
+cell with no in-water sample is also placed here. Those cells are coastal: the
+OHI cell is marine, but every bathymetry sample in it sits on land or is
+missing, so the water in the cell is the shallow edge.
+
+**Deep mask.** Every other marine cell. Each of those cells has at least one
+sample deeper than 100 m and no sample of 100 m or less.
+
+Depth comes from GMRT topography, not from VMS pings. GMRT stores elevation, so
+water depth is the elevation multiplied by −1. Pixels are about 220 m. They are
+placed on a 200 m grid nested inside the 1 km cells with nearest neighbor, which
+keeps the measured depths instead of smoothing them. The 1 km grid is the same
+EPSG:6372 grid used for the soft-bottom fraction and the vessel-pressure rasters.
+
+```{r setup}
+library(tidyverse)
+library(terra)
+library(sf)
+library(knitr)
+
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+gmrt_path <- "/home/shares/ohi/OHI_GOC/_raw_data/GMRT_bathymetry_data/GMRTv4_5_0_20260709topo.tif"
+marine_path <- "/home/frazier/ohi_goc_prep/spatial/ohi_regions/ohi_marine_raster_1km.tif"
+region_path <- "/home/frazier/ohi_goc_prep/spatial/ohi_regions/goc_ohi_rgns.shp"
+
+out_dir <- "/home/frazier/ohi_goc_prep/_habitats/HAB_soft_bottom/int"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 200 m samples inside each 1 km cell. 1000 / 200 = 5, and both raster
+# dimensions divide evenly by 5, so the blocks land back on the 1 km cells.
+fine_factor <- 5L
+depth_break_m <- 100
+```
+
+## 1. The 1 km marine grid
+
+Cell values are OHI region ids 1–9. Land and water outside the nine regions are
+empty. Resolution is 1 km in Mexico ITRF2008 / LCC (EPSG:6372).
+
+```{r template}
+region_1km <- rast(marine_path)
+marine_1km <- ifel(region_1km >= 1, 1, NA)
+
+region_labels <- st_read(region_path, quiet = TRUE) %>%
+  st_drop_geometry() %>%
+  filter(location == "marine") %>%
+  arrange(rgn_id) %>%
+  transmute(
+    rgn_num = as.integer(str_remove(rgn_id, "Region_")),
+    rgn_id = rgn_id,
+    region_label = paste(
+      rgn_id,
+      str_replace_all(estado, "_", " "),
+      str_replace_all(ecorgn, "_", " "),
+      sep = " · "
+    )
+  )
+
+cat(
+  "Cells:", ncell(region_1km), "\n",
+  "Resolution, m:", paste(res(region_1km), collapse = " × "), "\n",
+  "Marine cells:", as.numeric(global(marine_1km, "sum", na.rm = TRUE)[1, 1]), "\n"
+)
+```
+
+## 2. Bathymetry samples inside each 1 km cell
+
+GMRT is cropped to the grid footprint, then projected with nearest neighbor onto
+the 200 m grid. Water depth is −elevation. A fine cell is shallow when that
+depth is from 0 through 100 m, and deep when it is greater than 100 m. Land
+elevations are neither.
+
+```{r bathymetry}
+template_fine <- disagg(region_1km, fact = fine_factor)
+
+# Geographic box of the 1 km grid, with a small buffer so the edge cells
+# still receive a bathymetry sample after the projection.
+corners <- cbind(
+  x = c(xmin(region_1km), xmax(region_1km), xmin(region_1km), xmax(region_1km)),
+  y = c(ymin(region_1km), ymin(region_1km), ymax(region_1km), ymax(region_1km))
+)
+corners_ll <- project(vect(corners, crs = crs(region_1km)), "EPSG:4326")
+ll <- crds(corners_ll)
+gmrt_extent <- ext(
+  min(ll[, 1]) - 0.3,
+  max(ll[, 1]) + 0.3,
+  min(ll[, 2]) - 0.3,
+  max(ll[, 2]) + 0.3
+)
+
+gmrt <- rast(gmrt_path) %>%
+  crop(gmrt_extent)
+
+gmrt_fine <- project(gmrt, template_fine, method = "near")
+water_depth_m <- -gmrt_fine
+
+shallow_fine <- ifel(is.na(water_depth_m), NA, ifel(water_depth_m >= 0 & water_depth_m <= depth_break_m, 1, 0))
+deep_fine <- ifel(is.na(water_depth_m), NA, ifel(water_depth_m > depth_break_m, 1, 0))
+
+# max = 1 when any fine cell in the 1 km block meets the test.
+# A block with no in-water samples stays 0. Those coastal cells are assigned
+# to the shelf mask in the next section.
+shelf_any <- aggregate(shallow_fine, fact = fine_factor, fun = "max", na.rm = TRUE)
+has_deep <- aggregate(deep_fine, fact = fine_factor, fun = "max", na.rm = TRUE)
+shelf_any <- ifel(is.na(shelf_any), 0, shelf_any)
+has_deep <- ifel(is.na(has_deep), 0, has_deep)
+
+stopifnot(compareGeom(shelf_any, region_1km, stopOnError = FALSE))
+```
+
+## 3. The two masks
+
+Outside the nine marine regions both masks are empty. Inside them, every cell
+is 1 on exactly one mask. Cells with a measured depth of 100 m or less go to
+the shelf. Coastal marine cells with no in-water sample go to the shelf as
+well. The remaining cells go to the deep mask.
+
+```{r masks}
+# Coastal marine cells whose samples never reach water.
+no_water <- ifel(is.na(marine_1km), NA, ifel(shelf_any == 0 & has_deep == 0, 1, 0))
+
+shelf_mask <- ifel(
+  is.na(marine_1km),
+  NA,
+  ifel(shelf_any == 1 | no_water == 1, 1, 0)
+)
+deep_mask <- ifel(
+  is.na(marine_1km),
+  NA,
+  ifel(shelf_mask == 1, 0, 1)
+)
+names(shelf_mask) <- "depth_le_100m"
+names(deep_mask) <- "depth_gt_100m"
+
+overlap <- ifel(is.na(marine_1km), NA, ifel(shelf_mask == 1 & deep_mask == 1, 1, 0))
+unplaced <- ifel(is.na(marine_1km), NA, ifel(shelf_mask == 0 & deep_mask == 0, 1, 0))
+# Every deep cell should still have a sample deeper than 100 m.
+deep_without_sample <- ifel(is.na(marine_1km), NA, ifel(deep_mask == 1 & has_deep == 0, 1, 0))
+stopifnot(as.numeric(global(overlap, "sum", na.rm = TRUE)[1, 1]) == 0)
+stopifnot(as.numeric(global(unplaced, "sum", na.rm = TRUE)[1, 1]) == 0)
+stopifnot(as.numeric(global(deep_without_sample, "sum", na.rm = TRUE)[1, 1]) == 0)
+
+n_shelf <- as.numeric(global(shelf_mask, "sum", na.rm = TRUE)[1, 1])
+n_deep <- as.numeric(global(deep_mask, "sum", na.rm = TRUE)[1, 1])
+n_no_water <- as.numeric(global(no_water, "sum", na.rm = TRUE)[1, 1])
+n_marine <- as.numeric(global(marine_1km, "sum", na.rm = TRUE)[1, 1])
+stopifnot(n_shelf + n_deep == n_marine)
+```
+
+Each 1 km cell is 1 km², so the cell count is the area.
+
+```{r area-table}
+area_summary <- tibble(
+  class = c(
+    "100 m or shallower",
+    "    of which, no in-water sample",
+    "Deeper than 100 m",
+    "All marine cells"
+  ),
+  cells = c(n_shelf, n_no_water, n_deep, n_marine),
+  km2 = cells
+)
+
+kable(
+  area_summary,
+  digits = 0,
+  col.names = c("Class", "1 km cells", "Area, km²"),
+  caption = "Area of the depth masks. Cells on the 100 m line, and coastal cells with no in-water sample, are in the shallower class."
+)
+```
+
+```{r by-region}
+class_cells <- c(region_1km, shelf_mask, deep_mask, no_water)
+names(class_cells) <- c("rgn_num", "shelf", "deep", "no_water")
+class_by_region <- as.data.frame(class_cells, na.rm = TRUE) %>%
+  filter(!is.na(rgn_num)) %>%
+  group_by(rgn_num) %>%
+  summarise(
+    shelf_km2 = sum(shelf, na.rm = TRUE),
+    no_water_in_shelf_km2 = sum(no_water, na.rm = TRUE),
+    deep_km2 = sum(deep, na.rm = TRUE),
+    marine_km2 = n(),
+    .groups = "drop"
+  ) %>%
+  left_join(region_labels, by = "rgn_num") %>%
+  arrange(rgn_num)
+
+kable(
+  class_by_region %>%
+    select(region_label, shelf_km2, no_water_in_shelf_km2, deep_km2, marine_km2),
+  digits = 0,
+  col.names = c("Region", "≤ 100 m, km²", "No sample, counted as ≤ 100 m, km²", "> 100 m, km²", "Marine, km²"),
+  caption = "Mask area by OHI marine region. Each 1 km cell counts as 1 km². The no-sample column is already included in the ≤ 100 m column."
+)
+
+write_csv(class_by_region, file.path(out_dir, "depth_mask_km2_by_region.csv"))
+```
+
+## 4. Maps
+
+Orange is 100 m or shallower, including coastal cells with no in-water sample.
+Navy is deeper than 100 m.
+
+```{r map-data}
+class_raster <- ifel(
+  is.na(marine_1km),
+  NA,
+  ifel(shelf_mask == 1, 1, 2)
+)
+
+map_df <- as.data.frame(class_raster, xy = TRUE, na.rm = TRUE)
+names(map_df)[3] <- "class_id"
+map_df <- map_df %>%
+  mutate(
+    class_label = factor(
+      class_id,
+      levels = c(1, 2),
+      labels = c("100 m or shallower", "Deeper than 100 m")
+    )
+  )
+```
+
+```{r plot-masks, fig.width=8, fig.height=9}
+mask_plot <- ggplot(map_df, aes(x, y, fill = class_label)) +
+  geom_raster() +
+  scale_fill_manual(
+    values = c(
+      "100 m or shallower" = "#f4a261",
+      "Deeper than 100 m" = "#1d3557"
+    ),
+    name = NULL
+  ) +
+  coord_equal() +
+  labs(
+    title = "Gulf marine cells by the 100 m depth split",
+    subtitle = "A 1 km cell is shallow if any sample in it is 100 m or shallower, or if it has no in-water sample.",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+
+print(mask_plot)
+ggsave(
+  file.path(out_dir, "depth_masks_100m_1km.png"),
+  mask_plot,
+  width = 8,
+  height = 9,
+  dpi = 150,
+  bg = "white"
+)
+```
+
+## 5. Saved rasters
+
+Values are 1 inside the class, 0 in the other marine cells, and empty outside
+the nine marine regions. Every marine cell is 1 on one raster. Coastal cells
+with no in-water sample are 1 on the shelf raster.
+
+```{r save}
+shelf_path <- file.path(out_dir, "mask_depth_le_100m_1km.tif")
+deep_path <- file.path(out_dir, "mask_depth_gt_100m_1km.tif")
+
+writeRaster(shelf_mask, shelf_path, overwrite = TRUE, datatype = "INT1U", NAflag = 255)
+writeRaster(deep_mask, deep_path, overwrite = TRUE, datatype = "INT1U", NAflag = 255)
+
+cat("Shelf mask:", shelf_path, "\n")
+cat("Deep mask:", deep_path, "\n")
+cat("Shelf file, KB:", round(file.size(shelf_path) / 1024), "\n")
+cat("Deep file, KB:", round(file.size(deep_path) / 1024), "\n")
+```
+
+The shelf raster is `r shelf_path`. The deep raster is `r deep_path`.

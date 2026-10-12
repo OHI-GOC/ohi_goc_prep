@@ -11,6 +11,7 @@ execute:
   warning: false
 ---
 
+The sections through Pressure score one soft-bottom habitat. The last section repeats that score for soft bottom of 100 m or less and for soft bottom deeper than 100 m.
 
 ```{r}
 # Load in Libraries
@@ -300,9 +301,14 @@ pressure_df <- df_regions |>
   )
 
 pressure_df
-# SOF score per region per year
+# SOF score per region per year.
+# Condition (SOF_score) is stored to 1 decimal. The 0–100 pressure is the complement of that rounded condition.
 write_csv(
-  pressure_df,
+  pressure_df |>
+    mutate(
+      SOF_score = round(SOF_score, 1),
+      Pressure = round(100 - SOF_score, 1)
+    ),
   here("_habitats/HAB_soft_bottom/SOF_outputs/sof_region_scores_per_year.csv"))
 
 # pressure_df <- read_csv(here::here("_habitats/HAB_soft_bottom/SOF_outputs/sof_region_scores_per_year.csv"))
@@ -321,9 +327,13 @@ pressure_year <- pressure_df |>
 
 # Make a kable table
 pressure_year |>
+  mutate(
+    SOF_score = round(SOF_score, 1),
+    Pressure = round(100 - SOF_score, 1)
+  ) |>
   select(region_id, Pressure, SOF_score) |>
   kable(
-    digits = 4,
+    digits = 1,
     col.names = c("Region ID", "Pressure", "SOF_score"),
     align = c("c", "r", "r")
   ) |>
@@ -423,7 +433,7 @@ ggplot(
 condition_df <- pressure_df |>
   select(region_id, year, condition = SOF_score) |>                  # keep needed columns
   mutate(
-    condition = pmin(condition, 100)         # cap at 100
+    condition = pmin(round(condition, 1), 100)         # cap at 100, store to 1 decimal
   )
 condition_df
 
@@ -463,7 +473,7 @@ calc_trends <- function(d) {
     year = ye,
     year_start = ys,
     year_end = ye,
-    condition_start = cs,
+    condition_start = round(cs, 1),
     trend_pct_linear = (slope_lin / cs) * 100,              # slope / start * 100
     trend_pct_cagr   = (exp(slope_log) - 1) * 100           # slope from log model
   )
@@ -484,9 +494,310 @@ write_csv(trend_df, here::here("_habitats/HAB_soft_bottom/SOF_outputs/sof_trend.
 
 ```{r}
 pressure_df_score <- pressure_df %>%
-  mutate(pressure = Pressure/100) %>%
+  mutate(pressure = round(Pressure / 100, 2)) %>%
   select(region_id, year, pressure)
 
 write_csv(pressure_df_score, here::here("_habitats/HAB_soft_bottom/SOF_outputs/sof_pressure.csv"))
+```
+
+## Soft bottom by depth class
+
+The files above are the combined habitat. This section does not replace them, and it does not change the disturbed-proportion raster saved for rhodoliths.
+
+The same swept-area score is calculated twice. Soft bottom of 100 m or less uses `mask_depth_le_100m_1km.tif`. Soft bottom deeper than 100 m uses `mask_depth_gt_100m_1km.tif`. Those masks already partition the marine grid: a cell with any bathymetry sample of 100 m or less is shallow, and a coastal marine cell with no in-water sample is shallow as well. Every other marine cell is deep.
+
+Within a class, the cell calculation is unchanged. Disturbance in km² is fishing hours times 3.7 km/h times a 0.030 km headrope. The cell ratio of disturbance to soft-bottom area is capped at 1. The regional pressure is the sum of that capped disturbed area divided by the sum of soft-bottom area. Condition is 100 times 1 minus that pressure. Trend is the 2021–2025 change in condition, linear and as a compound rate.
+
+A cell's hours stay with that cell. Regions 1 and 5 have no cells deeper than 100 m, so they are left out of the deep files. Because the two classes do not overlap, adding their disturbed area and their soft-bottom area should recover the combined score above. Saved condition is rounded to 1 decimal. Saved pressure, on the 0–1 scale, is rounded to 2 decimals. The area columns stay unrounded.
+
+```{r}
+# Depth masks are 1 inside the class, 0 in other marine cells, empty outside.
+shelf_mask <- rast(here(
+  "_habitats", "HAB_soft_bottom", "int", "mask_depth_le_100m_1km.tif"
+))
+deep_mask <- rast(here(
+  "_habitats", "HAB_soft_bottom", "int", "mask_depth_gt_100m_1km.tif"
+))
+compareGeom(shelf_mask, soft_bottom_fraction, stopOnError = TRUE)
+compareGeom(deep_mask, soft_bottom_fraction, stopOnError = TRUE)
+compareGeom(shelf_mask, template, stopOnError = TRUE)
+
+# Same marine cells as the combined score: a region id and a soft-bottom value.
+score_cells <- !is.na(values(template)[, 1]) & !is.na(values(soft_bottom_fraction)[, 1])
+shelf_vals <- values(shelf_mask)[, 1]
+deep_vals <- values(deep_mask)[, 1]
+n_unassigned <- sum(score_cells & (is.na(shelf_vals) | (shelf_vals == 0 & deep_vals == 0)), na.rm = TRUE)
+n_overlap <- sum(score_cells & shelf_vals == 1 & deep_vals == 1, na.rm = TRUE)
+cat("Combined-score cells in neither mask:", n_unassigned, "\n")
+cat("Combined-score cells in both masks:", n_overlap, "\n")
+stopifnot(n_unassigned == 0, n_overlap == 0)
+```
+
+```{r}
+# Regional score for one depth class.
+# Rows are written only where that class has soft-bottom area.
+score_depth_class <- function(mask) {
+  soft_class <- soft_bottom_fraction * mask
+  disturbance_class <- disturbance_raster_km2 * mask
+
+  prop_class <- disturbance_class / soft_class
+  prop_class[prop_class > 1] <- 1
+  prop_class[is.infinite(prop_class)] <- 0
+  disturbed_class <- prop_class * soft_class
+
+  n_cells <- ncell(template)
+  n_years <- nlyr(disturbed_class)
+  class_df <- tibble(
+    region_id = rep(as.integer(values(template)[, 1]), times = n_years),
+    year = rep(years, each = n_cells),
+    in_class = rep(values(mask)[, 1], times = n_years),
+    disturbed_area = as.vector(values(disturbed_class)),
+    soft_bottom_area = rep(as.vector(values(soft_class)), times = n_years)
+  ) |>
+    filter(in_class == 1, !is.na(region_id)) |>
+    filter(!is.nan(disturbed_area), !is.nan(soft_bottom_area))
+
+  class_df |>
+    group_by(region_id, year) |>
+    summarise(
+      disturbed_sum = sum(disturbed_area, na.rm = TRUE),
+      soft_bottom_sum = sum(soft_bottom_area, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    filter(soft_bottom_sum > 0) |>
+    mutate(
+      pressure = round(disturbed_sum / soft_bottom_sum, 2),
+      condition = pmin(round((1 - disturbed_sum / soft_bottom_sum) * 100, 1), 100)
+    )
+}
+
+# Same trend definition as the combined habitat.
+# The log fit needs a positive condition in every year of the window.
+calc_trends_depth <- function(d) {
+  ys <- min(d$year)
+  ye <- max(d$year)
+  cs <- d$condition[d$year == ys][1]
+  fit_lin <- lm(condition ~ year, data = d)
+  slope_lin <- unname(coef(fit_lin)["year"])
+  trend_log <- NA_real_
+  if (all(d$condition > 0)) {
+    fit_log <- lm(log(condition) ~ year, data = d)
+    slope_log <- unname(coef(fit_log)["year"])
+    trend_log <- (exp(slope_log) - 1) * 100
+  }
+  tibble(
+    year = ye,
+    year_start = ys,
+    year_end = ye,
+    condition_start = round(cs, 1),
+    trend_pct_linear = (slope_lin / cs) * 100,
+    trend_pct_cagr = trend_log
+  )
+}
+
+write_depth_outputs <- function(scores, file_suffix) {
+  out_dir <- here("_habitats", "HAB_soft_bottom", "SOF_outputs")
+  write_csv(
+    scores |>
+      transmute(
+        region_id,
+        year,
+        disturbed_sum,
+        soft_bottom_sum,
+        Pressure = round(100 - condition, 1),
+        SOF_score = condition
+      ),
+    file.path(out_dir, paste0("sof_region_scores_per_year_", file_suffix, ".csv"))
+  )
+  write_csv(
+    scores |> select(region_id, year, condition),
+    file.path(out_dir, paste0("sof_status_", file_suffix, ".csv"))
+  )
+  write_csv(
+    scores |> select(region_id, year, pressure),
+    file.path(out_dir, paste0("sof_pressure_", file_suffix, ".csv"))
+  )
+
+  year_end <- max(scores$year)
+  trend <- scores |>
+    filter(year >= year_end - 4, year <= year_end) |>
+    group_by(region_id) |>
+    group_modify(~ calc_trends_depth(.x)) |>
+    ungroup()
+  write_csv(trend, file.path(out_dir, paste0("sof_trend_", file_suffix, ".csv")))
+  trend
+}
+
+shelf_scores <- score_depth_class(shelf_mask)
+deep_scores <- score_depth_class(deep_mask)
+shelf_trend <- write_depth_outputs(shelf_scores, "le_100m")
+deep_trend <- write_depth_outputs(deep_scores, "gt_100m")
+
+cat(
+  "Deep habitat has no cells for region(s):",
+  paste(setdiff(1:9, unique(deep_scores$region_id)), collapse = ", "),
+  "\n"
+)
+```
+
+The two class totals should add back to the combined score. A difference here would mean a cell was dropped or counted twice.
+
+```{r}
+split_sums <- bind_rows(shelf_scores, deep_scores) |>
+  group_by(region_id, year) |>
+  summarise(
+    disturbed_split = sum(disturbed_sum),
+    soft_split = sum(soft_bottom_sum),
+    .groups = "drop"
+  )
+
+depth_split_check <- pressure_df |>
+  transmute(
+    region_id = as.integer(region_id),
+    year = as.integer(year),
+    disturbed_original = disturbed_sum,
+    soft_original = soft_bottom_sum,
+    pressure_original = Pressure / 100
+  ) |>
+  left_join(split_sums, by = c("region_id", "year")) |>
+  mutate(
+    pressure_split = disturbed_split / soft_split,
+    abs_soft_diff = abs(soft_split - soft_original),
+    abs_disturbed_diff = abs(disturbed_split - disturbed_original),
+    abs_pressure_diff = abs(pressure_split - pressure_original)
+  )
+
+cat("Max |soft-bottom difference|, km²:", max(depth_split_check$abs_soft_diff), "\n")
+cat("Max |disturbed-area difference|, km²:", max(depth_split_check$abs_disturbed_diff), "\n")
+cat("Max |pressure difference|:", max(depth_split_check$abs_pressure_diff), "\n")
+stopifnot(max(depth_split_check$abs_soft_diff) < 1e-3)
+stopifnot(max(depth_split_check$abs_pressure_diff) < 1e-5)
+```
+
+```{r}
+# Soft-bottom area is the denominator of the pressure score. It does not change by year.
+area_by_class <- full_join(
+  shelf_scores |>
+    filter(year == max(year)) |>
+    select(region_id, shelf_soft_km2 = soft_bottom_sum),
+  deep_scores |>
+    filter(year == max(year)) |>
+    select(region_id, deep_soft_km2 = soft_bottom_sum),
+  by = "region_id"
+) |>
+  arrange(region_id)
+
+area_by_class |>
+  kable(
+    digits = 1,
+    col.names = c("Region", "≤ 100 m soft bottom, km²", "> 100 m soft bottom, km²"),
+    caption = "Soft-bottom area in each depth class. Empty cells are regions with no habitat in that class."
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "bordered"), full_width = FALSE)
+```
+
+```{r}
+year_to_show_depth <- max(shelf_scores$year)
+scores_2025 <- full_join(
+  shelf_scores |>
+    filter(year == year_to_show_depth) |>
+    select(region_id, shelf_pressure = pressure, shelf_condition = condition, shelf_disturbed = disturbed_sum),
+  deep_scores |>
+    filter(year == year_to_show_depth) |>
+    select(region_id, deep_pressure = pressure, deep_condition = condition, deep_disturbed = disturbed_sum),
+  by = "region_id"
+) |>
+  arrange(region_id)
+
+scores_2025 |>
+  kable(
+    digits = c(0, 2, 1, 1, 2, 1, 1),
+    col.names = c(
+      "Region",
+      "≤ 100 m pressure",
+      "≤ 100 m condition",
+      "≤ 100 m disturbed, km²",
+      "> 100 m pressure",
+      "> 100 m condition",
+      "> 100 m disturbed, km²"
+    ),
+    caption = paste("Depth-class scores in", year_to_show_depth, ". Pressure is the share of soft-bottom area disturbed.")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "bordered"), full_width = FALSE)
+```
+
+```{r, fig.width=12, fig.height=8}
+depth_colors <- c(
+  "100 m or shallower" = "#f4a261",
+  "Deeper than 100 m" = "#1d3557"
+)
+
+condition_by_depth <- bind_rows(
+  shelf_scores |> mutate(depth_class = "100 m or shallower"),
+  deep_scores |> mutate(depth_class = "Deeper than 100 m")
+) |>
+  mutate(
+    depth_class = factor(depth_class, levels = names(depth_colors)),
+    region_id = factor(region_id, levels = 1:9)
+  )
+
+ggplot(condition_by_depth, aes(x = year, y = condition, color = depth_class)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.6) +
+  facet_wrap(~ region_id, ncol = 3, labeller = labeller(region_id = function(x) paste("Region", x))) +
+  scale_color_manual(values = depth_colors, name = NULL) +
+  scale_y_continuous(limits = c(0, 100)) +
+  labs(
+    title = "Soft-bottom condition by depth class",
+    x = "Year",
+    y = "Condition"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+```{r, fig.width=12, fig.height=6}
+map_depth_status <- function(scores, title) {
+  ohi_map <- ohi_regions |>
+    left_join(
+      scores |>
+        filter(year == max(scores$year)) |>
+        transmute(id = as.integer(region_id), condition),
+      by = "id"
+    )
+  ggplot() +
+    geom_sf(data = dplyr::filter(ohi_map, location == "land"), fill = "#f5e6c8", color = "gray40", linewidth = 0.3) +
+    geom_sf(data = dplyr::filter(ohi_map, location == "marine"), aes(fill = condition), color = "gray20", linewidth = 0.4) +
+    scale_fill_distiller(
+      palette = "RdYlGn",
+      direction = 1,
+      name = "Condition",
+      limits = c(0, 100),
+      breaks = seq(0, 100, by = 20),
+      na.value = "grey85"
+    ) +
+    labs(title = title) +
+    theme_void() +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5))
+}
+
+map_depth_status(shelf_scores, "Soft bottom ≤ 100 m, condition in 2025")
+map_depth_status(deep_scores, "Soft bottom > 100 m, condition in 2025")
+```
+
+```{r}
+shelf_trend |>
+  kable(
+    digits = 2,
+    caption = "Trend in soft-bottom condition, 100 m or shallower, 2021–2025. trend_pct_linear is the annual slope divided by the 2021 condition, in percent. trend_pct_cagr is the compound rate from the log fit."
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "bordered"), full_width = FALSE)
+
+deep_trend |>
+  kable(
+    digits = 2,
+    caption = "Trend in soft-bottom condition, deeper than 100 m, 2021–2025. Regions 1 and 5 are absent because that class has no cells there."
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "bordered"), full_width = FALSE)
 ```
 
