@@ -111,14 +111,15 @@ terra::plot(
 
 ## Remove all rhodolith beds < 100m
 
-```{r Masks greater than and less than 100m}
-# Geopatial mask for less than and greater than 100m depth:
+```{r Masks > than and ≤ than 100m}
+# Geopatial mask for less than or equal to 100m depth:
 mask_less_than_100m<- rast(
   here("_habitats/HAB_soft_bottom/int/mask_depth_le_100m_1km.tif")
 )
 
 # Inspect mask
 plot(mask_less_than_100m)
+# Mask is a series of 0 and 1
 
 # Shallow water: value 1
 shallow_mask <- ifel(mask_less_than_100m == 1, 1, NA)
@@ -237,7 +238,7 @@ st_crs(FILTERED_rhodolith.data_area)
 points_sf <- st_as_sf(
   FILTERED_rhodolith.data_area,
   coords = c("lon", "lat"),
-  crs = 4326,
+  crs = st_crs(FILTERED_rhodolith.data_area),
   remove = FALSE
 )
 
@@ -276,10 +277,11 @@ FILTERED_rhodolith.data_area <- FILTERED_rhodolith.data_area %>%
     percent_difference = 100 * area_difference_ha / area_ha
   ) %>%
   select(
-    habitat, source, area_ha, polygon_area_ha,
+    habitat, source, reported_area_ha = area_ha, polygon_area_ha,
     area_difference_ha, percent_difference,
     lat, lon, geometry
   )
+# 102 obs.
 
 ```
 
@@ -291,7 +293,7 @@ terra::plot(
   shallow_mask,
   col = "coral",
   legend = FALSE,
-  main = "Rhodolith beds in water ≤ 100 m",
+  main = "Shallow rhodolith beds (≤ 100 m depth)",
   axes = FALSE
 )
 
@@ -421,7 +423,7 @@ write.csv(
 )
 ```
 
-```{r Map of CORL_Current_Extent}
+```{r Map of RHOD_Current_Extent}
 tmap_mode("plot")
 
 tm_shape(ohi_regions) +
@@ -438,10 +440,10 @@ tm_shape(ohi_regions) +
   ) +
 
 # Hem Coral points
-tm_shape(FILTERED_rhodolith.data_area) +
+tm_shape(RHOD_Current_Extent0) +
   tm_dots(
 
-    palette = c("Hem Rhodolith Points" = "#FF4500"),       # blue
+    palette = c("CEDO Rhodolith Points" = "#FF4500"),       # blue
     size = 0.05,
     alpha = 1,
     title = "Habitat"
@@ -476,7 +478,7 @@ print(st_crs(VMS_fishing_pressure)$Name)
 land <- terra::project(terra::vect(ohi_land), terra::crs(VMS_fishing_pressure))
 marine <- terra::project(terra::vect(ohi_marine), terra::crs(VMS_fishing_pressure))
 rhodolith <- terra::project(
-  terra::vect(FILTERED_rhodolith.data_area),
+  terra::vect(RHOD_Current_Extent0),
   terra::crs(VMS_fishing_pressure)
 )
 
@@ -520,55 +522,58 @@ deep_mask <- rasterize(
 )
 
 # Keep cells inside shallow areas, excluding deep areas
-VMS_fishing_pressure_FILTERED <- ifel(
+VMS_fishing_pressure_le100m <- ifel(
   !is.na(shallow_mask) & is.na(deep_mask),
   VMS_fishing_pressure,
   NA
 )
 
 plot(VMS_fishing_pressure)
-plot(VMS_fishing_pressure_FILTERED)
+plot(VMS_fishing_pressure_le100m)
 
 # Save original layer names
 original_names <- names(VMS_fishing_pressure)
 
-# Restore original layer names
-names(VMS_fishing_pressure_FILTERED) <- original_names
-
-plot(VMS_fishing_pressure_FILTERED)
+plot(VMS_fishing_pressure_le100m)
 ```
 
 
 
 ## Extract soft-bottom pressure under rhodolith beds
+# NOTE TO SELF: THIS IS THE PART I'D LIKE A SECOND LOOK AT - Oct 13 2026
 
-```{r}
-pressure_raster <- VMS_fishing_pressure_FILTERED
+```{r Extract soft-bottom pressure underneath rhodolith beds}
+# Restore original layer names
+names(VMS_fishing_pressure_le100m) <- original_names
 
-# Convert rhodolite polygons to a SpatVector
+pressure_raster <- VMS_fishing_pressure_le100m
+# Check CRS:
+crs(pressure_raster)
+
+# Convert rhodolith polygons to a SpatVector
 rhodolith_vect <- terra::vect(RHOD_Current_Extent0)
+# Check CRS:
+crs(rhodolith_vect)
 
-# Match CRS
-if (!terra::same.crs(rhodolith_vect, pressure_raster)) {
-  rhodolith_vect <- terra::project(
-    rhodolith_vect,
-    terra::crs(pressure_raster)
-  )
-}
-
-# Extract mean fishing pressure for each polygon
+# Extract area-weighted mean fishing pressure value for each rhodolith polygon
+# Note, some rhodolith polygons encompase multiple VMS raster cells, so we need to take the area-weighted mean:
 pressure_values <- terra::extract(
   pressure_raster,
   rhodolith_vect,
   fun = mean,
-  na.rm = TRUE
+  na.rm = TRUE,
+  weights = TRUE, # This line assigning area weights is critical
+  ID = TRUE
 )
 
 # Join extracted values back to the original polygon data
-FILTERED_rhodolith.pressure <- RHOD_Current_Extent0 %>%
+RHOD_Scores0 <- RHOD_Current_Extent0 %>%
   mutate(ID = row_number()) %>%
   left_join(pressure_values, by = "ID") %>%
   select(-ID)
+
+# Prop = average predicted probability of fishing disturbance per rhodolith bed x year.
+# Example, if prop = 0.7, this means an average predicted disturbance probability of 70% across the extracted cells.
 ```
 
 
@@ -576,47 +581,24 @@ Pressure under each bed = area-weighted mean of `VMS_fishing_pressure` cells ove
 No recovery scaling applied for now (same 0–1 exposure scale as soft bottom).
 ```{r}
 
-
-
 # Weighted mean pressure per rhodolith polygon × year
 # Note, some rhodolith polygons encompase multiple VMS raster cells, so we need to take the mean:
 ex <- terra::extract(
-  VMS_fishing_pressure_FILTERED,
-  vect(FILTERED_rhodolith.pressure),
+  pressure_raster,
+  vect(RHOD_Scores0),
   fun = mean,
   weights = TRUE,
   na.rm = TRUE,
   ID = TRUE
 )
 
-# Layer names → year; join polygon region + area
-# pressure_cols <- setdiff(names(ex), "ID")
-# 
-# df_poly <- as_tibble(ex) %>%
-#   rename(poly_id = ID) %>%
-#   left_join(
-#     st_drop_geometry(FILTERED_rhodolith.pressure) %>% select(rgn_id, area_km2),
-#     by = "poly_id"
-#   ) %>%
-#   pivot_longer(
-#     cols = all_of(pressure_cols),
-#     names_to = "layer",
-#     values_to = "prop"
-#   ) %>%
-#   mutate(
-#     year = as.integer(sub("VMS_fishing_pressure_", "", layer))
-#   )
-# 
-# df_poly
-# 
-
 rhodolith_attributes <- st_drop_geometry(
-  FILTERED_rhodolith.pressure
+  RHOD_Scores0
 ) %>%
   mutate(poly_id = row_number()) %>%
   select(poly_id, rgn_id, area_km2)
 
-df_poly <- as_tibble(ex) %>%
+df_poly <- as_tibble(pressure_values) %>%
   rename(poly_id = ID) %>%
   left_join(
     rhodolith_attributes,
@@ -640,35 +622,49 @@ df_poly
 ```
 
 ```{r}
+ RHOD_Scores0<- RHOD_Scores0 %>%
+  pivot_longer(
+    cols = all_of(pressure_cols),
+    names_to = "layer",
+    values_to = "prop"
+  ) %>%
+  mutate(
+    year = as.integer(
+      sub("prop_disturbed_", "", layer)
+    )
+  )
+
 # Area-weighted average pressure per region × year
-RHOD_Scores0 <- df_poly %>%
+RHOD_Scores <- RHOD_Scores0 %>%
   filter(!is.na(prop), !is.na(rgn_id), area_km2 > 0) %>%
+  st_drop_geometry() %>%
   group_by(rgn_id, year) %>%
   summarise(
     area_sum  = sum(area_km2, na.rm = TRUE),
+    # Must be in this order:
     Pressure  = sum(prop * area_km2, na.rm = TRUE) / area_sum,
-    RHO_score = 1 - Pressure,
+    RHOD_current_status = 1 - Pressure,
     Pressure  = Pressure * 100,
-    RHO_score = RHO_score * 100,
+    RHOD_current_status = RHOD_current_status * 100,
     .groups = "drop"
   )
 
-RHOD_Scores0
+RHOD_Scores
 
 ```
 
 ```{r Join rgn_name to scores}
 colnames(Region_Key)
-colnames(RHOD_Scores0)
+colnames(RHOD_Scores)
 
-RHOD_Scores <- RHOD_Scores0 %>%
+RHOD_Scores <- RHOD_Scores %>%
   left_join(Region_Key, by = "rgn_id")
   
 RHOD_Scores<- RHOD_Scores %>%
   relocate(rgn_name, .before = rgn_id)
 ```
 
-```{r Plot RHOD trends}
+```{r Plot RHOD trawling trends}
 
 Region_colors<- c(
   "Western Upper Gulf" = "#C03729",
@@ -693,7 +689,7 @@ RHOD_TrawlPressure_OverTime<- RHOD_Scores %>%
   geom_point(size = 2) +
   
   labs(
-    title = "Mean Probability of Rhodolith Trawling (i.e., Pressure)",
+    title = "Trawl Pressure per Region (i.e., mean prob of trawling over rhodolith beds)",
     subtitle = "Pressures estimates derived from fisheries VMS data",
     caption = "updated: Oct 12 2026",
     x = "Year",
@@ -726,16 +722,7 @@ ggsave(
 )
 ```
 
-
-## Save RHOD_Scores - NOTE TO SELF: COME BACK HERE TOMORROW ERICA!
-
-```{r Save}
-dir.create(here("_habitats/HAB_rhodolith_beds/RHO_outputs"), showWarnings = FALSE)
-write_csv(
-  RHOD_Scores,
-  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_region_scores_per_year.csv")
-)
-```
+## Save RHOD_Scores
 
 ```{r Save RHOD_Scores}
 write.csv(RHOD_Scores,
@@ -743,153 +730,75 @@ write.csv(RHOD_Scores,
           row.names = FALSE)
 ```
 
-## Current RHO
-```{r}
-# Select a single year
-year_to_show <- 2025   # <-- change this to any year you want
+## Plot RHOD_Scores
 
-# Filter for selected year
-pressure_year <- RHOD_Scores %>%
-  filter(year == year_to_show) %>%
-  arrange(region_id)
+```{r Plot RHOD_Scores}
+colnames(RHOD_Scores)
 
-# Make a kable table
-pressure_year %>%
-  select(region_id, Pressure, RHO_score) %>%
-  kable(
-    digits = 4,
-    col.names = c("Region ID", "Pressure", "RHO_score"),
-    align = c("c", "r", "r")
-  ) %>%
-  kable_styling(
-    bootstrap_options = c("striped", "bordered", "hover"),
-    full_width = FALSE
-  ) %>%
-  add_header_above(
-    setNames(3, paste0("Rhodolith Pressure & RHO — Year ", year_to_show))
-  )
-```
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
 
-```{r}
-ohi_rho <- ohi_regions %>%
-  left_join(
-    pressure_year %>% transmute(id = as.integer(region_id), RHO_score),
-    by = "id"
-  )
-ohi_land_map   <- ohi_rho %>% filter(location == "land")
-ohi_marine_map <- ohi_rho %>% filter(location == "marine")
-ggplot() +
-  geom_sf(data = ohi_land_map, fill = "#f5e6c8", color = "gray40", linewidth = 0.3) +
-  geom_sf(data = ohi_marine_map, aes(fill = RHO_score), color = "gray20", linewidth = 0.4) +
-  scale_fill_distiller(
-    palette = "RdYlGn",
-    direction = 1,
-    name = "RHO score",
-    limits = c(0, 100),
-    breaks = seq(0, 100, by = 20),
-    na.value = "gray90"
-  ) +
-  labs(title = "Rhodolith habitat status (2025)") +
-  theme_void() +
-  theme(
-    legend.position = "right",
-    plot.title = element_text(face = "bold", hjust = 0.5)
-  )
-```
-
-```{r, fig.width=12, fig.height=7}
-# Define region colors
-rgn_colors <- c(
-  "Region_1" = "#C03729",
-  "Region_2" = "#E68C7C",
-  "Region_3" = "#FC8F24",
-  "Region_4" = "#dcaa38",
-  "Region_5" = "#cbd2a0",
-  "Region_6" = "#98a25a",
-  "Region_7" = "#747428",
-  "Region_8" = "#627391",
-  "Region_9" = "#8d61a9"
-)
-
-# Clean region names in RHOD_Scores to match color names
-RHOD_Scores <- RHOD_Scores %>%
-  mutate(
-    region_clean = paste0("Region_", region_id),   # numeric → Region_#
-    region_clean = gsub("_", " ", region_clean)    # Region_1 → Region 1
-  )
-
-# Clean color names to match cleaned labels ("Region 1", etc.)
-rgn_colors_clean <- setNames(
-  rgn_colors,
-  gsub("_", " ", names(rgn_colors))                # Region_1 → Region 1
-)
-
-# RHO time series plot with custom colors
-ggplot(
-  RHOD_Scores,
-  aes(
-    x = year,
-    y = RHO_score,
-    group = region_clean,
-    color = region_clean
-  )
-) +
-  geom_point(size = 2) +
+# Plot:
+RHOD_Scores_OverTime<- RHOD_Scores %>%
+  ggplot(aes(year, RHOD_current_status, color = rgn_name)) +
+  
   geom_line(linewidth = 1) +
-  scale_color_manual(values = rgn_colors_clean) +
-  labs(
-    title = "RHO Score Over Time",
-    x = "Year",
-    y = "RHO Score",
-    color = "Region ID"
+  
+  geom_point(
+  size = 2
   ) +
-  theme_minimal(base_size = 14)
-```
-
-## Format and save data
-
-```{r}
-# Calculate condition score (0–100), same pattern as soft bottom
-condition_df <- RHOD_Scores %>%
-  select(region_id, year, condition = RHO_score) %>%
-  mutate(
-    condition = pmin(condition, 100)
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  ylim(0, 101) +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  labs(
+    title = "RHOD Component Scores (1.1) by Region",
+    subtitle = "Data sources: CEDO (2025); Fisheries VMS data (2026)",
+    caption = "updated: Oct 13 2026",
+    x = "Year",
+    y = "RHOD Score (from 0 to 100)",
+    color = "Region",
+  ) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
   )
-condition_df
 
-write_csv(
-  condition_df,
-  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_status.csv")
-)
+RHOD_Scores_OverTime
 
-condition_df <- condition_df %>%
-  mutate(region_id = factor(region_id, levels = 1:9))
-ggplot(condition_df, aes(x = year, y = condition)) +
-  geom_line(linewidth = 0.8) +
-  geom_point(size = 2) +
-  facet_wrap(~ region_id, ncol = 3, labeller = labeller(region_id = function(x) paste("Region", x))) +
-  scale_x_continuous(breaks = pretty(condition_df$year)) +
-  labs(
-    x = "Year",
-    y = "Condition",
-    title = "Condition by region and year"
-  ) +
-  theme_bw()
 ```
 
-# STEP 4: ESTIMATE RHOD_Pressure, the inverse of RHOD_Pressure ------------------------------
+# STEP 4: SAVE RHOD_Pressure ------------------------------
 
-```{r}
-pressure_df_score <- RHOD_Scores %>%
+```{r Create RHOD_Pressure}
+colnames(RHOD_Scores)
+
+RHOD_Pressure <- RHOD_Scores %>%
   mutate(pressure = Pressure / 100) %>%
-  select(region_id, year, pressure)
+  select(rgn_name, rgn_id, year, pressure)
+
+dim(RHOD_Pressure)
+# 152 obs., 4 cols.
 ```
 
-```{r}
-write_csv(
-  pressure_df_score,
-  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_pressure.csv")
-)
+```{r Save RHOD_Pressure}
+write.csv(RHOD_Pressure,
+          here::here("_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Pressure_Oct132026.csv"),
+          row.names = FALSE)
+
 ```
 
 
@@ -897,14 +806,16 @@ write_csv(
 
 ```{r}
 # Trend Calculation: lm for most recent 5 years of data
-year_end <- max(condition_df$year, na.rm = TRUE)
+year_end <- max(RHOD_Scores$year, na.rm = TRUE)
 year_start <- year_end - 4
+# NOTE TO SELF: This might also change.
+
 calc_trends <- function(d) {
   ys <- min(d$year)
   ye <- max(d$year)
-  cs <- d$condition[d$year == ys][1]
-  fit_lin <- lm(condition ~ year, data = d)
-  fit_log <- lm(log(pmax(condition, 1e-6)) ~ year, data = d)
+  cs <- d$RHOD_current_status[d$year == ys][1]
+  fit_lin <- lm(RHOD_current_status ~ year, data = d)
+  fit_log <- lm(log(pmax(RHOD_current_status, 1e-6)) ~ year, data = d)
   slope_lin <- unname(coef(fit_lin)["year"])
   slope_log <- unname(coef(fit_log)["year"])
   tibble(
@@ -916,18 +827,81 @@ calc_trends <- function(d) {
     trend_pct_cagr   = (exp(slope_log) - 1) * 100
   )
 }
-trend_df <- condition_df %>%
+RHOD_Trend <- RHOD_Scores %>%
   filter(year >= year_start, year <= year_end) %>%
-  group_by(region_id) %>%
+  group_by(rgn_id) %>%
   group_modify(~ calc_trends(.x)) %>%
   ungroup()
 
-trend_df
+RHOD_Trend
 ```
 
-```{r}
-write_csv(
-  trend_df,
-  here("_habitats/HAB_rhodolith_beds/RHO_outputs/rho_trend.csv")
+
+## METHOD B
+
+```{r Calculate RHOD_Trend using METHOD B}
+# METHOD B: 
+# See GitHub issue, Oct 7 2026, for more details: https://github.com/OHI-GOC/OHI_GOC_issues/issues/127#issuecomment-6041025924
+# slope = fit a linear model: lm(area ~ year), grab the slope estimate
+# trend_pct_year <- (1 + slope/earliest_area_in_lm)
+
+# Pull the most recent year and the comparison year:
+most_recent_year = max(RHOD_Scores$year, na.rm = TRUE)
+
+comparison_year <- min(
+  RHOD_Scores$year[
+    RHOD_Scores$year < most_recent_year &
+    RHOD_Scores$year >= most_recent_year - 10 &
+    RHOD_Scores$year <= most_recent_year - 5
+  ],
+  na.rm = TRUE
 )
+
+RHOD_score_lm <- RHOD_Scores %>%
+  filter(
+    year >= comparison_year,
+    year <= most_recent_year
+  ) %>%
+  group_by(rgn_id) %>%
+  summarise(
+    model = list(
+      lm(RHOD_current_status ~ year, data = pick(everything()))
+    ),
+    comparison_status = RHOD_current_status[year == comparison_year][1],
+    .groups = "drop"
+  ) %>%
+  mutate(
+    slope = sapply(model, function(x) coef(x)[["year"]]),
+    p_value = sapply(
+      model,
+      function(x) summary(x)$coefficients["year", "Pr(>|t|)"]
+    ),
+    trend_pct_year = round((slope / comparison_status) * 100, 2)
+  ) %>%
+  select(rgn_id, 
+         trend_linear_pct_year_opB = trend_pct_year,
+         lm_slope= slope, 
+         p_value)
+
+```
+
+
+```{r Make a nice Ktable for RHOD_score_lm}
+colnames(RHOD_score_lm)
+
+RHOD_score_lm %>%
+  select(rgn_id, trend_linear_pct_year_opB, p_value) %>%
+  kable(digits = 4, col.names = c("Region", "Trend (method B)", "p_value")) %>%
+  kable_styling(bootstrap_options = c("striped", "bordered")) %>%
+  add_header_above(
+    c('Rhodolith Bed Trend' = 3))
+```
+
+```{r Save RHOD_Trend}
+RHOD_Trend<- RHOD_score_lm
+
+write.csv(RHOD_Trend,
+          here::here("_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Trend_Oct132026.csv"),
+          row.names = FALSE)
+
 ```
