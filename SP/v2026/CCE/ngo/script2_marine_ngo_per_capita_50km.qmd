@@ -1,0 +1,310 @@
+---
+title: "OHI GoC CCE: Marine NGOs per coastal capita (50 km buffer)"
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    theme: cerulean
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# What this script does
+
+50 km alternative to `marine_ngo_per_capita.qmd`. Uses **`marine_and_inland50.gpkg`** for both NGO clipping and the coastal population denominator (same join logic as the 10 km script, but intersected with the 50 km layer).
+
+**Inputs:** `script1_denue_marine_ngo_prep.qmd` → `marine_ngos_2019_2026_goc_50km.gpkg`
+
+**Outputs**
+
+- `marine_ngo_units_per_pop_by_region_year_50km.csv`
+- `marine_ngo_units_per_pop_current_status_75th_quantile_50km.csv`
+- `marine_ngo_employees_per_pop_current_status_75th_quantile_50km.csv`
+
+```{r}
+library(tidyverse)
+library(sf)
+library(here)
+library(plotly)
+library(janitor)
+
+sf::sf_use_s2(FALSE)
+
+int_dir <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/int/marine_ngos"
+)
+output_dir <- here::here(
+  "/home/shares/ohi/OHI_GOC/goal_prep/sp/cce/v2026/output"
+)
+dir.create(int_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+ngo_gpkg <- here::here(int_dir, "marine_ngos_2019_2026_goc_50km.gpkg")
+ngo_shp <- here::here(int_dir, "marine_ngos_2019_2026_goc_50km.shp")
+ngo_path <- if (file.exists(ngo_gpkg)) ngo_gpkg else ngo_shp
+
+if (!file.exists(ngo_path)) {
+  stop(
+    "Run script1_denue_marine_ngo_prep.qmd first. Expected: ", ngo_gpkg
+  )
+}
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+fix_denue_text <- function(x) {
+  x %>%
+    as.character() %>%
+    str_replace_all("<fa>", "ú") %>%
+    str_replace_all("<e1>", "á") %>%
+    str_replace_all("<ed>", "í") %>%
+    str_replace_all("<f1>", "ñ") %>%
+    str_replace_all("<e9>", "é")
+}
+
+clean_municipio <- function(municipio_raw) {
+  municipio_fixed <- fix_denue_text(municipio_raw)
+  municipio_lower <- municipio_fixed %>%
+    str_to_lower() %>%
+    str_replace_all(" ", "_")
+  case_when(
+    municipio_fixed == "San Ignacio Río Muerto" ~ "cajeme",
+    municipio_fixed == "Bácum" ~ "cajeme",
+    municipio_fixed == "Mexicali" ~ "san_felipe",
+    municipio_fixed == "Sinaloa" ~ "guasave",
+    municipio_fixed == "Santa María del Oro" ~ "san_pedro_lagunillas",
+    TRUE ~ municipio_lower
+  )
+}
+
+employees_from_per_ocu <- function(per_ocu) {
+  case_when(
+    per_ocu == "0 a 5 personas" ~ 3,
+    per_ocu == "6 a 10 personas" ~ 8,
+    per_ocu == "11 a 30 personas" ~ 20.5,
+    per_ocu == "31 a 50 personas" ~ 40.5,
+    per_ocu == "51 a 100 personas" ~ 75.5,
+    per_ocu == "101 a 250 personas" ~ 175.5,
+    per_ocu %in% c("251 y m<e1>s personas", "251 y más personas") ~ 300,
+    TRUE ~ NA_real_
+  )
+}
+```
+
+# 1. Read marine NGOs and summarize by municipio
+
+```{r}
+marine_ngo_gulf_50km <- st_read(ngo_path, quiet = TRUE)
+
+marine_ngo_places <- marine_ngo_gulf_50km %>%
+  mutate(
+    nom_estab = fix_denue_text(nom_estab),
+    nombre_act = fix_denue_text(nombre_act),
+    municipio = fix_denue_text(municipio),
+    municipio_clean = clean_municipio(municipio),
+    employees_estimated = if ("employees_estimated" %in% names(.)) {
+      employees_estimated
+    } else {
+      employees_from_per_ocu(per_ocu)
+    }
+  )
+
+marine_ngo_gulf_50km_clean <- marine_ngo_places %>%
+  group_by(municipio_clean, data_year, rgn_id) %>%
+  summarize(
+    agg_employees = sum(employees_estimated, na.rm = TRUE),
+    n_units = length(unique(id)),
+    .groups = "drop"
+  )
+
+marine_ngo_gulf_50km_clean
+```
+
+# 2. Coastal population in the 50 km buffer
+
+```{r}
+goc50_candidates <- c(
+  "/home/shares/ohi/OHI_GOC/spatial/OHI_regions/marine_and_inland50.gpkg",
+  "/home/shares/ohi/OHI_GOC/spatial/ohi_regions/marine_and_inland50.gpkg",
+  here::here("spatial", "OHI_regions", "marine_and_inland50.gpkg"),
+  here::here("spatial", "ohi_regions", "marine_and_inland50.gpkg")
+)
+goc50_path <- goc50_candidates[file.exists(goc50_candidates)][1]
+
+pop_candidates <- c(
+  "/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_localities/inegi_boundaries_pop.shp",
+  here::here("goal_prep", "pressures", "population_localities", "inegi_boundaries_pop.shp")
+)
+pop_path <- pop_candidates[file.exists(pop_candidates)][1]
+
+if (is.na(goc50_path) || is.na(pop_path)) {
+  stop("Could not find marine_and_inland50.gpkg or INEGI locality population shapefile.")
+}
+
+goc50 <- st_read(goc50_path, quiet = TRUE) %>% st_make_valid()
+
+cities <- st_read(pop_path, quiet = TRUE) %>%
+  clean_names()
+
+cities_clean <- st_intersection(st_transform(cities, st_crs(goc50)), goc50) %>%
+  mutate(municipio = fix_denue_text(nom_mun)) %>%
+  mutate(municipio_clean = clean_municipio(municipio)) %>%
+  dplyr::select(municipio_clean, rgn_id, pobtot, area_km2, pobtot_km2)
+```
+
+# 3. Join NGOs with population (same inner join as 10 km script)
+
+```{r}
+marine_ngo_clean_join <- marine_ngo_gulf_50km_clean %>% st_drop_geometry()
+
+cities_clean_join <- cities_clean %>%
+  st_drop_geometry() %>%
+  group_by(municipio_clean) %>%
+  summarize(
+    pobtot = sum(pobtot),
+    area_km2 = sum(area_km2),
+    pobtot_km2 = sum(pobtot_km2),
+    .groups = "drop"
+  )
+
+join_ngo_pop_50km <- inner_join(marine_ngo_clean_join, cities_clean_join)
+
+join_ngo_pop_50km
+```
+
+# 4. Scale to population by region and year
+
+```{r}
+marine_ngo_scaled_to_population <- join_ngo_pop_50km %>%
+  group_by(rgn_id, data_year) %>%
+  summarize(
+    agg_employees = sum(agg_employees),
+    n_units = sum(n_units),
+    pobtot = sum(pobtot),
+    area_km2 = sum(area_km2),
+    pobtot_km2 = sum(pobtot_km2),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ngo_emp_per_local_pop = agg_employees / pobtot,
+    ngo_units_per_local_pop = n_units / pobtot
+  )
+
+write_csv(
+  marine_ngo_scaled_to_population,
+  here::here(int_dir, "marine_ngo_units_per_pop_by_region_year_50km.csv")
+)
+
+marine_ngo_scaled_to_population
+```
+
+```{r}
+plot_ly(
+  marine_ngo_scaled_to_population,
+  x = ~data_year,
+  y = ~ngo_units_per_local_pop,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Marine NGOs: economic units per coastal resident (50 km buffer)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "units / coastal population")
+  )
+```
+
+# 5. Current status (75th quantile reference, capped at 100)
+
+```{r}
+marine_ngo_units_75th <- marine_ngo_scaled_to_population %>%
+  mutate(
+    percap_75th = quantile(ngo_units_per_local_pop, probs = 0.75, na.rm = TRUE),
+    current_status = (ngo_units_per_local_pop / percap_75th) * 100
+  ) %>%
+  mutate(score = if_else(current_status > 100, 100, current_status))
+
+marine_ngo_emp_75th <- marine_ngo_scaled_to_population %>%
+  mutate(
+    percap_75th = quantile(ngo_emp_per_local_pop, probs = 0.75, na.rm = TRUE),
+    current_status = (ngo_emp_per_local_pop / percap_75th) * 100
+  ) %>%
+  mutate(score = if_else(current_status > 100, 100, current_status))
+
+write_csv(
+  marine_ngo_units_75th,
+  here::here(
+    output_dir,
+    "marine_ngo_units_per_pop_current_status_75th_quantile_50km.csv"
+  )
+)
+
+write_csv(
+  marine_ngo_emp_75th,
+  here::here(
+    output_dir,
+    "marine_ngo_employees_per_pop_current_status_75th_quantile_50km.csv"
+  )
+)
+
+marine_ngo_units_75th %>%
+  dplyr::select(rgn_id, data_year, n_units, pobtot, ngo_units_per_local_pop, current_status, score) %>%
+  arrange(rgn_id, data_year)
+```
+
+```{r}
+plot_ly(
+  marine_ngo_units_75th,
+  x = ~data_year,
+  y = ~score,
+  color = ~rgn_id,
+  colors = rgn_colors,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "CURRENT STATUS: marine NGOs per capita, 50 km (75th quantile reference)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Score (0-100)")
+  ) %>%
+  add_lines(
+    x = range(marine_ngo_units_75th$data_year),
+    y = c(100, 100),
+    line = list(color = "black", width = 2, dash = "dash"),
+    name = "Goal (100)",
+    inherit = FALSE
+  )
+```
+
+# 6. Spot-check table for EWG review
+
+```{r}
+marine_ngo_places %>%
+  st_drop_geometry() %>%
+  dplyr::select(
+    data_year, rgn_id, municipio_clean, id, nom_estab, nombre_act, per_ocu
+  ) %>%
+  arrange(data_year, rgn_id, nom_estab) %>%
+  write_csv(here::here(int_dir, "marine_ngo_spotcheck_for_review_50km.csv"))
+
+marine_ngo_places %>%
+  st_drop_geometry() %>%
+  count(data_year, rgn_id, nombre_act, sort = TRUE) %>%
+  slice_head(n = 20)
+```
