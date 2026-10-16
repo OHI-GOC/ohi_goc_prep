@@ -1,0 +1,1262 @@
+################################################################################
+
+Erica Ferrer
+emferrer@ucsd.edu - OR - ferrer@nceas.ucsb.edu
+
+################################################################################
+
+# PRE-WORK ------------------------------
+```{r Clear environment}
+rm(list=ls(all=T))
+```
+
+```{r Load Libraries & Set WD}
+# Read In
+library(here)
+library(readxl)
+library(readr)
+# Data Processing
+library(tidyverse)
+library(dplyr)
+library(tidytext)  # for reorder_within and scale_x_reordered
+library(lubridate)
+library(janitor)
+library(stringi)
+library(stringr)
+library(data.table)
+library(zoo) # used for gapfilling RAM data.
+# Visualization
+library(ggplot2)
+library(colorspace)
+library(ggforce)
+library(plotly)
+library(htmlwidgets)
+library(htmltools)
+
+# No scientific notation:
+options(scipen = 999)
+
+# Set wd()
+setwd("/home/ferrer/ohi_goc_prep/_habitats/")
+```
+
+```{r Load clean_names_lowercase function}
+clean_names_lowercase <- function(x) {
+
+  x <- iconv(x, from = "", to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+
+  x %>%
+    tolower() %>%
+    trimws()
+}
+```
+
+# Strategy: track changes in landings of major functional groups relative to mean landings  ------------------------------
+
+# STEP 0: Load in Region_Key
+```{r Region key}
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
+
+colnames(Region_Key0)
+
+Region_Key<- Region_Key0 %>%
+  select(OHI_region_est, OHI_region_name) %>%
+  distinct()
+```
+
+# STEP 1: Load in and summarize CONAPESCA_GOC_MarineLandings0
+
+```{r Load in CONAPESCA_GOC_MarineLandings0 as necessary}
+CONAPESCA_GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_PATCHED_Jun032026.rds"))
+# 3246583 obs., 58 var.
+
+# NOTE TO SELF: This source file may change in later Summer / Fall run. - EMF, June 4 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+```
+
+
+# PATCH 1 - Assign groups that are unassigned to a Major_Functional_Group:
+NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+```{r Load in GenusFamilyGroup_Key as needed}
+GenusFamilyGroup_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Taxonomic_Keys/GenusFamilyGroupKey_REVISED_Sep072026.csv")
+
+# NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+# See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+MajorFunctionalGroup_Key<- GenusFamilyGroup_Key0 %>%
+  select(estimated_genus_name, Major_Functional_Group)
+```
+
+```{r Major_Functional_Group patch for CONAPESCA_GOC_MarineLandings}
+# Fill in missing values based on MajorFunctionalGroup_Key:
+CONAPESCA_GOC_MarineLandings <- CONAPESCA_GOC_MarineLandings0 %>%
+  left_join(
+    MajorFunctionalGroup_Key %>%
+      select(estimated_genus_name, Major_Functional_Group),
+    by = "estimated_genus_name",
+    suffix = c("", ".lookup")
+  )
+
+CONAPESCA_GOC_MarineLandings <- CONAPESCA_GOC_MarineLandings %>%
+  mutate(
+    Major_Functional_Group = coalesce(
+      Major_Functional_Group,
+      Major_Functional_Group.lookup
+    )
+  ) %>%
+  select(-Major_Functional_Group.lookup)
+
+# 3246583 obs., 58 var.
+
+# SANITY CHECK:
+sum(is.na(CONAPESCA_GOC_MarineLandings$Major_Functional_Group))
+# Only 26 records unassigned. Looks good!
+
+```
+
+```{r Patch the new shark assignments}
+colnames(GenusFamilyGroup_Key0)
+unique(GenusFamilyGroup_Key0$Major_Functional_Group)
+
+Shark_Key<- GenusFamilyGroup_Key0 %>%
+  filter(Major_Functional_Group== "Sharks") %>%
+  select(estimated_genus_name, Major_Functional_Group_adjusted) %>%
+  distinct()
+# 20 obs., 2 vars.
+
+# Patch in the sharks:
+CONAPESCA_GOC_MarineLandings <- CONAPESCA_GOC_MarineLandings %>%
+  left_join(
+    Shark_Key %>%
+      select(estimated_genus_name, Major_Functional_Group_adjusted),
+    by = "estimated_genus_name"
+  ) %>%
+  mutate(
+    Major_Functional_Group = coalesce(
+      Major_Functional_Group_adjusted,
+      Major_Functional_Group
+    )
+  ) %>%
+  select(-Major_Functional_Group_adjusted)
+
+sum(is.na(CONAPESCA_GOC_MarineLandings$Major_Functional_Group))
+# Only 26 records unassigned. Looks good!
+
+table(CONAPESCA_GOC_MarineLandings$Major_Functional_Group)
+
+Shark_Landings<- CONAPESCA_GOC_MarineLandings %>%
+  filter(recorded_taxa_group %in% c("TIBURON", "CAZON"),
+         Major_Functional_Group %in% c("Large sharks", "Medium-Large sharks", "Small sharks", "Sharks"))
+# 167855 obs., 58 vars. (5 shark values unassigned)
+
+unique(Shark_Landings$estimated_genus_name[which(Shark_Landings$recorded_taxa_group=="CAZON")])
+unique(Shark_Landings$estimated_genus_name[which(Shark_Landings$recorded_taxa_group=="TIBURON")])
+# NOTE TO SELF: shark genera within "CAZON" or "TIBURON" can be small, medium, or large, there is no general rule.
+
+# Patch all sharks in CONAPESCA_GOC_MarineLandings:
+CONAPESCA_GOC_MarineLandings <- CONAPESCA_GOC_MarineLandings %>%
+  mutate(
+    
+    # First patch examples of NA:
+    Major_Functional_Group = case_when(
+      recorded_taxa_group %in% c("TIBURON", "CAZON") &
+        is.na(Major_Functional_Group) ~ "Sharks",
+      
+      TRUE ~ Major_Functional_Group
+    )
+  ) %>%
+  mutate(
+    # Then change assignment on "Sharks"
+    Major_Functional_Group = case_when(
+      Major_Functional_Group == "Sharks" ~ "Sharks (size unknown)",
+      
+      TRUE ~ Major_Functional_Group
+    )
+  )
+
+# 3246583 obs., 58 var. Same as before. Good!
+```
+
+```{r Update the Major_Functional_Group names for small and large pelagics}
+# Update the Major_Functional_Group names for small and large pelagics:
+CONAPESCA_GOC_MarineLandings <- CONAPESCA_GOC_MarineLandings %>%
+  
+  mutate(
+
+    Major_Functional_Group = case_when(
+      Major_Functional_Group == "Anchovy & Sardine (small pelagics)" ~ "Small pelagic bony fish",
+      
+      TRUE ~ Major_Functional_Group
+    ),
+    Major_Functional_Group = case_when(
+      Major_Functional_Group == "Pelagic marine fish (excl. anchovy & sardine)" ~ "Large pelagic bony fish",
+      
+      TRUE ~ Major_Functional_Group
+    )
+  )
+
+# 3246583 obs., 58 var. Same as before. Good!
+
+table(CONAPESCA_GOC_MarineLandings$Major_Functional_Group)
+```
+
+
+# PATCH 2 - Re-assign litopenaeus as paneus:
+NOTE TO SELF: This patch should not be necessary when we re-run this in later Summer / Fall run. - EMF, June 15 2026
+See the patch file here: https://docs.google.com/document/d/1L6w4Gd8SOjp14f_u46vyn64rEpv4qBRaN_V2IyPjP5w/edit?tab=t.0
+
+```{r Re-assign paneus as litopenaeus}
+CONAPESCA_GOC_MarineLandings <- CONAPESCA_GOC_MarineLandings %>%
+  mutate(
+    estimated_genus_name = case_when(
+      estimated_genus_name == "Litopenaeus" ~ "Penaeus",
+      TRUE ~ estimated_genus_name
+    )
+  )
+
+unique(CONAPESCA_GOC_MarineLandings$estimated_genus_name)
+```
+
+
+# **DECISION POINT: Selecting which sectors to include**
+```{r Select Sectors_of_Interest}
+table(CONAPESCA_GOC_MarineLandings$sector_estimate_draft)
+
+MarineFishery_Sectors<- c("marine: fishery sector yet to be classified",
+                          "marine: small-scale capture",
+                          "marine: large-scale capture")
+  
+PossibleMarineFishery_Sectors<- c("freshwater or marine: large-scale capture",
+                          "freshwater or marine: small-scale capture",
+                          "freshwater or marine: fishery sector yet to be classified")
+
+CONAPESCA_GOC_MarFisheryLandings0<- CONAPESCA_GOC_MarineLandings %>%
+  filter(sector_estimate_draft %in% c(MarineFishery_Sectors, PossibleMarineFishery_Sectors))
+
+# 3137044 obs., 58 var.
+```
+
+```{r Re-level sector_estimate_draft and Major_Functional_Group}
+# Re-level sectors (mainly for plotting purposes):
+CONAPESCA_GOC_MarFisheryLandings <- CONAPESCA_GOC_MarFisheryLandings0 %>%
+  filter(
+    sector_estimate_draft %in% c(
+      MarineFishery_Sectors,
+      PossibleMarineFishery_Sectors
+    )
+  ) %>%
+  mutate(
+    sector_estimate_draft = factor(
+      sector_estimate_draft,
+      levels = c(
+        "marine: large-scale capture",
+        "marine: small-scale capture",
+        "marine: fishery sector yet to be classified",
+        "freshwater or marine: large-scale capture",
+        "freshwater or marine: small-scale capture",
+        "freshwater or marine: fishery sector yet to be classified"
+      )
+    )
+  )
+
+# SANITY CHECK: How many Major_Functional_Group unassigned?
+sum(is.na(CONAPESCA_GOC_MarFisheryLandings$Major_Functional_Group))
+# Only 18 records unassigned. Looks good!
+
+table(CONAPESCA_GOC_MarFisheryLandings$Major_Functional_Group)
+
+CONAPESCA_GOC_MarFisheryLandings <- CONAPESCA_GOC_MarFisheryLandings %>%
+  mutate(
+    Major_Functional_Group = factor(
+      Major_Functional_Group,
+      levels= c(
+        
+        # Crustaceans
+        "Shrimps, prawns",
+        "Crustaceans",
+        
+        # Molluscs
+        "Cephalopods",
+        "Molluscs excl. Cephalopods",
+        
+        # Other invertebrates
+        "Echinoderms",
+        "Jellies",
+        "Other marine invertebrates",
+        
+        # Fishes
+        "Small pelagic bony fish",
+        "Large pelagic bony fish",
+        "Demersal marine fishes",
+        "Marine fishes NEI",
+        "Marine or freshwater fishes NEI",
+        "Diadromous fishes",
+        
+        # Elasmobranchs
+        "Sharks (size unknown)",
+        "Small sharks",
+        "Medium-Large sharks",
+        "Large sharks",
+        
+        # Miscellaneous / unresolved
+        "Marine algae",
+        "Marine species NEI",
+        "unknown",
+        NA_character_
+      )
+    )
+  )
+
+# SANITY CHECK:
+sum(is.na(CONAPESCA_GOC_MarFisheryLandings$Major_Functional_Group))
+# Only 18 records unassigned. Looks good!
+```
+
+# STEP 2: Isolate Open Ocean Taxa (OCE)
+
+```{r Isolate Open-Ocean taxa and create OCE_Landings0}
+unique(CONAPESCA_GOC_MarFisheryLandings$Major_Functional_Group)
+
+Open_Ocean_Taxa<- c("Large pelagic bony fish",
+                    "Small pelagic bony fish",
+                    "Sharks (size unknown)",
+                    "Small sharks",
+                    "Medium-Large sharks",
+                    "Large sharks",
+                    "Cephalopods"
+)
+
+colnames(CONAPESCA_GOC_MarFisheryLandings)
+
+OpenOcean_Landings0<- CONAPESCA_GOC_MarFisheryLandings %>%
+  filter(Major_Functional_Group %in% Open_Ocean_Taxa) %>%
+    select(state, OHI_region_est,
+         office_name_clean, landing_site_clean, 
+         year,
+         est_aquaculture_production, reported_fleet, 
+         sector_estimate_reported, sector_estimate_draft,
+         recorded_taxa_name, recorded_taxa_name_clean, common_name_clean, 
+         recorded_taxa_group, estimated_taxa_group, Major_Functional_Group,
+         estimated_species_name, estimated_genus_name, estimated_family_name,
+         landed_weight, live_weight, weight_kg_corrected, value
+         ) %>%
+  mutate(
+    estimated_genus_name= clean_names_lowercase(estimated_genus_name),
+    estimated_species_name= clean_names_lowercase(estimated_species_name),
+    Major_Functional_Group= clean_names_lowercase(Major_Functional_Group)
+  )
+
+dim(OpenOcean_Landings0)
+
+# 653887 obs., 22 vars.
+
+```
+
+# PATCHES 3 - genera names
+NOTE TO SELF: These patches probably won't be necessary if I can fix the raw data in the CONAPESCA data base; for now, keep. - EMF, Oct 16 2026
+```{r APPLY PATCHES}
+unique(OpenOcean_Landings0$estimated_genus_name)
+unique(OpenOcean_Landings0$estimated_species_name[which(OpenOcean_Landings0$estimated_genus_name == "sardinops")])
+
+OpenOcean_Landings0 <- OpenOcean_Landings0 %>%
+  mutate(
+    Major_Functional_Group = case_when(
+      estimated_genus_name == "oligoplites" ~ "Small pelagic bony fish",
+      TRUE ~ Major_Functional_Group
+    ),
+    estimated_genus_name = case_when(
+      estimated_genus_name == "sypyrna" ~ "sphyrna",
+      estimated_genus_name == "carcahrhinus" ~ "carcharhinus",
+      estimated_genus_name == "sardinops caeruleus" ~ "sardinops sagax",
+      TRUE ~ estimated_genus_name
+    )
+  )
+
+```
+
+# DECISION POINT: Select HISTORIC and CONTEMPORARY periods:
+```{r Select historic and contemporary start and end}
+OCEA_HISTORIC_START = 2004
+OCEA_HISTORIC_END = 2014
+OCEA_CONTEMPORARY_START = 2015
+OCEA_CONTEMPORARY_END = 2024
+```
+
+```{r Extract the top open ocean taxa per group in the CONAPESCA data}
+colnames(OpenOcean_Landings0)
+
+OCEA_GOC.Landings_TopSpecies0<- OpenOcean_Landings0 %>%
+  filter(year >= OCEA_HISTORIC_START, year <= OCEA_CONTEMPORARY_END) %>%  # Filter from study period, 2004-2014
+  group_by(year, Major_Functional_Group, estimated_genus_name, estimated_species_name) %>%
+  summarize(
+    total_landings_mt = sum(weight_kg_corrected, na.rm = TRUE)/1000,
+    .groups = "drop"
+  )
+# 1383 obs., 5 vars.
+
+OCEA_GOC.Landings_TopSpecies <- OCEA_GOC.Landings_TopSpecies0 %>%
+  filter(
+    !is.na(estimated_species_name),
+    !estimated_species_name %in% c("nei", "unknown", NA)
+  ) %>%
+  group_by(Major_Functional_Group, estimated_species_name) %>%
+  summarise(
+    total_landings = sum(total_landings_mt, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(Major_Functional_Group) %>%
+  slice_max(order_by = total_landings, n = 5, with_ties = FALSE) %>%
+  ungroup()
+# 30 obs., 3 vars.
+
+```
+
+
+# STEP 3: Calculate mean condition values for OCEA genera across the entire GOC:
+
+```{r Summarize OCE gulfwide landings in OCEA_GOC.Landings_summary}
+colnames(OpenOcean_Landings0)
+
+OCEA_Landings_summary <- OpenOcean_Landings0 %>%
+  mutate(
+    estimated_genus_name = if_else(
+      is.na(estimated_genus_name),
+      "nei",
+      estimated_genus_name
+    ),
+    Major_Functional_Group = clean_names_lowercase(Major_Functional_Group)
+  ) %>%
+  group_by(
+    year,
+    Major_Functional_Group,
+    estimated_genus_name
+  ) %>%
+  summarise(
+    total_landings_mt = sum(weight_kg_corrected, na.rm = TRUE) / 1000,
+    species_names = paste(
+      sort(unique(na.omit(estimated_species_name))),
+      collapse = "; "
+    ),
+    .groups = "drop"
+  )
+# 1168 obs., 5 vars.
+
+OCEA_Group_totals <- OCEA_Landings_summary %>%
+  filter(year >= OCEA_HISTORIC_START, year <= OCEA_CONTEMPORARY_END) %>%
+  group_by(year, Major_Functional_Group) %>%
+  summarise(
+    total_landings_mt = sum(total_landings_mt, na.rm = TRUE),
+    .groups = "drop"
+  )
+# 147 obs., 3 vars.
+
+```
+
+## PLOT open-ocean landings over time (gulfwide)
+
+```{r Plot open-ocean landings over time (gulfwide)}
+colnames(OCEA_Landings_summary)
+
+# Plot 1, panel per region:
+
+OCEA_Group_Landings_plot <- OCEA_Landings_summary %>%
+  filter(year >= OCEA_HISTORIC_START, year <= OCEA_CONTEMPORARY_END) %>%
+  
+  ggplot(
+    aes(
+      x = year,
+      y = total_landings_mt
+    )
+  ) +
+  
+  # Individual genus trajectories
+  geom_line(
+    aes(
+      group = estimated_genus_name,
+      text = paste0(
+        "Genus: ", estimated_genus_name,
+        "<br>Year: ", year,
+        "<br>Landings: ", round(total_landings_mt, 2), " mt"
+      )
+    ),
+    color = "black",
+    linewidth = 0.5,
+    alpha = 0.5
+  ) +
+  
+  # Functional-group total
+  geom_line(
+    data = OCEA_Group_totals,
+    aes(
+      x = year,
+      y = total_landings_mt,
+      group = Major_Functional_Group,
+      text = paste0(
+        "Functional group: ", Major_Functional_Group,
+        "<br>Year: ", year,
+        "<br>Total landings: ", round(total_landings_mt, 2), " mt"
+      )
+    ),
+    color = "#2C7FB8",
+    linewidth = 1.0
+  ) +
+  
+  geom_point(
+    data = OCEA_Group_totals,
+    aes(
+      x = year,
+      y = total_landings_mt,
+      text = paste0(
+        "Functional group: ", Major_Functional_Group,
+        "<br>Year: ", year,
+        "<br>Total landings: ", round(total_landings_mt, 2), " mt"
+      )
+    ),
+    shape = 16,
+    size = 2,
+    color = "#2C7FB8"
+  ) +
+  
+  geom_vline(
+    xintercept = 2018,
+    linetype = "dashed",
+    color = "grey50",
+    linewidth = 0.7
+  ) +
+  
+  facet_wrap(
+    ~ Major_Functional_Group,
+    scales = "free_y"
+  ) +
+  
+  labs(
+    title = "Open-Ocean Landings by Functional Group",
+    subtitle = "Gulf-wide annual landings, 2004–2024",
+    y = "Total landings (metric tonnes)",
+    x = "Year"
+  ) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    plot.title = element_text(
+      size = 16,
+      face = "bold"
+    ),
+    plot.subtitle = element_text(
+      size = 12
+    )
+  )
+
+OCEA_Group_Landings_plot
+
+```
+
+```{r Save plot as PNG}
+ggsave(
+  plot = OCEA_Group_Landings_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/OCEA_Group_Landings_plot_Oct162026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+```
+
+```{r Convert to interactive Plotly}
+OCEA_Group_Landings_plotly <- ggplotly(
+  OCEA_Group_Landings_plot,
+  tooltip = "text"
+)
+
+OCEA_Group_Landings_plotly
+
+saveWidget(
+  OCEA_Group_Landings_plotly,
+  "/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/OCEA_Group_Landings_plot_Oct162026.html",
+  selfcontained = TRUE
+)
+```
+
+
+
+# Reference Points: calculate OCEA reference points based on genus-level detail:
+
+```{r Calculate OCEA_taxa_reference_points}
+colnames(OCEA_Landings_summary)
+
+# Calculate pre- and post-2014 means gulf-wide:
+
+OCEA_genus_ref_points <- OCEA_Landings_summary %>%
+  filter(year >= OCEA_HISTORIC_START, year <= OCEA_HISTORIC_END) %>%
+  
+  group_by(estimated_genus_name) %>%
+  
+  summarise(
+    Major_Functional_Group = first(na.omit(Major_Functional_Group)),
+    mean_HISTORIC_catch_mt = mean(total_landings_mt, na.rm = TRUE),
+    n_years = n_distinct(year),
+    
+    .groups = "drop"
+  )
+
+# 62 obs., 4 vars.
+```
+
+```{r Calculate condition for all genera relative to ref. point}
+colnames(OCEA_Landings_summary)
+colnames(OCEA_genus_ref_points)
+
+CONAPESCA_OCEA_genus.landings.data0 <- OCEA_Landings_summary %>%
+  left_join(
+    OCEA_genus_ref_points,
+    by= c("Major_Functional_Group", "estimated_genus_name")
+  )
+# 1168 obs., 6 vars.
+
+CONAPESCA_OCEA_genus.landings.data<- CONAPESCA_OCEA_genus.landings.data0 %>%
+  filter(year >= OCEA_HISTORIC_START, year <= OCEA_CONTEMPORARY_END) %>%
+  mutate(
+    ratio_catch_v_ref = (total_landings_mt / mean_HISTORIC_catch_mt),
+    taxa_condition = pmin(ratio_catch_v_ref * 100, 100)
+    )
+# 983 obs., 8 vars.
+
+```
+
+```{r Aggregate at the group level}
+colnames(CONAPESCA_OCEA_genus.landings.data)
+
+# Aggregate at the group level:
+CONAPESCA_OCEA_group.landings.data <- CONAPESCA_OCEA_genus.landings.data %>%
+  select(year, Major_Functional_Group, estimated_genus_name, taxa_condition, total_landings_mt) %>%
+  distinct() %>%
+  
+  group_by(year, Major_Functional_Group) %>%
+  
+  summarise(
+    group_condition = mean(taxa_condition, na.rm = TRUE),
+    n = n_distinct(estimated_genus_name),
+    total_landings_mt = sum(total_landings_mt, na.rm= TRUE),
+    .groups = "drop"
+  )
+
+dim(CONAPESCA_OCEA_group.landings.data)
+# 147 obs., 5 vars.
+
+```
+
+
+```{r Calculate group means pre- post- 2014 PURG?}
+colnames(CONAPESCA_OCEA_group.landings.data)
+
+OCEA_group_condition_means <- CONAPESCA_OCEA_group.landings.data %>%
+  group_by(Major_Functional_Group) %>%
+  summarise(
+    mean_HISTORIC = mean(
+      total_landings_mt[year >= OCEA_HISTORIC_START & year <= OCEA_HISTORIC_END],
+      na.rm = TRUE
+    ),
+    mean_CONTEMPORARY = mean(
+      total_landings_mt[year >= OCEA_CONTEMPORARY_START & year <= OCEA_CONTEMPORARY_END],
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+# 7 obs., 3 vars.
+```
+
+```{r Plot OCE GROUP means over time}
+# Plot OCE GROUP means over time:
+OCEA_Group_Landings_pre.post_plot <- CONAPESCA_OCEA_group.landings.data %>%
+
+  ggplot(
+    aes(
+      x = year,
+      y = total_landings_mt,
+      group = Major_Functional_Group
+    )
+  ) +
+
+  # Annual functional-group trajectory
+  geom_line(
+    color = "darkgrey",
+    linewidth = 1.0
+  ) +
+
+  # Annual points
+  geom_point(
+    shape = 16,
+    size = 2,
+    color = "darkgrey"
+  ) +
+
+  # Pre-mean: 2004–2014 only
+  geom_segment(
+    data = OCEA_group_condition_means,
+    aes(
+      x = OCEA_HISTORIC_START,
+      xend = OCEA_HISTORIC_END,
+      y = mean_HISTORIC,
+      yend = mean_HISTORIC
+    ),
+    color = "blue",
+    linetype = "solid",
+    linewidth = 0.9
+  ) +
+
+  # Post-2014 mean: 2015–2024 only
+  geom_segment(
+    data = OCEA_group_condition_means,
+    aes(
+      x = OCEA_CONTEMPORARY_START,
+      xend = OCEA_CONTEMPORARY_END,
+      y = mean_CONTEMPORARY,
+      yend = mean_CONTEMPORARY
+    ),
+    color = "#D95F02",
+    linetype = "solid",
+    linewidth = 0.9
+  ) +
+
+  # Reference-period cutoff
+  geom_vline(
+    xintercept = OCEA_HISTORIC_END,
+    linetype = "dashed",
+    color = "black",
+    linewidth = 0.7
+  ) +
+
+  facet_wrap(
+    ~ Major_Functional_Group,
+    scales = "free_y"
+  ) +
+
+  labs(
+    title = "Open-ocean landings by functional group",
+    subtitle = "Annual landings with pre- and post-2014 period means",
+    caption = "Updated: Oct 16 2026",
+    y = "Total landings (mt)",
+    x = "Year"
+  ) +
+
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(
+      size = 14,
+      face = "bold"
+    ),
+    plot.title = element_text(
+      size = 16,
+      face = "bold"
+    ),
+    plot.subtitle = element_text(
+      size = 12
+    )
+  )
+
+OCEA_Group_Landings_pre.post_plot
+
+```
+
+```{r Save OCEA_Group_Landings_pre.post_plot}
+# All groups pre- and post- 2014
+ggsave(
+  plot = OCEA_Group_Landings_pre.post_plot,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/OCEA_Group_Landings_pre.post_plot_Oct162026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+```
+
+# NEW (Oct 14 2026)
+Going to calculate condition at the genus level as oppossed to group level so I can compare fisheries-dependent versus independent across specific taxa.
+
+```{r Calculate group means pre- post- 2014}
+colnames(CONAPESCA_OCEA_genus.landings.data)
+
+OCEA_FD_genus_condition0 <- CONAPESCA_OCEA_genus.landings.data %>%
+  group_by(Major_Functional_Group, estimated_genus_name) %>%
+  summarise(
+    mean_HISTORIC = mean(
+      total_landings_mt[year >= OCEA_HISTORIC_START & year <= OCEA_HISTORIC_END],
+      na.rm = TRUE
+    ),
+    mean_CONTEMPORARY = mean(
+      total_landings_mt[year >= OCEA_CONTEMPORARY_START & year <= OCEA_CONTEMPORARY_END],
+      na.rm = TRUE
+    ),
+    n_pre_2014 = sum(year < 2014 & !is.na(total_landings_mt), na.rm = TRUE),
+    n_post_2014 = sum(year >= 2014 & !is.na(total_landings_mt), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 68 obs., 6 vars.
+```
+
+```{r Plot OCEA_FD_genus_condition0 as landings per GENUS over time}
+
+OCEA_FD_Condition_plots <- purrr::map(
+  functional_groups,
+  function(group_name) {
+
+    CONAPESCA_OCEA_genus.landings.data %>%
+      filter(Major_Functional_Group == group_name) %>%
+      ggplot(
+        aes(
+          x = year,
+          y = total_landings_mt,
+          group = estimated_genus_name
+        )
+      ) +
+      geom_line(color = "darkgrey", linewidth = 1) +
+      geom_point(color = "darkgrey", size = 2) +
+      geom_segment(
+        data = OCEA_FD_genus_condition0 %>%
+          filter(Major_Functional_Group == group_name),
+        aes(
+          x = OCEA_HISTORIC_START,
+          xend = OCEA_HISTORIC_END,
+          y = mean_HISTORIC,
+          yend = mean_HISTORIC
+        ),
+        inherit.aes = FALSE,
+        color = "blue",
+        linewidth = 0.9
+      ) +
+      geom_segment(
+        data = OCEA_FD_genus_condition0 %>%
+          filter(Major_Functional_Group == group_name),
+        aes(
+          x = OCEA_CONTEMPORARY_START,
+          xend = OCEA_CONTEMPORARY_END,
+          y = mean_CONTEMPORARY,
+          yend = mean_CONTEMPORARY
+        ),
+        inherit.aes = FALSE,
+        color = "#D95F02",
+        linewidth = 0.9
+      ) +
+      geom_vline(
+        xintercept = OCEA_HISTORIC_END + 0.5,
+        linetype = "dashed",
+        color = "black",
+        linewidth = 0.7
+      ) +
+      facet_wrap(~estimated_genus_name, scales = "free_y") +
+      labs(
+        title = paste("Open-ocean landings:", group_name),
+        subtitle = "Annual landings with pre- and post-2014 period means",
+        caption = "Updated: Oct 14 2026",
+        y = "Total landings (mt)",
+        x = "Year"
+      ) +
+      theme_bw(base_size = 14) +
+      theme(
+        strip.text = element_text(size = 14, face = "bold"),
+        plot.title = element_text(size = 16, face = "bold"),
+        plot.subtitle = element_text(size = 12)
+      )
+  }
+)
+
+names(OCEA_FD_Condition_plots) <- functional_groups
+
+unique(CONAPESCA_OCEA_genus.landings.data$Major_Functional_Group)
+
+OCEA_FD_Condition_plots[["cephalopods"]]
+OCEA_FD_Condition_plots[["large pelagic bony fish"]]
+OCEA_FD_Condition_plots[["small pelagic bony fish"]]
+OCEA_FD_Condition_plots[["large sharks"]]
+OCEA_FD_Condition_plots[["medium-large sharks"]]
+OCEA_FD_Condition_plots[["sharks (size unknown)"]]
+OCEA_FD_Condition_plots[["small sharks"]]
+
+# Exclude genera that have fewer than 3 observations in either period
+# In other words, genera must have ≥ 3 observations from 2004-2014 and 2015-2024
+# Or 5?
+```
+
+# Calculate OCEA_group_FD_condition (fisheries dependent; gulf-wide per group, not time varying):
+
+```{r Filter out genera with fewer than 5 data points in either period}
+
+colnames(OCEA_FD_genus_condition0)
+
+OCEA_FD_genus_condition0
+
+OCEA_FD_genus_condition<- OCEA_FD_genus_condition0 %>%
+  filter(n_pre_2014 >= 5 & n_post_2014 >= 5) %>%
+  mutate(
+    ratio_aka_condition = mean_CONTEMPORARY / mean_HISTORIC,
+    condition_FD = pmin((mean_CONTEMPORARY / mean_HISTORIC) * 100, 100)
+  )
+# 41 obs., 8 vars.
+
+```
+
+```{r Plot OCEA_FD_genus_condition as landings per genera_of_interest over time}
+
+# Extract genera names of interest
+OCEA_genera_of_interest<- unique(OCEA_FD_genus_condition$estimated_genus_name)
+
+colnames(CONAPESCA_OCEA_genus.landings.data)
+
+OCEA_FD_Condition_plots <- purrr::map(
+  functional_groups,
+  function(group_name) {
+
+    CONAPESCA_OCEA_genus.landings.data %>%
+      filter(Major_Functional_Group == group_name,
+             estimated_genus_name %in% OCEA_genera_of_interest) %>%
+      ggplot(
+        aes(
+          x = year,
+          y = total_landings_mt,
+          group = estimated_genus_name
+        )
+      ) +
+      geom_line(color = "darkgrey", linewidth = 1) +
+      geom_point(color = "darkgrey", size = 2) +
+      geom_segment(
+        data = OCEA_FD_genus_condition %>%
+          filter(Major_Functional_Group == group_name),
+        aes(
+          x = OCEA_HISTORIC_START,
+          xend = OCEA_HISTORIC_END,
+          y = mean_HISTORIC,
+          yend = mean_HISTORIC
+        ),
+        inherit.aes = FALSE,
+        color = "blue",
+        linewidth = 0.9
+      ) +
+      geom_segment(
+        data = OCEA_FD_genus_condition %>%
+          filter(Major_Functional_Group == group_name),
+        aes(
+          x = OCEA_CONTEMPORARY_START,
+          xend = OCEA_CONTEMPORARY_END,
+          y = mean_CONTEMPORARY,
+          yend = mean_CONTEMPORARY
+        ),
+        inherit.aes = FALSE,
+        color = "#D95F02",
+        linewidth = 0.9
+      ) +
+      geom_vline(
+        xintercept = OCEA_HISTORIC_END + 0.5,
+        linetype = "dashed",
+        color = "black",
+        linewidth = 0.7
+      ) +
+      facet_wrap(~estimated_genus_name, scales = "free_y") +
+      labs(
+        title = paste("Open-ocean landings:", group_name),
+        subtitle = "Annual landings with pre- and post-2014 period means",
+        caption = "Updated: Oct 14 2026",
+        y = "Total landings (mt)",
+        x = "Year"
+      ) +
+      theme_bw(base_size = 14) +
+      theme(
+        strip.text = element_text(size = 14, face = "bold"),
+        plot.title = element_text(size = 16, face = "bold"),
+        plot.subtitle = element_text(size = 12)
+      )
+  }
+)
+
+names(OCEA_FD_Condition_plots) <- functional_groups
+
+unique(CONAPESCA_OCEA_genus.landings.data$Major_Functional_Group)
+
+OCEA_FD_Condition_plots[["cephalopods"]]
+OCEA_FD_Condition_plots[["large pelagic bony fish"]]
+OCEA_FD_Condition_plots[["small pelagic bony fish"]]
+OCEA_FD_Condition_plots[["large sharks"]]
+OCEA_FD_Condition_plots[["medium-large sharks"]]
+OCEA_FD_Condition_plots[["sharks (size unknown)"]]
+OCEA_FD_Condition_plots[["small sharks"]]
+
+```
+
+# Calculate OCEA_group_FI_condition (fisheries INDEPENDENT; gulf-wide per group, not time varying):
+
+```{r Load in OCEA_group_FI_condition}
+OCEA_FisheriesIndependent_data0<- read.csv("/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/OCEA_FI_condition_TEMP_Oct162026.csv")
+# 18 obs., 25 vars.
+```
+
+```{r Simplify and filter down OCEA_FisheriesIndependent_data0}
+# Simplify dataframe:
+
+colnames(OCEA_FisheriesIndependent_data0)
+
+OCEA_FI_data<- OCEA_FisheriesIndependent_data0 %>%
+  select(taxonomic_group, specific_taxa, OHI_region_est, 
+         t1_year, t2_year,
+         t1_condition_manual, t2_condition_manual, status_t2_v_t1_manual) %>%
+  mutate(
+   ratio_aka_condition = pmin(status_t2_v_t1_manual, 100)
+  )
+# 18 obs., 9 vars.
+
+# NOTE TO SELF: Might want to filter out old condition values.
+# Discuss with group Oct 16 2026
+
+# Filter records that came before the 2014 cut off:
+OCEA_FI_data<- OCEA_FI_data %>%
+  filter(t2_year >= OCEA_HISTORIC_END)
+# 7 obs., 9 vars.
+```
+
+```{r OCEA_group_FI_condition}
+colnames(OCEA_FI_data)
+
+OCEA_group_FI_condition<- OCEA_FI_data %>%
+  select(taxonomic_group, ratio_aka_condition) %>%
+  group_by(taxonomic_group) %>%
+  summarize(
+    OCEA_FI_condition = mean(ratio_aka_condition, na.rm= TRUE)
+  )
+# 5 obs., 2 vars.
+```
+
+# Calculate OCEA_FI_conditions based on fisheries INDEPENDENT and DEPENDENT data:
+
+```{r Merge OCEA_group_FI_condition and OCEA_group_FD_condition}
+colnames(OCEA_group_FI_condition)
+colnames(OCEA_group_FD_condition)
+
+OCEA_current_status0 <- OCEA_group_FD_condition %>%
+  full_join(
+    OCEA_group_FI_condition,
+    by = "taxonomic_group"
+  ) %>%
+  select(
+    taxonomic_group, OCEA_FD_condition, OCEA_FI_condition
+  )
+
+# 11 obs., 3 vars.
+```
+
+```{r Calculate final OCEA_current_status per group and gulf-wide}
+OCEA_current_status <- OCEA_current_status0 %>%
+  mutate(
+    OCEA_current_condition = round(
+      rowMeans(cbind(OCEA_FD_condition, OCEA_FI_condition), na.rm = TRUE),
+      1
+    )
+  )
+# 11 obs., 4 vars.
+
+OCEA_current_status <- OCEA_current_status %>%
+  summarise(
+    taxonomic_group = "OCEA_current_status",
+    OCEA_FD_condition = mean(OCEA_FD_condition, na.rm = TRUE),
+    OCEA_FI_condition = mean(OCEA_FI_condition, na.rm = TRUE),
+    OCEA_current_condition = mean(OCEA_current_condition, na.rm = TRUE)
+  )
+
+OCEA_SubScores <- bind_rows(
+  OCEA_current_status,
+  OCEA_SubScores
+)
+# 12 obs., 4 vars.
+```
+
+```{r Gulfwide OCE score assigned to dataframe}
+OCEA_score= mean(OCEA_SubScores$OCEA_current_condition)
+# 67
+
+OCEA_SubScores <- data.frame(
+  OHI_region = c("region_1", "region_2", "region_3",
+                 "region_4", "region_5", "region_6",
+                 "region_7", "region_8", "region_9"),
+  year = c(2024),
+  OCEA_score = OCEA_score
+)
+
+# 9 obs., 4 vars.
+```
+
+
+# SAVE OCEA_SubScores ------------------------------
+
+```{r Save OCEA_SubScores}
+write.csv(OCEA_SubScores, 
+          "/home/ferrer/ohi_goc_prep/_habitats/HAB_open_ocean/OCEA_outputs/OCEA_Scores_1.0_df_Oct162026.csv", 
+          row.names = FALSE)
+# 9 obs., 4 vars.
+```
+
+# PLOT OCEA_Scores - no reasonable plotting. ------------------------------
+
+```{r Level region_order for plotting purposes}
+# Make sure to order the regions:
+region_order <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
+OCEA_Scores <- OCEA_Scores %>%
+  mutate(
+    OHI_region_name = factor(
+      OHI_region_name,
+      levels = region_order
+    )
+  )
+```
+
+```{r Plot OCEA_Scores}
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
+OCEA_Scores_overTime<- OCEA_Scores %>%
+  
+  filter(!is.na(OHI_region_name)) %>%
+  
+  ggplot(aes(x = year, y = OCEA_Score, color = OHI_region_name)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~ OHI_region_name, scales = "fixed") +
+  
+  labs(
+    title = "OCE Scores by Region",
+    subtitle= "updated: Jul 22 2026",
+    y = "FIS Score (from 0 to 100)",
+    x = "Year"
+  ) +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  ylim(0, 101) +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+OCEA_Scores_overTime
+```
+
+```{r Save as PNG}
+  ggsave(
+    plot = OCEA_Scores_overTime,
+    filename = sprintf("/home/ferrer/ohi_goc_prep/BD/BD_Scores/OCEA_Scores/OCEA_Scores_plot_Jul222026.png"),
+    width = 12,
+    height = 12,
+    dpi = 300
+  )
+```
+
+
+# NEW: ICO Species Check (Oct 14 2026) - COMPLETE. PURG?
+
+```{r Load in iconic species}
+ICO_Species0<- read.csv("/home/shares/ohi/OHI_GOC/goal_prep/sp/ico/especies_iconicas_093026.csv")
+
+ICO_Species<- ICO_Species0 %>%
+  mutate(
+    sci_nombre = str_replace_all(sci_nombre, "[\u200b\u200c\u200d\ufeff]", ""), # to strip any zero width characters
+    sci_nombre = str_squish(sci_nombre),
+    general_nombre = str_squish(general_nombre)
+  ) %>%
+  janitor::clean_names() %>%
+  filter(keep_remove %in% "Keep") %>%
+  select(-keep_remove)
+```
+
+Search the GOC landings for any billfish
+
+```{r Filter for billfish}
+colnames(CONAPESCA_GOC_MarFisheryLandings)
+unique(CONAPESCA_GOC_MarFisheryLandings$Major_Functional_Group)
+
+fishes<- c("Large pelagic bony fish", "Small pelagic bony fish", 
+           "Demersal marine fishes",
+           "Diadromous fishes",
+           "Marine fishes NEI", "Marine or freshwater fishes NEI")
+
+billfish_genera<- c("Istiophorus",
+               "Xiphias",
+               "Makaira",
+               "Tetrapturus",
+               "Istiompax",
+               "Tetrapturus",
+               "Kajikia")
+
+billfish_families<- c("Istiophoridae",
+                      "Xiphiidae")
+
+CONAPESCA_GOC_BillfishLandings<- CONAPESCA_GOC_MarFisheryLandings %>%
+  filter(estimated_genus_name %in% billfish_genera | estimated_family_name %in% billfish_families) %>%
+  select(state, OHI_region_est, OHI_region_name,
+         year, month,
+         Major_Functional_Group,
+         recorded_taxa_group, recorded_taxa_name, recorded_taxa_name_clean, estimated_taxa_group,
+         recorded_scientific_name, estimated_species_name,
+         estimated_genus_name, estimated_family_name, most_likely_family,
+         landed_weight, live_weight, weight_kg_corrected,
+         sector_estimate_draft)
+# 8780 obs., 19 vars.
+
+table(CONAPESCA_GOC_BillfishLandings$estimated_family_name)
+table(CONAPESCA_GOC_BillfishLandings$most_likely_family)
+table(CONAPESCA_GOC_BillfishLandings$recorded_taxa_name_clean)
+
+CONAPESCA_GOC_Billfish_summary <- CONAPESCA_GOC_BillfishLandings %>%
+  filter(year >= 2018, year <= 2024) %>%
+  group_by(most_likely_family, estimated_genus_name, estimated_species_name, year) %>%
+  summarize(
+    GOC_annual_landings = sum(weight_kg_corrected, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(year) %>%
+  mutate(
+    percent_annual_landings = round(
+      100 * GOC_annual_landings / sum(GOC_annual_landings, na.rm = TRUE),
+      0
+    )
+  ) %>%
+  ungroup()
+# 30 obs., 6 vars.
+
+```
+
+```{r Write this summary table as a CSV}
+write.csv(CONAPESCA_GOC_Billfish_summary, 
+          "/home/ferrer/ohi_goc_prep/SP/v2026/ICO/CONAPESCA_Billfish_Summary_0ct142026.csv", 
+          row.names = FALSE)
+# 30 obs., 6 vars.
+```
+
+
