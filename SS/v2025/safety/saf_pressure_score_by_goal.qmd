@@ -22,14 +22,30 @@ editor_options:
 
 # Overview
 
-THINGS TO ADD: none for now
-
 In this script, we will take the annual crime incidents for each coastal municipality that we cleaned in `SS/v2025/safety/ss_safety_dataprep.qmd` and create individual subsets for each goal. This will be based on the collapsed crime category matrix (`saf_collapsed_crime_categories_matrix.csv`), which groups SESNSP subtypes into plain-language categories and marks which OHI GoC goals each subtype affects.
 
-Rates use CONAPO municipal population summed to region, severity weights aligned with TR quality (person/harm = 2, property = 1), and LE coastal share scaling for Region_2, Region_3, and Region_4. Safety is kept as a **pressure** score (0 to 1, higher = more pressure), averaging two subcomponents: comparative incidence (top 5 mean within the GoC panel) and historical change using Semáforo methods (zero pressure at a 25% or larger reduction from the fixed 2015 to 2020 mean; pressure 1 at or above that mean).
+Rates use CONAPO municipal population summed to region, severity weights aligned with TR quality (person/harm = 2, property = 1), and LE coastal share scaling for Region_2, Region_3, and Region_4. Safety is kept as a **pressure** score (0 to 1, higher = more pressure). There is no globally agreed “safe” crime-rate cutoff, so each option below chooses a **reference point** and then **rescales** the crime rate onto 0–1.
+
+## Reference points and 0–1 rescaling options
+
+All options produce a pressure on a **0 to 1** scale (higher = worse). \(H\) below is that region × goal’s **fixed mean crime rate over 2015 to 2020**, unless noted otherwise.
+
+| Option | Column | Reference / endpoints | What 0 and 1 mean |
+|---|---|---|---|
+| **(1) Comparative incidence** | `pressure_comparative` | Reference = mean of the **top 5** crime rates for that OHI goal across all GoC regions and years | **0** = no recorded incidence; **1** = rate at or above the top-5 mean |
+| **(2) Semáforo methods, fixed baseline** | `pressure_historical` | Floor \(T = 0.75H\) (25% reduction); ceiling = \(H\) | **0** = 25% or more below \(H\); **1** = at or above \(H\) |
+| **(3) \(\pm 50\%\) of fixed \(H\)** | `pressure_historical_alt` | Floor \(0.5H\); ceiling \(1.5H\) | **0** = 50% or more below \(H\); **1** = 50% or more above \(H\) (at \(H\), pressure = 0.5) |
+| **(4) \(\pm 25\%\) of fixed \(H\)** | `pressure_historical_pm25` | Floor \(0.75H\) (Semáforo target); ceiling \(1.25H\) | **0** = 25% or more below \(H\); **1** = 25% or more above \(H\) (at \(H\), pressure = 0.5) |
+
+**Default product:** combined `pressure` = mean of **(1) comparative** and **(4) \(\pm 25\%\) historical** when both exist; otherwise comparative only. Options (2) and (3) remain available for sensitivity plots and discussion.
+
+**Rescaling formulas (section 6):**
+
+- Comparative: \(\mathrm{pressure} = \min(1,\ \mathrm{crime\_rate} / \mathrm{top5\_mean})\)
+- Historical options: \(\mathrm{pressure} = \mathrm{clamp}\big((\mathrm{crime\_rate} - T) / (C - T),\ 0,\ 1\big)\), where \(T\) and \(C\) are the floor and ceiling in the table above (\(C = H\) for option 2)
 
 1. **Load packages.** We load the tidyverse and spatial libraries used throughout the script.
-2. **Read cleaned SESNSP municipal data through 2025.** 
+2. **Read cleaned SESNSP municipal data through 2025.**
 
 Intermediate files are saved to `/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_int`. Final outputs are saved to `/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output`.
 
@@ -89,7 +105,7 @@ coastal_adj_path <- "/home/shares/ohi/OHI_GOC/goal_prep/le/coastal_adjustment_mu
 #| label: step_02_read_sesnsp
 
 sesnsp_goc <- read_csv(here::here(annual_sesnsp_path))
-sesnsp_goc_sf <- st_read(here::here(annual_sesnsp_sf_path))
+# sesnsp_goc_sf <- st_read(here::here(annual_sesnsp_sf_path))
 ```
 
 
@@ -410,15 +426,15 @@ rate_of_incidence_per_goal <- incidences_per_goal %>%
     crime_rate = total_crimes_reported / population
   )
 
-write_csv(
-  rate_of_incidence_per_goal,
-  here::here(safety_output, "rate_of_incidence_per_goal_2015_2025.csv")
-)
-
-write_csv(
-  conapo_population_by_rgn,
-  here::here(safety_output, "conapo_population_by_rgn_coastal_2015_2025.csv")
-)
+# write_csv(
+#   rate_of_incidence_per_goal,
+#   here::here(safety_output, "rate_of_incidence_per_goal_2015_2025.csv")
+# )
+# 
+# write_csv(
+#   conapo_population_by_rgn,
+#   here::here(safety_output, "conapo_population_by_rgn_coastal_2015_2025.csv")
+# )
 ```
 
 ### 5a. Viz
@@ -685,9 +701,9 @@ There is no globally agreed bad / medium / good cutoff for crime rates that work
 For that reason, Safety here is kept as a **pressure** score (0 to 1, where higher means more pressure), built from **two transparent subcomponents**, rather than from one unsupported universal cutoff. We do not convert these to a current status score in this script; if a status is needed later, it is simply the inverse, `1 − pressure`.
 
 1. **Comparative crime incidence** places each region-year rate next to other Gulf of California coastal observations for the same OHI goal. The reference is the mean of the five highest crime rates for that goal across regions and years (top 5 mean). This answers: *how does this place compare with the worst observed burden in our GoC panel for this goal?*
-2. **Historical change** uses Semáforo Delictivo methods. For each region and goal, each year’s rate from 2015 to 2025 is compared with that same place’s **fixed 2015 to 2020 mean** crime rate. A 25% (or larger) reduction from that historical mean has pressure 0. Matching or exceeding the historical mean has pressure 1. This answers: *is recorded incidence lower than that place’s own 2015 to 2020 baseline?*
+2. **Historical change (\(\pm 25\%\))** uses the Semáforo **25% reduction** as pressure 0, but a more lenient pressure = 1: the rate must reach **25% above** that place’s **fixed 2015 to 2020 mean** \(H\). Matching \(H\) scores 0.5. This answers: *how does recorded incidence sit relative to that place’s own baseline, allowing some room above the mean before full pressure?*
 
-Neither subcomponent claims a globally “safe” level. Comparative incidence is about relative burden within the GoC panel. Historical change is a trend / performance signal, not an absolute danger label. The overall **Safety pressure** for each region, year, and goal is the simple average of the two when both are available. When a region-goal series has no 2015 to 2020 observations (for example San Felipe only appears from 2022), historical pressure is missing and Safety uses the comparative pressure alone.
+Neither subcomponent claims a globally “safe” level. Comparative incidence is about relative burden within the GoC panel. Historical change is a trend / performance signal, not an absolute danger label. The overall **Safety pressure** for each region, year, and goal is the simple average of comparative and \(\pm 25\%\) historical when both are available. When a region-goal series has no 2015 to 2020 observations (for example San Felipe only appears from 2022), historical pressure is missing and Safety uses the comparative pressure alone. Classic Semáforo (pressure 1 at \(H\)) and the \(\pm 50\%\) alternative are still computed for sensitivity plots.
 
 ### 6.1 Comparative crime incidence (top 5 mean)
 
@@ -697,9 +713,9 @@ For each goal, the reference is the mean of the top 5 crime-rate observations ac
 
 Pressures are capped at 1 when the crime rate is at or above the top 5 mean. A region-year with zero crime scores 0 pressure.
 
-### 6.2 Historical change (using Semáforo methods)
+### 6.2 Historical change (classic Semáforo; sensitivity)
 
-For each region and goal:
+For each region and goal (still computed for plots; **not** used in the default combined score):
 
 - Historical mean \(H\) = mean crime rate over **2015 to 2020** (fixed baseline)
 - Target \(T\) = \(0.75 \times H\) (at least a 25% reduction from the historical mean)
@@ -707,19 +723,29 @@ For each region and goal:
 
 So a 25% (or larger) decline from \(H\) has pressure 0, matching or exceeding \(H\) has pressure 1, and values between \(T\) and \(H\) map linearly (Semáforo yellow). Years inside the 2015 to 2020 window are still scored against that same fixed mean so the full 2015 to 2025 series can be plotted. If \(H = 0\), pressure is 0 when the current rate is also 0 and 1 otherwise. If a region-goal has no 2015 to 2020 rates, historical pressure is missing.
 
-### 6.2a Alternative: \(\pm 50\%\) historical band
+### 6.2a Alternative: \(\pm 50\%\) of fixed historical mean
 
-For comparison we also compute `pressure_historical_alt` on a wider band around the same \(H\):
+For comparison we also compute `pressure_historical_alt` around the same \(H\):
 
 - Floor \(T_{\mathrm{alt}}\) = \(0.5 \times H\) (a 50% reduction; pressure 0)
 - Ceiling \(C_{\mathrm{alt}}\) = \(1.5 \times H\) (a 50% increase; pressure 1)
 - `pressure_historical_alt = clamp((crime_rate - T_alt) / (C_alt - T_alt), 0, 1)`
 
-Matching \(H\) scores 0.5 on this scale. This column is for sensitivity plots only (`p_pressure_historical_alt_list`); the default combined `pressure` still uses Semáforo-style `pressure_historical` from 6.2.
+Matching \(H\) scores 0.5 on this scale. This column is for sensitivity plots only (`p_pressure_historical_alt_list`).
+
+### 6.2b \(\pm 25\%\) historical (used in the default combined score)
+
+Keeps the Semáforo **25% reduction** as pressure 0, but sets pressure 1 only when the rate is **25% above** \(H\) (i.e. \(1.25 \times H\)), rather than at \(H\) itself:
+
+- Floor \(T_{25}\) = \(0.75 \times H\) (Semáforo 25% reduction; pressure 0)
+- Ceiling \(C_{25}\) = \(1.25 \times H\) (25% above the mean; pressure 1)
+- `pressure_historical_pm25 = clamp((crime_rate - T_25) / (C_25 - T_25), 0, 1)`
+
+Matching \(H\) scores 0.5. Plots: `p_pressure_historical_pm25_list`. This is the historical subcomponent in the default combined `pressure`.
 
 ### 6.3 Combined Safety pressure
 
-`pressure = mean(pressure_comparative, pressure_historical)` when both exist; otherwise `pressure = pressure_comparative` when only the comparative score is available.
+`pressure = mean(pressure_comparative, pressure_historical_pm25)` when both exist; otherwise `pressure = pressure_comparative` when only the comparative score is available.
 
 ```{r}
 #| label: step_06_pressure
@@ -767,7 +793,9 @@ hist_ref_by_rgn_goal <- rate_of_incidence_per_goal %>%
   mutate(
     hist_target = 0.75 * hist_mean,
     hist_floor_alt = 0.5 * hist_mean,
-    hist_ceiling_alt = 1.5 * hist_mean
+    hist_ceiling_alt = 1.5 * hist_mean,
+    hist_floor_pm25 = 0.75 * hist_mean,
+    hist_ceiling_pm25 = 1.25 * hist_mean
   )
 
 hist_ref_by_rgn_goal %>%
@@ -806,17 +834,27 @@ pressure_per_goal <- rate_of_incidence_per_goal %>%
         pmin(1, (crime_rate - hist_floor_alt) / (hist_ceiling_alt - hist_floor_alt))
       )
     ),
+    # alternative: Semáforo 25% reduction for 0, pressure 1 at +25% above H
+    pressure_historical_pm25 = dplyr::case_when(
+      is.na(hist_mean) ~ NA_real_,
+      hist_mean == 0 & crime_rate == 0 ~ 0,
+      hist_mean == 0 & crime_rate > 0 ~ 1,
+      TRUE ~ pmax(
+        0,
+        pmin(1, (crime_rate - hist_floor_pm25) / (hist_ceiling_pm25 - hist_floor_pm25))
+      )
+    ),
     n_safety_components = as.integer(!is.na(pressure_comparative)) +
-      as.integer(!is.na(pressure_historical)),
+      as.integer(!is.na(pressure_historical_pm25)),
     pressure = dplyr::case_when(
-      !is.na(pressure_comparative) & !is.na(pressure_historical) ~
-        (pressure_comparative + pressure_historical) / 2,
+      !is.na(pressure_comparative) & !is.na(pressure_historical_pm25) ~
+        (pressure_comparative + pressure_historical_pm25) / 2,
       !is.na(pressure_comparative) ~ pressure_comparative,
       TRUE ~ NA_real_
     ),
     method_safety = dplyr::case_when(
-      !is.na(pressure_comparative) & !is.na(pressure_historical) ~
-        "Mean of comparative (top 5) and historical (2015 to 2020, using Semáforo methods) pressures",
+      !is.na(pressure_comparative) & !is.na(pressure_historical_pm25) ~
+        "Mean of comparative (top 5) and historical ±25% (Semáforo target; pressure 1 at +25% of 2015 to 2020 mean)",
       !is.na(pressure_comparative) ~
         "Comparative (top 5) pressure only; 2015 to 2020 historical baseline not available",
       TRUE ~ NA_character_
@@ -826,6 +864,7 @@ pressure_per_goal <- rate_of_incidence_per_goal %>%
 summary(pressure_per_goal$pressure_comparative)
 summary(pressure_per_goal$pressure_historical)
 summary(pressure_per_goal$pressure_historical_alt)
+summary(pressure_per_goal$pressure_historical_pm25)
 summary(pressure_per_goal$pressure)
 
 pressure_per_goal %>%
@@ -843,32 +882,32 @@ pressure_summary_table <- pressure_per_goal %>%
     q3 = quantile(pressure, 0.75, na.rm = TRUE),
     max = max(pressure, na.rm = TRUE),
     mean_comparative = mean(pressure_comparative, na.rm = TRUE),
-    mean_historical = mean(pressure_historical, na.rm = TRUE),
+    mean_historical_pm25 = mean(pressure_historical_pm25, na.rm = TRUE),
     .groups = "drop"
   )
 
 pressure_summary_table %>%
   knitr::kable(digits = 3, caption = "Safety pressure summary by OHI goal (combined and subcomponents; 0 to 1)")
 
-write_csv(
-  pressure_per_goal,
-  here::here(safety_output, "pressure_per_goal_2015_2025.csv")
-)
-
-write_csv(
-  pressure_summary_table,
-  here::here(safety_output, "pressure_summary_by_goal_2015_2025.csv")
-)
-
-write_csv(
-  hist_ref_by_rgn_goal,
-  here::here(safety_output, "historical_baseline_2015_to_2020_by_rgn_goal.csv")
-)
-
-write_csv(
-  top5_ref_by_goal,
-  here::here(safety_output, "crime_rate_top5_reference_by_goal_2015_2025.csv")
-)
+# write_csv(
+#   pressure_per_goal,
+#   here::here(safety_output, "pressure_per_goal_2015_2025.csv")
+# )
+# 
+# write_csv(
+#   pressure_summary_table,
+#   here::here(safety_output, "pressure_summary_by_goal_2015_2025.csv")
+# )
+# 
+# write_csv(
+#   hist_ref_by_rgn_goal,
+#   here::here(safety_output, "historical_baseline_2015_to_2020_by_rgn_goal.csv")
+# )
+# 
+# write_csv(
+#   top5_ref_by_goal,
+#   here::here(safety_output, "crime_rate_top5_reference_by_goal_2015_2025.csv")
+# )
 ```
 
 ### 6a. Pressure plots by goal
@@ -997,7 +1036,7 @@ p_pressure_list <- make_pressure_plot(
   pressure_per_goal,
   "pressure",
   "",
-  "Combined Safety pressure: mean of comparative (top 5) and historical change when both exist"
+  "Combined Safety pressure: mean of comparative (top 5) and historical ±25% when both exist"
 )
 
 p_pressure_comparative_list <- make_pressure_plot(
@@ -1017,14 +1056,104 @@ p_pressure_historical_list <- make_pressure_plot(
 p_pressure_historical_alt_list <- make_pressure_plot(
   pressure_per_goal,
   "pressure_historical_alt",
-  " (historical alternative)",
+  " (historical alternative ±50%)",
   "Historical change alternative; 0 = 50% or more below 2015 to 2020 mean, 1 = 50% or more above"
+)
+
+p_pressure_historical_pm25_list <- make_pressure_plot(
+  pressure_per_goal,
+  "pressure_historical_pm25",
+  " (historical ±25%)",
+  "Semáforo 25% reduction for pressure 0; pressure 1 at 25% or more above 2015 to 2020 mean"
 )
 
 names(p_pressure_list)
 ```
 
+
+#### Save per-goal pressure CSVs (combined, comparative, historical ±25%)
+
+Combined = mean of Option 1 (`pressure_comparative`) and Option 4 (`pressure_historical_pm25`) when both exist; otherwise comparative only (e.g. Region_1).
+
+Files are written to `safety_output/goal_specific_pressure_scores/` as:
+
+`saf_pressure_[goal]_[combined|comparative|historical_25]_101626.csv`
+
+```{r}
+#| label: step_06a_save_goal_pressure_csvs
+
+pressure_csv_dir <- file.path(
+  safety_output,
+  "goal_specific_pressure_scores"
+)
+dir.create(pressure_csv_dir, recursive = TRUE, showWarnings = FALSE)
+
+pressure_file_date <- "101626"
+
+# score type -> column in pressure_per_goal
+pressure_export_specs <- list(
+  combined = "pressure",
+  comparative = "pressure_comparative",
+  historical_25 = "pressure_historical_pm25"
+)
+
+# shared context columns when present
+pressure_context_cols <- c(
+  "rgn_id", "ano", "ohi_goal",
+  "crime_rate", "population",
+  "ref_top5_mean", "hist_mean",
+  "hist_floor_pm25", "hist_ceiling_pm25",
+  "n_hist_years", "method_safety", "n_safety_components"
+)
+
+for (g in goal_list) {
+  df_goal <- pressure_per_goal %>%
+    dplyr::filter(ohi_goal == g) %>%
+    dplyr::arrange(rgn_id, ano)
+
+  for (score_name in names(pressure_export_specs)) {
+    score_col <- pressure_export_specs[[score_name]]
+
+    df_out <- df_goal %>%
+      dplyr::select(
+        dplyr::any_of(pressure_context_cols),
+        dplyr::all_of(score_col)
+      )
+
+    # for combined, also keep the two inputs used in the average
+    if (score_name == "combined") {
+      df_out <- df_goal %>%
+        dplyr::select(
+          dplyr::any_of(pressure_context_cols),
+          dplyr::any_of(c(
+            "pressure_comparative",
+            "pressure_historical_pm25",
+            "pressure"
+          ))
+        )
+    }
+
+    out_path <- file.path(
+      pressure_csv_dir,
+      paste0("saf_pressure_", g, "_", score_name, "_", pressure_file_date, ".csv")
+    )
+    readr::write_csv(df_out, out_path)
+  }
+}
+
+message(
+  "Wrote ",
+  length(goal_list) * length(pressure_export_specs),
+  " CSVs to ",
+  pressure_csv_dir
+)
+list.files(pressure_csv_dir, pattern = paste0("_", pressure_file_date, "\\.csv$"))
+```
+
 #### Call individual pressure plots by goal
+
+pressure = (pressure_comparative + pressure_historical_pm25) / 2
+
 
 ```{r}
 #| label: step_06a_print_pressure_by_goal
@@ -1032,7 +1161,8 @@ names(p_pressure_list)
 #| fig-height: 4.5
 #| fig-dpi: 96
 
-# Combined Safety pressure (default product)
+# Combined Safety pressure (average of Option 1 + Option 4, unless historical does not exist such as for Region_1)
+
 p_pressure_list[["biodiversity"]]
 p_pressure_list[["clean_waters"]]
 p_pressure_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
@@ -1111,6 +1241,30 @@ p_pressure_historical_alt_list[["sentido_de_pertenencia"]]
 p_pressure_historical_alt_list[["tourism_recreation"]]
 ```
 
+#### Historical \(\pm 25\%\) plots by goal (Semáforo target; pressure 1 at +25%)
+
+```{r}
+#| label: step_06a_print_historical_pm25_by_goal
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
+
+p_pressure_historical_pm25_list[["biodiversity"]]
+p_pressure_historical_pm25_list[["clean_waters"]]
+p_pressure_historical_pm25_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
+p_pressure_historical_pm25_list[["coastal_opportunities_coastal_access"]]
+p_pressure_historical_pm25_list[["food_provisioning_fisheries"]]
+p_pressure_historical_pm25_list[["food_provisioning_mariculture"]]
+p_pressure_historical_pm25_list[["habitat_services_carbon_storage"]]
+p_pressure_historical_pm25_list[["habitat_services_coastal_protection"]]
+p_pressure_historical_pm25_list[["habitat_services_filtration"]]
+p_pressure_historical_pm25_list[["livelihoods_economies_economies"]]
+p_pressure_historical_pm25_list[["livelihoods_economies_livelihoods"]]
+p_pressure_historical_pm25_list[["natural_products"]]
+p_pressure_historical_pm25_list[["sentido_de_pertenencia"]]
+p_pressure_historical_pm25_list[["tourism_recreation"]]
+```
+
 ### 6b. Crimes included in each goal
 
 For each OHI goal, we list the crimes marked as affecting that goal in `saf_collapsed_crime_categories_matrix.csv`.
@@ -1165,4 +1319,4 @@ for (g in goal_list) {
 
 ### 6c. Reference method note
 
-The multi-method reference exploration (per goal max, global max, quantiles, regional baseline) was retired. Safety is scored as a **pressure** on a 0 to 1 scale (higher = worse) using comparative top 5 and historical Semáforo methods (fixed 2015 to 2020 baseline, scored for 2015 to 2025) in section 6. An alternative \(\pm 50\%\) historical band is available as `pressure_historical_alt` for sensitivity plots. Downstream merge scripts should use `pressure_per_goal_2015_2025.csv`.
+The multi-method reference exploration (per goal max, global max, quantiles, regional baseline) was retired. Safety is scored as a **pressure** on a 0 to 1 scale (higher = worse) using the mean of comparative top 5 and historical \(\pm 25\%\) (Semáforo 25% reduction for pressure 0; pressure 1 at +25% above fixed 2015 to 2020 \(H\)) in section 6. Sensitivity alternatives still available: classic Semáforo `pressure_historical` (pressure 1 at \(H\)) and `pressure_historical_alt` (\(\pm 50\%\)). Downstream merge scripts should use `pressure_per_goal_2015_2025.csv`.
