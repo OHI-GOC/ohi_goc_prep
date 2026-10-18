@@ -49,15 +49,17 @@ clean_names_lowercase <- function(x) {
 
 
 # Region key (important for plotting):
-```{r Region key}
+```{r Load in the OHI Region_Key0}
 Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
 
 colnames(Region_Key0)
 
 Region_Key<- Region_Key0 %>%
-  select(OHI_region_est, OHI_region_name) %>%
+  select(rgn_id= OHI_region_est, rgn_name= OHI_region_name) %>%
   distinct()
-# 10 obs., 2 vars.
+
+# Make uppercase:
+Region_Key$rgn_id <- sub("^r", "R", Region_Key$rgn_id)
 ```
 
 
@@ -2029,122 +2031,89 @@ KEY_MunicipioRegion<- read_csv("/home/shares/ohi/OHI_GOC/_raw_data/Anuario_Estad
 ```{r Merge KEY_MunicipioRegion to MINE_Data0}
 colnames(Anuario_Mining_Data0)
 
-MINE_Data0<- Anuario_Mining_Data0 %>%
+Anuario_GOC_Data<- Anuario_Mining_Data0 %>%
   left_join(KEY_MunicipioRegion,
     by= c("state", "municipality")
     )
 # 739 obs., 14 vars.
 
-colnames(MINE_Data0)
+colnames(Anuario_GOC_Data)
 
-MINE_Data0<- MINE_Data0 %>%
+Anuario_GOC_Data<- Anuario_GOC_Data %>%
   select(mineral_type, year, state, rgn_id, municipality, 
          production_tonnes,
          GOC_include, within_100km_coastline) %>%
   filter(GOC_include == "TRUE" & within_100km_coastline == "TRUE")
-# 104 obs., 8 vars.
+# 86 obs., 8 vars.
 
 ```
 
-# Extropolate salt data (at the site level) from 2018-2023 to 2024 and 2025
-```{r Extropolate MINE_Data from 2018-2023 to 2024 and 2025}
+```{r Generate MINE_data_municipality at the municipality level}
 # First, take annual totals by region:
-MINE_Regional_totals <- MINE_Data %>%
+MINE_data_municipality0 <- Anuario_GOC_Data %>%
   select(rgn_id, mineral_type, year, state, municipality, production_tonnes) %>%
   group_by(mineral_type, state, municipality, year) %>%
+  
   summarise(
-    production_tonnes = sum(production_tonnes, na.rm = TRUE),
+    production_tonnes = sum(production_tonnes, na.rm = FALSE),
     rgn_id = first(rgn_id),
     .groups = "drop"
   )
 
-# Then, fit a linear trend for each region and predict 2025:
+# 86 obs., 6 vars.
+```
 
-# Use the broom library for forecast.
-MINE_Regional_forecasts <- MINE_Regional_totals %>%
-  group_by(mineral_type, rgn_id, state, municipality, year) %>%
-  summarise(
-    production_tonnes = sum(production_tonnes, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  group_by(mineral_type, rgn_id, state, municipality) %>%
-  nest() %>%
+## Interpolate mineral data (at the site level) for missing years between 2016 and 2024:
+```{r Interpolate missing years}
+MINE_data_municipality <- MINE_data_municipality0 %>%
+
+  group_by(mineral_type, state, municipality, rgn_id) %>%
+  arrange(year, .by_group = TRUE) %>%
   mutate(
-    model_data = map(data, ~ filter(
-      .x,
-      !is.na(year),
-      !is.na(production_tonnes),
-      production_tonnes > 0
-    )),
+    was_missing = is.na(production_tonnes),
 
-    n_years_forecast_ = map_int(
-      model_data,
-      ~ n_distinct(.x$year)
+    interpolated_production = na.approx(
+      production_tonnes,
+      x = year,
+      na.rm = FALSE,
+      rule = 1
     ),
 
-    forecast = map(model_data, ~ {
-      if (nrow(.x) < 2 || n_distinct(.x$year) < 2) {
-        return(tibble(
-          year = 2025,
-          predicted_prod_tonnes = NA_real_
-        ))
-      }
+    production_tonnes = if_else(
+      was_missing & !is.na(interpolated_production),
+      interpolated_production,
+      production_tonnes
+    ),
 
-      model <- lm(production_tonnes ~ year, data = .x)
-
-      tibble(
-        year = 2025,
-        predicted_prod_tonnes = as.numeric(
-          predict(model, newdata = tibble(year = 2025))
-        )
-      )
-    })
+    production_provenance = case_when(
+      was_missing & !is.na(interpolated_production) ~ "interpolated",
+      was_missing ~ "missing",
+      TRUE ~ "observed"
+    )
   ) %>%
-  select(
-    mineral_type, rgn_id, state, municipality,
-    forecast, n_years_forecast_
-  ) %>%
-  unnest(forecast)
+  select(-was_missing, -interpolated_production) %>%
+  ungroup()
 
-# Add a forecasted column:
-MINE_Regional_forecasts$forecasted_<- c("TRUE")
-
-# 18 obs., 8 vars.
-
-```
-
-```{r Merge MINE_Regional_forecasts to MINE_Data}
-colnames(MINE_Data)
-colnames(MINE_Regional_forecasts)
-
-MINE_Data0$forecasted_<- c("FALSE")
-
-MINE_Data <- bind_rows(
-  MINE_Data0,
-  MINE_Regional_forecasts
-)
-# 122 obs., 11 vars.
-
-```
-
-```{r Create cleaned MINE_Data_finalized}
-colnames(MINE_Data)
-
-MINE_Data_finalized <- MINE_Data %>%
-  select(mineral_type, year, state, rgn_id, municipality, within_100km_coastline,
-         production_tonnes, predicted_prod_tonnes,
-         forecasted_, n_years_forecast_) %>%
+# Replace NA values with zeros:
+MINE_data_municipality <- MINE_data_municipality %>%
   mutate(
-    production_tonnes = coalesce(production_tonnes, predicted_prod_tonnes)
-  ) %>%
-  relocate(production_tonnes, .after= predicted_prod_tonnes)
+    production_provenance = if_else(
+      is.na(production_tonnes),
+      "zero assumed",
+      production_provenance
+    ),
+    production_tonnes = coalesce(production_tonnes, 0)
+  )
+
+dim(MINE_data_municipality)
+# 86 obs., 7 vars.
 
 ```
 
-```{r Plot MINE_Data_finalized}
-colnames(MINE_Data_finalized)
+```{r Create cleaned MINE_Data}
+colnames(MINE_data_municipality)
 
-TEST <- MINE_Data_finalized %>%
+MINE_Data <- MINE_data_municipality %>%
   select(mineral_type, year, rgn_id, production_tonnes) %>%
   group_by(mineral_type, year, rgn_id) %>%
   summarise(
@@ -2152,7 +2121,11 @@ TEST <- MINE_Data_finalized %>%
     .groups = "drop"
   )
 
-TEST %>%
+```
+
+```{r Plot Salt and Gypsum Production}
+
+MINE_Salt_Plot<- MINE_Data %>%
   filter(mineral_type == "Sal") %>%
   ggplot(aes(x = year, y = mean_prod_mt, color = rgn_id, group = rgn_id)) +
   geom_line(linewidth = 0.8, na.rm = TRUE) +
@@ -2171,7 +2144,9 @@ TEST %>%
     axis.text.x = element_text(angle = 45, hjust = 1)
   )
 
-TEST %>%
+MINE_Salt_Plot
+
+MINE_Gypsum_Plot<- MINE_Data %>%
   filter(mineral_type == "Yeso") %>%
   ggplot(aes(x = year, y = mean_prod_mt, color = rgn_id, group = rgn_id)) +
   geom_line(linewidth = 0.8, na.rm = TRUE) +
@@ -2190,66 +2165,153 @@ TEST %>%
     axis.text.x = element_text(angle = 45, hjust = 1)
   )
 
-```
-
-
-```{r Curious about MINE production region 7}
-test<- MINE_Data_finalized %>%
-  filter(rgn_id== "Region_7")
-
-# NOTE TO SELF: I actually just don't think the salt spike in region 7 2024 is real. I think this will be corrected when we load in new Anuario data for 2024. = September 7 2026
+MINE_Gypsum_Plot
 ```
 
 ## Calculate MINE reference point:
 Salt reference point: "Salt production from all mines roughly equals production from Hermosillio, a great example of a good, sustainable mine."
 Salt reference period: 2018-2022
 
-```{r Calculate salt reference point}
-table(MINE_Data_finalized$municipality)
-colnames(MINE_Data_finalized)
+```{r Calculate salt and gypsum reference points}
+table(MINE_data_municipality$municipality)
+colnames(MINE_Data)
 
-# Sum this year (by region) and compare to the mean annual regional volume over 2018–2022:
-MINE_ref_point <- MINE_Data_finalized %>%
-  filter(municipality == "hermosillo",
-         year >= 2018 & year <= 2022) %>%
-  summarise(mean_volume_2018_2022 = mean(production_tonnes, na.rm = TRUE)) %>%
-  pull(mean_volume_2018_2022)
+MINE_REF_START = 2018
+MINE_REF_END = 2022
+
+# Salt reference point: mean production in Hermosillo, 2018–2022
+SAL_ref_points <- MINE_data_municipality %>%
+  filter(
+    mineral_type == "Sal",
+    municipality == "Hermosillo",
+    year >= MINE_REF_START,
+    year <= MINE_REF_END
+  ) %>%
+  summarise(
+    Sal_ref_point_mt = mean(production_tonnes, na.rm = TRUE)
+  )
+
+
+# Sal
+# 31376.9 mt
+
+# Gypsum reference point: mine-specific mean production, 2018–2022
+YESO_ref_points <- MINE_data_municipality %>%
+  filter(
+    mineral_type == "Yeso",
+    year >= MINE_REF_START,
+    year <= MINE_REF_END
+  ) %>%
+  group_by(state, municipality) %>%
+  summarise(
+    Yeso_ref_point_mt = mean(production_tonnes, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Ahome
+# 866.045
+# 
+# Mocorito
+# 100.000
+# 
+# Caborca
+# 35175.000
+# 
+# Hermosillo
+# 125002.050
+# 
+# Álamos
+# 147525.00
+
 ```
 
 
 ## Calculate MINE_SubScores:
 
 ```{r Calculate MINE_SubScores}
-colnames(MINE_Data_finalized)
+colnames(MINE_Data)
 
-# First, calculate the scores PER MINE MINE relative to the reference point:
-MINE_Scores_per_mine<- MINE_Data_finalized
-
-MINE_Scores_per_mine$ref_point_mt<- c(MINE_ref_point)
-
-MINE_Scores_per_mine <- MINE_Scores_per_mine %>%
+# Combine reference points with the production data
+MINE_data_municipality <- MINE_data_municipality %>%
+  left_join(YESO_ref_points, by = c("state", "municipality")) %>%
   mutate(
-    mine_MINE_score = (production_tonnes / ref_point_mt)* 100,
-    mine_MINE_score = pmin(mine_MINE_score, 100)
+    Sal_ref_point_mt = SAL_ref_points$Sal_ref_point_mt
   )
 
+# Calculate the scores PER MINE MINE relative to the reference point:
+# NOTE: Salt production is widely considered sustainable and renewable while Gypsum is not. Therefore, these scores do not penalize salt production over the reference point but they do penalize gypsum over the reference point. Penality is linear on both sides of 100 with a 10% buffer.
+
+REF_POINT_BUFFER = 0.1 # 10% buffer
+
+MINE_Scores_per_mine <- MINE_data_municipality %>%
+  mutate(
+    reference_point = case_when(
+      mineral_type == "Sal" ~ Sal_ref_point_mt,
+      mineral_type == "Yeso" ~ Yeso_ref_point_mt,
+      TRUE ~ NA_real_
+    ),
+
+    ratio = production_tonnes / reference_point,
+
+    # Linear symmetric scoring
+    MINE_score_per.mine = case_when(
+      mineral_type == "Yeso" ~ pmax(
+        0,
+        100 - 100 * pmax(0, abs(ratio - 1) - REF_POINT_BUFFER) /
+          (1 - REF_POINT_BUFFER)
+      ),
+      mineral_type == "Sal" ~ pmin(ratio * 100, 100),
+      TRUE ~ NA_real_
+    ),
+
+    # Nonlinear asymmetric scoring (alternative)
+    # MINE_score_per.mine = case_when(
+    #   mineral_type == "Yeso" & ratio >= (1 - REF_POINT_BUFFER) &
+    #     ratio <= (1 + REF_POINT_BUFFER) ~ 100,
+    #   mineral_type == "Yeso" & ratio > (1 + REF_POINT_BUFFER) ~ 100 / ratio,
+    #   mineral_type == "Yeso" & ratio < (1 - REF_POINT_BUFFER) ~ ratio * 100,
+    #   mineral_type == "Sal" ~ pmin(ratio * 100, 100),
+    #   TRUE ~ NA_real_
+    # ),
+
+    MINE_score_per.mine = round(MINE_score_per.mine, 2)
+  )
+# 86 obs.
+
+```
+
+```{r Next take mean across all mines in that region (weight the contribution of each mine by total production)}
 # Next take mean across all mines in that region (weight the contribution of each mine by total production):
 colnames(MINE_Scores_per_mine)
 
 MINE_SubScores0 <- MINE_Scores_per_mine %>%
-  group_by(rgn_id, year) %>%
+  group_by(mineral_type, rgn_id, year) %>%
   summarise(
-    regional_production_mt = sum(production_tonnes, na.rm = TRUE),
+    total_regional_prod_mt = sum(production_tonnes, na.rm = TRUE),
+    mean_regional_ref.point_mt = mean(reference_point, na.rm = TRUE),
+    
     MINE_score = weighted.mean(
-      mine_MINE_score,
+      MINE_score_per.mine,
       w = production_tonnes,
-      na.rm = TRUE
+      na.rm = FALSE
     ),
+    
+    MINE_score= round(MINE_score, 2),
+    
     .groups = "drop"
   ) %>%
+  
+  # Be sure to account for regional zeros:
   mutate(
-    rgn_id = clean_names_lowercase(rgn_id)
-  )
+    MINE_score = if_else(
+      !is.na(total_regional_prod_mt) & is.na(MINE_score),
+      0,
+      MINE_score
+    )
+  )%>%
+  rename(mining_type = mineral_type)
+# 47 obs.
+
 ```
 
 ```{r Complete the MINE_SubScores grid}
@@ -2258,59 +2320,75 @@ colnames(MINE_SubScores0)
 MINE_SubScores <- MINE_SubScores0 %>%
   ungroup() %>%
   complete(
-    rgn_id = paste0("region_", 1:9),
+    mining_type= c("Sal", "Yeso"),
+    rgn_id = paste0("Region_", 1:9),
     year = full_seq(year, 1),
     fill = list(
-      SHEL_score = NA_real_
+      MINE_score = NA_real_
     )
-  ) %>%
-  arrange(rgn_id, year)
+  )
+# 162 obs.
 
-# Exclusion criteria? > Not sure this is necessary here.
-summary(MINE_SubScores$regional_production_mt) # median = 101722, mean = 1730837
-sd(MINE_SubScores$regional_production_mt, na.rm = TRUE) # sd = 2892755
-
-exclusion_threshold = median(MINE_SubScores$regional_production_mt, na.rm= TRUE)
-
-MINE_SubScores$region_exclude_include<- c(NA)
-
-MINE_SubScores <- MINE_SubScores %>%
-  group_by(rgn_id) %>%
-  mutate(
-    median_regional_prod_mt = median(regional_production_mt, na.rm = TRUE),
-    
-    region_exclude_include = case_when(
-      is.na(median_regional_prod_mt) ~ "exclude",
-      median_regional_prod_mt <= exclusion_threshold ~ "exclude",
-      median_regional_prod_mt > exclusion_threshold ~ "include"
-    )
-  ) %>%
-  ungroup()
-# 70 obs., 6 vars.
+table(MINE_SubScores$rgn_id)
 ```
 
 ```{r Merge Region_Key to MINE_SubScores}
 MINE_SubScores <- MINE_SubScores %>%
   left_join(
     Region_Key,
-    by = c("rgn_id" = "OHI_region_est")
-  )
-# 70 obs., 7 vars.
+    by = c("rgn_id")
+  ) %>%
+  arrange(mining_type, rgn_id, rgn_name, year, 
+          total_regional_prod_mt, mean_regional_ref.point_mt, 
+          MINE_score)
+# 162 obs., 7 vars.
+
+```
+
+```{r Add exclusion criteria? Only if asked for it.}
+# Exclusion criteria? 
+# > Not sure this is necessary here. Do not include.
+# summary(MINE_SubScores$total_regional_prod_mt, na.rm= TRUE) # median = 41193, mean = 90689
+# sd(MINE_SubScores$total_regional_prod_mt, na.rm = TRUE) # sd = 84774.78
+# 
+# exclusion_threshold = quantile(
+#   MINE_SubScores$total_regional_prod_mt,
+#   probs = 0.25,
+#   na.rm = TRUE
+# ) %>%
+#   as.numeric()
+# 
+# MINE_SubScores$region_exclude_include<- c(NA)
+# 
+# MINE_SubScores <- MINE_SubScores %>%
+#   group_by(rgn_id) %>%
+#   mutate(
+#     exclusion_threshold = exclusion_threshold,
+#     
+#     region_exclude_include = case_when(
+#       is.na(total_regional_prod_mt) ~ "exclude",
+#       total_regional_prod_mt <= exclusion_threshold ~ "exclude",
+#       total_regional_prod_mt > exclusion_threshold ~ "include"
+#     )
+#   ) %>%
+#   ungroup()
+# 128 obs., 8 vars.
+
 ```
 
 
 ## Save MINE_SubScores:
 ```{r Save MINE_SubScores as needed}
 write.csv(MINE_SubScores, 
-          "/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/MINE_SubScores/MINE_SubScores_df_Sep062026.csv", 
+          "/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores_1.1/MINE_Scores_1.1/MINE_SubScores_df_Oct182026.csv", 
           row.names = FALSE)
 ```
 
 ## Plot MINE_SubScores: 
 
 ```{r Load MINE_SubScores as needed}
-MINE_SubScores0<- read.csv("/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/MINE_SubScores/MINE_SubScores_df_Sep062026.csv")
-# 70 obs., 7 vars.
+MINE_SubScores0<- read.csv("/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores_1.1/MINE_Scores_1.1/MINE_SubScores_df_Oct182026.csv")
+# 162 obs., 7 vars.
 
 MINE_SubScores<- MINE_SubScores0
 
@@ -2329,14 +2407,28 @@ region_order <- c(
 
 MINE_SubScores <- MINE_SubScores %>%
   mutate(
-    OHI_region_name = factor(
-      OHI_region_name,
+    rgn_name = factor(
+      rgn_name,
       levels = region_order
     )
   )
 ```
 
 ```{r Plot MINE_SubScores}
+
+colnames(MINE_SubScores)
+
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
 # Plot over time:
 MINE_SubScores_plot <- MINE_SubScores %>%
   filter(!is.na(rgn_id)) %>%
@@ -2345,16 +2437,17 @@ MINE_SubScores_plot <- MINE_SubScores %>%
   
   ggplot(aes(x = year, 
              y = MINE_score, 
-             color = OHI_region_name)) +
+             color = rgn_name)) +
   
   geom_line(linewidth = 1) +
   geom_point(size = 2) +
   
-  facet_wrap(~ OHI_region_name, scales = "fixed") +
+  facet_wrap(~ mining_type, scales = "fixed") +
   
   labs(
-    title = "NP: MINE Scores by Region",
-    caption = "updated: Sep 6 2026",
+    title = "NP: MINE Scores by Region (2018-2024)",
+    subtitle = "Salt (Sal) reference point = mean production at Hermosillo 2018-2022 \nGypsum (Yeso) reference point = mean production per mine from 2018-2022 stays steady", 
+    caption = "updated: Oct 18 2026",
     y = "MINE Current Status (0 to 100)",
     x = "Year"
   ) +
@@ -2367,7 +2460,6 @@ MINE_SubScores_plot <- MINE_SubScores %>%
   
   theme_bw(base_size = 14) +
   theme(
-    legend.position = "none",
     strip.text = element_text(size = 14, face = "bold"),
     plot.title = element_text(size = 16, face = "bold")
   )
@@ -2377,7 +2469,7 @@ MINE_SubScores_plot
 
 ```{r Save MINE_SubScores_plot}
   ggsave(
-    filename = sprintf("/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores/MINE_SubScores/MINE_SubScores_plot_Sep062026.png"),
+    filename = sprintf("/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores_1.1/MINE_Scores_1.1/MINE_SubScores_plot_Oct182026.png"),
     plot = MINE_SubScores_plot,
     width = 12,
     height = 12,
@@ -2385,7 +2477,7 @@ MINE_SubScores_plot
   )
 ```
 
-## Plot MINE_Production over time:
+## Plot MINE_Production over time - PURG?
 ```{r Plot MINE_Production over time}
 colnames(MINE_SubScores)
 
