@@ -1,0 +1,641 @@
+---
+title: "Social lag pressure on the Gulf of California"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+This notebook turns CONEVAL's locality-level **Indice de Rezago Social Longitudinal (IRSL)** into an OHI social pressure for the Gulf of California.
+
+Higher IRSL = more social lag = higher pressure (**1 = most pressure**).
+
+**Why IRSL (not IRS):** the cross-sectional IRS is rebuilt each census year and is not meant for year-to-year comparisons. IRSL is designed so the same locality can be compared across 2000, 2005, 2010, and 2020.
+
+**Pipeline:**
+
+1. Read IRSL and reshape to one row per locality-year  
+2. Assign `rgn_id` from municipality (`municipality_to_rgnid_update.csv`)  
+3. Drop Ensenada and Mexicali  
+4. Build locality points from census `*l.shp` centroids (+ ITER lat/lon for gaps)  
+5. Keep localities inside the inland 50 km Gulf buffer  
+6. Scale IRSL to 0-1 on the pooled Gulf set (90th percentile = 1)  
+7. Unweighted mean by region in census years  
+8. Linearly interpolate to every year 2000-2020  
+
+```{r setup}
+library(tidyverse)
+library(readxl)
+library(sf)
+library(knitr)
+
+knitr::opts_chunk$set(fig.width = 8, fig.height = 5, message = FALSE, warning = FALSE)
+
+irsl_path <- "/home/shares/ohi/OHI_GOC/_raw_data/CONEVAL_indice_de_rezago/IRSL_localidades_00_20.xlsx"
+buffer_path <- "/home/shares/ohi/OHI_GOC/spatial/inland_50km_buffer/inland_50km_goc.shp"
+iter_path <- "/home/shares/ohi/OHI_GOC/_raw_data/census_inegi/iter_location/iter_00_cpv2020/conjunto_de_datos/conjunto_de_datos_iter_00CSV20.csv"
+
+loc_shp_paths <- c(
+  "/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/02_bajacalifornia/conjunto_de_datos/02l.shp",
+  "/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/03_bajacaliforniasur/conjunto_de_datos/03l.shp",
+  "/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/14_jalisco/conjunto_de_datos/14l.shp",
+  "/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/18_nayarit/conjunto_de_datos/18l.shp",
+  "/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/25_sinaloa/conjunto_de_datos/25l.shp",
+  "/home/shares/ohi/OHI_GOC/_raw_data/boundaries_inegi/census_2020/26_sonora/conjunto_de_datos/26l.shp"
+)
+
+out_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/social_lag"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+mun_path <- "/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid_update.csv"
+if (!file.exists(mun_path)) {
+  mun_path <- "/Users/manos/Documents/Cursor/social_pressures_and_resiliences/municipality_to_rgnid_update.csv"
+}
+
+goc_ents <- c("02", "03", "14", "18", "25", "26")
+mexico_crs <- 6372
+quantile_p <- 0.90
+census_years <- c(2000, 2005, 2010, 2020)
+interp_years <- 2000:2020
+
+# irsl excel layout (excel 1-based rows/cols, confirmed from the file)
+# rows 1-7 = titles / headers / year labels
+# row 8 = blank; row 9+ = data
+# columns: A-B blank, C=clave, D=entidad, E=municipio, F=localidad,
+#          G-J=pop years, ... CI-CL=irsl years, CN-CQ=grado years
+irsl_data_start_row <- 9
+irsl_n_cols <- 95
+col_clave <- 3
+col_entidad <- 4
+col_municipio <- 5
+col_localidad <- 6
+col_pop <- c(pop_2000 = 7, pop_2005 = 8, pop_2010 = 9, pop_2020 = 10)
+col_irsl <- c(irsl_2000 = 87, irsl_2005 = 88, irsl_2010 = 89, irsl_2020 = 90)
+col_grado <- c(grado_2000 = 92, grado_2005 = 93, grado_2010 = 94, grado_2020 = 95)
+```
+
+## 1. Municipality to OHI region
+
+```{r municipalities}
+exclude_mun <- tibble(
+  cve_ent = c("02", "02"),
+  cve_mun = c("001", "002"),
+  municipio_drop = c("ENSENADA", "MEXICALI")
+)
+
+mun_lookup <- read_csv(mun_path, show_col_types = FALSE) %>%
+  mutate(
+    cve_ent = str_pad(as.integer(E03), width = 2, pad = "0"),
+    cve_mun = str_pad(as.integer(E04), width = 3, pad = "0"),
+    rgn_id = as.character(rgn_id)
+  ) %>%
+  anti_join(exclude_mun, by = c("cve_ent", "cve_mun")) %>%
+  select(cve_ent, cve_mun, municipio, estado, rgn_id, directly_coastal, both_pacific_gulf)
+
+stopifnot(nrow(mun_lookup) > 0)
+stopifnot(!anyDuplicated(mun_lookup %>% select(cve_ent, cve_mun)))
+
+mun_lookup %>%
+  count(rgn_id, name = "n_municipalities") %>%
+  kable(caption = "Municipalities per OHI region after dropping Ensenada and Mexicali")
+```
+
+## 2. Read IRSL Excel (both sheets)
+
+CONEVAL splits localities across two sheets. We force Excel columns A-CQ and data starting at row 9 with `range = cell_limits(...)`. That keeps blank leading columns, so fixed column numbers stay aligned. Using `skip` alone is unsafe because `readxl` can drop empty leading columns and then `col_clave = 3` no longer points at the locality code (that is why you saw 0 localities).
+
+### 2a. Read sheet 1 (AGS-MICH) into wide form
+
+```{r read-irsl-sheet1}
+stopifnot(file.exists(irsl_path))
+irsl_sheets <- excel_sheets(irsl_path)
+irsl_sheets
+
+# force columns 1:95 and start at first data row (excel row 9)
+raw1 <- read_excel(
+  irsl_path,
+  sheet = irsl_sheets[[1]],
+  col_names = FALSE,
+  range = cell_limits(
+    ul = c(irsl_data_start_row, 1),
+    lr = c(NA, irsl_n_cols)
+  ),
+  .name_repair = "minimal"
+)
+
+# quick check: column 3 should look like 010010001
+tibble(
+  ncol = ncol(raw1),
+  nrow = nrow(raw1),
+  col1_example = as.character(raw1[[1]][1]),
+  col2_example = as.character(raw1[[2]][1]),
+  col3_example = as.character(raw1[[3]][1]),
+  col4_example = as.character(raw1[[4]][1])
+) %>%
+  kable(caption = "Sheet 1 raw diagnostics (col3 should be a 9-digit clave)")
+
+irsl_wide1 <- tibble(
+  clave_raw = as.character(raw1[[col_clave]]),
+  entidad = as.character(raw1[[col_entidad]]),
+  municipio_irsl = as.character(raw1[[col_municipio]]),
+  localidad = as.character(raw1[[col_localidad]]),
+  pop_2000 = as.character(raw1[[col_pop[["pop_2000"]]]]),
+  pop_2005 = as.character(raw1[[col_pop[["pop_2005"]]]]),
+  pop_2010 = as.character(raw1[[col_pop[["pop_2010"]]]]),
+  pop_2020 = as.character(raw1[[col_pop[["pop_2020"]]]]),
+  irsl_2000 = as.character(raw1[[col_irsl[["irsl_2000"]]]]),
+  irsl_2005 = as.character(raw1[[col_irsl[["irsl_2005"]]]]),
+  irsl_2010 = as.character(raw1[[col_irsl[["irsl_2010"]]]]),
+  irsl_2020 = as.character(raw1[[col_irsl[["irsl_2020"]]]]),
+  grado_2000 = as.character(raw1[[col_grado[["grado_2000"]]]]),
+  grado_2005 = as.character(raw1[[col_grado[["grado_2005"]]]]),
+  grado_2010 = as.character(raw1[[col_grado[["grado_2010"]]]]),
+  grado_2020 = as.character(raw1[[col_grado[["grado_2020"]]]])
+) %>%
+  mutate(
+    # excel may store clave as numeric (losing the leading zero)
+    clave_localidad = str_pad(str_replace(clave_raw, "\\.0$", ""), width = 9, pad = "0")
+  ) %>%
+  filter(str_detect(clave_localidad, "^[0-9]{9}$")) %>%
+  select(-clave_raw)
+
+nrow(irsl_wide1)
+head(irsl_wide1 %>% select(clave_localidad, entidad, municipio_irsl, localidad, irsl_2020), 5)
+```
+
+### 2b. Read sheet 2 (MOR-ZAC) the same way
+
+```{r read-irsl-sheet2}
+raw2 <- read_excel(
+  irsl_path,
+  sheet = irsl_sheets[[2]],
+  col_names = FALSE,
+  range = cell_limits(
+    ul = c(irsl_data_start_row, 1),
+    lr = c(NA, irsl_n_cols)
+  ),
+  .name_repair = "minimal"
+)
+
+tibble(
+  ncol = ncol(raw2),
+  nrow = nrow(raw2),
+  col3_example = as.character(raw2[[3]][1]),
+  col4_example = as.character(raw2[[4]][1])
+) %>%
+  kable(caption = "Sheet 2 raw diagnostics")
+
+irsl_wide2 <- tibble(
+  clave_raw = as.character(raw2[[col_clave]]),
+  entidad = as.character(raw2[[col_entidad]]),
+  municipio_irsl = as.character(raw2[[col_municipio]]),
+  localidad = as.character(raw2[[col_localidad]]),
+  pop_2000 = as.character(raw2[[col_pop[["pop_2000"]]]]),
+  pop_2005 = as.character(raw2[[col_pop[["pop_2005"]]]]),
+  pop_2010 = as.character(raw2[[col_pop[["pop_2010"]]]]),
+  pop_2020 = as.character(raw2[[col_pop[["pop_2020"]]]]),
+  irsl_2000 = as.character(raw2[[col_irsl[["irsl_2000"]]]]),
+  irsl_2005 = as.character(raw2[[col_irsl[["irsl_2005"]]]]),
+  irsl_2010 = as.character(raw2[[col_irsl[["irsl_2010"]]]]),
+  irsl_2020 = as.character(raw2[[col_irsl[["irsl_2020"]]]]),
+  grado_2000 = as.character(raw2[[col_grado[["grado_2000"]]]]),
+  grado_2005 = as.character(raw2[[col_grado[["grado_2005"]]]]),
+  grado_2010 = as.character(raw2[[col_grado[["grado_2010"]]]]),
+  grado_2020 = as.character(raw2[[col_grado[["grado_2020"]]]])
+) %>%
+  mutate(
+    clave_localidad = str_pad(str_replace(clave_raw, "\\.0$", ""), width = 9, pad = "0")
+  ) %>%
+  filter(str_detect(clave_localidad, "^[0-9]{9}$")) %>%
+  select(-clave_raw)
+
+irsl_wide <- bind_rows(irsl_wide1, irsl_wide2)
+
+irsl_wide %>%
+  summarise(n_localities = n()) %>%
+  kable(caption = "Localities after reading both IRSL sheets (wide)")
+
+stopifnot(nrow(irsl_wide) > 0)
+```
+
+### 2c. Replace N.A. with missing, then pivot long
+
+```{r irsl-clean-na}
+na_tokens <- c("N.A.", "N.A", "NA", "n.a.", "n.a")
+
+irsl_wide_clean <- irsl_wide %>%
+  mutate(across(
+    starts_with(c("pop_", "irsl_", "grado_")),
+    ~ if_else(.x %in% na_tokens | .x == "", NA_character_, .x)
+  )) %>%
+  mutate(across(starts_with(c("pop_", "irsl_")), as.numeric))
+```
+
+```{r irsl-pivot-long}
+irsl_pop <- irsl_wide_clean %>%
+  select(clave_localidad, entidad, municipio_irsl, localidad, starts_with("pop_")) %>%
+  pivot_longer(
+    cols = starts_with("pop_"),
+    names_to = "year",
+    names_prefix = "pop_",
+    values_to = "poblacion"
+  ) %>%
+  mutate(year = as.integer(year))
+
+irsl_index <- irsl_wide_clean %>%
+  select(clave_localidad, starts_with("irsl_")) %>%
+  pivot_longer(
+    cols = starts_with("irsl_"),
+    names_to = "year",
+    names_prefix = "irsl_",
+    values_to = "irsl"
+  ) %>%
+  mutate(year = as.integer(year))
+
+irsl_grado <- irsl_wide_clean %>%
+  select(clave_localidad, starts_with("grado_")) %>%
+  pivot_longer(
+    cols = starts_with("grado_"),
+    names_to = "year",
+    names_prefix = "grado_",
+    values_to = "grado"
+  ) %>%
+  mutate(year = as.integer(year))
+
+irsl_all <- irsl_pop %>%
+  left_join(irsl_index, by = c("clave_localidad", "year")) %>%
+  left_join(irsl_grado, by = c("clave_localidad", "year")) %>%
+  filter(!is.na(irsl)) %>%
+  mutate(
+    cve_ent = str_sub(clave_localidad, 1, 2),
+    cve_mun = str_sub(clave_localidad, 3, 5)
+  )
+
+irsl_all %>%
+  count(year, name = "n_localities") %>%
+  kable(caption = "Localities with IRSL by year (national, before Gulf filters)")
+```
+
+## 3. Join municipalities to get `rgn_id`
+
+```{r join-regions}
+irsl_mun <- irsl_all %>%
+  inner_join(mun_lookup, by = c("cve_ent", "cve_mun"))
+
+irsl_mun %>%
+  count(year, name = "n_localities") %>%
+  kable(caption = "Localities after municipality-to-region join")
+
+irsl_mun %>%
+  distinct(rgn_id, cve_ent, cve_mun, municipio) %>%
+  count(rgn_id, name = "n_municipalities") %>%
+  kable(caption = "Municipalities present in IRSL after the join")
+```
+
+## 4. Build locality points
+
+Use the same census locality polygons as the population notebook. Centroids give coordinates for most localities. ITER fills gaps with lat/lon.
+
+```{r locality-polygons}
+loc_poly <- map_dfr(loc_shp_paths, ~ st_read(.x, quiet = TRUE)) %>%
+  st_make_valid() %>%
+  mutate(
+    cve_ent = str_pad(as.character(CVE_ENT), width = 2, pad = "0"),
+    cve_mun = str_pad(as.character(CVE_MUN), width = 3, pad = "0"),
+    cve_loc = str_pad(as.character(CVE_LOC), width = 4, pad = "0"),
+    clave_localidad = paste0(cve_ent, cve_mun, cve_loc)
+  )
+
+pts_from_poly <- loc_poly %>%
+  st_point_on_surface() %>%
+  transmute(clave_localidad, source = "polygon_centroid")
+# mapview(pts_from_poly)
+
+nrow(pts_from_poly)
+```
+
+```{r locality-iter-gaps}
+iter <- read_csv(iter_path, show_col_types = FALSE) %>%
+  filter(
+    ENTIDAD %in% goc_ents,
+    !str_detect(NOM_LOC, "Total"),
+    NOM_LOC != "Localidades de una vivienda",
+    NOM_LOC != "Localidades de dos viviendas",
+    suppressWarnings(as.numeric(as.character(LOC))) > 0
+  ) %>%
+  mutate(
+    clave_localidad = paste0(
+      str_pad(as.integer(ENTIDAD), 2, pad = "0"),
+      str_pad(as.integer(MUN), 3, pad = "0"),
+      str_pad(as.integer(LOC), 4, pad = "0")
+    ),
+    # iter stores coordinates as dms text; convert roughly to decimal degrees
+    lon_txt = str_replace_all(LONGITUD, "[NnSsEeWw\"'?`]", ""),
+    lat_txt = str_replace_all(LATITUD, "[NnSsEeWw\"'?`]", ""),
+    lon_parts = str_match(lon_txt, "(\\d+)\\D+(\\d+)\\D+(\\d+(?:\\.\\d+)?)"),
+    lat_parts = str_match(lat_txt, "(\\d+)\\D+(\\d+)\\D+(\\d+(?:\\.\\d+)?)"),
+    lon_dd = -(as.numeric(lon_parts[, 2]) + as.numeric(lon_parts[, 3]) / 60 + as.numeric(lon_parts[, 4]) / 3600),
+    lat_dd = as.numeric(lat_parts[, 2]) + as.numeric(lat_parts[, 3]) / 60 + as.numeric(lat_parts[, 4]) / 3600
+  ) %>%
+  filter(!is.na(lon_dd), !is.na(lat_dd))
+
+missing_claves <- setdiff(iter$clave_localidad, pts_from_poly$clave_localidad)
+
+pts_from_iter <- iter %>%
+  filter(clave_localidad %in% missing_claves) %>%
+  distinct(clave_localidad, lon_dd, lat_dd) %>%
+  st_as_sf(coords = c("lon_dd", "lat_dd"), crs = 4326) %>%
+  transmute(clave_localidad, source = "iter_latlon")
+
+pts <- bind_rows(
+  st_transform(pts_from_poly, mexico_crs),
+  st_transform(pts_from_iter, mexico_crs)
+) %>%
+  distinct(clave_localidad, .keep_all = TRUE)
+
+tibble(
+  n_polygon_centroids = nrow(pts_from_poly),
+  n_iter_only = nrow(pts_from_iter),
+  n_points_total = nrow(pts)
+) %>%
+  kable(caption = "Locality point sources")
+```
+
+## 5. Keep localities inside the inland 50 km Gulf buffer
+
+The buffer is only a geographic filter. Region still comes from the municipality lookup.
+
+```{r buffer-filter}
+buffer <- st_read(buffer_path, quiet = TRUE) %>%
+  st_make_valid() %>%
+  st_transform(mexico_crs)
+
+pts_in_buffer <- pts %>%
+  st_filter(buffer, .predicate = st_intersects)
+
+coastal_claves <- pts_in_buffer %>%
+  st_drop_geometry() %>%
+  distinct(clave_localidad, source)
+
+irsl_goc <- irsl_mun %>%
+  inner_join(coastal_claves, by = "clave_localidad")
+
+irsl_goc %>%
+  count(year, name = "n_localities") %>%
+  kable(caption = "Localities inside the inland 50 km Gulf buffer")
+
+irsl_goc %>%
+  distinct(cve_ent, cve_mun, municipio, rgn_id) %>%
+  arrange(rgn_id, cve_ent, cve_mun) %>%
+  kable(caption = "Municipalities retained after municipality join + buffer filter") # no san felipe because it was not made into a municipality until 2022.
+```
+
+## 6. Scale IRSL to 0-1 (pooled Gulf locality-years)
+
+Because IRSL is longitudinally comparable, min and the `quantile_p` ceiling are taken from **all** retained locality-years together.
+
+```{r rescale}
+ref_low <- min(irsl_goc$irsl, na.rm = TRUE)
+ref_high <- as.numeric(quantile(irsl_goc$irsl, probs = quantile_p, na.rm = TRUE))
+stopifnot(is.finite(ref_low), is.finite(ref_high), ref_high > ref_low)
+
+irsl_scaled <- irsl_goc %>%
+  mutate(
+    pressure = (irsl - ref_low) / (ref_high - ref_low),
+    pressure = pmin(pmax(pressure, 0), 1)
+  )
+
+tibble(
+  quantile = quantile_p,
+  irsl_min = ref_low,
+  irsl_ceiling = ref_high,
+  n_locality_years = nrow(irsl_scaled),
+  n_at_one = sum(irsl_scaled$pressure == 1, na.rm = TRUE)
+) %>%
+  kable(digits = 3, caption = "Pooled Gulf IRSL scaling")
+```
+
+```{r plot-irsl}
+irsl_scaled %>%
+  ggplot(aes(x = irsl)) +
+  geom_histogram(bins = 40, fill = "grey75", color = "white") +
+  geom_vline(xintercept = ref_high, color = "red", linewidth = 0.8) +
+  facet_wrap(~ year, scales = "free_y") +
+  labs(
+    title = "IRSL on Gulf coastal localities",
+    subtitle = paste0("red line = pooled Gulf ", quantile_p * 100, "th percentile (pressure = 1)"),
+    x = "IRSL",
+    y = "localities"
+  ) +
+  theme_minimal()
+```
+
+```{r locality-change}
+change_2010_2020 <- irsl_scaled %>%
+  filter(year %in% c(2010, 2020)) %>%
+  select(clave_localidad, rgn_id, year, irsl, pressure) %>%
+  pivot_wider(names_from = year, values_from = c(irsl, pressure)) %>%
+  filter(!is.na(irsl_2010), !is.na(irsl_2020)) %>%
+  mutate(
+    delta_irsl = irsl_2020 - irsl_2010,
+    delta_pressure = pressure_2020 - pressure_2010
+  )
+
+change_2010_2020 %>%
+  summarise(
+    n_localities = n(),
+    mean_delta_irsl = mean(delta_irsl),
+    share_improved = mean(delta_irsl < 0),
+    share_worsened = mean(delta_irsl > 0)
+  ) %>%
+  kable(digits = 3, caption = "Locality IRSL change, 2010 to 2020 (negative = less lag)")
+```
+
+## 7. Unweighted regional means (census years)
+
+Each locality counts equally inside its region.
+
+```{r region-means}
+scores_census <- irsl_scaled %>%
+  group_by(year, rgn_id) %>%
+  summarise(
+    n_localities = n(),
+    n_municipalities = n_distinct(cve_ent, cve_mun),
+    pressure = mean(pressure, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rgn_num = as.integer(str_remove(rgn_id, "Region_")),
+    pressure = round(pressure, 4)
+  ) %>%
+  arrange(year, rgn_num)
+
+scores_census %>%
+  select(rgn_id, year, n_localities, n_municipalities, pressure) %>%
+  kable(digits = 3, caption = "Unweighted social lag pressure by region (census years)")
+```
+
+## 8. Interpolate to every year 2000-2020
+
+First build a complete region x census-year grid (missing cells are `NA`).  
+`approx()` needs **at least two** non-NA census years, so regions with only one year (here Region_2 in 2020 only) are not linearly interpolated: that single year is kept, other years stay `NA`. Regions with zero years stay all `NA`.
+
+```{r interpolate}
+all_rgn_ids <- paste0("Region_", 1:9)
+
+# complete census-year grid so every region has rows for 2000/2005/2010/2020
+scores_grid <- scores_census %>%
+  select(rgn_id, year, pressure, n_localities, n_municipalities) %>%
+  complete(
+    rgn_id = all_rgn_ids,
+    year = census_years,
+    fill = list(
+      pressure = NA_real_,
+      n_localities = 0L,
+      n_municipalities = 0L
+    )
+  ) %>%
+  mutate(rgn_num = as.integer(str_remove(rgn_id, "Region_"))) %>%
+  arrange(rgn_num, year)
+
+scores_grid %>%
+  filter(is.na(pressure)) %>%
+  count(rgn_id, name = "n_missing_census_years") %>%
+  kable(caption = "Region-years with no social-lag pressure (cannot interpolate from these alone)")
+
+pressure_annual <- scores_grid %>%
+  group_by(rgn_id, rgn_num) %>%
+  group_modify(function(df, keys) {
+    ok <- !is.na(df$pressure)
+    n_ok <- sum(ok)
+
+    if (n_ok >= 2) {
+      tibble(
+        year = interp_years,
+        pressure = approx(
+          x = df$year[ok],
+          y = df$pressure[ok],
+          xout = interp_years,
+          method = "linear",
+          rule = 1
+        )$y
+      )
+    } else if (n_ok == 1) {
+      # one census year only: keep that year, leave the rest missing
+      tibble(
+        year = interp_years,
+        pressure = if_else(interp_years == df$year[ok], df$pressure[ok], NA_real_)
+      )
+    } else {
+      tibble(year = interp_years, pressure = NA_real_)
+    }
+  }) %>%
+  ungroup() %>%
+  arrange(rgn_num, year)
+
+# round only for export; keep full precision for plotting so lines stay linear
+pressure_csv <- pressure_annual %>%
+  filter(!is.na(pressure)) %>%
+  mutate(pressure = round(pressure, 2)) %>%
+  select(rgn_id, year, pressure)
+```
+
+```{r write-outputs}
+loc_path <- file.path(out_dir, "social_lag_localities.csv")
+census_path <- file.path(out_dir, "social_lag_pressure_census_years.csv")
+csv_path <- file.path(out_dir, "social_lag_pressure.csv")
+
+loc_csv <- irsl_scaled %>%
+  select(
+    year, rgn_id, cve_ent, cve_mun, clave_localidad,
+    entidad, municipio, localidad, poblacion,
+    source, irsl, grado, pressure
+  ) %>%
+  arrange(year, rgn_id, clave_localidad)
+
+write_csv(loc_csv, loc_path)
+write_csv(
+  scores_census %>%
+    select(rgn_id, year, pressure) %>%
+    mutate(pressure = round(pressure, 2)),
+  census_path
+)
+write_csv(pressure_csv, csv_path)
+
+pressure_annual %>%
+  filter(year %in% census_years) %>%
+  select(rgn_id, year, pressure) %>%
+  kable(digits = 2, caption = "Interpolated series at census years")
+```
+
+Locality file: `r loc_path`
+
+Census-year regional file: `r census_path`
+
+Annual regional file: `r csv_path`
+
+```{r plot-region-pressure}
+library(plotly)
+
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+plot_annual <- pressure_annual %>%
+  mutate(
+    region = recode(rgn_id, !!!rgn_labels),
+    region = factor(region, levels = unname(rgn_labels))
+  )
+
+plot_census <- scores_census %>%
+  mutate(
+    region = recode(rgn_id, !!!rgn_labels),
+    region = factor(region, levels = unname(rgn_labels))
+  )
+
+p <- ggplot(plot_annual, aes(x = year, y = pressure, color = region)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(data = plot_census, size = 2) +
+  scale_color_manual(values = setNames(unname(rgn_colors), unname(rgn_labels))) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(
+    title = "Social lag pressure by OHI region",
+    subtitle = "points = census years; lines = linear interpolation",
+    x = NULL,
+    y = "pressure (0 = least, 1 = most)",
+    color = "region"
+  ) +
+  theme_minimal()
+
+ggplotly(p, tooltip = c("x", "y", "colour"))
+```
+
+## Notes
+
+- **Region:** locality -> municipality (`cve_ent` + `cve_mun`) -> `rgn_id`
+- **Buffer:** geographic filter only (`inland_50km_goc.shp`)
+- **Points:** census `*l.shp` centroids, plus ITER lat/lon for localities without polygons
+- **Interpolation:** fills years between 2000, 2005, 2010, and 2020 only
+
+
+Also note, IRSL only has census years 2000, 2005, 2010, 2020. So there are no estimated values for 2015...
