@@ -35,6 +35,19 @@ clean_names_lowercase <- function(x) {
 }
 ```
 
+# Region key (important for plotting):
+```{r Load in the OHI Region_Key0}
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
+
+colnames(Region_Key0)
+
+Region_Key<- Region_Key0 %>%
+  select(rgn_id= OHI_region_est, rgn_name= OHI_region_name) %>%
+  distinct()
+
+# Make uppercase:
+Region_Key$rgn_id <- sub("^r", "R", Region_Key$rgn_id)
+```
 
 # LOAD AND PREP INDIVIDUAL GOAL SCORES ------------------------------
 
@@ -128,7 +141,7 @@ write_csv(FP_Scores, here::here(final_output_dir, "_goal_scores_1.0/FP_Scores_1.
 
 ```{r habitat_services}
 # Load original:
-HS_Scores0 <- read_csv(here::here("/home/ferrer/ohi_goc_prep/HS/v2026/HS_Scores_1.1/HS_current_status_Sep112026.csv"))
+HS_Scores0 <- read_csv(here::here("/home/ferrer/ohi_goc_prep/HS/v2026/HS_Scores_1.1/HS_Scores_df_Sep112026.csv"))
 # 54 obs., 6 vars.
 
 colnames(HS_Scores0)
@@ -183,7 +196,7 @@ write_csv(LE_Scores_gf, here::here(final_output_dir, "_goal_scores_1.0/LE_Scores
 
 ```{r natural_products}
 # Load original:
-NP_Scores0 <- read_csv(here::here("/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores_1.0/NP_Scores_1.0_df_Sep082026.csv"))
+NP_Scores0 <- read_csv(here::here("/home/ferrer/ohi_goc_prep/NP/v2026/NP_Scores_1.1/NP_Scores_1.1_df_Oct192026.csv"))
 # NOTE TO SELF: Including 1.1 score since these do not include CPUE.
 # 63 obs., 10 vars.
 
@@ -191,7 +204,7 @@ colnames(NP_Scores0)
 
 # Clean:
 NP_Scores<- NP_Scores0 %>%
-  select(year, OHI_region_no = OHI_region, NP_Score) %>% 
+  select(year, OHI_region_no = rgn_id, NP_Score) %>% 
   mutate(goal = "natural_products")
 # 63 obs., 4 vars.
 
@@ -261,7 +274,8 @@ Index_Scores_long0 <- bind_rows(
   SP_Scores,
   TR_Scores
 ) %>%
-  arrange(year, OHI_region_no, goal)
+  arrange(year, OHI_region_no, goal) %>%
+  rename(rgn_id = OHI_region_no)
 
 # Coalesce score values:
 Index_Scores_long <- Index_Scores_long0 %>%
@@ -280,11 +294,21 @@ Index_Scores_long <- Index_Scores_long0 %>%
   ) %>%
   select(
     year,
-    OHI_region_no,
+    rgn_id,
     goal,
     goal_score
   ) %>%
-  arrange(year, OHI_region_no, goal)
+  arrange(year, rgn_id, goal)
+
+# Add in rgn_name
+Index_Scores_long <- Index_Scores_long %>%
+  mutate(rgn_id = stringr::str_to_title(rgn_id))
+
+# Merge:
+Index_Scores_long<- Index_Scores_long %>%
+  left_join(Region_Key, 
+            by = "rgn_id")
+# 561 obs., 5 vars.
 
 ```
 
@@ -293,7 +317,7 @@ Index_Scores_long <- Index_Scores_long0 %>%
 ```{r Index_Scores_wide0}
 Index_Scores_wide0 <- Index_Scores_long %>%
   pivot_wider(
-    id_cols = c(year, OHI_region_no),
+    id_cols = c(year, rgn_name, rgn_id),
     names_from = goal,
     values_from = goal_score
   ) %>%
@@ -310,7 +334,18 @@ Index_Scores_wide0 <- Index_Scores_long %>%
   )
 
 
-Index_Scores_wide <- Index_Scores_wide0 %>%
+Index_Scores_wide<- Index_Scores_wide0 %>%
+  filter(!is.na(rgn_id)) %>%
+  filter(year >= 2018, year <= 2025)
+
+# GAPFILL FORWARD:
+Index_Scores_wide <- Index_Scores_wide %>%
+  arrange(rgn_id, year) %>%
+  group_by(rgn_id) %>%
+  fill(LE_score:HS_score, .direction = "down") %>%
+  ungroup()
+
+Index_Scores_wide <- Index_Scores_wide %>%
   mutate(
     Index_score = rowMeans(
       select(., 
@@ -330,7 +365,7 @@ Index_Scores_wide <- Index_Scores_wide0 %>%
 
 Index_Scores_wide_2023<- Index_Scores_wide %>%
   filter(year == 2023,
-         !is.na(OHI_region_no))
+         !is.na(rgn_id))
 ```
 
 
@@ -347,31 +382,27 @@ write.csv(Index_Scores_wide,
 
 ```{r Read in OHI region boundaries}
 # Read in OHI region boundaries
-ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) |> st_make_valid()
+ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) %>% 
+  st_make_valid()
 
 colnames(ohi_regions)
 
-ohi_regions<- ohi_regions %>%
-  rename(OHI_region_no= rgn_id) %>%
-  mutate(
-    OHI_region_no= clean_names_lowercase(OHI_region_no)
-  )
 ```
 
-```{r Map Index_Scores_wide_2023}
+```{r Map Index_Scores_wide over time}
 
-# 2. Join onto OHI polygons
-Index_Scores_wide_2023 <- ohi_regions |>
-  left_join(Index_Scores_wide_2023, by = "OHI_region_no")
+# Join onto OHI polygons:
+Index_Scores_wide <- ohi_regions %>%
+  left_join(Index_Scores_wide, by = "rgn_id")
 
-# 3. Split marine vs land
-ohi_marine <- Index_Scores_wide_2023 %>% filter(location == "marine")
-ohi_land   <- Index_Scores_wide_2023 %>% filter(location == "land")
+# Split marine vs land:
+ohi_marine <- Index_Scores_wide %>% filter(location == "marine")
+ohi_land   <- Index_Scores_wide %>% filter(location == "land")
 
-# 4. Map
+# Map:
 tmap_mode("plot")
 
-Index_Scores_2023_map<- tm_shape(ohi_land) +
+Index_Scores_maps<- tm_shape(ohi_land) +
   tm_polygons(
     col = "#f5e6c8",
     border.col = "gray40",
