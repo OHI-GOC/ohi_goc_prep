@@ -6,7 +6,7 @@
 # Shared by J.C. Sep, 2025
 #
 # Edited by Erica Ferrer, Ph.D.
-# Oct 29, 2025
+# Oct 23, 2026
 
 # NOTES:
 # The raw data for this file is included in the /home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/ directory.
@@ -31,10 +31,11 @@ pacman::p_load(
 library(dplyr)
 
 # Load and define functions ----------------------------------------------------
-source(here("/home/ferrer/ohi_goc_prep/FP/EMF_CONAPESCA_Exploration/JC_Scripts_EMF_Edited", "00_setup_edited.R"))
+source(here("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_CleanUp/JC_Scripts_EMF_edited/", "00_setup_edited.R"))
+source(here::here("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_CleanUp/JC_Scripts_EMF_edited/", "00_setup_edited.R"))
 
 # Load data --------------------------------------------------------------------
-avisos_old_landings <- readRDS(here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/mex_landings/data/clean/", "mex_conapesca_avisos_2000_2019.rds")) |> 
+avisos_old_landings <- readRDS(here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPESCA/d2025/SharedByJuanCarlos/mex_landings/data/clean/", "mex_conapesca_avisos_2000_2019.rds")) %>% 
   filter(year_cut <= 2017)
 # 8270314 obs.
 
@@ -48,7 +49,7 @@ months <- tibble(month_cut = c("ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JU
 
 # Combine and select columns ---------------------------------------------------
 landings <- bind_rows(avisos_old_landings,
-                      apertura_newer_landings) |> 
+                      apertura_newer_landings) %>% 
   left_join(months, by = "month_cut")
 
 # Fix dates --------------------------------------------------------------------
@@ -61,7 +62,7 @@ landings_fixed_dates <- landings %>%
                                         date_to_fix = receipt_date))
 
 
-final_landings_edited <- landings_fixed_dates |> 
+final_landings_edited <- landings_fixed_dates %>% 
   select(state,
          office_name,
          landing_site,
@@ -83,12 +84,15 @@ final_landings_edited <- landings_fixed_dates |>
          live_weight,
          value)
 
-# 12,153,879 obs. 
+
+# NOW: 12,654,062 after Oct 2026 update
+# PREVIOUSLY: 12,153,879 obs. 
 
 ## EXPORT ######################################################################
 
 # Export file ------------------------------------------------------------------
+
 # This creates all sorts of issues because it's so big.
 saveRDS(final_landings_edited, 
-        file = "/home/shares/ohi/OHI_GOC/goal_prep/fis/v2025/int/juan_carlos/mex_landings_2000_present_EMF_edited.rds")
-# Now saved as "AllMex_landings_2000_present_EMF_edited.rds"
+        file = "/home/shares/ohi/OHI_GOC/goal_prep/fp/juan_carlos/AllMex_landings_2000_present_Oct2026.rds")
+
