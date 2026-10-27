@@ -1,0 +1,140 @@
+---
+title: "Fisheries status as a pressure"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+This notebook turns a finished fisheries (FIS) score table into a pressure
+table. The score is already on a 0–100 scale, with a high score meaning a
+healthier fishery. A pressure runs the other way: 0 is no stress and 1 is
+the top of the scale. The conversion is
+
+`pressure = round(1 - FIS_Score * 0.01, 2)`.
+
+A score of 100 becomes a pressure of 0. A score of 0 would become a pressure
+of 1. The saved file has one row per OHI region and year, with columns
+`rgn_id`, `year`, and `pressure`.
+
+To use a newly generated score file, change `scores_path` below and knit
+again. The new file needs the columns `OHI_region_est`, `year`, and
+`FIS_Score`. The pressure file is rewritten in this folder as
+`FIS_pressure.csv`.
+
+Rows whose region is missing are left out. In the current score file that
+label is the text `NA`, which is not one of the nine OHI regions. `read_csv()`
+reads that text as a missing value.
+
+```{r setup}
+library(tidyverse)
+library(knitr)
+
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+# Score export. Change this path when a new file is generated.
+scores_path <- "/home/ferrer/ohi_goc_prep/FP/v2026/FP_Scores_1.1/FIS_Scores_1.1/copy_FIS_Scores_1.0_df_Jun052026.csv"
+
+# This account can read the score export above and cannot write in that
+# folder, so the pressure file is saved here, beside this notebook.
+out_dir <- "/home/frazier/ohi_goc_prep/FP/v2026/FP_Scores_1.1/FIS_Scores_1.1"
+pressure_file <- "FIS_pressure.csv"
+
+rgn_colors <- c(
+  "Region 1" = "#C03729",
+  "Region 2" = "#E68C7C",
+  "Region 3" = "#FC8F24",
+  "Region 4" = "#dcaa38",
+  "Region 5" = "#cbd2a0",
+  "Region 6" = "#98a25a",
+  "Region 7" = "#747428",
+  "Region 8" = "#627391",
+  "Region 9" = "#8d61a9"
+)
+```
+
+## 1. Read the score export
+
+```{r read}
+scores_raw <- read_csv(scores_path, show_col_types = FALSE)
+
+needed <- c("OHI_region_est", "year", "FIS_Score")
+stopifnot(all(needed %in% names(scores_raw)))
+
+# read_csv() turns the text "NA" into a missing region. Count those rows
+# before they are removed so a future file that loses a real region is obvious.
+n_unassigned <- sum(is.na(scores_raw$OHI_region_est))
+
+scores <- scores_raw %>%
+  filter(!is.na(OHI_region_est)) %>%
+  transmute(
+    rgn_id = str_replace(OHI_region_est, "^region_", "Region_"),
+    year = as.integer(year),
+    score = FIS_Score
+  )
+
+cat("Score file:", scores_path, "\n")
+cat("Rows read:", nrow(scores_raw), "\n")
+cat("Rows with no OHI region, set aside:", n_unassigned, "\n")
+cat("Regions kept:", paste(sort(unique(scores$rgn_id)), collapse = ", "), "\n")
+cat("Years:", paste(sort(unique(scores$year)), collapse = ", "), "\n")
+```
+
+The region id in the score file is `region_1`. The other pressure tables use
+`Region_1`, so the prefix is rewritten here. Each region-year must appear
+once, and each score must sit on the 0–100 scale the conversion assumes.
+
+```{r check-scores}
+stopifnot(all(str_detect(scores$rgn_id, "^Region_[1-9]$")))
+stopifnot(!anyDuplicated(scores[c("rgn_id", "year")]))
+stopifnot(all(scores$score >= 0), all(scores$score <= 100))
+stopifnot(n_distinct(scores$rgn_id) == 9)
+```
+
+## 2. Pressure
+
+Subtracting the score, as a fraction of 100, from 1 reverses the scale.
+Rounding to two decimal places matches the other recent pressure tables.
+
+```{r pressure}
+pressure <- scores %>%
+  mutate(pressure = round(1 - score * 0.01, 2)) %>%
+  select(rgn_id, year, pressure) %>%
+  arrange(year, rgn_id)
+
+stopifnot(nrow(pressure) == 9 * n_distinct(pressure$year))
+stopifnot(all(pressure$pressure >= 0), all(pressure$pressure <= 1))
+
+pressure_path <- file.path(out_dir, pressure_file)
+write_csv(pressure, pressure_path)
+
+cat("Wrote", pressure_path, "\n")
+cat("Rows:", nrow(pressure), "\n")
+```
+
+```{r table}
+kable(
+  pressure,
+  digits = 2,
+  caption = "Fisheries pressure by region and year"
+)
+```
+
+```{r plot, fig.width=8, fig.height=5}
+pressure %>%
+  mutate(region_label = str_replace(rgn_id, "_", " ")) %>%
+  ggplot(aes(year, pressure, color = region_label)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.6) +
+  scale_color_manual(values = rgn_colors, name = NULL) +
+  scale_x_continuous(breaks = sort(unique(pressure$year))) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(
+    title = "Fisheries pressure",
+    subtitle = "1 minus the FIS score, on a 0 to 1 scale",
+    x = NULL,
+    y = "Pressure"
+  ) +
+  theme_bw() +
+  theme(legend.position = "right")
+```

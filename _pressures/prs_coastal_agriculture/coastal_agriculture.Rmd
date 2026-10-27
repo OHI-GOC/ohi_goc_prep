@@ -1,0 +1,436 @@
+---
+title: "Agriculture within 1 km of mangrove"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+This notebook measures farmland sitting against mangrove that is still mapped.
+It does not measure mangrove that has already been cleared. The mangrove
+outline is held fixed, and each land-cover year is asked the same question:
+what share of the land within 1 km of that outline is agriculture?
+
+The mangrove comes from Hem's land-cover extract,
+`mangrove_Hem/USV_AGRUPADO`. Only the mangrove classes are kept. The same
+file also contains aquaculture and agriculture polygons. Those are not the
+habitat.
+
+The 1 km zone is a ring outside the mangrove, cut to OHI land. A plain buffer
+would include the forest itself, the lagoon, and open water. Those surfaces
+cannot be farmland, so they are left out of both the numerator and the
+denominator. Where two mangrove patches sit within 2 km of each other, the
+rings are merged so the shared ground is counted once. The ring is then split
+by OHI region.
+
+Agriculture is the INEGI land-use and vegetation inventory at 1:250,000, as
+distributed by CONABIO. The years are series II through VII: 2001, 2005,
+2009, 2013, 2016, and 2021. Series I, the 1980–91 composite, is left out.
+Crop classes are every polygon whose name starts with `AGRICULTURA`.
+`ACUÍCOLA` is shrimp aquaculture and is left out, because that pressure is
+already scored as mariculture. Cultivated pasture is also left out. These
+maps were redrawn between series, so a change from one year to the next
+mixes real conversion with a new tracing of the same edge. One kilometre is
+about the width of that tracing uncertainty.
+
+The pressure in a region is agricultural area inside the ring divided by the
+area of the ring, rounded to two decimal places. It is between 0 and 1. A
+region with no mangrove has no ring, so that pressure is missing.
+
+```{r setup}
+library(sf)
+library(tidyverse)
+library(scales)
+library(knitr)
+
+sf_use_s2(FALSE)
+knitr::opts_chunk$set(fig.width = 8, fig.height = 6, message = FALSE, warning = FALSE)
+
+target_crs <- "EPSG:6372"
+
+mangrove_path <- "/home/shares/ohi/OHI_GOC/_raw_data/mangrove_Hem/USV_AGRUPADO/USV_AGRUPADO.shp"
+inegi_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/CONABIO_Saltmarsh_landuse_veg"
+rgn_path <- "/home/frazier/ohi_goc_prep/spatial/ohi_regions/goc_ohi_rgns.shp"
+
+out_dir <- "/home/frazier/ohi_goc_prep/_pressures/prs_coastal_agriculture/output"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+buffer_m <- 1000
+
+# Same four classes used for the mangrove habitat and the mariculture coastal mask.
+mangrove_classes <- c(
+  "MANGLAR",
+  "VEGETACIÓN SECUNDARIA ARBÓREA DE MANGLAR",
+  "VEGETACIÓN SECUNDARIA ARBUSTIVA DE MANGLAR",
+  "VEGETACIÓN SECUNDARIA HERBÁCEA DE MANGLAR"
+)
+
+# Years are the labels in the CONABIO folder readme. Series I (1980–91) is omitted.
+inegi_series <- tibble(
+  year = c(2001, 2005, 2009, 2013, 2016, 2021),
+  year_label = c("2001", "2005", "2009", "2013", "2016", "2021"),
+  file = c(
+    "usv250ks2gw/usv250ks2gw.shp",
+    "usv250ks3gw/usv250ks3gw.shp",
+    "usv250ks4gw/usv250ks4gw.shp",
+    "usv250s5ugw/usv250s5ugw.shp",
+    "usv250s6gw/usv250s6gw.shp",
+    "usv250s7gw/usv250s7gw.shp"
+  )
+)
+
+rgn_colors <- c(
+  "Region 1" = "#C03729",
+  "Region 2" = "#E68C7C",
+  "Region 3" = "#FC8F24",
+  "Region 4" = "#dcaa38",
+  "Region 5" = "#cbd2a0",
+  "Region 6" = "#98a25a",
+  "Region 7" = "#747428",
+  "Region 8" = "#627391",
+  "Region 9" = "#8d61a9"
+)
+
+# Keep polygon pieces and drop lines created where two polygons only touch.
+as_polygons <- function(x) {
+  x <- st_collection_extract(st_make_valid(x), "POLYGON")
+  x[!st_is_empty(x), ]
+}
+```
+
+## 1. OHI regions
+
+Each region has a land polygon and a marine polygon. The ring is cut to the
+land polygons. Mangrove that falls in a marine polygon still generates a ring
+on the land beside it.
+
+```{r regions}
+regions <- st_read(rgn_path, quiet = TRUE) %>%
+  st_make_valid() %>%
+  st_transform(target_crs) %>%
+  mutate(
+    region_label = paste("Region", as.integer(str_remove(rgn_id, "Region_")))
+  )
+
+land <- regions %>% filter(location == "land")
+marine <- regions %>% filter(location == "marine")
+
+# Geographic window used to crop the national INEGI files before transforming them.
+gulf_bbox_ll <- st_bbox(st_transform(regions, 4326))
+```
+
+```{r plot-regions, fig.height=8}
+ggplot() +
+  geom_sf(data = land, aes(fill = region_label), color = "grey30", linewidth = 0.15) +
+  geom_sf(data = marine, aes(fill = region_label), color = "grey30", linewidth = 0.15, alpha = 0.45) +
+  scale_fill_manual(values = rgn_colors, name = NULL) +
+  labs(
+    title = "OHI regions",
+    subtitle = "Solid colour is land. The lighter shade is marine. The ring is cut to the land polygons."
+  ) +
+  theme_void() +
+  theme(legend.position = "right")
+```
+
+## 2. Mangrove outline
+
+The outline is one map. It stays fixed while the agriculture years change.
+Holding it fixed means a loss of mangrove in an earlier year does not shrink
+the zone being measured.
+
+```{r mangrove}
+mangrove <- st_read(mangrove_path, quiet = TRUE) %>%
+  filter(DESCRIP_AG %in% mangrove_classes) %>%
+  st_transform(target_crs) %>%
+  st_make_valid() %>%
+  as_polygons()
+
+stopifnot(nrow(mangrove) > 0)
+
+# One outline, so overlapping mangrove polygons do not make a double ring.
+mangrove_union <- st_union(mangrove) %>%
+  st_make_valid()
+
+mangrove_km2 <- as.numeric(st_area(mangrove_union)) / 1e6
+cat("Mangrove area, km²:", round(mangrove_km2, 1), "\n")
+cat("Mangrove polygons:", nrow(mangrove), "\n")
+```
+
+```{r plot-mangrove, fig.height=8}
+ggplot() +
+  geom_sf(data = land, fill = "grey92", color = NA) +
+  geom_sf(data = marine, fill = "#d6eaf8", color = NA) +
+  geom_sf(data = st_sf(geometry = mangrove_union), fill = "#006d2c", color = NA) +
+  labs(
+    title = "Mangrove outline held fixed",
+    subtitle = "Green is mangrove. Grey is OHI land. Blue is marine."
+  ) +
+  theme_void()
+```
+
+## 3. The 1 km land ring
+
+Buffering the outline by 1 km makes a disk that still contains the mangrove.
+Subtracting the mangrove leaves the ring. Intersecting that ring with the
+land polygons drops the water. The result is split by region, and the pieces
+inside one region are merged.
+
+```{r ring}
+outer <- st_buffer(mangrove_union, buffer_m)
+ring_water_included <- st_difference(outer, mangrove_union) %>%
+  st_make_valid() %>%
+  as_polygons()
+
+ring_by_region <- st_intersection(land, ring_water_included) %>%
+  as_polygons() %>%
+  group_by(rgn_id, region_label, estado, ecorgn) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop") %>%
+  mutate(ring_km2 = as.numeric(st_area(geometry)) / 1e6) %>%
+  arrange(rgn_id)
+
+stopifnot(nrow(ring_by_region) > 0)
+
+kable(
+  st_drop_geometry(ring_by_region) %>%
+    select(region_label, estado, ecorgn, ring_km2),
+  digits = 1,
+  col.names = c("Region", "State", "Ecoregion", "Land within 1 km, km²"),
+  caption = "Area of the land ring. This is the denominator of every proportion below. Regions with no mangrove on their land are absent."
+)
+```
+
+```{r plot-ring, fig.height=8}
+ggplot() +
+  geom_sf(data = land, fill = "grey92", color = NA) +
+  geom_sf(data = marine, fill = "#d6eaf8", color = NA) +
+  geom_sf(data = ring_by_region, aes(fill = region_label), color = NA) +
+  geom_sf(data = st_sf(geometry = mangrove_union), fill = "#006d2c", color = NA) +
+  scale_fill_manual(values = rgn_colors, name = NULL) +
+  labs(
+    title = "Land within 1 km of mangrove",
+    subtitle = "The coloured band is the ring. Green mangrove is not part of the ring. Open water is not part of the ring."
+  ) +
+  theme_void()
+```
+
+A closer window makes the ring visible. The window is 15 km around the
+largest mangrove patch.
+
+```{r plot-zoom, fig.height=7}
+pieces <- st_cast(st_sf(geometry = mangrove_union), "POLYGON")
+largest <- pieces[which.max(st_area(pieces)), ]
+zoom_window <- st_buffer(st_centroid(largest), 15000)
+
+ggplot() +
+  geom_sf(data = st_crop(land, zoom_window), fill = "grey92", color = "grey70", linewidth = 0.2) +
+  geom_sf(data = st_crop(marine, zoom_window), fill = "#d6eaf8", color = "grey70", linewidth = 0.2) +
+  geom_sf(data = st_crop(ring_by_region, zoom_window), fill = "#fec44f", color = NA) +
+  geom_sf(data = st_crop(st_sf(geometry = mangrove_union), zoom_window), fill = "#006d2c", color = NA) +
+  coord_sf(xlim = st_bbox(zoom_window)[c("xmin", "xmax")], ylim = st_bbox(zoom_window)[c("ymin", "ymax")]) +
+  labs(
+    title = "How the ring is built",
+    subtitle = "Yellow is the 1 km land ring. Green is mangrove. Blue water is excluded from the proportion."
+  ) +
+  theme_void()
+```
+
+## 4. INEGI agriculture
+
+Each series is a national drawing. Only polygons whose description starts
+with `AGRICULTURA` are read. That drops `ACUÍCOLA` and every pasture class.
+The polygons are cropped to the Gulf before they are projected, then
+intersected with the ring. Area is measured in EPSG:6372, where the unit is
+the metre.
+
+```{r inegi}
+# Agricultural area of one INEGI series inside the ring, by region.
+inegi_area_one_year <- function(year, file) {
+  layer <- tools::file_path_sans_ext(basename(file))
+  ag <- st_read(
+    file.path(inegi_dir, file),
+    query = sprintf("SELECT DESCRIPCIO FROM \"%s\" WHERE DESCRIPCIO LIKE 'AGRICULTURA%%'", layer),
+    quiet = TRUE
+  ) %>%
+    st_make_valid() %>%
+    st_crop(gulf_bbox_ll) %>%
+    st_transform(target_crs) %>%
+    st_make_valid()
+
+  # Keep polygons that touch the ring, then measure the overlap.
+  ag <- st_filter(ag, ring_by_region)
+  if (nrow(ag) == 0) {
+    return(tibble(year = integer(), rgn_id = character(), ag_km2 = double()))
+  }
+
+  st_intersection(ag, ring_by_region) %>%
+    as_polygons() %>%
+    mutate(
+      year = year,
+      ag_km2 = as.numeric(st_area(geometry)) / 1e6
+    ) %>%
+    st_drop_geometry() %>%
+    group_by(year, rgn_id) %>%
+    summarise(ag_km2 = sum(ag_km2), .groups = "drop")
+}
+
+inegi_ag <- pmap_dfr(
+  inegi_series %>% select(year, file),
+  inegi_area_one_year
+)
+
+inegi_prop <- ring_by_region %>%
+  st_drop_geometry() %>%
+  select(rgn_id, region_label, estado, ecorgn, ring_km2) %>%
+  crossing(inegi_series %>% select(year, year_label)) %>%
+  left_join(inegi_ag, by = c("rgn_id", "year")) %>%
+  mutate(
+    ag_km2 = replace_na(ag_km2, 0),
+    proportion = ag_km2 / ring_km2
+  )
+```
+
+```{r inegi-table}
+kable(
+  inegi_prop %>%
+    arrange(year, region_label) %>%
+    select(year_label, region_label, ring_km2, ag_km2, proportion),
+  digits = c(0, 0, 1, 1, 3),
+  col.names = c("Map", "Region", "Ring, km²", "Agriculture, km²", "Proportion"),
+  caption = "Share of the land ring mapped as INEGI agriculture. This share is the pressure."
+)
+```
+
+```{r plot-inegi-lines, fig.width=9, fig.height=5.5}
+ggplot(inegi_prop, aes(year, proportion, color = region_label, group = region_label)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  scale_color_manual(values = rgn_colors, name = NULL) +
+  scale_x_continuous(breaks = inegi_series$year, labels = inegi_series$year_label) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, NA)) +
+  labs(
+    title = "INEGI agriculture within 1 km of mangrove",
+    subtitle = "Proportion of the land ring. This proportion is the pressure.",
+    x = NULL,
+    y = "Share of the ring"
+  ) +
+  theme_bw() +
+  theme(legend.position = "right")
+```
+
+The 2021 map shows where that proportion comes from. Brown is INEGI
+agriculture inside the ring. Yellow is ring that is not agriculture.
+
+```{r inegi-2021-geometry}
+ag_2021 <- st_read(
+  file.path(inegi_dir, "usv250s7gw/usv250s7gw.shp"),
+  query = "SELECT DESCRIPCIO FROM \"usv250s7gw\" WHERE DESCRIPCIO LIKE 'AGRICULTURA%'",
+  quiet = TRUE
+) %>%
+  st_make_valid() %>%
+  st_crop(gulf_bbox_ll) %>%
+  st_transform(target_crs) %>%
+  st_make_valid() %>%
+  st_filter(ring_by_region) %>%
+  st_intersection(ring_by_region) %>%
+  as_polygons()
+```
+
+```{r plot-inegi-2021, fig.height=8}
+ggplot() +
+  geom_sf(data = land, fill = "grey94", color = NA) +
+  geom_sf(data = ring_by_region, fill = "#fff7bc", color = NA) +
+  geom_sf(data = ag_2021, fill = "#8c510a", color = NA) +
+  geom_sf(data = st_sf(geometry = mangrove_union), fill = "#006d2c", color = NA) +
+  labs(
+    title = "INEGI agriculture in the ring, 2021",
+    subtitle = "Brown is agriculture inside the ring. Yellow is the rest of the ring. Green is mangrove, which is outside the ring."
+  ) +
+  theme_void()
+```
+
+```{r plot-inegi-zoom, fig.height=7}
+ggplot() +
+  geom_sf(data = st_crop(land, zoom_window), fill = "grey92", color = "grey70", linewidth = 0.15) +
+  geom_sf(data = st_crop(marine, zoom_window), fill = "#d6eaf8", color = NA) +
+  geom_sf(data = st_crop(ring_by_region, zoom_window), fill = "#fff7bc", color = NA) +
+  geom_sf(data = st_crop(ag_2021, zoom_window), fill = "#8c510a", color = NA) +
+  geom_sf(data = st_crop(st_sf(geometry = mangrove_union), zoom_window), fill = "#006d2c", color = NA) +
+  coord_sf(xlim = st_bbox(zoom_window)[c("xmin", "xmax")], ylim = st_bbox(zoom_window)[c("ymin", "ymax")]) +
+  labs(
+    title = "Same window, INEGI agriculture in 2021",
+    subtitle = "Brown farmland against green mangrove is the pressure this score is built to see."
+  ) +
+  theme_void()
+```
+
+Cultivated pasture is the class most easily confused with cropland. It is
+not in the proportion above. The 2021 area of that one class inside the ring
+is reported here so the exclusion has a size.
+
+```{r pasture-2021}
+pasture_2021 <- st_read(
+  file.path(inegi_dir, "usv250s7gw/usv250s7gw.shp"),
+  query = "SELECT DESCRIPCIO FROM \"usv250s7gw\" WHERE DESCRIPCIO = 'PASTIZAL CULTIVADO'",
+  quiet = TRUE
+) %>%
+  st_make_valid() %>%
+  st_crop(gulf_bbox_ll) %>%
+  st_transform(target_crs) %>%
+  st_make_valid() %>%
+  st_filter(ring_by_region)
+
+pasture_km2 <- if (nrow(pasture_2021) == 0) {
+  0
+} else {
+  st_intersection(pasture_2021, st_union(ring_by_region)) %>%
+    as_polygons() %>%
+    st_area() %>%
+    sum() %>%
+    as.numeric() / 1e6
+}
+
+ag_2021_km2 <- sum(inegi_prop$ag_km2[inegi_prop$year == 2021])
+cat("2021 agriculture inside the ring, km²:", round(ag_2021_km2, 1), "\n")
+cat("2021 cultivated pasture inside the ring, km²:", round(pasture_km2, 1), "\n")
+```
+
+## 5. Pressure
+
+The pressure is that proportion, rounded to two decimal places. Columns match
+the other pressure tables: `rgn_id`, `year`, and `pressure`. Every region is
+included in every year. Where the land ring has no agriculture, the pressure
+is 0. Where the region has no mangrove, there is no ring, and the pressure
+is `NA`.
+
+```{r save}
+pressure <- land %>%
+  st_drop_geometry() %>%
+  distinct(rgn_id) %>%
+  crossing(year = inegi_series$year) %>%
+  left_join(
+    inegi_prop %>% select(rgn_id, year, proportion),
+    by = c("rgn_id", "year")
+  ) %>%
+  transmute(
+    rgn_id,
+    year,
+    pressure = round(proportion, 2)
+  ) %>%
+  arrange(year, rgn_id)
+
+stopifnot(nrow(pressure) == 9 * nrow(inegi_series))
+scored <- pressure$pressure[!is.na(pressure$pressure)]
+stopifnot(all(scored >= 0), all(scored <= 1))
+
+pressure_path <- file.path(out_dir, "coastal_agriculture_pressure.csv")
+write_csv(pressure, pressure_path)
+
+kable(
+  pressure,
+  digits = 2,
+  col.names = c("Region", "Year", "Pressure"),
+  caption = "Pressure is the share of land within 1 km of mangrove that INEGI maps as agriculture. Regions with no mangrove are NA."
+)
+```
+
+The pressure table is `r pressure_path`.

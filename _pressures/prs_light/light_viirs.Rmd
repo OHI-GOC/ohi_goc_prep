@@ -1,0 +1,369 @@
+---
+title: "Coastal light pressure"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+The pressure is the share of a coastal band that is lit, rounded to two
+decimal places. A 1 km cell counts as lit when its median night-time radiance
+is above 1 nW cm^-2 sr^-1. That level is about the top of the background in
+this satellite product, so a cell above it has stable artificial light rather
+than the faint fringe the mask leaves behind.
+
+The band is scored once per region. It is the land within 1 km of that
+region's own marine polygon, plus the sea within 5 km of that region's own
+land. Open water farther offshore is left out. It is almost all dark, and
+including it would pull every region toward zero. The two pieces are built
+one region at a time, so a narrow channel does not hand one region's shore to
+its neighbour. A cell already on the marine grid stays in the marine part of
+the band.
+
+The measurements are the Earth Observation Group's annual VIIRS nighttime
+lights. Earth Engine stores 2013–2021 in collection V2.1 and 2022–2024 in
+collection V2.2. Both use the median radiance after the background mask.
+The median drops fires and other one-night flares. Unlit background is stored
+as zero. Seasonal squid-jigging lights are mostly gone, because they do not
+last through the year. The 2012 composite is a partial year and is left out.
+
+Several 15 arc-second satellite cells fall inside one 1 km cell. The 1 km
+value is their average. Zero stays zero: it means unlit, not missing.
+
+```{r setup}
+library(sf)
+library(terra)
+library(tidyverse)
+library(scales)
+library(knitr)
+
+sf_use_s2(FALSE)
+knitr::opts_chunk$set(fig.width = 8, fig.height = 6, message = FALSE, warning = FALSE)
+
+target_crs <- "EPSG:6372"
+
+rgn_path <- "/home/frazier/ohi_goc_prep/spatial/ohi_regions/goc_ohi_rgns.shp"
+marine_raster_path <- "/home/frazier/ohi_goc_prep/spatial/ohi_regions/ohi_marine_raster_1km.tif"
+
+raw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/light_VIIRS"
+out_dir <- "/home/frazier/ohi_goc_prep/_pressures/prs_light/output"
+fig_dir <- "/home/frazier/ohi_goc_prep/_pressures/prs_light/figures"
+dir.create(raw_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+
+python_bin <- "/home/frazier/anaconda3/bin/python3"
+download_script <- "/home/frazier/ohi_goc_prep/_pressures/prs_light/download_vnl_v22.py"
+
+# Same Cloud project the vessel BigQuery queries bill to.
+ee_project <- Sys.getenv("EE_PROJECT", unset = "goc-vms")
+
+years <- 2013:2024
+inland_m <- 1000
+offshore_m <- 5000
+light_cutoff <- 1
+
+rgn_colors <- c(
+  "Region 1" = "#C03729",
+  "Region 2" = "#E68C7C",
+  "Region 3" = "#FC8F24",
+  "Region 4" = "#dcaa38",
+  "Region 5" = "#cbd2a0",
+  "Region 6" = "#98a25a",
+  "Region 7" = "#747428",
+  "Region 8" = "#627391",
+  "Region 9" = "#8d61a9"
+)
+
+# Keep polygon pieces and drop lines created where two polygons only touch.
+as_polygons <- function(x) {
+  x <- st_collection_extract(st_make_valid(x), "POLYGON")
+  x[!st_is_empty(x), ]
+}
+
+raw_path <- function(year) {
+  file.path(raw_dir, sprintf("vnl_v22_median_masked_%d.tif", year))
+}
+
+coast_path <- function(year) {
+  file.path(out_dir, sprintf("radiance_coast_1km_%d.tif", year))
+}
+```
+
+## 1. The coastal band
+
+Each region has a land polygon and a marine polygon. The land piece is that
+region's land within 1 km of its marine polygon. The sea piece is that
+region's sea within 5 km of its land. Raster cells are kept when their centre
+falls in the piece. A centre that falls in both is kept as sea, because it is
+already on the marine grid.
+
+```{r band}
+regions <- st_read(rgn_path, quiet = TRUE) %>%
+  st_make_valid() %>%
+  st_transform(target_crs) %>%
+  mutate(
+    rgn_num = as.integer(str_remove(rgn_id, "Region_")),
+    region_label = paste("Region", rgn_num)
+  )
+
+land <- regions %>% filter(location == "land")
+marine <- regions %>% filter(location == "marine")
+
+# The buffer carries no attributes, so the region id comes from the polygon it is cut to.
+inland <- bind_rows(lapply(sort(unique(land$rgn_id)), function(region) {
+  shore <- marine %>%
+    filter(rgn_id == region) %>%
+    select() %>%
+    st_buffer(inland_m)
+  st_intersection(land %>% filter(rgn_id == region), shore) %>%
+    as_polygons()
+}))
+
+nearshore <- bind_rows(lapply(sort(unique(marine$rgn_id)), function(region) {
+  shore <- land %>%
+    filter(rgn_id == region) %>%
+    select() %>%
+    st_buffer(offshore_m)
+  st_intersection(marine %>% filter(rgn_id == region), shore) %>%
+    as_polygons()
+}))
+
+template <- rast(marine_raster_path)
+marine_id <- template
+
+inland_id <- rasterize(vect(inland), template, field = "rgn_num", background = NA)
+inland_id <- mask(inland_id, marine_id, inverse = TRUE)
+
+near_id <- rasterize(vect(nearshore), template, field = "rgn_num", background = NA)
+near_id <- mask(near_id, marine_id)
+
+coast_id <- cover(inland_id, near_id)
+
+stopifnot(all(na.omit(unique(values(coast_id))) %in% 1:9))
+
+band_km2 <- zonal(ifel(!is.na(coast_id), 1, NA), coast_id, fun = "sum", na.rm = TRUE)
+band_km2 <- as_tibble(band_km2)
+names(band_km2)[1:2] <- c("rgn_num", "km2")
+band_km2 <- band_km2 %>%
+  left_join(
+    st_drop_geometry(land) %>% distinct(rgn_num, region_label, estado),
+    by = "rgn_num"
+  ) %>%
+  arrange(rgn_num)
+```
+
+```{r band-table}
+kable(
+  band_km2 %>% select(region_label, estado, km2),
+  digits = 0,
+  col.names = c("Region", "State", "Cells (km²)"),
+  caption = "Cells in the coastal band. Each cell is 1 km². The band is 1 km of land plus 5 km of sea."
+)
+```
+
+```{r plot-band, fig.height = 8}
+ggplot() +
+  geom_sf(data = regions, fill = "grey92", color = "grey70", linewidth = 0.15) +
+  geom_sf(data = nearshore, aes(fill = region_label), color = NA, alpha = 0.45) +
+  geom_sf(data = inland, aes(fill = region_label), color = NA) +
+  scale_fill_manual(values = rgn_colors, name = NULL) +
+  labs(
+    title = "Coastal band used for the pressure",
+    subtitle = "Solid colour is land within 1 km of the shore. Pale colour is sea within 5 km."
+  ) +
+  theme_minimal() +
+  theme(axis.title = element_blank(), legend.position = "right")
+
+ggsave(file.path(fig_dir, "light_coastal_band.png"), width = 8, height = 8, bg = "white")
+```
+
+## 2. Download the Gulf window
+
+Earth Engine holds 2013–2021 in `NOAA/VIIRS/DNB/ANNUAL_V21` and 2022–2024 in
+`NOAA/VIIRS/DNB/ANNUAL_V22`. The download asks for `median_masked` inside a
+rectangle around the OHI regions, with a small margin so the outer coastal
+cells are not clipped. The northern and southern halves are requested
+separately and then merged. A year that is already on disk is left as it is.
+
+The first run needs a local Earth Engine login (`earthengine authenticate`)
+and the Cloud project registered with Earth Engine. Here that project is
+`goc-vms`.
+
+```{r download}
+gulf_bbox_ll <- st_bbox(st_transform(regions, 4326))
+pad <- 0.2
+
+missing_years <- years[!file.exists(raw_path(years))]
+
+if (length(missing_years) > 0) {
+  status <- system2(
+    python_bin,
+    args = c(
+      download_script,
+      "--out-dir", raw_dir,
+      "--years", paste(missing_years, collapse = ","),
+      "--west", gulf_bbox_ll[["xmin"]] - pad,
+      "--south", gulf_bbox_ll[["ymin"]] - pad,
+      "--east", gulf_bbox_ll[["xmax"]] + pad,
+      "--north", gulf_bbox_ll[["ymax"]] + pad,
+      "--project", ee_project
+    )
+  )
+  if (!identical(status, 0L)) {
+    stop(
+      "The VIIRS download did not finish. Earth Engine has to be signed in on this machine ",
+      "(earthengine authenticate), and EE_PROJECT must be the Cloud project registered with Earth Engine."
+    )
+  }
+}
+
+walk(missing_years, function(year) {
+  parts <- file.path(raw_dir, sprintf("vnl_v22_median_masked_%d_%s.tif", year, c("s", "n")))
+  stopifnot(all(file.exists(parts)))
+  merged <- mosaic(sprc(parts), fun = "mean")
+  names(merged) <- "median_masked"
+  writeRaster(merged, raw_path(year), overwrite = TRUE, datatype = "FLT4S")
+  file.remove(parts)
+})
+
+raw_check <- tibble(year = years, path = raw_path(years)) %>%
+  mutate(
+    exists = file.exists(path),
+    res_deg = map_dbl(path, ~ res(rast(.x))[1])
+  )
+
+# 15 arc-seconds is 0.004167 degrees. Reject a file whose scale was read as degrees.
+stopifnot(all(raw_check$exists))
+stopifnot(all(raw_check$res_deg > 0.002), all(raw_check$res_deg < 0.02))
+raw_check %>% select(year, res_deg)
+```
+
+## 3. Average each year onto the coastal band
+
+The average is taken first, then the band is applied. Cells outside the band
+are left empty.
+
+```{r aggregate}
+walk(years, function(year) {
+  lights <- project(rast(raw_path(year)), template, method = "average")
+  lights <- mask(lights, coast_id)
+  names(lights) <- "median_masked"
+  writeRaster(lights, coast_path(year), overwrite = TRUE, datatype = "FLT4S")
+})
+```
+
+The colour stretch in the next map is only for display. The stored raster is
+still the radiance in nW cm^-2 sr^-1. Cells above the cutoff of 1 are the ones
+that enter the pressure.
+
+```{r latest-map, fig.height = 8}
+latest <- max(years)
+
+coast_latest <- as.data.frame(rast(coast_path(latest)), xy = TRUE, na.rm = TRUE) %>%
+  as_tibble() %>%
+  rename(radiance = median_masked) %>%
+  mutate(above_cutoff = radiance > light_cutoff)
+
+ggplot(coast_latest, aes(x, y, fill = radiance)) +
+  geom_raster() +
+  scale_fill_viridis_c(
+    option = "inferno",
+    trans = "log1p",
+    name = "nW cm^-2 sr^-1",
+    labels = label_number(accuracy = 0.1)
+  ) +
+  coord_equal() +
+  labs(
+    title = sprintf("Radiance in the coastal band, %d", latest),
+    subtitle = "Colour is log(1 + radiance), for display. The pressure uses a cutoff of 1."
+  ) +
+  theme_minimal() +
+  theme(axis.title = element_blank())
+
+ggplot(coast_latest, aes(x, y, fill = above_cutoff)) +
+  geom_raster() +
+  scale_fill_manual(
+    values = c("TRUE" = "#b2182b", "FALSE" = "grey85"),
+    labels = c("TRUE" = "Above 1", "FALSE" = "At or below 1"),
+    name = NULL
+  ) +
+  coord_equal() +
+  labs(
+    title = sprintf("Cells that count toward the pressure, %d", latest),
+    subtitle = "Red cells are above 1 nW cm^-2 sr^-1. Grey cells are in the band and are not."
+  ) +
+  theme_minimal() +
+  theme(axis.title = element_blank())
+
+ggsave(
+  file.path(fig_dir, "light_coastal_band_above_1_2024.png"),
+  width = 8,
+  height = 7,
+  bg = "white"
+)
+```
+
+## 4. Pressure
+
+The pressure in a region and year is the number of band cells above 1 divided
+by the number of band cells. It is already between 0 and 1. Rounding is to
+two decimal places. Every region is included in every year. A dark coast,
+such as Region 2, stays at 0.00.
+
+```{r pressure}
+pressure <- map_dfr(years, function(year) {
+  lights <- rast(coast_path(year))
+  above <- ifel(!is.na(lights), as.numeric(lights > light_cutoff), NA)
+  scores <- zonal(above, coast_id, fun = "mean", na.rm = TRUE)
+  scores <- as_tibble(scores)
+  names(scores)[1:2] <- c("rgn_num", "pressure")
+  mutate(scores, year = year)
+}) %>%
+  left_join(st_drop_geometry(land) %>% distinct(rgn_num, rgn_id), by = "rgn_num") %>%
+  transmute(
+    rgn_id,
+    year,
+    pressure = round(pressure, 2)
+  ) %>%
+  arrange(year, rgn_id)
+
+stopifnot(nrow(pressure) == 9 * length(years))
+stopifnot(all(pressure$pressure >= 0), all(pressure$pressure <= 1))
+
+pressure_path <- file.path(out_dir, "light_pressure.csv")
+write_csv(pressure, pressure_path)
+```
+
+```{r pressure-plot, fig.height = 6}
+pressure_plot <- pressure %>%
+  mutate(region_label = paste("Region", as.integer(str_remove(rgn_id, "Region_")))) %>%
+  ggplot(aes(year, pressure, color = region_label)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.6) +
+  scale_color_manual(values = rgn_colors, name = NULL) +
+  scale_x_continuous(breaks = years) +
+  scale_y_continuous(limits = c(0, 1), labels = label_number(accuracy = 0.01)) +
+  labs(
+    title = "Coastal light pressure",
+    subtitle = "Share of the coastal band above 1 nW cm^-2 sr^-1.",
+    x = NULL,
+    y = "Pressure"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+pressure_plot
+ggsave(file.path(fig_dir, "light_pressure.png"), pressure_plot, width = 8, height = 6, bg = "white")
+```
+
+```{r pressure-table}
+kable(
+  pressure %>% filter(year == latest),
+  digits = 2,
+  col.names = c("Region", "Year", "Pressure"),
+  caption = sprintf("Pressure in %d, rounded to two decimals.", latest)
+)
+```
+
+The pressure table is `r pressure_path`. The Gulf windows of the satellite grids are in `r raw_dir`.
