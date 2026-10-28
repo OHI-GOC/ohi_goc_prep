@@ -1,0 +1,1080 @@
+---
+title: 'OHI GoC: Labor poverty pressure'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Labor poverty (INEGI / CONEVAL ITLP)
+
+I am turning INEGI **Pobreza Laboral (PL)** quarterly estimates (2005-I through 2026-II) into pressures.
+
+A person is in *pobreza laboral* when household labor income is not enough to buy the food basket (*canasta alimentaria*). Higher poverty share = higher pressure (**1 = most pressure**).
+
+**Pros:** quarterly and current through 2025/2026.  
+**Cons:** national and **state** level only (no municipality).
+
+We decided that for now, assessing this pressure at the state level is fine, as the resources addressing poverty are likely provided more at the state level anyway.  So, we assess the six GoC states: Baja California, Baja California Sur, Sonora, Sinaloa, Jalisco, and Nayarit.
+
+In this script, I produced **two** pressure scores:
+
+1. **General labor poverty** (Cuadro 9): the % whose labor income cannot buy the food basket.  
+2. **LE income pressure** (Cuadro 18): within-industry mean labor income (lower income → higher pressure). This is **not** a poverty rate. Also, we may not include it as a pressure...just exploring what it would look like to include it.
+
+*Outline of the script:*
+
+1. Take a look at what every Cuadro in the workbook contains (and does not).  Each tab is called a Cuadro in the excel sheet available for download here: <https://en.www.inegi.org.mx/desarrollosocial/pl/#tabular_data>
+2. Read CONAPO population for year-specific weights of population, which allows us to scale each state by the number of people.
+3. Clean Cuadro 9 to obtain a GoC poverty pressure 0-1.  
+4. Clean Cuadro 18 to get a within-industry LE income pressure 0-1.  
+5. Combine all marine-adjacent industries (there are none that are explicitly marine); apply the population weight across the states.  
+6. Explore with `plotly` and save.
+
+```{r setup}
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(plotly)
+
+knitr::opts_chunk$set(
+  fig.width = 9,
+  fig.height = 5,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r paths}
+pl_path <- here::here("/home/shares/ohi/OHI_GOC/_raw_data/inegi_labor_poverty/pl_2005t_2026t.xlsx") # note that pl = poverty laboral
+
+conapo_path <- here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPO_demographic_indicators/d2026/pobproy_ggrupos.csv")
+
+output_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/labor_poverty/output"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r constants}
+quantile_p <- 0.90
+
+goc_states <- c(
+  "Baja California",
+  "Baja California Sur",
+  "Sonora",
+  "Sinaloa",
+  "Jalisco",
+  "Nayarit"
+)
+
+# short labels that I use later for plots and joins
+industry_lookup <- tribble(
+  ~industry_raw,                                                   ~industry,
+  "Agricultura, ganadería, silvicultura, caza y pesca",            "ag_fishing",
+  "Industria extractiva y de la electricidad",                     "extractive_electricity",
+  "Industria manufacturera",                                       "manufacturing",
+  "Construcción",                                                  "construction",
+  "Comercio",                                                      "commerce",
+  "Restaurantes y servicios de alojamiento",                       "restaurants_lodging",
+  "Transportes, comunicaciones, correo y almacenamiento",         "transport_comms",
+  "Servicios profesionales, financieros y corporativos",           "professional_finance",
+  "Servicios sociales",                                            "social_services",
+  "Servicios diversos",                                            "other_services",
+  "Gobierno y organismos internacionales",                         "government"
+)
+
+# coarse marine-adjacent sectors from cuadro 18 (revisit when combining)
+marine_adjacent_industries <- c(
+  "ag_fishing",
+  "restaurants_lodging",
+  "transport_comms"
+)
+```
+
+## 1. What is in the workbook? (before any cleaning)
+
+I start from the **Contenido** sheet so I can see every Cuadro before I filter anything.
+
+```{r peek-sheets}
+excel_sheets(pl_path)
+
+#  [1] "Contenido"        "Cuadro 1"         "Cuadro 2"         "Cuadro 3"         "Cuadro 4"         "Cuadro 5"        
+#  [7] "Cuadro 6"         "Cuadro 7"         "Cuadro 8"         "Cuadro 9"         "Cuadro 10"        "Cuadro 11"       
+# [13] "Cuadro 12"        "Cuadro 13"        "Cuadro 14"        "Cuadro 15"        "Cuadro 16"        "Cuadro 17"       
+# [19] "Cuadro 18.EUM"    "Cuadro 18.Ags."   "Cuadro 18.BC"     "Cuadro 18.BCS"    "Cuadro 18.Camp."  "Cuadro 18.Coah." 
+# [25] "Cuadro 18.Col."   "Cuadro 18.Chis."  "Cuadro 18.Chih."  "Cuadro 18.CDMX"   "Cuadro 18.Dgo."   "Cuadro 18.Gto."  
+# [31] "Cuadro 18.Gro."   "Cuadro 18.Hgo."   "Cuadro 18.Jal."   "Cuadro 18.Mex."   "Cuadro 18.Mich."  "Cuadro 18.Mor."  
+# [37] "Cuadro 18.Nay."   "Cuadro 18.NL"     "Cuadro 18.Oax."   "Cuadro 18.Pue."   "Cuadro 18.Qro."   "Cuadro 18.Q. Roo"
+# [43] "Cuadro 18.SLP"    "Cuadro 18.Sin."   "Cuadro 18.Son."   "Cuadro 18.Tab."   "Cuadro 18.Tamps." "Cuadro 18.Tlax." 
+# [49] "Cuadro 18.Ver."   "Cuadro 18.Yuc."   "Cuadro 18.Zac."  
+```
+
+```{r peek-contenido}
+contenido <- read_excel(
+  pl_path,
+  sheet = "Contenido",
+  col_names = FALSE,
+  .name_repair = "minimal"
+) |> 
+  janitor::clean_names() |> 
+  dplyr::select(x, x_3)
+
+# first two columns are the sheet name and its description
+colnames(contenido)[1:2] <- c("sheet", "description")
+
+contenido_tidy <- contenido %>%
+  select(1:2) %>%
+  setNames(c("sheet", "description")) %>%
+  mutate(
+    sheet = str_trim(as.character(sheet)),
+    description = str_trim(as.character(description))
+  ) %>%
+  filter(!is.na(sheet), sheet != "", str_detect(sheet, "^Cuadro"))
+
+# lets take a look!!
+contenido_tidy %>%
+  kable(caption = "INEGI pobreza laboral workbook - contenido")
+```
+
+### What I understand each Cuadro to be
+
+After going through it, here is what I think each tab has, and what it does **not** provide us:
+
+| Sheet | What it does have | What it does **not** have |
+|---|---|---|
+| **Cuadro 1** | ITLP (índice de la tendencia laboral de la pobreza), national + rural/urban | state or industry information |
+| **Cuadro 2** | % of people in labor poverty, national + rural/urban | state or industry information |
+| **Cuadro 3** | labor income per capita, national + rural/urban | poverty rate; state/industry |
+| **Cuadro 4** | wage mass (*masa salarial*), national + rural/urban | poverty rate; state/industry |
+| **Cuadro 5** | labor income per capita **by state** | poverty rate; industry |
+| **Cuadro 6** | labor poverty indicators by sex of household head | national only, so missing information at a higher resolution |
+| **Cuadro 7** | wage mass **by state** | poverty rate; industry |
+| **Cuadro 8** | ITLP **by state** | industry; not the % poverty rate itself |
+| **Cuadro 9** | **% in labor poverty by state**: my main poverty pressure | municipality; industry |
+| **Cuadro 10** | % in labor poverty for self-represented cities | full GoC coastal coverage, has only 3 cities across the GoC (not including Mexicali) |
+| **Cuadro 11** | labor-force participation by age × rural/urban | poverty rate by state |
+| **Cuadro 12** | school attendance ages 5-17 × rural/urban | poverty / income |
+| **Cuadro 13** | occupied population in labor poverty by sex | state × industry |
+| **Cuadro 14** | occupied population in labor poverty, indigenous municipality flag | GoC states I need |
+| **Cuadro 15** | occupied population in labor poverty by age | state × industry |
+| **Cuadro 16** | occupied population in labor poverty by formality | state × industry |
+| **Cuadro 17** | mean labor income by sex × state | poverty rate; industry |
+| **Cuadro 18.*** | mean labor income of the occupied population **by industry**, one sheet per state (and EUM) | poverty %; municipality; specific marine sectors |
+
+So for this script I only clean **Cuadro 9** (pressure 1) and **Cuadro 18** for the six GoC states (pressure 2). Everything else I leave alone for now.
+
+### Explore Cuadro 9 raw (national + all states)
+
+```{r peek-cuadro9-header}
+# excel row 6 holds año, trimestre, and every state name
+c9_header_raw <- read_excel(
+  pl_path,
+  sheet = "Cuadro 9",
+  range = cell_rows(6),
+  col_names = FALSE,
+  .name_repair = "unique"
+) %>%
+  unlist(use.names = FALSE) %>%
+  as.character() %>%
+  str_trim()
+
+#  [1] "Año"                             "Trimestre"                      
+#  [3] "Estados Unidos Mexicanos"        "Aguascalientes"                 
+#  [5] "Baja California"                 "Baja California Sur"            
+#  [7] "Campeche"                        "Coahuila de Zaragoza"           
+#  [9] "Colima"                          "Chiapas"                        
+# [11] "Chihuahua"                       "Ciudad de México"               
+# [13] "Durango"                         "Guanajuato"                     
+# [15] "Guerrero"                        "Hidalgo"                        
+# [17] "Jalisco"                         "México"                         
+# [19] "Michoacán de Ocampo"             "Morelos"                        
+# [21] "Nayarit"                         "Nuevo León"                     
+# [23] "Oaxaca"                          "Puebla"                         
+# [25] "Querétaro"                       "Quintana Roo"                   
+# [27] "San Luis Potosí"                 "Sinaloa"                        
+# [29] "Sonora"                          "Tabasco"                        
+# [31] "Tamaulipas"                      "Tlaxcala"                       
+# [33] "Veracruz de Ignacio de la Llave" "Yucatán"                        
+# [35] "Zacatecas"      
+
+tibble(
+  col = seq_along(c9_header_raw),
+  header = c9_header_raw
+) %>%
+  filter(!is.na(header), header != "") %>%
+  kable(caption = "Cuadro 9 column headers (row 6)")
+```
+
+### Exploring the Cuadro 18 sheet (Baja California)
+
+There is a sheet for every state, so this is just exploring BC first.
+
+```{r peek-cuadro18-bc}
+c18_bc_header <- read_excel(
+  pl_path,
+  sheet = "Cuadro 18.BC",
+  range = cell_rows(7),
+  col_names = FALSE,
+  .name_repair = "unique"
+) %>%
+  unlist(use.names = FALSE) %>%
+  as.character() %>%
+  str_trim()
+
+tibble(
+  col = seq_along(c18_bc_header),
+  header = c18_bc_header
+) %>%
+  filter(!is.na(header), header != "") %>%
+  kable(caption = "Cuadro 18.BC industry columns (row 7)")
+
+# | col|header                                               |
+# |---:|:----------------------------------------------------|
+# |   1|Año                                                  |
+# |   2|Trimestre                                            |
+# |   3|Agricultura, ganadería, silvicultura, caza y pesca   |
+# |   4|Industria extractiva y de la electricidad            |
+# |   5|Industria manufacturera                              |
+# |   6|Construcción                                         |
+# |   7|Comercio                                             |
+# |   8|Restaurantes y servicios de alojamiento              |
+# |   9|Transportes, comunicaciones, correo y almacenamiento |
+# |  10|Servicios profesionales, financieros y corporativos  |
+# |  11|Servicios sociales                                   |
+# |  12|Servicios diversos                                   |
+# |  13|Gobierno y organismos internacionales                |
+```
+
+Note that Cuadro 18 is **average labor income in constant pesos** (base = first quarter of 2020), not a poverty percentage. `NA` cells appear when ENOE cannot support an estimate for that state/industry/quarter.
+
+## 2. CONAPO state population (year-specific weights)
+
+`pobproy_ggrupos.csv` is municipality × sex × year. Here, I sum `POB_TOTAL` so each GoC state-year has one population weight. It is not often we are wanting the state population haha!!
+
+```{r conapo-read}
+conapo_raw <- read_csv(conapo_path)
+```
+
+```{r conapo-aggregate}
+state_population <- conapo_raw %>%
+  select(CLAVE_ENT, NOM_ENT, ANO, SEXO, POB_TOTAL) %>%
+  filter(NOM_ENT %in% goc_states) %>%
+  group_by(year = ANO, estado = NOM_ENT) %>%
+  # sum men + women across all municipalities in the state
+  summarize(poblacion = sum(POB_TOTAL, na.rm = TRUE), .groups = "drop")
+```
+
+```{r conapo-check}
+state_population %>%
+  filter(year %in% c(2005, 2010, 2020, 2025)) %>%
+  pivot_wider(names_from = year, values_from = poblacion) %>%
+  kable(
+    caption = "CONAPO projected total population (GoC states; selected years)",
+    format.args = list(big.mark = ",")
+  )
+
+stopifnot(all(goc_states %in% unique(state_population$estado)))
+```
+
+## 3. Clean Cuadro 9: labor poverty % by state
+
+Year is only printed on the first quarter of each year, so I fill it down. Quarter labels sometimes carry footnotes (e.g. `IV3/`), so I remove those. 
+
+```{r cuadro9-header}
+# pull header cells as a plain character vector (avoids empty colnames)
+c9_header <- read_excel(
+  pl_path,
+  sheet = "Cuadro 9",
+  range = cell_rows(6),
+  col_names = FALSE,
+  .name_repair = "unique"
+) %>%
+  unlist(use.names = FALSE) %>%
+  as.character() %>%
+  str_trim()
+```
+
+```{r cuadro9-data}
+# skip the title block; data start at excel row 7
+c9_data <- read_excel(
+  pl_path,
+  sheet = "Cuadro 9",
+  skip = 6,
+  col_names = FALSE,
+  col_types = "text",
+  .name_repair = "unique"
+)
+
+# replace placeholder colnames with the real excel header row
+colnames(c9_data) <- make.unique(c9_header)
+colnames(c9_data)[1:2] <- c("year", "quarter")
+```
+
+```{r cuadro9-tidy-year-quarter}
+# clean it for all of the states before selecting for GoC!!
+c9_tidy <- c9_data %>%
+  mutate(
+    # pull the year (later quarters leave this blank)
+    year = as.integer(str_extract(year, "^[0-9]{4}")),
+    # keep only roman numerals (drop footnote junk like 3/)
+    quarter = str_trim(str_replace_all(as.character(quarter), "[^IVX]", "")),
+    quarter = factor(quarter, levels = c("I", "II", "III", "IV"), ordered = TRUE)
+  ) %>%
+  # carry the printed year down through ii, iii, iv
+  fill(year, .direction = "down") %>%
+  filter(!is.na(year), !is.na(quarter), quarter %in% c("I", "II", "III", "IV"))
+```
+
+```{r cuadro9-long-goc}
+pl_state_long <- c9_tidy %>%
+  pivot_longer(
+    cols = -c(year, quarter),
+    names_to = "estado",
+    values_to = "poverty_pct_raw"
+  ) %>%
+  mutate(
+    estado = str_trim(estado),
+    # non-numeric cells (na, nd, notes) become na
+    poverty_pct = suppressWarnings(as.numeric(poverty_pct_raw))
+  ) %>%
+  filter(estado %in% goc_states) %>%
+  select(year, quarter, estado, poverty_pct) %>%
+  mutate(
+    year_q = paste0(year, "-", as.character(quarter)),
+    # decimal year for plotting (i=0, ii=0.25, iii=0.5, iv=0.75)
+    time = year + (as.integer(quarter) - 1) / 4 
+  ) %>%
+  arrange(estado, year, quarter)
+```
+
+```{r cuadro9-summary}
+pl_state_long %>%
+  count(estado, name = "n_quarters") %>%
+  kable(caption = "GoC states: quarters with Cuadro 9 rows (includes NA poverty cells)")
+
+pl_state_long %>%
+  summarise(
+    n = n(),
+    n_missing = sum(is.na(poverty_pct)),
+    min_pct = min(poverty_pct, na.rm = TRUE),
+    max_pct = max(poverty_pct, na.rm = TRUE),
+    years = paste(range(year, na.rm = TRUE), collapse = "-")
+  ) %>%
+  kable(digits = 2, caption = "Cuadro 9 GoC summary")
+
+# |   n| n_missing| min_pct| max_pct|years     |
+# |---:|---------:|-------:|-------:|:---------|
+# | 516|         6|   10.75|   41.27|2005-2026 |
+```
+
+I expect **2020-II** to be missing nationally because ENOE collection was suspended during COVID.
+
+```{r cuadro9-missing}
+pl_state_long %>%
+  filter(is.na(poverty_pct)) %>%
+  count(year, quarter, name = "n_states_missing") %>%
+  kable(caption = "Missing poverty cells in GoC Cuadro 9 extract")
+
+# YUP!
+# | year|quarter | n_states_missing|
+# |----:|:-------|----------------:|
+# | 2020|II      |                6|
+```
+
+## 4. Rescale Cuadro 9 → general poverty pressure 0-1
+
+Here I bring together **all GoC state-quarters** and set the 90th percentile to pressure = 1. Higher `poverty_pct` = a higher pressure.
+
+Before locking that in, I also compute two alternatives and compare **2025** scores:
+
+| Option | Formula | What pressure = 1 means |
+|---|---|---|
+| **A. GoC 90th** | `(pct - GoC min) / (GoC p90 - GoC min)`, clipped | among the worst GoC state-quarters |
+| **B. Absolute /100** | `pct / 100` | everyone in labor poverty |
+| **C. Mexico 90th** | `(pct - MX min) / (MX p90 - MX min)`, clipped | as bad as the national high end |
+
+```{r poverty-refs}
+pl_obs <- pl_state_long %>% filter(!is.na(poverty_pct))
+
+ref_low <- min(pl_obs$poverty_pct)
+
+# 90th percentile of the pooled goC series becomes pressure = 1
+ref_high <- as.numeric(quantile(pl_obs$poverty_pct, probs = quantile_p))
+
+stopifnot(is.finite(ref_low), is.finite(ref_high), ref_high > ref_low)
+```
+
+```{r poverty-scale}
+pl_scaled <- pl_state_long %>%
+  mutate(
+    pressure = (poverty_pct - ref_low) / (ref_high - ref_low),
+    # clip anything outside 0-1 (values above the 90th pct become 1)
+    pressure = pmin(pmax(pressure, 0), 1)
+  )
+```
+
+```{r poverty-scale-table}
+tibble(
+  quantile = quantile_p,
+  poverty_min = ref_low,
+  poverty_max = ref_high,
+  n_state_quarters = nrow(pl_obs),
+  n_at_one = sum(pl_scaled$pressure == 1, na.rm = TRUE)
+) %>%
+  kable(digits = 3, caption = "Rescaled GoC labor poverty (Cuadro 9) - option A")
+
+# | quantile| poverty_min| poverty_max| n_state_quarters| n_at_one|
+# |--------:|-----------:|-----------:|----------------:|--------:|
+# |      0.9|      10.748|      33.612|              510|       51|
+```
+
+### Optional annual mean (option A)
+
+If I later want one value per year, I average the available quarters (unweighted).
+
+```{r poverty-annual}
+pl_annual <- pl_scaled %>%
+  filter(!is.na(pressure)) %>%
+  group_by(year, estado) %>%
+  summarise(
+    n_quarters = n(),
+    poverty_pct = mean(poverty_pct),
+    pressure = mean(pressure),
+    .groups = "drop"
+  )
+```
+
+```{r poverty-annual-table}
+pl_annual %>%
+  filter(year == max(year)) %>%
+  arrange(desc(pressure)) %>%
+  kable(digits = 3, caption = "Latest available year: annual mean pressure by state (option A)")
+
+# | year|estado              | n_quarters| poverty_pct| pressure|
+# |----:|:-------------------|----------:|-----------:|--------:|
+# | 2026|Sinaloa             |          2|      26.985|    0.710|
+# | 2026|Sonora              |          2|      23.478|    0.557|
+# | 2026|Jalisco             |          2|      23.362|    0.552|
+# | 2026|Nayarit             |          2|      23.260|    0.547|
+# | 2026|Baja California     |          2|      16.824|    0.266|
+# | 2026|Baja California Sur |          2|      13.988|    0.142|
+```
+
+### Compare three rescales (focus on 2025)
+
+```{r poverty-mexico-long}
+# all mexico states for option C (drop the national aggregate column)
+pl_mexico_long <- c9_tidy %>%
+  pivot_longer(
+    cols = -c(year, quarter),
+    names_to = "estado",
+    values_to = "poverty_pct_raw"
+  ) %>%
+  mutate(
+    estado = str_trim(estado),
+    poverty_pct = suppressWarnings(as.numeric(poverty_pct_raw))
+  ) %>%
+  filter(
+    !is.na(poverty_pct),
+    !str_detect(estado, regex("Estados Unidos Mexicanos", ignore_case = TRUE))
+  ) %>%
+  select(year, quarter, estado, poverty_pct)
+```
+
+```{r poverty-refs-three}
+# option a refs (same as above)
+ref_goc_low  <- ref_low
+ref_goc_high <- ref_high
+
+# option c refs: all mexico state-quarters
+ref_mx_low  <- min(pl_mexico_long$poverty_pct)
+ref_mx_high <- as.numeric(quantile(pl_mexico_long$poverty_pct, probs = quantile_p))
+
+stopifnot(ref_mx_high > ref_mx_low)
+
+tibble(
+  option = c("A. GoC 90th", "B. Absolute 100% in labor poverty", "C. Mexico 90th"),
+  ref_low = c(ref_goc_low, 0, ref_mx_low),
+  ref_high = c(ref_goc_high, 100, ref_mx_high),
+  n_obs_in_ref = c(nrow(pl_obs), NA_integer_, nrow(pl_mexico_long))
+) %>%
+  kable(digits = 2, caption = "Reference anchors for the three Cuadro 9 rescales")
+
+# |option           | ref_low| ref_high| n_obs_in_ref|
+# |:----------------|-------:|--------:|------------:|
+# |A. GoC 90th      |   10.75|    33.61|          510|
+# |B. Absolute 100% in labor poverty |    0.00|   100.00|           NA|
+# |C. Mexico 90th   |   10.75|    55.96|         2719|
+```
+
+```{r poverty-scale-three}
+pl_scaled_compare <- pl_state_long %>%
+  mutate(
+    # a: relative to goC history
+    pressure_goc90 = (poverty_pct - ref_goc_low) / (ref_goc_high - ref_goc_low),
+    pressure_goc90 = pmin(pmax(pressure_goc90, 0), 1),
+    # b: absolute share in poverty
+    pressure_pct100 = poverty_pct / 100,
+    pressure_pct100 = pmin(pmax(pressure_pct100, 0), 1),
+    # c: relative to all mexico states
+    pressure_mx90 = (poverty_pct - ref_mx_low) / (ref_mx_high - ref_mx_low),
+    pressure_mx90 = pmin(pmax(pressure_mx90, 0), 1)
+  )
+```
+
+```{r poverty-compare-2025}
+# annual mean for 2025 under each option
+pl_compare_2025 <- pl_scaled_compare %>%
+  filter(year == 2025, !is.na(poverty_pct)) %>%
+  group_by(estado) %>%
+  summarise(
+    n_quarters = n(),
+    poverty_pct = mean(poverty_pct),
+    pressure_goc90 = mean(pressure_goc90),
+    pressure_pct100 = mean(pressure_pct100),
+    pressure_mx90 = mean(pressure_mx90),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(poverty_pct))
+
+pl_compare_2025 %>%
+  kable(
+    digits = 3,
+    caption = "2025 GoC labor poverty: raw % and pressure under three rescales"
+  )
+
+# |estado              | n_quarters| poverty_pct| pressure_goc90| pressure_pct100| pressure_mx90|
+# |:-------------------|----------:|-----------:|--------------:|---------------:|-------------:|
+# |Sonora              |          4|      26.575|          0.692|           0.266|         0.350|
+# |Sinaloa             |          4|      25.477|          0.644|           0.255|         0.326|
+# |Nayarit             |          4|      24.171|          0.587|           0.242|         0.297|
+# |Jalisco             |          4|      23.338|          0.551|           0.233|         0.278|
+# |Baja California     |          4|      19.395|          0.378|           0.194|         0.191|
+# |Baja California Sur |          4|      13.358|          0.114|           0.134|         0.058|
+```
+
+```{r poverty-compare-2025-long}
+pl_compare_2025_long <- pl_compare_2025 %>%
+  select(estado, poverty_pct, pressure_goc90, pressure_pct100, pressure_mx90) %>%
+  pivot_longer(
+    cols = starts_with("pressure_"),
+    names_to = "rescale",
+    values_to = "pressure"
+  ) %>%
+  mutate(
+    rescale = recode(
+      rescale,
+      pressure_goc90 = "A. GoC 90th",
+      pressure_pct100 = "B. Absolute 100% in labor poverty",
+      pressure_mx90 = "C. Mexico 90th"
+    )
+  )
+```
+
+```{r poverty-compare-timeseries}
+# goC mean across states over time under each option
+pl_compare_ts <- pl_scaled_compare %>%
+  filter(!is.na(poverty_pct)) %>%
+  group_by(year, quarter, time) %>%
+  summarise(
+    pressure_goc90 = mean(pressure_goc90),
+    pressure_pct100 = mean(pressure_pct100),
+    pressure_mx90 = mean(pressure_mx90),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = starts_with("pressure_"),
+    names_to = "rescale",
+    values_to = "pressure"
+  ) %>%
+  mutate(
+    rescale = recode(
+      rescale,
+      pressure_goc90 = "A. GoC 90th",
+      pressure_pct100 = "B. Absolute 100% in labor poverty",
+      pressure_mx90 = "C. Mexico 90th"
+    )
+  )
+
+plot_compare_ts <- plot_ly(
+  pl_compare_ts,
+  x = ~time,
+  y = ~pressure,
+  color = ~rescale,
+  type = "scatter",
+  mode = "lines"
+) %>%
+  layout(
+    title = "GoC mean poverty pressure over time: three options for rescaling",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Mean pressure (0-1)", range = c(0, 1.05))
+  )
+
+plot_compare_ts
+```
+
+
+I am keeping **Option B** for now (`pressure = poverty_pct / 100`). It is easy to swap to A or C later by changing which column becomes `pl_scaled` below.
+
+```{r save-option-b}
+# Option B: absolute share in labor poverty (1 = 100% of people in poverty)
+pl_scaled <- pl_scaled_compare %>%
+  transmute(
+    year, quarter, time, year_q, estado,
+    poverty_pct,
+    pressure = pressure_pct100
+  )
+
+pl_annual <- pl_scaled %>%
+  filter(!is.na(pressure)) %>%
+  group_by(year, estado) %>%
+  summarise(
+    n_quarters = n(),
+    poverty_pct = mean(poverty_pct),
+    pressure = mean(pressure),
+    .groups = "drop"
+  )
+
+pl_annual %>%
+  filter(year == 2025) %>%
+  arrange(desc(pressure)) %>%
+  kable(digits = 3, caption = "Using Option B: 2025 annual mean pressure by state")
+
+# | year|estado              | n_quarters| poverty_pct| pressure|
+# |----:|:-------------------|----------:|-----------:|--------:|
+# | 2025|Sonora              |          4|      26.575|    0.266|
+# | 2025|Sinaloa             |          4|      25.477|    0.255|
+# | 2025|Nayarit             |          4|      24.171|    0.242|
+# | 2025|Jalisco             |          4|      23.338|    0.233|
+# | 2025|Baja California     |          4|      19.395|    0.194|
+# | 2025|Baja California Sur |          4|      13.358|    0.134|
+```
+
+
+## 5. Choosing Option B and saving it (`rgn_id`, `year`, `pressure`)
+
+State Cuadro 9 values are inherited by every GoC `rgn_id` that sits in that state (`municipality_to_rgnid_update.csv`). Region_9 spans Jalisco and Nayarit, so for that region I take a CONAPO population-weighted mean of the two state pressures.
+
+```{r mun-rgn-lookup}
+mun_lookup <- read_csv(here::here("/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid_update.csv")) %>%
+  mutate(
+    estado = str_trim(estado),
+    rgn_id = as.character(rgn_id)
+  )
+
+estado_to_rgn <- mun_lookup %>%
+  distinct(estado, rgn_id) %>%
+  mutate(estado_key = str_to_upper(estado)) %>%
+  select(estado_key, rgn_id)
+
+estado_to_rgn %>%
+  arrange(rgn_id, estado_key) %>%
+  kable(caption = "Estado → rgn_id (unique pairs from municipality lookup)")
+
+# |estado_key          |rgn_id   |
+# |:-------------------|:--------|
+# |BAJA CALIFORNIA     |Region_1 |
+# |BAJA CALIFORNIA     |Region_2 |
+# |BAJA CALIFORNIA SUR |Region_3 |
+# |BAJA CALIFORNIA SUR |Region_4 |
+# |SONORA              |Region_5 |
+# |SONORA              |Region_6 |
+# |SONORA              |Region_7 |
+# |SINALOA             |Region_8 |
+# |JALISCO             |Region_9 |
+# |NAYARIT             |Region_9 |
+```
+
+```{r option-b-to-rgn}
+pl_rgn_annual <- pl_annual %>%
+  mutate(estado_key = str_to_upper(estado)) %>%
+  left_join(estado_to_rgn, by = "estado_key", relationship = "many-to-many") %>%
+  left_join(state_population, by = c("year", "estado")) %>%
+  filter(!is.na(rgn_id), !is.na(pressure))
+
+# one row per rgn_id × year; pop-weight when a region spans 2+ states (Region_9)
+poverty_laboral_pressure <- pl_rgn_annual %>%
+  group_by(rgn_id, year) %>%
+  summarise(
+    pressure = if (n() == 1 || all(is.na(poblacion))) {
+      mean(pressure)
+    } else {
+      weighted.mean(pressure, w = poblacion, na.rm = TRUE)
+    },
+    n_states = n_distinct(estado),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rgn_num = as.integer(str_remove(rgn_id, "Region_")),
+    pressure = round(pressure, 4)
+  ) %>%
+  arrange(year, rgn_num) %>%
+  select(rgn_id, year, pressure)
+
+poverty_laboral_pressure %>%
+  filter(year == 2025) %>%
+  kable(digits = 4, caption = "Option B labor poverty pressure by rgn_id (2025)")
+
+# |rgn_id   | year| pressure|
+# |:--------|----:|--------:|
+# |Region_1 | 2025|   0.1940|
+# |Region_2 | 2025|   0.1940|
+# |Region_3 | 2025|   0.1336|
+# |Region_4 | 2025|   0.1336|
+# |Region_5 | 2025|   0.2658|
+# |Region_6 | 2025|   0.2658|
+# |Region_7 | 2025|   0.2658|
+# |Region_8 | 2025|   0.2548|
+# |Region_9 | 2025|   0.2345|
+```
+
+```{r save-option-b}
+mazu_csv <- write_csv(poverty_laboral_pressure, here::here(output_dir, "poverty_laboral_pressure.csv"))
+github_csv <- write_csv(poverty_laboral_pressure, here::here("_pressures/social/output", "poverty_laboral_pressure.csv"))
+```
+
+
+## 6. LE POTENTIAL PRESSURE: Clean Cuadro 18: mean labor income by industry × state
+
+I read each GoC state's Cuadro 18 sheet the same way, then bind them.
+
+```{r cuadro18-sheet-map}
+# sheet name in the workbook and the estado label I want in the tidy data
+goc_cuadro18_sheets <- tribble(
+  ~sheet, ~estado,
+  "Cuadro 18.BC", "Baja California",
+  "Cuadro 18.BCS", "Baja California Sur",
+  "Cuadro 18.Son.", "Sonora",
+  "Cuadro 18.Sin.", "Sinaloa",
+  "Cuadro 18.Jal.", "Jalisco",
+  "Cuadro 18.Nay.", "Nayarit"
+)
+```
+
+
+```{r cuadro18-read-loop}
+pl_industry_list <- list()
+
+for (i in seq_len(nrow(goc_cuadro18_sheets))) {
+  sheet_i <- goc_cuadro18_sheets$sheet[i]
+  estado_i <- goc_cuadro18_sheets$estado[i]
+
+  # industry names live on excel row 7; unlist so colnames stay usable
+  header_i <- read_excel(
+    pl_path,
+    sheet = sheet_i,
+    range = cell_rows(7),
+    col_names = FALSE,
+    .name_repair = "unique"
+  ) %>%
+    unlist(use.names = FALSE) %>%
+    as.character() %>%
+    str_trim()
+
+  dat_i <- read_excel(
+    pl_path,
+    sheet = sheet_i,
+    skip = 7,
+    col_names = FALSE,
+    col_types = "text",
+    .name_repair = "unique"
+  )
+
+  colnames(dat_i) <- make.unique(header_i)
+  colnames(dat_i)[1:2] <- c("year", "quarter")
+
+  dat_i <- dat_i %>%
+    mutate(
+      year = as.integer(str_extract(year, "^[0-9]{4}")),
+      quarter = str_trim(str_replace_all(as.character(quarter), "[^IVX]", "")),
+      quarter = factor(quarter, levels = c("I", "II", "III", "IV"), ordered = TRUE),
+      estado = estado_i
+    ) %>%
+    fill(year, .direction = "down") %>%
+    filter(!is.na(year), quarter %in% c("I", "II", "III", "IV")) %>%
+    pivot_longer(
+      cols = -c(year, quarter, estado),
+      names_to = "industry_raw",
+      values_to = "income_raw"
+    ) %>%
+    mutate(
+      industry_raw = str_trim(industry_raw),
+      income = suppressWarnings(as.numeric(income_raw))
+    ) %>%
+    select(year, quarter, estado, industry_raw, income)
+
+  pl_industry_list[[i]] <- dat_i
+}
+```
+
+```{r cuadro18-bind}
+pl_industry_long <- bind_rows(pl_industry_list) %>%
+  left_join(industry_lookup, by = "industry_raw") %>%
+  mutate(
+    year_q = paste0(year, "-", as.character(quarter)),
+    time = year + (as.integer(quarter) - 1) / 4,
+    marine_adjacent = industry %in% marine_adjacent_industries
+  )
+```
+
+```{r cuadro18-check-mapping}
+# every raw industry name from inegi should match my lookup table
+unmapped <- pl_industry_long %>%
+  filter(is.na(industry)) %>%
+  distinct(industry_raw)
+
+stopifnot(nrow(unmapped) == 0)
+
+pl_industry_long %>%
+  count(industry, marine_adjacent) %>%
+  kable(caption = "Cuadro 18 industries (GoC states)")
+```
+
+## 7. Rescale Cuadro 18 → LE income pressure 0-1
+
+Low income → high pressure. High income → low pressure.
+
+Incomes are **right-skewed**: a few `income_max` values sit well above `income_p90`. I do **not** want those rich outliers to set pressure = 0.
+
+I **do** want extreme poor to still reach pressure = 1.
+
+**Asymmetric scale (within each industry):**
+
+| Anchor | Role |
+|---|---|
+| `income_min` | pressure = **1** (extreme poor still count) |
+| `income_p90` | pressure = **0** (rich tail trimmed) |
+| above p90 | clipped to 0 |
+
+```{r le-rescale}
+income_p_high <- 0.90
+
+pl_industry_scaled <- pl_industry_long %>%
+  group_by(industry) %>%
+  mutate(
+    # poorest observed income in this industry across goC state-quarters
+    income_min_ind = min(income, na.rm = TRUE),
+    # trim the rich end so a few high outliers do not stretch the scale
+    income_p90_ind = as.numeric(quantile(income, probs = income_p_high, na.rm = TRUE)),
+    # map [min, p90] → [1, 0]
+    pressure_income = (income_p90_ind - income) / (income_p90_ind - income_min_ind),
+    pressure_income = pmin(pmax(pressure_income, 0), 1)
+  ) %>%
+  ungroup() %>%
+  select(-income_min_ind, -income_p90_ind)
+```
+
+```{r le-join-population}
+# year-specific conapo weight for each state-quarter
+pl_industry_scaled <- pl_industry_scaled %>%
+  left_join(state_population, by = c("year", "estado"))
+
+n_missing_pop <- sum(is.na(pl_industry_scaled$poblacion))
+if (n_missing_pop > 0) {
+  warning(n_missing_pop, " industry rows missing CONAPO population join")
+}
+```
+
+```{r le-summary-table}
+pl_industry_scaled %>%
+  filter(!is.na(income), !is.na(poblacion)) %>%
+  group_by(industry, marine_adjacent) %>%
+  summarise(
+    n = n(),
+    income_min = min(income),
+    income_p50 = as.numeric(quantile(income, 0.5)),
+    income_p90 = as.numeric(quantile(income, income_p_high)),
+    income_max = max(income),
+    pressure_mean_unweighted = mean(pressure_income),
+    # larger states pull the mean more
+    pressure_mean_popwt = weighted.mean(pressure_income, w = poblacion),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(marine_adjacent), industry) %>%
+  kable(
+    digits = 1,
+    caption = "Within-industry LE pressure (min→1, p90→0); unweighted vs CONAPO pop-weighted mean"
+  )
+```
+
+## 8. Combine marine-adjacent industries
+
+For each state-quarter I average the three marine-adjacent industry pressures (equal industry weights for now). Then I roll up across states with that year's CONAPO population.
+
+```{r le-by-state-quarter}
+pl_le_marine <- pl_industry_scaled %>%
+  filter(marine_adjacent, !is.na(pressure_income), !is.na(poblacion)) %>%
+  group_by(year, quarter, year_q, time, estado, poblacion) %>%
+  summarise(
+    n_industries = n(),
+    pressure_le = mean(pressure_income),
+    .groups = "drop"
+  )
+```
+
+```{r le-gulf}
+pl_le_gulf <- pl_le_marine %>%
+  group_by(year, quarter, year_q, time) %>%
+  summarise(
+    pressure_le_popwt = weighted.mean(pressure_le, w = poblacion),
+    pressure_le_unwt = mean(pressure_le),
+    .groups = "drop"
+  )
+```
+
+```{r le-state-table}
+pl_le_marine %>%
+  group_by(estado) %>%
+  summarise(
+    mean_pressure_le = mean(pressure_le),
+    # show one year of population for context
+    poblacion_2020 = poblacion[year == 2020][1],
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_pressure_le)) %>%
+  kable(digits = 3, caption = "Mean LE marine-adjacent pressure by state (CONAPO 2020 pop shown)")
+```
+
+```{r le-industry-by-state-table}
+pl_industry_scaled %>%
+  filter(marine_adjacent, !is.na(pressure_income)) %>%
+  group_by(estado, industry) %>%
+  summarise(
+    mean_pressure = mean(pressure_income),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = industry, values_from = mean_pressure) %>%
+  kable(digits = 3, caption = "Mean income-pressure by state × marine-adjacent industry")
+```
+
+## 9. Explore both with plotlys
+
+### General poverty pressure (Cuadro 9, Option B)
+
+```{r plot-poverty}
+plot_poverty <- plot_ly(
+  pl_scaled %>% filter(!is.na(pressure)),
+  x = ~time,
+  y = ~pressure,
+  color = ~estado,
+  type = "scatter",
+  mode = "lines",
+  text = ~paste0(
+    estado, "<br>", year_q,
+    "<br>poverty %: ", round(poverty_pct, 1),
+    "<br>pressure: ", round(pressure, 3)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Labor poverty pressure (Cuadro 9, Option B Absolute 100% labor poverty ref)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Pressure (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Estado"))
+  )
+
+plot_poverty
+```
+
+### LE income pressure by marine-adjacent industries
+
+```{r plot-industry}
+plot_industry <- plot_ly(
+  pl_industry_scaled %>% filter(marine_adjacent, !is.na(pressure_income)),
+  x = ~time,
+  y = ~pressure_income,
+  color = ~estado,
+  linetype = ~industry,
+  type = "scatter",
+  mode = "lines",
+  text = ~paste0(
+    estado, " | ", industry, "<br>", year_q,
+    "<br>income: ", scales::comma(round(income, 0)),
+    "<br>pressure: ", round(pressure_income, 3)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "LE income pressure (Cuadro 18) - marine-adjacent industries by state",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Pressure (0-1)", range = c(0, 1.05))
+  )
+
+plot_industry
+```
+
+### Combined LE marine pressure: Gulf pop-weighted vs unweighted
+
+```{r plot-le-gulf}
+plot_le_gulf <- plot_ly(pl_le_gulf, x = ~time) %>%
+  add_lines(
+    y = ~pressure_le_popwt,
+    name = "population-weighted",
+    text = ~paste0(year_q, "<br>pop-wt: ", round(pressure_le_popwt, 3)),
+    hoverinfo = "text"
+  ) %>%
+  add_lines(
+    y = ~pressure_le_unwt,
+    name = "unweighted (states equal)",
+    text = ~paste0(year_q, "<br>unwt: ", round(pressure_le_unwt, 3)),
+    hoverinfo = "text"
+  ) %>%
+  layout(
+    title = "Combined LE marine-adjacent pressure - GoC",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Pressure (0-1)", range = c(0, 1.05))
+  )
+
+plot_le_gulf
+```
+
+## 10. Other outputs (Cuadro 18 exploratory)
+
+Option B labor poverty is already written in section 5. Cuadro 18 remains exploratory; uncomment below if you want those intermediates on Mazu too.
+
+```{r save}
+# write_csv(pl_scaled, file.path(output_dir, "pl_state_poverty_pressure.csv"))
+# write_csv(pl_annual, file.path(output_dir, "pl_state_poverty_pressure_annual.csv"))
+# write_csv(pl_industry_scaled, file.path(output_dir, "pl_industry_income_pressure.csv"))
+# write_csv(pl_le_marine, file.path(output_dir, "pl_le_marine_pressure_by_state.csv"))
+# write_csv(pl_le_gulf, file.path(output_dir, "pl_le_marine_pressure_gulf.csv"))
+
+tibble(
+  file = c(
+    "poverty_laboral_pressure.csv",
+    "pl_state_poverty_pressure.csv",
+    "pl_state_poverty_pressure_annual.csv",
+    "pl_industry_income_pressure.csv",
+    "pl_le_marine_pressure_by_state.csv",
+    "pl_le_marine_pressure_gulf.csv"
+  ),
+  description = c(
+    "Pressure 1 - quarterly Cuadro 9 poverty % + 0-1 pressure, GoC states",
+    "Pressure 1 annualized - mean of quarterly pressures by state",
+    "Pressure 2 detail - Cuadro 18 income by industry + LE pressure (min→1, p90→0)",
+    "Pressure 2 by state - mean of marine-adjacent industry pressures",
+    "Pressure 2 Gulf - pop-weighted vs unweighted quarterly series"
+  ),
+  output_dir = output_dir
+) %>%
+  kable(caption = "Outputs (Option B already written; uncomment write_csv for Cuadro 18)")
+```
+
+## Next steps
+
+1. Re-knit and confirm Option B `poverty_laboral_pressure.csv` on Mazu and under `_pressures/social/output`.  
+2. Decide whether Cuadro 18 LE income stays as a second pressure or is dropped.  
+3. Optionally swap Option B for A or C later if the absolute scale feels too muted.
