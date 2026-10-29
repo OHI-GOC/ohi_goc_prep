@@ -67,7 +67,7 @@ How the scores are built:
 All pressures are on a 0 to 1 scale (higher means more pressure). For SS-average goals, both Safety and Security must be present. ENSU starts in 2018, and Regions 2, 3, and 5 often have no ENSU city, so those regions may be missing from SS averages. Biodiversity, clean waters, and habitat services use Safety whenever Safety exists.
 
 Intermediate files go to `/home/shares/ohi/OHI_GOC/goal_prep/ss/ss_int`.  
-Final files go to `/home/shares/ohi/OHI_GOC/goal_prep/ss/ss_output`.
+Final files go to `/home/shares/ohi/OHI_GOC/goal_prep/ss/ss_output`, and the same files are also written to `SS/v2025/int` in this repo.
 
 Upstream scripts:
 
@@ -110,6 +110,9 @@ library(scales) # axis helpers for plots
 # intermediate and final folders for the combined SS score
 ss_int <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/ss_int"
 ss_output <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/ss_output"
+# same final files, kept in this repo. here() starts at the project root,
+# so the path does not depend on who is running the script.
+ss_repo <- here::here("SS/v2025/int")
 
 # upstream safety and security products
 safety_output <- "/home/shares/ohi/OHI_GOC/goal_prep/ss/safety_output"
@@ -133,6 +136,7 @@ cs_security_path <- file.path(security_output, "cs_security.csv")
 # create output folders if missing (e.g. first run on a machine with the share mounted)
 if (!dir.exists(ss_int)) dir.create(ss_int, recursive = TRUE)
 if (!dir.exists(ss_output)) dir.create(ss_output, recursive = TRUE)
+if (!dir.exists(ss_repo)) dir.create(ss_repo, recursive = TRUE)
 ```
 
 ## 2. Read Safety pressure (comparative + historical subcomponents)
@@ -377,21 +381,33 @@ write_csv(
   ss_pressure,
   here::here(ss_output, "ss_pressure_full_join_2015_2025.csv")
 )
+write_csv(
+  ss_pressure,
+  file.path(ss_repo, "ss_pressure_full_join_2015_2025.csv")
+)
 
 write_csv(
   ss_pressure_complete,
   here::here(ss_output, "ss_pressure_safety_security_avg.csv")
+)
+write_csv(
+  ss_pressure_complete,
+  file.path(ss_repo, "ss_pressure_safety_security_avg.csv")
 )
 
 write_csv(
   ss_pressure_reported,
   here::here(ss_output, "ss_pressure_reported_by_goal_rule.csv")
 )
+write_csv(
+  ss_pressure_reported,
+  file.path(ss_repo, "ss_pressure_reported_by_goal_rule.csv")
+)
 ```
 
 ### 4a. Save per-goal pressure CSVs
 
-One CSV per OHI goal under `ss_output/selective_goal_specific_combinations/`.
+One CSV per OHI goal under `ss_output/selective_goal_specific_combinations/`, and the same CSV under `SS/v2025/int/selective_goal_specific_combinations/`.
 
 File names look like:
 
@@ -406,7 +422,12 @@ goal_csv_dir <- file.path(
   ss_output,
   "selective_goal_specific_combinations"
 )
+repo_goal_csv_dir <- file.path(
+  ss_repo,
+  "selective_goal_specific_combinations"
+)
 dir.create(goal_csv_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(repo_goal_csv_dir, recursive = TRUE, showWarnings = FALSE)
 
 pressure_file_date <- "101626"
 
@@ -427,18 +448,19 @@ for (g in goal_list_export) {
     dplyr::select(dplyr::any_of(goal_export_cols)) %>%
     dplyr::arrange(rgn_id, ano)
 
-  out_path <- file.path(
-    goal_csv_dir,
-    paste0("ss_pressure_", g, "_reported_", pressure_file_date, ".csv")
-  )
+  out_name <- paste0("ss_pressure_", g, "_reported_", pressure_file_date, ".csv")
+  out_path <- file.path(goal_csv_dir, out_name)
   readr::write_csv(df_goal, out_path)
+  readr::write_csv(df_goal, file.path(repo_goal_csv_dir, out_name))
 }
 
 message(
   "Wrote ",
   length(goal_list_export),
   " goal CSVs to ",
-  goal_csv_dir
+  goal_csv_dir,
+  " and ",
+  repo_goal_csv_dir
 )
 list.files(goal_csv_dir, pattern = paste0("_", pressure_file_date, "\\.csv$"))
 ```
@@ -519,10 +541,67 @@ write_csv(
   ss_summary_by_goal,
   here::here(ss_output, "ss_pressure_summary_by_goal.csv")
 )
+write_csv(
+  ss_summary_by_goal,
+  file.path(ss_repo, "ss_pressure_summary_by_goal.csv")
+)
 
 write_csv(
   ss_summary_overall,
   here::here(ss_output, "ss_pressure_summary_overall.csv")
+)
+write_csv(
+  ss_summary_overall,
+  file.path(ss_repo, "ss_pressure_summary_overall.csv")
+)
+```
+
+### 4c. Standard pressure tables
+
+Each file in `selective_goal_specific_combinations/` is rewritten with the
+columns used by the other pressure layers: `rgn_id`, `year`, and `pressure`.
+`year` is the source column `ano`. `pressure` is `reported_pressure`, rounded
+to two decimal places. For resource and social goals that is the mean of
+Safety and Security. For biodiversity, clean waters, and the habitat-service
+goals it is the Safety score.
+
+The tables are saved in `SS/v2025/output`.
+
+```{r}
+#| label: step_04c_standard_pressure_tables
+
+# Final pressure tables live in the repo output folder.
+pressure_out <- here::here("SS", "v2025", "output")
+dir.create(pressure_out, recursive = TRUE, showWarnings = FALSE)
+
+goal_files <- list.files(
+  goal_csv_dir,
+  pattern = paste0("_reported_", pressure_file_date, "\\.csv$"),
+  full.names = TRUE
+)
+
+for (path in goal_files) {
+  pressure_table <- read_csv(path, show_col_types = FALSE) %>%
+    transmute(
+      rgn_id,
+      year = as.integer(ano),
+      pressure = round(reported_pressure, 2)
+    ) %>%
+    arrange(year, rgn_id)
+
+  goal <- basename(path) %>%
+    str_remove("^ss_pressure_") %>%
+    str_remove(paste0("_reported_", pressure_file_date, "\\.csv$"))
+  out_name <- paste0("ss_", goal, "_pressure.csv")
+
+  write_csv(pressure_table, file.path(pressure_out, out_name))
+}
+
+message(
+  "Wrote ",
+  length(goal_files),
+  " standard pressure tables to ",
+  pressure_out
 )
 ```
 
@@ -826,9 +905,10 @@ p_ss_compare_list[["tourism_recreation"]]
 | `ss_output/ss_pressure_full_join_2015_2025.csv` | Full join, including flags for whether Security applies |
 | `ss_output/ss_pressure_safety_security_avg.csv` | SS average rows only (resource and social goals with both components) |
 | `ss_output/ss_pressure_reported_by_goal_rule.csv` | Main reported product: SS average or Safety only, depending on the goal |
-| `ss_output/selective_goal_specific_combinations/ss_pressure_*_reported_101626.csv` | One reported-pressure CSV per OHI goal |
+| `ss_output/selective_goal_specific_combinations/ss_pressure_*_reported_101626.csv` | One reported-pressure CSV per OHI goal. The same file is written to `SS/v2025/int/selective_goal_specific_combinations/`. |
 | `ss_output/ss_pressure_summary_by_goal.csv` | Summary of reported pressure by goal |
 | `ss_output/ss_pressure_summary_overall.csv` | Summary stats for Safety, Security, and SS layers |
+| `SS/v2025/output/ss_*_pressure.csv` | `rgn_id`, `year`, `pressure` from `reported_pressure`, rounded to 2 decimals |
 
 Main scoring rules:
 
