@@ -1,0 +1,1095 @@
+---
+title: 'OHI GoC 2025: Corruption (ENSU June / December)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+    include-in-header: '../../../src/templates/ohi_hdr.html'
+  pdf:
+    toc: true
+editor: 
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: console
+---
+
+# Safety and Security: ENSU corruption in contact with authorities
+
+# Summary
+
+### Background
+
+This script estimates **experiences of corruption during direct contact with public safety authorities** using the National Survey of Urban Public Security (ENSU) for cities in the six states that border or fringe the Gulf of California: Baja California, Baja California Sur, Sonora, Sinaloa, Nayarit, and Jalisco.
+
+It mirrors the city and region workflow in `ensu_security.qmd`, but uses **June (Q2) and December (Q4)** person tables (`ENSU_CB_*`) where the corruption module is asked. March survey rounds do **not** carry these items.
+
+Where to download: [INEGI ENSU](https://www.inegi.org.mx/programas/ensu/)
+
+### Why June / December (not March)
+
+INEGI asks the corruption block only in trimesters II and IV. Published bulletins report:
+
+1. Share of adults 18+ who had contact with public-safety authorities in the last six months
+2. Of those, the share who experienced at least one act of corruption
+
+Reference window of corruption: **last six months** before the interview (January–June from the June round; July–December from the December round).
+
+Modern mnemonics `BP3_3`–`BP3_6` appear from **June 2019** onward in these microdata.  Years 2016-2018 June/December lack that block.  Older 2014-2015 `P3_*` names are a different questionnaire layout and are **not** remapped here.  June 2020 is often missing from local archives; December 2020 is used when present.
+
+### Variables used
+
+#### Corruption from public safety officers
+
+| Code | Question (last six months) |
+|---|---|
+| `BP3_5` | Contact with traffic, municipal, state police or other public-safety authorities for transit incidents, infractions, fights, moral or administrative offenses? |
+| `BP3_6` | Did that authority ask for money, a gift, or a favor to speed things up, approve something, or avoid a fine / arrest? |
+
+| Code | Meaning |
+|---|---|
+| `1` | sí |
+| `2` | no |
+| `9` | no sabe / no responde (dropped from percents) |
+| blank | not asked (no contact on the filter question) |
+
+**Three rates** (all `FAC_SEL`-weighted):
+
+1. **`pct_contact`**: share with `BP3_5 = 1` among clear sí/no on `BP3_5`
+2. **`pct_corrupt_among_contact`**: among people with contact and a clear `BP3_6`, share with `BP3_6 = 1` (INEGI headline)
+3. **`pct_corrupt_population`**: share with `BP3_6 = 1` among all adults with clear `BP3_5` (population prevalence; people with no contact count as not experiencing this corruption)
+
+#### Broader trámites corruption 
+
+| Code | Question (last six months) |
+|---|---|
+| `BP3_3` | Did you do a trámite, payment, or service request with a public employee? |
+| `BP3_4` | Did that employee ask for money, a gift, or a favor? |
+
+Same coding rules; rates named `pct_tramite_contact`, `pct_tramite_corrupt_among`, `pct_tramite_corrupt_population`.
+
+### Data layout and paths
+
+Primary table: `ENSU_CB_*` (selected person).
+
+Raw data are read from the first existing path among:
+
+1. `/home/shares/ohi/OHI_GOC/_raw_data/inegi_crime/d2025/ENSU`
+2. `ENSU/` or `ENSU_unzipped/` under the project root (`here::here`)
+3. common local copies (`ss_brainstorming/ENSU_unzipped`, `SS_security/ENSU`) when present
+
+Intermediate outputs go to `goal_prep/ss/corruption_int` (server under `/home/shares/ohi/OHI_GOC/...` when available).
+
+Final outputs go to `goal_prep/ss/corruption_output`.
+
+OHI GoC regions use `municipality_to_rgnid_update.csv` the same way as `ensu_security.qmd`.
+
+# Setup
+
+
+```{r}
+# install librarian if it is missing
+if (!require(librarian)) {
+  install.packages("librarian")
+  library(librarian)
+}
+
+# load project packages through librarian
+librarian::shelf(
+  tidyverse,
+  here,
+  ggplot2,
+  readr,
+  stringr,
+  stringi,
+  lubridate,
+  janitor,
+  scales,
+  purrr,
+  foreign
+)
+
+# raw ensu root on the shared server
+path_ensu <- "/home/shares/ohi/OHI_GOC/_raw_data/inegi_crime/d2025/ENSU_unzipped"
+
+# candidate intermediate folders
+path_int_candidates <- c(
+  "/home/shares/ohi/OHI_GOC/goal_prep/ss/corruption_int",
+  here::here("goal_prep", "ss", "corruption_int")
+)
+
+# candidate output folders
+path_out_candidates <- c(
+  "/home/shares/ohi/OHI_GOC/goal_prep/ss/corruption_output",
+  here::here("goal_prep", "ss", "corruption_output")
+)
+
+# default to local intermediate path
+path_int <- path_int_candidates[[2]]
+
+# prefer server intermediate path when the ohi shares tree exists
+if (dir.exists("/home/shares/ohi/OHI_GOC") || dir.exists(path_int_candidates[[1]])) {
+  path_int <- path_int_candidates[[1]]
+}
+
+# default to local output path
+path_out <- path_out_candidates[[2]]
+
+# prefer server output path when the ohi shares tree exists
+if (dir.exists("/home/shares/ohi/OHI_GOC") || dir.exists(path_out_candidates[[1]])) {
+  path_out <- path_out_candidates[[1]]
+}
+
+# create folders
+dir.create(path_int, recursive = TRUE, showWarnings = FALSE)
+dir.create(path_out, recursive = TRUE, showWarnings = FALSE)
+
+# print which paths are in use
+message("using raw ensu path: ", path_ensu)
+message("using intermediate path: ", path_int)
+message("using output path: ", path_out)
+
+# municipality-to-region lookup (server, project, security folder, SS_security)
+path_mun_rgn_candidates <- c(
+  "/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid_update.csv",
+  here::here("municipality_to_rgnid_update.csv"),
+  here::here("security", "municipality_to_rgnid_update.csv"),
+  "/Users/manos/Downloads/SS/v2025/security/municipality_to_rgnid_update.csv",
+  "/Users/manos/Documents/Cursor/SS_security/municipality_to_rgnid_update.csv"
+)
+
+path_mun_rgn_existing <- path_mun_rgn_candidates[file.exists(path_mun_rgn_candidates)]
+
+if (length(path_mun_rgn_existing) == 0) {
+  stop("municipality_to_rgnid_update.csv not found on server or next to this script.")
+}
+
+path_mun_rgn <- path_mun_rgn_existing[[1]]
+message("using municipality-to-region file: ", path_mun_rgn)
+
+# readable names for each OHI GoC region
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+# colors for each OHI GoC region
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+# ordered region ids
+region_levels <- paste0("Region_", 1:9)
+
+# same colors, but named by the readable region labels for plots
+rgn_label_colors <- setNames(unname(rgn_colors[region_levels]), unname(rgn_labels[region_levels]))
+
+# state codes for the six gulf adjacent states
+goc_state_codes <- c(
+  "02", # baja california
+  "03", # baja california sur
+  "14", # jalisco
+  "18", # nayarit
+  "25", # sinaloa
+  "26"  # sonora
+)
+
+# ENSU cities we care about, with the municipality code used to look up the region
+goc_city_meta <- tibble::tribble(
+  ~cve_ent, ~cd, ~cve_mun, ~nom_cd, ~gulf_relevance,
+  "03", "04", "003", "LA PAZ", "goc",
+  "03", "55", "008", "LOS CABOS", "goc",
+  "25", "42", "001", "LOS MOCHIS", "goc",
+  "26", "94", "018", "CIUDAD OBREGON", "goc",
+  "26", "43", "030", "HERMOSILLO", "goc",
+  "25", "40", "006", "CULIACAN ROSALES", "goc",
+  "25", "41", "012", "MAZATLAN", "goc",
+  "14", "25", "067", "PUERTO VALLARTA", "goc",
+  "18", "33", "017", "TEPIC", "goc",
+  "02", "02", "002", "MEXICALI", "border not goc",
+  "26", "44", "043", "NOGALES", "border sonora not goc"
+)
+
+# read the municipality-to-region file
+mun_rgn <- readr::read_csv(path_mun_rgn, show_col_types = FALSE, locale = readr::locale(encoding = "UTF-8")) %>%
+  janitor::clean_names() %>%
+  dplyr::mutate(
+    cve_ent = stringr::str_pad(as.character(e03), width = 2, pad = "0"),
+    cve_mun = stringr::str_pad(as.character(e04), width = 3, pad = "0"),
+    rgn_id = dplyr::na_if(as.character(rgn_id), "NA")
+  ) %>%
+  dplyr::select(cve_ent, cve_mun, rgn_id, both_pacific_gulf, directly_coastal) %>%
+  dplyr::distinct(cve_ent, cve_mun, .keep_all = TRUE)
+
+# add the region id to each ENSU city using its municipality
+goc_city_meta <- goc_city_meta %>%
+  dplyr::left_join(mun_rgn %>% dplyr::select(cve_ent, cve_mun, rgn_id), by = c("cve_ent", "cve_mun")) %>%
+  dplyr::mutate(
+    rgn_id = factor(rgn_id, levels = region_levels),
+    rgn_label = unname(rgn_labels[as.character(rgn_id)]),
+    rgn_label = factor(rgn_label, levels = unname(rgn_labels[region_levels]))
+  )
+
+print(
+  goc_city_meta %>%
+    dplyr::select(cve_ent, cd, cve_mun, nom_cd, gulf_relevance, rgn_id, rgn_label)
+)
+
+# 2014 to 2015 used different city codes than later years
+cd_legacy_2014_2015 <- tibble::tribble(
+  ~cve_ent, ~cd_legacy, ~cd, ~nom_cd_legacy,
+  "02", "21", "03", "TIJUANA",
+  "03", "40", "04", "LA PAZ",
+  "14", "02", "59", "GUADALAJARA",
+  "18", "27", "33", "TEPIC",
+  "25", "24", "40", "CULIACAN ROSALES",
+  "26", "25", "43", "HERMOSILLO"
+)
+```
+
+
+### Discover June and December microdata
+
+Accepted names include `ENSU_CB_0625.csv`, `ENSU_CB_1224.csv`, `ENSU_CB_0619.dbf`, and older spellings such as `ENSU_CB0616.dbf`.
+
+```{r}
+# find june/december cb files in csv or dbf form under the ensu root
+sem_cb_files <- list.files(
+  path = path_ensu,
+  pattern = "^ENSU_CB_?(06|12)[0-9]{2}\\.(csv|dbf)$",
+  full.names = TRUE,
+  recursive = TRUE,
+  ignore.case = TRUE
+)
+
+# stop if nothing was found
+if (length(sem_cb_files) == 0) {
+  stop("no june/december ensu_cb csv/dbf files found under ", path_ensu)
+}
+
+# build an inventory tibble from discovered files
+sem_inventory <- tibble::tibble(
+  path = sem_cb_files
+) %>%
+  dplyr::mutate(
+    base = basename(path),
+    mm = as.integer(stringr::str_match(base, "(?i)ENSU_CB_?(06|12)([0-9]{2})")[, 2]),
+    yy = stringr::str_match(base, "(?i)ENSU_CB_?(06|12)([0-9]{2})")[, 3],
+    year = dplyr::if_else(as.integer(yy) >= 90L, 1900L + as.integer(yy), 2000L + as.integer(yy)),
+    month = mm,
+    semester = dplyr::if_else(month == 6L, "I", "II"),
+    period = paste0(year, "-", semester),
+    period_date = as.Date(paste(year, month, "15", sep = "-")),
+    file = base,
+    format = tolower(tools::file_ext(path)),
+    # prefer cleaner paths (skip Finder " 2" duplicates and nested *.zip/ folders)
+    path_score = as.integer(!stringr::str_detect(path, " 2|\\.zip/"))
+  ) %>%
+  # prefer csv over dbf; prefer non-duplicate paths
+  dplyr::arrange(year, month, dplyr::desc(format == "csv"), dplyr::desc(path_score), path) %>%
+  dplyr::distinct(year, month, .keep_all = TRUE) %>%
+  dplyr::mutate(
+    note = dplyr::case_when(
+      year < 2019L ~ "pre-2019: modern BP3_3-BP3_6 usually absent",
+      year == 2020L & month == 6L ~ "june 2020 often missing in local archives",
+      TRUE ~ NA_character_
+    )
+  )
+
+print(sem_inventory)
+
+# readr::write_csv(sem_inventory, file.path(path_int, "ensu_sem_file_inventory.csv"))
+```
+
+## Load and clean June / December person tables
+
+The loader:
+
+1. Reads CSV or DBF
+2. Renames `ENT` / `MUN` to `CVE_ENT` / `CVE_MUN` when needed
+3. Ensures `BP3_3`–`BP3_6` exist (empty if the round lacks the module)
+4. Pads state and city codes
+5. Converts 2014–2015 city codes and Guadalajara `CD` 24 when those years appear
+6. Fills missing city names from newer files
+7. Keeps GoC-adjacent states and rounds from **2019 onward** (when the modern corruption block exists)
+
+```{r}
+# helper: read one ensu table from csv or dbf as character columns
+read_ensu_file <- function(path) {
+  ext <- tolower(tools::file_ext(path))
+  if (ext == "csv") {
+    out <- readr::read_csv(path, col_types = readr::cols(.default = "c"), show_col_types = FALSE)
+    return(out)
+  }
+  if (ext == "dbf") {
+    out <- foreign::read.dbf(path, as.is = TRUE)
+    out[] <- lapply(out, function(col) as.character(col))
+    return(tibble::as_tibble(out))
+  }
+  stop("unsupported ensu file type: ", path)
+}
+
+# helper: clean one june/december file so columns match later years
+harmonize_ensu_sem_cb <- function(path, year, month) {
+  raw <- read_ensu_file(path)
+  raw <- janitor::clean_names(raw)
+
+  # rename older weight column factor to fac_sel when needed
+  if (!("fac_sel" %in% names(raw)) && ("factor" %in% names(raw))) {
+    raw$fac_sel <- raw$factor
+  }
+  # rename older state / municipality codes
+  if ("ent" %in% names(raw) && !("cve_ent" %in% names(raw))) {
+    raw <- dplyr::rename(raw, cve_ent = ent)
+  }
+  if ("mun" %in% names(raw) && !("cve_mun" %in% names(raw))) {
+    raw <- dplyr::rename(raw, cve_mun = mun)
+  }
+
+  # ensure identity columns exist
+  for (nm in c("cve_ent", "cd", "nom_ent", "nom_cd", "cve_mun", "nom_mun", "fac_sel", "per")) {
+    if (!(nm %in% names(raw))) raw[[nm]] <- NA_character_
+  }
+
+  # ensure corruption / tramite columns exist (do NOT remap 2014-2015 P3_*)
+  for (nm in c("bp3_3", "bp3_4", "bp3_5", "bp3_6")) {
+    if (!(nm %in% names(raw))) raw[[nm]] <- NA_character_
+  }
+
+  keep_cols <- c(
+    "cve_ent", "nom_ent", "cve_mun", "nom_mun",
+    "cd", "nom_cd", "per",
+    "sexo", "edad",
+    "bp3_3", "bp3_4", "bp3_5", "bp3_6",
+    "fac_sel", "fac_viv",
+    "upm", "upm_dis", "est_dis", "dominio"
+  )
+  keep_cols <- intersect(keep_cols, names(raw))
+  out <- dplyr::select(raw, dplyr::all_of(keep_cols))
+
+  out$year <- year
+  out$month <- month
+  out$semester <- dplyr::if_else(month == 6L, "I", "II")
+  out$period <- paste0(year, "-", out$semester)
+  out$period_date <- as.Date(paste(year, month, "15", sep = "-"))
+  out$source_file <- basename(path)
+
+  out$cve_ent <- stringr::str_pad(stringr::str_trim(out$cve_ent), width = 2, pad = "0")
+  out$cd <- stringr::str_pad(stringr::str_trim(out$cd), width = 2, pad = "0")
+  out$nom_ent <- stringi::stri_trans_general(
+    stringr::str_to_upper(stringr::str_squish(out$nom_ent)),
+    "Latin-ASCII"
+  )
+  out$nom_cd <- stringi::stri_trans_general(
+    stringr::str_to_upper(stringr::str_squish(out$nom_cd)),
+    "Latin-ASCII"
+  )
+  out$nom_cd <- dplyr::if_else(out$nom_cd == "CULIACAN", "CULIACAN ROSALES", out$nom_cd)
+  out
+}
+
+# read and clean every june/december round
+sem_list <- purrr::pmap(
+  list(sem_inventory$path, sem_inventory$year, sem_inventory$month),
+  function(path, year, month) {
+    message("reading ensu cb for ", year, "-", sprintf("%02d", month), " (", basename(path), ")")
+    harmonize_ensu_sem_cb(path, year, month)
+  }
+)
+
+ensu_sem_all <- dplyr::bind_rows(sem_list)
+
+# convert 2014 to 2015 city codes / Guadalajara CD 24 if those rounds appear
+ensu_sem_all <- ensu_sem_all %>%
+  dplyr::mutate(cd_raw = cd) %>%
+  dplyr::left_join(
+    cd_legacy_2014_2015 %>% dplyr::select(cve_ent, cd_legacy, cd_modern = cd),
+    by = c("cve_ent", "cd_raw" = "cd_legacy")
+  ) %>%
+  dplyr::mutate(
+    cd = dplyr::if_else(year %in% c(2014L, 2015L) & !is.na(cd_modern), cd_modern, cd),
+    cd = dplyr::if_else(cve_ent == "14" & cd == "24", "59", cd)
+  ) %>%
+  dplyr::select(-cd_modern)
+
+# city-code to city-name lookup from rows that already have names
+cd_catalog <- ensu_sem_all %>%
+  dplyr::filter(!is.na(cd), cd != "", !is.na(nom_cd), nom_cd != "") %>%
+  dplyr::count(cd, nom_cd, year, name = "n") %>%
+  dplyr::group_by(cd) %>%
+  dplyr::arrange(dplyr::desc(year), dplyr::desc(n), .by_group = TRUE) %>%
+  dplyr::slice(1) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(cd, nom_cd_std = nom_cd)
+
+cd_catalog <- cd_catalog %>%
+  dplyr::left_join(goc_city_meta %>% dplyr::select(cd, nom_cd_meta = nom_cd), by = "cd") %>%
+  dplyr::mutate(nom_cd_std = dplyr::coalesce(nom_cd_meta, nom_cd_std)) %>%
+  dplyr::select(cd, nom_cd_std)
+
+ensu_sem_all <- ensu_sem_all %>%
+  dplyr::left_join(cd_catalog, by = "cd") %>%
+  dplyr::mutate(nom_cd = dplyr::if_else(is.na(nom_cd) | nom_cd == "", nom_cd_std, nom_cd)) %>%
+  dplyr::select(-nom_cd_std)
+
+state_catalog <- tibble::tribble(
+  ~cve_ent, ~nom_ent_std,
+  "02", "BAJA CALIFORNIA",
+  "03", "BAJA CALIFORNIA SUR",
+  "14", "JALISCO",
+  "18", "NAYARIT",
+  "25", "SINALOA",
+  "26", "SONORA"
+)
+
+ensu_sem_all <- ensu_sem_all %>%
+  dplyr::left_join(state_catalog, by = "cve_ent") %>%
+  dplyr::mutate(nom_ent = dplyr::coalesce(dplyr::na_if(nom_ent, ""), nom_ent_std)) %>%
+  dplyr::select(-nom_ent_std)
+
+# keep gulf-adjacent states and modern corruption years
+ensu_sem_goc <- ensu_sem_all %>%
+  dplyr::filter(cve_ent %in% goc_state_codes) %>%
+  dplyr::filter(year >= 2019L) %>%
+  # drop rounds with no usable BP3_5 answers (module absent)
+  dplyr::group_by(year, month) %>%
+  dplyr::filter(any(bp3_5 %in% c("1", "2"), na.rm = TRUE)) %>%
+  dplyr::ungroup()
+
+readr::write_csv(ensu_sem_goc, file.path(path_int, "ensu_sem_goc_persons.csv"))
+
+ensu_sem_goc %>%
+  dplyr::count(year, month, semester, period, name = "n_selected_adults") %>%
+  print()
+```
+
+### City coverage by semester
+
+```{r}
+city_period_coverage <- ensu_sem_goc %>%
+  dplyr::filter(!is.na(cd), cd != "") %>%
+  dplyr::count(year, month, semester, period, period_date, cve_ent, nom_ent, cd, nom_cd, name = "n") %>%
+  dplyr::left_join(
+    goc_city_meta %>% dplyr::select(cve_ent, cd, gulf_relevance, rgn_id, rgn_label),
+    by = c("cve_ent", "cd")
+  ) %>%
+  dplyr::arrange(nom_ent, cd, period_date)
+unique(city_period_coverage$rgn_id)
+
+# readr::write_csv(city_period_coverage, file.path(path_int, "ensu_sem_goc_city_period_coverage.csv"))
+
+city_period_wide <- city_period_coverage %>%
+  dplyr::select(nom_ent, cd, nom_cd, gulf_relevance, rgn_id, rgn_label, period, n) %>%
+  tidyr::pivot_wider(names_from = period, values_from = n)
+
+# readr::write_csv(city_period_wide, file.path(path_out, "ensu_sem_goc_city_period_presence.csv"))
+print(city_period_wide)
+```
+
+# Indicator 1: public-safety contact and corruption (`BP3_5` / `BP3_6`)
+
+```{r}
+# helper: weighted rates for a contact/corruption pair at city x period
+summarise_corrupt_city <- function(df, contact_col, corrupt_col) {
+  df %>%
+    dplyr::mutate(
+      fac_sel = as.numeric(fac_sel),
+      contact = as.integer(.data[[contact_col]]),
+      corrupt = as.integer(.data[[corrupt_col]])
+    ) %>%
+    dplyr::filter(!is.na(fac_sel), fac_sel > 0) %>%
+    dplyr::group_by(year, month, semester, period, period_date, cve_ent, nom_ent, cd, nom_cd) %>%
+    dplyr::summarise(
+      n_adults = dplyr::n(),
+      wt_adults = sum(fac_sel, na.rm = TRUE),
+      # contact among clear sí/no
+      n_contact_denom = sum(contact %in% c(1L, 2L), na.rm = TRUE),
+      wt_contact_denom = sum(fac_sel[contact %in% c(1L, 2L)], na.rm = TRUE),
+      wt_contact = sum(fac_sel[contact == 1L], na.rm = TRUE),
+      pct_contact = dplyr::if_else(
+        wt_contact_denom > 0,
+        100 * wt_contact / wt_contact_denom,
+        NA_real_
+      ),
+      # corruption among contacts with clear corrupt answer
+      n_among_denom = sum(contact == 1L & corrupt %in% c(1L, 2L), na.rm = TRUE),
+      wt_among_denom = sum(fac_sel[contact == 1L & corrupt %in% c(1L, 2L)], na.rm = TRUE),
+      wt_corrupt_among = sum(fac_sel[contact == 1L & corrupt == 1L], na.rm = TRUE),
+      pct_corrupt_among_contact = dplyr::if_else(
+        wt_among_denom > 0,
+        100 * wt_corrupt_among / wt_among_denom,
+        NA_real_
+      ),
+      # population prevalence: corrupt yes over adults with clear contact answer
+      wt_corrupt_pop = sum(fac_sel[corrupt == 1L], na.rm = TRUE),
+      pct_corrupt_population = dplyr::if_else(
+        wt_contact_denom > 0,
+        100 * wt_corrupt_pop / wt_contact_denom,
+        NA_real_
+      ),
+      .groups = "drop"
+    ) %>%
+    dplyr::left_join(
+      goc_city_meta %>% dplyr::select(cve_ent, cd, gulf_relevance, rgn_id, rgn_label),
+      by = c("cve_ent", "cd")
+    ) %>%
+    dplyr::arrange(nom_ent, cd, period_date)
+}
+
+bp3_56_city <- summarise_corrupt_city(
+  ensu_sem_goc,
+  contact_col = "bp3_5",
+  corrupt_col = "bp3_6"
+)
+
+# readr::write_csv(bp3_56_city, file.path(path_int, "ensu_sem_bp3_5_6_city_period.csv"))
+# readr::write_csv(bp3_56_city, file.path(path_out, "ensu_sem_public_safety_corruption_city_period.csv"))
+print(bp3_56_city)
+```
+
+### Plot public-safety corruption over semesters
+
+```{r}
+p_corrupt_among <- ggplot(
+  data = bp3_56_city,
+  mapping = aes(x = period_date, y = pct_corrupt_among_contact, color = nom_cd, group = cd)
+) +
+  geom_line(linewidth = 0.6, alpha = 0.9) +
+  geom_point(size = 1.8) +
+  facet_wrap(~ nom_ent, scales = "free_y") +
+  labs(
+    title = "ENSU (June/December): corruption among adults with public-safety contact",
+    subtitle = "Weighted with FAC_SEL; BP3_6 = 1 among BP3_5 = 1 with clear answers",
+    x = "Semester (June = I, December = II)",
+    y = "Percent corrupt among contact",
+    color = "City"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_x_date(date_labels = "%Y-%m")
+
+print(p_corrupt_among)
+
+ggsave(
+  filename = file.path(path_out, "ensu_sem_pct_corrupt_among_contact_by_city.png"),
+  plot = p_corrupt_among,
+  width = 12,
+  height = 8,
+  dpi = 150
+)
+
+p_corrupt_among_rgn <- ggplot(
+  data = bp3_56_city,
+  mapping = aes(
+    x = period_date,
+    y = pct_corrupt_among_contact,
+    color = dplyr::coalesce(as.character(rgn_label), "Unassigned"),
+    group = cd
+  )
+) +
+  geom_line(linewidth = 0.6, alpha = 0.9) +
+  geom_point(size = 1.8) +
+  facet_wrap(~ nom_ent, scales = "free_y") +
+  labs(
+    title = "ENSU (June/December): corruption among public-safety contacts",
+    subtitle = "Same city series, colored by OHI GoC region",
+    x = "Semester",
+    y = "Percent corrupt among contact",
+    color = "Region"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_x_date(date_labels = "%Y-%m") +
+  scale_color_manual(
+    values = c(rgn_label_colors, "Unassigned" = "grey50"),
+    breaks = c(unname(rgn_labels[region_levels]), "Unassigned")
+  )
+
+print(p_corrupt_among_rgn)
+
+ggsave(
+  filename = file.path(path_out, "ensu_sem_pct_corrupt_among_contact_by_city_rgn_color.png"),
+  plot = p_corrupt_among_rgn,
+  width = 12,
+  height = 8,
+  dpi = 150
+)
+
+p_contact <- ggplot(
+  data = bp3_56_city,
+  mapping = aes(x = period_date, y = pct_contact, color = nom_cd, group = cd)
+) +
+  geom_line(linewidth = 0.6, alpha = 0.9) +
+  geom_point(size = 1.8) +
+  facet_wrap(~ nom_ent, scales = "free_y") +
+  labs(
+    title = "ENSU (June/December): contact with public-safety authorities",
+    subtitle = "Weighted share with BP3_5 = 1 among clear answers",
+    x = "Semester",
+    y = "Percent with contact",
+    color = "City"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_x_date(date_labels = "%Y-%m")
+
+print(p_contact)
+
+ggsave(
+  filename = file.path(path_out, "ensu_sem_pct_contact_by_city.png"),
+  plot = p_contact,
+  width = 12,
+  height = 8,
+  dpi = 150
+)
+```
+
+### GoC cities only (excludes border comparison cities)
+
+Primary pressure uses the INEGI headline (corruption among contacts) on a 0–1 scale:
+
+\[
+\text{pressure} = \frac{\%\ \text{corrupt among contact}}{100}
+\]
+
+```{r}
+bp3_56_gulf_focus <- bp3_56_city %>%
+  dplyr::filter(gulf_relevance == "goc") %>%
+  dplyr::mutate(
+    current_status = 100 - pct_corrupt_among_contact,
+    pressure = pct_corrupt_among_contact / 100,
+    pressure_population = pct_corrupt_population / 100
+  )
+
+readr::write_csv(
+  bp3_56_gulf_focus,
+  file.path(path_out, "ensu_sem_public_safety_corruption_gulf_focus_city_period.csv")
+)
+
+if (nrow(bp3_56_gulf_focus) > 0) {
+  p_focus <- ggplot(
+    data = bp3_56_gulf_focus,
+    mapping = aes(
+      x = period_date,
+      y = pressure,
+      color = rgn_label,
+      linetype = nom_cd,
+      group = cd
+    )
+  ) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2) +
+    labs(
+      title = "ENSU June/December: corruption pressure in gulf focus cities",
+      subtitle = "Pressure = pct_corrupt_among_contact / 100 (0 = best, 1 = worst)",
+      x = "Semester",
+      y = "Corruption pressure",
+      color = "Region",
+      linetype = "City"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "bottom") +
+    scale_y_continuous(limits = c(0, 1)) +
+    scale_x_date(date_labels = "%Y-%m") +
+    scale_color_manual(values = rgn_label_colors, drop = FALSE)
+
+  print(p_focus)
+
+  ggsave(
+    filename = file.path(path_out, "ensu_sem_corruption_pressure_gulf_focus.png"),
+    plot = p_focus,
+    width = 10,
+    height = 6,
+    dpi = 150
+  )
+
+  p_focus_rgn <- ggplot(
+    data = bp3_56_gulf_focus %>% dplyr::filter(!is.na(rgn_id)),
+    mapping = aes(x = period_date, y = pressure, color = rgn_label, group = cd)
+  ) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2) +
+    facet_wrap(~ rgn_label, scales = "free_y") +
+    labs(
+      title = "ENSU June/December: corruption pressure by OHI GoC region",
+      subtitle = "Each line is an ENSU city; pressure = pct_corrupt_among_contact / 100",
+      x = "Semester",
+      y = "Corruption pressure",
+      color = "Region"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+    scale_y_continuous(limits = c(0, 1)) +
+    scale_x_date(date_labels = "%Y-%m") +
+    scale_color_manual(values = rgn_label_colors, drop = FALSE)
+
+  print(p_focus_rgn)
+
+  ggsave(
+    filename = file.path(path_out, "ensu_sem_corruption_pressure_by_rgn.png"),
+    plot = p_focus_rgn,
+    width = 11,
+    height = 7,
+    dpi = 150
+  )
+}
+```
+
+# Indicator 2: trámites corruption (`BP3_3` / `BP3_4`)
+
+Companion module for bribery during government trámites / payments / service requests (not limited to police).
+
+```{r}
+bp3_34_city <- summarise_corrupt_city(
+  ensu_sem_goc,
+  contact_col = "bp3_3",
+  corrupt_col = "bp3_4"
+) %>%
+  dplyr::rename(
+    pct_tramite_contact = pct_contact,
+    pct_tramite_corrupt_among = pct_corrupt_among_contact,
+    pct_tramite_corrupt_population = pct_corrupt_population
+  )
+
+readr::write_csv(bp3_34_city, file.path(path_int, "ensu_sem_bp3_3_4_city_period.csv"))
+readr::write_csv(bp3_34_city, file.path(path_out, "ensu_sem_tramite_corruption_city_period.csv"))
+print(bp3_34_city)
+```
+
+## Region totals (weighted from people, not city averages)
+
+```{r}
+# helper: region-pooled rates for a contact/corruption pair
+summarise_corrupt_rgn <- function(df, contact_col, corrupt_col) {
+  persons <- df %>%
+    dplyr::mutate(
+      fac_sel = as.numeric(fac_sel),
+      contact = as.integer(.data[[contact_col]]),
+      corrupt = as.integer(.data[[corrupt_col]])
+    ) %>%
+    dplyr::filter(!is.na(fac_sel), fac_sel > 0) %>%
+    dplyr::left_join(
+      goc_city_meta %>% dplyr::select(cve_ent, cd, rgn_id, rgn_label),
+      by = c("cve_ent", "cd")
+    ) %>%
+    dplyr::filter(!is.na(rgn_id))
+
+  persons %>%
+    dplyr::group_by(year, month, semester, period, period_date, rgn_id, rgn_label) %>%
+    dplyr::summarise(
+      n_cities = dplyr::n_distinct(cd),
+      n_adults = dplyr::n(),
+      wt_adults = sum(fac_sel, na.rm = TRUE),
+      wt_contact_denom = sum(fac_sel[contact %in% c(1L, 2L)], na.rm = TRUE),
+      wt_contact = sum(fac_sel[contact == 1L], na.rm = TRUE),
+      pct_contact = dplyr::if_else(wt_contact_denom > 0, 100 * wt_contact / wt_contact_denom, NA_real_),
+      wt_among_denom = sum(fac_sel[contact == 1L & corrupt %in% c(1L, 2L)], na.rm = TRUE),
+      wt_corrupt_among = sum(fac_sel[contact == 1L & corrupt == 1L], na.rm = TRUE),
+      pct_corrupt_among_contact = dplyr::if_else(
+        wt_among_denom > 0,
+        100 * wt_corrupt_among / wt_among_denom,
+        NA_real_
+      ),
+      wt_corrupt_pop = sum(fac_sel[corrupt == 1L], na.rm = TRUE),
+      pct_corrupt_population = dplyr::if_else(
+        wt_contact_denom > 0,
+        100 * wt_corrupt_pop / wt_contact_denom,
+        NA_real_
+      ),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(rgn_id, period_date)
+}
+
+bp3_56_rgn <- summarise_corrupt_rgn(ensu_sem_goc, "bp3_5", "bp3_6")
+bp3_34_rgn <- summarise_corrupt_rgn(ensu_sem_goc, "bp3_3", "bp3_4") %>%
+  dplyr::rename(
+    pct_tramite_contact = pct_contact,
+    pct_tramite_corrupt_among = pct_corrupt_among_contact,
+    pct_tramite_corrupt_population = pct_corrupt_population
+  )
+
+readr::write_csv(bp3_56_rgn, file.path(path_int, "ensu_sem_bp3_5_6_rgn_period.csv"))
+readr::write_csv(bp3_56_rgn, file.path(path_out, "ensu_sem_public_safety_corruption_rgn_period.csv"))
+readr::write_csv(bp3_34_rgn, file.path(path_out, "ensu_sem_tramite_corruption_rgn_period.csv"))
+
+p_rgn_agg <- ggplot(
+  data = bp3_56_rgn,
+  mapping = aes(x = period_date, y = pct_corrupt_among_contact, color = rgn_label, group = rgn_id)
+) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  labs(
+    title = "ENSU June/December: corruption among public-safety contacts by OHI GoC region",
+    subtitle = "Survey-weighted total across ENSU cities in each region",
+    x = "Semester",
+    y = "Percent corrupt among contact",
+    color = "Region"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_x_date(date_labels = "%Y-%m") +
+  scale_color_manual(values = rgn_label_colors, drop = FALSE)
+
+print(p_rgn_agg)
+
+ggsave(
+  filename = file.path(path_out, "ensu_sem_pct_corrupt_among_contact_rgn_aggregate.png"),
+  plot = p_rgn_agg,
+  width = 10,
+  height = 6,
+  dpi = 150
+)
+
+print(bp3_56_rgn)
+```
+
+## Latest semester snapshot (city and region)
+
+```{r}
+latest_period_date <- max(bp3_56_city$period_date, na.rm = TRUE)
+latest_period <- bp3_56_city %>%
+  dplyr::filter(period_date == latest_period_date) %>%
+  dplyr::pull(period) %>%
+  unique()
+
+latest_snapshot_city <- bp3_56_city %>%
+  dplyr::filter(period_date == latest_period_date) %>%
+  dplyr::select(
+    period, year, month, semester, nom_ent, cd, nom_cd, gulf_relevance, rgn_id, rgn_label,
+    n_adults, pct_contact, pct_corrupt_among_contact, pct_corrupt_population
+  ) %>%
+  dplyr::left_join(
+    bp3_34_city %>%
+      dplyr::select(
+        period, cd,
+        pct_tramite_contact, pct_tramite_corrupt_among, pct_tramite_corrupt_population
+      ),
+    by = c("period", "cd")
+  ) %>%
+  dplyr::arrange(rgn_id, nom_cd)
+
+latest_snapshot_rgn <- bp3_56_rgn %>%
+  dplyr::filter(period_date == latest_period_date) %>%
+  dplyr::select(
+    period, year, month, semester, rgn_id, rgn_label, n_cities, n_adults,
+    pct_contact, pct_corrupt_among_contact, pct_corrupt_population
+  ) %>%
+  dplyr::left_join(
+    bp3_34_rgn %>%
+      dplyr::select(
+        period, rgn_id,
+        pct_tramite_contact, pct_tramite_corrupt_among, pct_tramite_corrupt_population
+      ),
+    by = c("period", "rgn_id")
+  ) %>%
+  dplyr::arrange(rgn_id)
+
+readr::write_csv(
+  latest_snapshot_city,
+  file.path(path_out, paste0("ensu_sem_", latest_period, "_city_snapshot.csv"))
+)
+readr::write_csv(
+  latest_snapshot_rgn,
+  file.path(path_out, paste0("ensu_sem_", latest_period, "_rgn_snapshot.csv"))
+)
+
+print(latest_snapshot_city)
+print(latest_snapshot_rgn)
+```
+
+# Corruption pressure score
+
+Corruption is scored as a **pressure** on a 0 to 1 scale (higher = worse), matching Security:
+
+\[
+\text{pressure} = \frac{\%\ \text{corrupt among contact}}{100}
+\]
+
+This uses the region-pooled semester series (`bp3_56_rgn`). Ideal pressure is **0** (no reported bribery among people who had public-safety contact).
+
+An **annual** table averages available June/December pressures within each calendar year (useful for joining to March Security / Safety).
+
+```{r}
+# semester pressure by region
+cs_corruption <- bp3_56_rgn %>%
+  dplyr::mutate(
+    current_status = 100 - pct_corrupt_among_contact,
+    pressure = pct_corrupt_among_contact / 100,
+    pressure_population = pct_corrupt_population / 100
+  ) %>%
+  dplyr::select(
+    year, month, semester, period, period_date,
+    rgn_id, rgn_label, n_cities, n_adults,
+    pct_contact, pct_corrupt_among_contact, pct_corrupt_population,
+    current_status, pressure, pressure_population
+  ) %>%
+  dplyr::arrange(rgn_id, period_date)
+
+readr::write_csv(cs_corruption, file.path(path_out, "cs_corruption.csv"))
+
+# annual mean of semester pressures (and of the underlying percents)
+cs_corruption_annual <- cs_corruption %>%
+  dplyr::group_by(year, rgn_id, rgn_label) %>%
+  dplyr::summarise(
+    n_semesters = dplyr::n(),
+    pct_contact = mean(pct_contact, na.rm = TRUE),
+    pct_corrupt_among_contact = mean(pct_corrupt_among_contact, na.rm = TRUE),
+    pct_corrupt_population = mean(pct_corrupt_population, na.rm = TRUE),
+    pressure = mean(pressure, na.rm = TRUE),
+    pressure_population = mean(pressure_population, na.rm = TRUE),
+    current_status = 100 - pct_corrupt_among_contact,
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(rgn_id, year)
+
+readr::write_csv(cs_corruption_annual, file.path(path_out, "cs_corruption_annual.csv"))
+
+p_cs_corruption <- ggplot(
+  data = cs_corruption,
+  mapping = aes(x = period_date, y = pressure, color = rgn_label, group = rgn_id)
+) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.6) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  labs(
+    title = "ENSU June/December: corruption pressure by OHI GoC region",
+    subtitle = "Pressure = pct_corrupt_among_contact / 100 (0 = best, 1 = worst)",
+    x = "Semester",
+    y = "Corruption pressure",
+    color = "Region"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_x_date(date_labels = "%Y-%m") +
+  scale_color_manual(values = rgn_label_colors, drop = FALSE)
+
+print(p_cs_corruption)
+
+ggsave(
+  filename = file.path(path_out, "cs_corruption_rgn_pressure.png"),
+  plot = p_cs_corruption,
+  width = 10,
+  height = 6,
+  dpi = 150
+)
+
+# alternative: population prevalence pressure
+p_cs_corruption_pop <- ggplot(
+  data = cs_corruption,
+  mapping = aes(x = period_date, y = pressure_population, color = rgn_label, group = rgn_id)
+) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.6) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  labs(
+    title = "ENSU June/December: population corruption pressure by OHI GoC region",
+    subtitle = "Pressure = pct_corrupt_population / 100 (share of adults reporting bribery demand)",
+    x = "Semester",
+    y = "Population corruption pressure",
+    color = "Region"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_x_date(date_labels = "%Y-%m") +
+  scale_color_manual(values = rgn_label_colors, drop = FALSE)
+
+print(p_cs_corruption_pop)
+
+ggsave(
+  filename = file.path(path_out, "cs_corruption_rgn_pressure_population.png"),
+  plot = p_cs_corruption_pop,
+  width = 10,
+  height = 6,
+  dpi = 150
+)
+
+print(cs_corruption)
+print(cs_corruption_annual)
+```
+
+# Saving all plots as PDFs
+
+```{r}
+path_pdf <- file.path(path_out, "plot_pdfs")
+dir.create(path_pdf, recursive = TRUE, showWarnings = FALSE)
+
+pdf_w <- 10
+pdf_h <- 5.63
+
+save_slide_pdf <- function(plot, filename) {
+  ggsave(
+    filename = file.path(path_pdf, filename),
+    plot = plot +
+      theme(
+        legend.position = "bottom",
+        legend.box = "horizontal",
+        legend.margin = margin(t = 2, b = 2),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 9),
+        plot.margin = margin(10, 10, 10, 10)
+      ),
+    width = pdf_w,
+    height = pdf_h,
+    device = cairo_pdf
+  )
+}
+
+save_slide_pdf(p_corrupt_among, "ensu_sem_pct_corrupt_among_contact_by_city.pdf")
+save_slide_pdf(p_corrupt_among_rgn, "ensu_sem_pct_corrupt_among_contact_by_city_rgn_color.pdf")
+save_slide_pdf(p_contact, "ensu_sem_pct_contact_by_city.pdf")
+
+if (exists("p_focus")) {
+  save_slide_pdf(p_focus, "ensu_sem_corruption_pressure_gulf_focus.pdf")
+}
+if (exists("p_focus_rgn")) {
+  save_slide_pdf(p_focus_rgn, "ensu_sem_corruption_pressure_by_rgn.pdf")
+}
+
+save_slide_pdf(p_rgn_agg, "ensu_sem_pct_corrupt_among_contact_rgn_aggregate.pdf")
+save_slide_pdf(p_cs_corruption, "cs_corruption_rgn_pressure.pdf")
+save_slide_pdf(p_cs_corruption_pop, "cs_corruption_rgn_pressure_population.pdf")
+
+message("PDFs saved to: ", path_pdf)
+```
+
+# Practical notes
+
+1. Use **June and December** `ENSU_CB_*` only; March does not include `BP3_3`–`BP3_6`.
+2. Modern corruption block starts in **2019**. Pre-2019 June/December files are discovered but filtered out of the GoC series.
+3. June 2020 may be missing locally; December 2020 is included when present (including awkwardly nested `*.zip/` folders from incomplete unzips).
+4. Duplicate Finder folders (`* 2`) are skipped in favor of a single csv/dbf per year-month.
+5. City → region assignment matches `ensu_security.qmd` via `municipality_to_rgnid_update.csv`.
+6. Region percentages pool people with survey weights; they are not averages of city percentages.
+7. Main pressure is INEGI’s headline (`pct_corrupt_among_contact / 100`). `pressure_population` is also saved for an adult-population prevalence view.
+8. `cs_corruption_annual.csv` averages June and December within each calendar year for easier joins to March Security.
+9. Trámites corruption (`BP3_3` / `BP3_4`) is saved as a companion series; it is usually lower than police-contact corruption.
+10. Plots are also saved as PDFs (10 × 5.63 in) under `plot_pdfs/`.
