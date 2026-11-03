@@ -121,9 +121,7 @@ GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings0 %>%
 sum(is.na(GOC_MarineFisheryLandings$Major_Functional_Group))
 # 7375 records unassigned.
 
-```
 
-```{r}
 GOC_MarineFisheryLandings <- GOC_MarineFisheryLandings %>%
   mutate(
     Major_Functional_Group = factor(
@@ -320,7 +318,7 @@ ggsave(
 ```
 
 
-# STEP 3: Pull matching FIS scores ------------------------------
+# STEP 3: Pull matching Stock_Statuses for SSF stocks ------------------------------
 
 ```{r Load in Stock_Statuses0 scores as necessary}
 Stock_Statuses0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/FP_Scores_1.1/FIS_Scores_1.1/Stock_Statuses_Compiled_df_Oct282026.csv")
@@ -337,101 +335,18 @@ Stock_Statuses <- Stock_Statuses0 %>%
     estimated_genus_name = clean_names_lowercase(estimated_genus_name)
   )
 # 4596 obs., 23 vars.
+
+sum(is.na(Stock_Statuses$Major_Functional_Group))
+
+# Looks fine.
+TEST<- Stock_Statuses %>%
+  filter(is.na(Major_Functional_Group))
+
+table(TEST$estimated_genus_name)
+# fistularia      lamna        nei    unknown 
+#          2         48         80         66
 ```
 
-```{r Load in revised MajorGroup_KEY0}
-MajorGroup_KEY0<- read_csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Taxonomic_Keys/Older_Outdated_Keys/MajorGroupKey_Mar252026.csv")
-# 526 obs. 13 vars.
-
-colnames(MajorGroup_KEY0)
-table(MajorGroup_KEY0$estimated_taxa_group)
-
-# Patch the small pelagics:
-SMALL_PELAGICS<- c("ANCHOVETA", "SARDINA") 
-
-MajorGroup_KEY <- MajorGroup_KEY0 %>%
-  mutate(
-    estimated_genus_name =
-      clean_names_lowercase(estimated_genus_name),
-    
-    Major_Functional_Group = case_when(
-      recorded_taxa_group %in% SMALL_PELAGICS ~ "Anchovy & Sardine (small pelagics)",
-      Major_Functional_Group == "Pelagic marine fishes" ~ "Pelagic marine fish (excl. anchovy & sardine)",
-      TRUE ~ Major_Functional_Group
-      ),
-    # PATCH oligoplites:
-    Major_Functional_Group = case_when(
-      estimated_genus_name == "oligoplites" ~ "Anchovy & Sardine (small pelagics)",
-      TRUE ~ Major_Functional_Group
-    )
-  )
-
-# Trim down the key:
-MajorGroup_KEY <- MajorGroup_KEY %>%
-  select(
-    estimated_genus_name,
-    Major_Functional_Group
-  ) %>%
-  distinct()
-# 257
-
-# Find keys with multiple functional group assignments
-MajorGroup_KEY_conflicts <- MajorGroup_KEY %>%
-  group_by(
-    estimated_genus_name
-  ) %>%
-  summarise(
-    n_functional_groups = n_distinct(
-      Major_Functional_Group,
-      na.rm = FALSE
-    ),
-    functional_groups = paste(
-      sort(unique(as.character(Major_Functional_Group))),
-      collapse = "; "
-    ),
-    .groups = "drop"
-  ) %>%
-  filter(n_functional_groups > 1) %>%
-  arrange(desc(n_functional_groups))
-
-MajorGroup_KEY_conflicts
-
-# Remove the conflicts from the key:
-MajorGroup_KEY <- MajorGroup_KEY %>%
-  select(
-    estimated_genus_name,
-    Major_Functional_Group
-  ) %>%
-  mutate(
-    estimated_genus_name =
-      clean_names_lowercase(estimated_genus_name)
-  ) %>%
-  distinct() %>%
-  anti_join(
-    MajorGroup_KEY_conflicts %>%
-      select(
-        estimated_genus_name
-      ),
-    by = c(
-      "estimated_genus_name"
-    )
-  )
-
-# 217 obs.
-```
-
-```{r Merge MajorGroup_KEY to Stock_Statuses0}
-colnames(Stock_Statuses0)
-
-Stock_Statuses<- Stock_Statuses %>%
-  left_join(
-    MajorGroup_KEY,
-    by= c("estimated_genus_name")
-  )
-# 13008 obs., 17 vars. (good!)
-
-table(Stock_Statuses$Major_Functional_Group.x)
-```
 
 # STEP 4: Prep AFO dataframe ------------------------------
 
@@ -443,8 +358,8 @@ SSF_SECTORS<- c("marine: small-scale capture",
                 "freshwater or marine: small-scale capture ")
 
 GOC_SSF_Landings <- GOC_MarineFisheryLandings %>%
-  select(state, OHI_region_est,
-         office_name_clean, landing_site_clean, 
+  select(state, OHI_rgn_id, OHI_rgn_name,
+         office_name, landing_site, 
          year,
          est_aquaculture_production, reported_fleet, sector_estimate_reported, sector_estimate_draft,
          recorded_taxa_name, recorded_taxa_name_clean, common_name_clean, 
@@ -453,12 +368,15 @@ GOC_SSF_Landings <- GOC_MarineFisheryLandings %>%
          landed_weight, live_weight, weight_kg_corrected, value
          ) %>%
   filter(sector_estimate_draft %in% SSF_SECTORS)
-# 977477 obs., 22 vars.
+
+dim(GOC_SSF_Landings)
+# 1094311 obs., 23 vars.
+
 ```
 
-# PATCH 3 - Re-assign values with no estimated_genus_name 
+# Re-assign values with no estimated_genus_name 
 ```{r Re-assign values with no estimated_genus_name}
-unique(GOC_SSF_Landings$estimated_genus_name)
+sort(unique(GOC_SSF_Landings$estimated_genus_name))
 
 no_genus <- c("unknown", "NEI", "Especies")
 
@@ -470,31 +388,78 @@ GOC_SSF_Landings <- GOC_SSF_Landings %>%
       TRUE ~ estimated_genus_name
     )
   )
-# 977477 obs., 22 vars.
+
+dim(GOC_SSF_Landings)
+# 1094311 obs., 23 vars.
+
+```
+
+# PATCHES - spelling errors
+These patches won't be necessary when the CONAPESCA cleaning file is one day perfected.
+
+```{r Let's look into landings that are missing genus level details}
+TEST<- SSF_Landings_summary %>%
+  select(Major_Functional_Group, estimated_genus_name) %>%
+  distinct()
+
+sort(unique(TEST$estimated_genus_name)) # 165 unique genera
+
+GOC_SSF_Landings_patched <- GOC_SSF_Landings %>%
+  mutate(
+    
+    # Patch genera that are spelled wrong:
+    estimated_genus_name = case_when(
+      estimated_genus_name == "Lujtanus" ~ "Lutjanus",
+      estimated_genus_name == "Hemirhamphus" ~ "Hemiramphus",
+      estimated_genus_name == "Rhizorionodon" ~ "Rhizoprionodon",
+      estimated_genus_name == "Sphoeriodes" ~ "Sphoeroides",
+      TRUE ~ estimated_genus_name
+      ),
+    
+    # PATCH oligoplites:
+    Major_Functional_Group = case_when(
+      estimated_genus_name == "Oligoplites" ~ "Anchovy & Sardine (small pelagics)",
+      TRUE ~ Major_Functional_Group
+    )
+  )
+
+sort(unique(GOC_SSF_Landings_patched$estimated_genus_name)) # 161 unique genera
+
+TEST<- GOC_SSF_Landings_patched %>%
+  select(Major_Functional_Group, estimated_genus_name) %>%
+  distinct()
+```
+
+```{r Let's look into landings that are missing genus level details}
+TEST2<- GOC_SSF_Landings_patched %>%
+  filter(is.na(estimated_genus_name))
+# 0 obs.  
 ```
 
 ```{r Create SSF_Landings_summary}
-SSF_Landings_summary <- GOC_SSF_Landings %>%
-  group_by(year, OHI_region_est, estimated_genus_name) %>%
+SSF_Landings_summary <- GOC_SSF_Landings_patched %>%
+  group_by(year, OHI_rgn_id, Major_Functional_Group, estimated_genus_name) %>%
   summarize(
     total_landings_mt = sum(weight_kg_corrected, na.rm = TRUE)/1000,
     .groups = "drop"
   ) %>%
   mutate(
     estimated_genus_name= clean_names_lowercase(estimated_genus_name),
-    OHI_region_est= clean_names_lowercase(OHI_region_est)
+    OHI_rgn_id= clean_names_lowercase(OHI_rgn_id)
   )
-# 4108 obs., 4 vars.
+# 5155 obs., 5 vars.
+
 ```
 
 ```{r Merge Stock_Statuses to SSF_Landings_summary}
 colnames(Stock_Statuses)
+colnames(SSF_Landings_summary)
 
-AFO_df0 <- SSF_Landings_summary %>%
+AFO_df <- SSF_Landings_summary %>%
   left_join(
     Stock_Statuses %>%
       select(
-        OHI_region_est,
+        OHI_rgn_id= OHI_region_est,
         year,
         estimated_genus_name,
         StockStatus_final,
@@ -504,23 +469,32 @@ AFO_df0 <- SSF_Landings_summary %>%
     by = c(
       "year",
       "estimated_genus_name",
-      "OHI_region_est"
+      "OHI_rgn_id"
     )
   )
 
-# 4108 obs. (as expected!), 7 vars.
+# 5155 obs. (as expected!), 8 vars.
 
-AFO_df0<- AFO_df0 %>%
-  filter(year <= END_EVAL_PERIOD)
-# 3657 obs., 7 vars.
+AFO_df<- AFO_df %>%
+  filter(year >= START_EVAL_PERIOD, year <= END_EVAL_PERIOD)
+# 4691 obs., 8 vars.
+
+TEST2<- AFO_df %>%
+ filter(is.na(StockStatus_final))
+
+table(TEST2$estimated_genus_name)
+table(TEST2$Major_Functional_Group)
+
 ```
 
 # **DECISION POINT: Gapfilling missing StockStatus_final values**
-```{r Gap-fill}
-colnames(AFO_df0)
+Missing stock status values were imputed using the mean stock status of available observations within the same region, year, and Major Functional Group. This stratified mean-imputation approach accounts for spatial, temporal, and functional-group differences in stock status. This approach assumes that the available stock status observations are reasonably representative of the missing observations within that region, year, and functional group.
 
-AFO_df <- AFO_df0 %>%
-  group_by(year, OHI_region_est) %>%
+```{r Gap-fill stock status details between years}
+colnames(AFO_df)
+
+AFO_df_gapfilled <- AFO_df %>%
+  group_by(year, OHI_rgn_id, Major_Functional_Group) %>%
   mutate(
     regional_StockStatus = mean(StockStatus_final, na.rm = TRUE),
    
@@ -540,15 +514,17 @@ AFO_df <- AFO_df0 %>%
   ) %>%
   ungroup() %>%
   select(-regional_StockStatus, -StockStatus_missing)
+# 4691 obs., 8 vars.
+
 ```
 
 # **DECISION POINT: Do not exclude values missing a genus**
 ```{r How much of the biomass is unassigned at the genus level?}
 table(AFO_df$estimated_genus_name)
 
-unassigned <- AFO_df %>%
+unassigned <- AFO_df_gapfilled %>%
   mutate(is_no_genus = estimated_genus_name == "no_genus") %>%
-  group_by(year, OHI_region_est) %>%
+  group_by(year, OHI_rgn_id) %>%
   summarise(
     total_landings_mt_sum = sum(total_landings_mt, na.rm = TRUE),
 
@@ -560,48 +536,78 @@ unassigned <- AFO_df %>%
     pct_no_genus = 100 * no_genus_landings_mt / total_landings_mt_sum,
     .groups = "drop"
   )
-# About 55% of landings in Region_6 are unassigned at the genus level in 2025...
+
+# About 55% of landings in Region_6 are unassigned at the genus level in 2018...
+
 ```
 
 
 # STEP 5: Calculate AFO Scores ------------------------------
 Calculate scores per region!!
-Not a weighted average, just a normal average across stocks.
+Here, the AFO score represents the landings-weighted average stock status for a given region and year.
 
 ```{r Calculate AFO_Scores}
-colnames(AFO_df)
+colnames(AFO_df_gapfilled)
 
-AFO_Scores <- AFO_df %>%
-  group_by(year, OHI_region_est) %>%
+# Use this chunk of code if you **DO** want to use the gap-filled data:
+AFO_Scores0 <- AFO_df_gapfilled %>%
+  group_by(year, OHI_rgn_id) %>%
   summarise(
-    total_landings_mt = sum(total_landings_mt, na.rm = TRUE),
-    mean_StockStatus = mean(StockStatus_final, na.rm = TRUE),
-    #common_StockStatus_source = mode_fun(StockStatus_source),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    AFO_Score = total_landings_mt * mean_StockStatus
-  )
-
-# 3475 obs. (as expected), 25 varsity.
-
-AFO_Scores <- AFO_df %>%
-  group_by(year, OHI_region_est) %>%
-  summarise(
-    AFO_Score = 100 * sum(StockStatus_final * total_landings_mt, na.rm = TRUE) /
-                    sum(total_landings_mt, na.rm = TRUE),
+    AFO_landings_mt = round(sum(total_landings_mt, na.rm = TRUE), 2),
+    mean_StockStatus = round(mean(StockStatus_final, na.rm = TRUE), 2),
+    AFO_score = round(100 * sum(StockStatus_final * total_landings_mt, na.rm = TRUE) /
+                    sum(total_landings_mt, na.rm = TRUE), 2),
     .groups = "drop"
   )
+# 80 obs., 5 vars.
+
+# Use this chunk of code if you **DO NOT** want to use the gap-filled data:
+# AFO_Scores0 <- AFO_df %>%
+#   group_by(year, OHI_rgn_id) %>%
+#   summarise(
+#     AFO_landings_mt = round(sum(total_landings_mt, na.rm = TRUE), 2),
+#     mean_StockStatus = round(mean(StockStatus_final, na.rm = TRUE), 2),
+#     AFO_score = round(100 * sum(StockStatus_final * total_landings_mt, na.rm = TRUE) /
+#                     sum(total_landings_mt, na.rm = TRUE), 2),
+#     .groups = "drop"
+#   )
+# 80 obs., 5 vars.
+
 ```
 
 ```{r Sanity check AFO_Scores}
-colnames(AFO_Scores)
+colnames(AFO_Scores0)
 
-nrow(AFO_Scores)
+summary(AFO_Scores0$AFO_score)
 
-summary(AFO_Scores$AFO_Score)
+# AFTER EWG updates, WITH gapfilling at the year x region x functional group level (Nov 2026):
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#    3.1   70.5   79.0   72.2   85.3   98.0 
+
+# AFTER EWG updates, WITHOUT gapfilling (Nov 2026):
   #  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
-  # 38.93   73.30   80.08   79.12   86.35   98.39 
+  # 2.1  39.1  54.3  52.6  67.1  94.7
+   
+# AFTER EWG updates, WITH gapfilling at the year x region level (Nov 2026):
+  #  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+  # 41.5   73.7   80.7   79.6   87.5   98.4
+   
+# BEFORE EWG updates (Aug 2026):
+  #  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+  # 38.9   73.3   80.0   79.1   86.3   98.3
+
+```
+
+```{r Clean up AFO_Scores before saving}
+# Make uppercase:
+AFO_Scores <- AFO_Scores0 %>%
+  rename(rgn_id = OHI_rgn_id) %>%
+  mutate(rgn_id = sub("^r", "R", rgn_id))
+
+AFO_Scores<- AFO_Scores %>%
+  filter(!is.na(rgn_id))
+# 72 obs., 5 vars.
+
 ```
 
 # SAVE AFO_Scores ------------------------------
@@ -609,7 +615,7 @@ summary(AFO_Scores$AFO_Score)
 ```{r Save AFO_Scores}
 write.csv(
   AFO_Scores,
-  file = "/home/ferrer/ohi_goc_prep/AO/v2025/AFO_Scores/AFO_Scores_df_Jun152026.csv",
+  file = "/home/ferrer/ohi_goc_prep/AO/v2026/AO_Scores_1.1/AFO_Scores_1.1/AFO_Scores_1.1_df_Nov022026.csv",
   row.names = FALSE
 )
 ```
@@ -618,28 +624,31 @@ write.csv(
 # STEP 6: Plot regional AFO scores over time ------------------------------
 
 ```{r Load in AFO_Scores as needed}
-AFO_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/AO/v2025/AO_Scores/AFO_Scores/AFO_Scores_1.0_df_Jun152026.csv")
+AFO_Scores0<- read.csv("/home/ferrer/ohi_goc_prep/AO/v2026/AO_Scores_1.1/AFO_Scores_1.1/AFO_Scores_1.1_df_Nov022026.csv")
 
 AFO_Scores<- AFO_Scores0
 ```
 
 ```{r Region key}
-Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
 
 colnames(Region_Key0)
 
 Region_Key<- Region_Key0 %>%
-  select(OHI_region_est, OHI_region_name) %>%
+  select(rgn_id= OHI_region_est, rgn_name= OHI_region_name) %>%
+  # Make uppercase:
+  mutate(rgn_id = sub("^r", "R", rgn_id)) %>%
   distinct()
+
 ```
 
 ```{r Merge Region_Key to AFO_Scores}
 AFO_Scores<- AFO_Scores %>%
   left_join(Region_Key, 
-            by = "OHI_region_est")
+            by = "rgn_id")
 
 # Make sure to order the regions:
-region_order <- c(
+REGION_ORDER <- c(
   "Western Upper Gulf",
   "Western Midriff Islands",
   "Western Central Gulf",
@@ -653,15 +662,16 @@ region_order <- c(
 
 AFO_Scores <- AFO_Scores %>%
   mutate(
-    OHI_region_name = factor(
-      OHI_region_name,
-      levels = region_order
+    rgn_name = factor(
+      rgn_name,
+      levels = REGION_ORDER
     )
   )
+
 ```
 
 ```{r Plot AFO_Scores over time}
-Region_colors<- c(
+REGION_COLORS<- c(
   "Western Upper Gulf" = "#C03729",
   "Western Midriff Islands" = "#E68C7C",
   "Western Central Gulf" = "#FC8F24",
@@ -673,46 +683,46 @@ Region_colors<- c(
   "Southeastern Gulf" = "#8d61a9")
 
 AFO_Scores_overTime <- AFO_Scores %>%
-  # Filter out the NA region:
-  filter(!is.na(OHI_region_est)) %>%
+  filter(year>= START_EVAL_PERIOD & year <= END_EVAL_PERIOD) %>%
   
   ggplot(aes(
     x = year,
-    y = AFO_Score,
-    color = OHI_region_name
+    y = AFO_score,
+    color = rgn_name
   )) +
+  
   geom_line(linewidth = 1) +
   geom_point(size = 2) +
-  facet_wrap(~ OHI_region_name, scales = "fixed") +
+  
+  facet_wrap(~ rgn_name, scales = "fixed") +
+  
   geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
-
+  
+  scale_color_manual(values = REGION_COLORS) +
   
   labs(
     title = "AFO Scores by Region",
-    subtitle = "Updated June 15 2026",
+    caption = "updated: Nov 02 2026",
     y = "AFO Score (from 0 to 100)",
     x = "Year"
   ) +
   
-  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
-  
   ylim(0, 101) +
-  
-  scale_color_manual(values = Region_colors) +
   
   theme_bw(base_size = 14) +
   theme(
     legend.position = "none",
-    strip.text = element_text(size = 12, face = "bold")
+    strip.text = element_text(size = 14, face = "bold")
   )
 
 AFO_Scores_overTime
+
 ```
 
 ```{r SAVE regional AFO score plot}
 ggsave(
   plot = AFO_Scores_overTime,
-  filename = "/home/ferrer/ohi_goc_prep/AO/v2025/AO_Scores/AFO_Scores/AFO_Scores_1.0_plot_Nov022026.png",
+  filename = "/home/ferrer/ohi_goc_prep/AO/v2026/AO_Scores_1.1/AFO_Scores_1.1/AFO_Scores_1.1_plot_Nov022026.png",
   width = 12,
   height = 8,
   dpi = 300
@@ -728,17 +738,17 @@ ggsave(
 colnames(GOC_MarineFisheryLandings0)
 
 Region_summary<- GOC_MarineFisheryLandings %>%
-  select(year, OHI_region_est, Major_Functional_Group, weight_kg_corrected) %>%
-  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+  select(year, OHI_rgn_id, Major_Functional_Group, weight_kg_corrected) %>%
+  group_by(year, OHI_rgn_id, Major_Functional_Group) %>%
   summarize(
     total_weight_mt= sum(weight_kg_corrected, na.rm = TRUE) / 1000,
     n_records= n()
   )
 
 Region78_summary<- GOC_MarineFisheryLandings %>%
-  filter(OHI_region_est %in% c("Region_7", "Region_8")) %>%
-  select(year, OHI_region_est, Major_Functional_Group, weight_kg_corrected) %>%
-  group_by(year, OHI_region_est, Major_Functional_Group) %>%
+  filter(OHI_rgn_id %in% c("Region_7", "Region_8")) %>%
+  select(year, OHI_rgn_id, Major_Functional_Group, weight_kg_corrected) %>%
+  group_by(year, OHI_rgn_id, Major_Functional_Group) %>%
   summarize(
     total_weight_mt= sum(weight_kg_corrected, na.rm = TRUE) / 1000,
     n_records= n()
@@ -769,10 +779,10 @@ mfg_cols <- qualitative_hcl(
 
 Region78_plot<- Region78_summary %>%
   filter(year >= START_EVAL_PERIOD & year <= END_EVAL_PERIOD) %>%
-  ggplot(aes(x = year, y = total_weight_mt, group= OHI_region_est)) +
+  ggplot(aes(x = year, y = total_weight_mt, group= OHI_rgn_id)) +
   
     geom_col(
-    aes(color= OHI_region_est, fill= OHI_region_est), 
+    aes(color= OHI_rgn_id, fill= OHI_rgn_id), 
     position = position_dodge(width = 0.8),
     width = 0.7
   ) +
@@ -809,7 +819,7 @@ Region78_plot
 
 ```{r Save Landings_bySector_plot}
 ggsave(
-  "/home/ferrer/ohi_goc_prep/AO/v2025/ExploratoryResearch/Rgn78_Landings_byGroup_Jun152026.png",
+  "/home/ferrer/ohi_goc_prep/AO/v2025/ExploratoryResearch/Rgn78_Landings_byGroup_Nov022026.png",
   plot = Region78_plot,
   width = 10,
   height = 10,
