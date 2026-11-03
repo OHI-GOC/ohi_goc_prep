@@ -1,0 +1,97 @@
+---
+title: "Gulf of California beach access — main workflow"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+This notebook builds the analyst locality list into beach worksheets, clipped support layers, and per-locality support maps.
+
+**External inputs** (not stored in `_pressures/access`):
+
+- INEGI locality polygons: `/home/shares/ohi/OHI_GOC/goal_prep/pressures/population_localities/inegi_boundaries_pop.shp`
+- INEGI roads and sites: `/home/shares/ohi/OHI_GOC/_raw_data/inegi_roads/.../red_vial.shp`, `sitio_de_interes.shp`
+- CONANP MPAs: `/home/shares/ohi/OHI_GOC/_raw_data/CONANP/anpmx/anpmx.shp`
+
+**Local inputs** in `data/`:
+
+- `GofC_access_localities.csv` — analyst locality names with INEGI keys
+- `beach.shp` — Gulf beach linework
+- `paths_osm_Jan7_2025.shp`, `parking_osm_Jan7_2025.shp` — Gulf-wide OSM cache (clipped per locality)
+
+Run chunks in order from the repo root.
+
+```{r setup, message=FALSE}
+library(here)
+library(dplyr)
+library(sf)
+library(purrr)
+
+access_dir <- here("_pressures/access")
+data_dir <- file.path(access_dir, "data")
+source(file.path(access_dir, "access_utils.R"), local = TRUE)
+
+paths <- default_external_paths(data_dir)
+paths$osm_paths <- st_read(paths$osm_paths, quiet = TRUE) |> st_make_valid()
+paths$osm_parking <- st_read(paths$osm_parking, quiet = TRUE) |> st_make_valid()
+paths$mpa <- st_read(paths$mpa, quiet = TRUE) |> st_make_valid()
+
+localities <- load_access_localities(data_dir)
+locality_names <- sort(unique(localities$city))
+length(locality_names)
+```
+
+## 1. Overview map of all localities
+
+```{r overview-map, eval=FALSE}
+build_localities_overview_map(data_dir, access_dir, paths = default_external_paths(data_dir))
+```
+
+Output: `output/all_localities_map.html`
+
+## 2. Identify beaches within each 20 km buffer
+
+Writes one CSV per analyst locality to `data/locality_beaches/{slug}_beaches.csv`. Existing expert scores in those CSVs are preserved.
+
+```{r identify-beaches, eval=FALSE}
+identify_all_locality_beaches(data_dir, paths = default_external_paths(data_dir))
+```
+
+## 3. Extract support layers per locality
+
+Full INEGI/OSM roads, paths, parking, sites, and MPAs clipped to each locality's 20 km study region (no thinning). Outputs GeoPackages under `data/locality_support/{slug}/`.
+
+Set `REFETCH_OSM <- TRUE` only if the Gulf-wide OSM cache is missing (slow; needs network).
+
+```{r extract-support, eval=FALSE}
+REFETCH_OSM <- FALSE
+
+for (nm in locality_names) {
+  message("=== Extract: ", nm, " ===")
+  extract_locality_support(
+    locality_nm = nm,
+    data_dir = data_dir,
+    access_dir = access_dir,
+    paths = if (REFETCH_OSM) default_external_paths(data_dir) else paths,
+    refetch_osm = REFETCH_OSM
+  )
+}
+
+bind_rows(map(locality_names, \(nm) {
+  p <- file.path(locality_support_dir(nm, data_dir), "extraction_summary.csv")
+  if (file.exists(p)) readr::read_csv(p, show_col_types = FALSE) else NULL
+})) |>
+  readr::write_csv(file.path(data_dir, "locality_support", "extraction_summary_all_localities.csv"))
+```
+
+## 4. Build per-locality support maps
+
+Interactive Leaflet maps with 20 km buffer, roads, paths, parking, beaches, and INEGI sites.
+
+```{r support-maps, eval=FALSE}
+for (nm in locality_names) {
+  message("=== Map: ", nm, " ===")
+  build_locality_support_map(nm, data_dir, access_dir)
+}
+```
+
+Output: `localities_support_layers/{slug}_support_layers.html` (+ auto-generated `_files/` assets)
