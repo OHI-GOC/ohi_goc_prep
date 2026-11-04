@@ -1,0 +1,705 @@
+---
+title: 'OHI GoC: Governance resilience (IEDMX / World Justice Project)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Governance resilience (IEDMX)
+
+I am turning World Justice Project **IEDMX** (Índice de Estado de Derecho en México) state factor scores into a governance resilience layer for the Gulf of California.
+
+IEDMX measures how closely each Mexican state adheres to the rule of law, from a citizen perspective. Scores run from **0 to 1**, where **1 = strongest rule of law / maximum resilience**. The index has eight factors; for OHI GoC governance resilience I average **Factors 1, 3, 4, 6, and 7** only, as these were the ones Mel and I decided would apply the best to governance resilience.
+
+We leave out Factor 2 (absence of corruption) because we already cover corruption as a separate pressure and the resilience is located within Social Stability resilience, Factor 5 (order and security) because security is also within Social Stability, and Factor 8 (criminal justice) for the same reason we are focusing on institutional / civil-governance capacity rather than the penal system.
+
+**Pros:** designed for state comparison; consistent 0–1 scale already oriented the right way (higher = better); multi-edition history back to 2018.  
+**Cons:** state level only (no municipal coverage); editions are biennial-ish after 2018, so to make an annual series we need to carry scores forward
+
+We decided that for now, assessing this resilience at the state level is fine (same decision as labor poverty and ENCIG corruption). So I use the six GoC states: Baja California, Baja California Sur, Sonora, Sinaloa, Jalisco, and Nayarit.
+
+I downloaded one Excel workbook per GoC state from the WJP Mexico map downloads. Each file has an `Histórico` sheet with factor and subfactor scores across editions.
+
+---
+
+**To download:**
+
+- Go to <https://index.worldjusticeproject.mx/mapa>.
+- Hit "Descargas", and for every GoC state, download the data.
+- Bring the six workbooks into Mazu at `/home/shares/ohi/OHI_GOC/_raw_data/IEDM_world_justice_project/d2026`
+
+---
+
+*Outline of the script:*
+
+1. Read CONAPO population for year-specific weights (needed when Region_9 spans two states).  
+2. Clean each GoC state Excel one at a time (keep Factors 1, 3, 4, 6, and 7), then stack them.  
+3. Expand edition labels into an annual 2018–2024 series by carrying scores forward.  
+4. Average the five factors into a governance resilience score (already 0–1).  
+5. Map the state scores onto GoC `rgn_id`s and save.  
+6. Explore with `plotly`.
+
+---
+
+```{r setup}
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(plotly)
+
+knitr::opts_chunk$set(
+  fig.width = 9,
+  fig.height = 5,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r paths}
+raw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/IEDM_world_justice_project/d2026"
+
+# one workbook per GoC state
+bc_path <- file.path(raw_dir, "IEDMX2023-24_Baja_California.xlsx")
+bcs_path <- file.path(raw_dir, "IEDMX2023-24_Baja_California_Sur.xlsx")
+son_path <- file.path(raw_dir, "IEDMX2023-24_Sonora.xlsx")
+sin_path <- file.path(raw_dir, "IEDMX2023-24_Sinaloa.xlsx")
+jal_path <- file.path(raw_dir, "IEDMX2023-24_Jalisco.xlsx")
+nay_path <- file.path(raw_dir, "IEDMX2023-24_Nayarit.xlsx")
+
+conapo_path <- here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPO_demographic_indicators/d2026/pobproy_ggrupos.csv")
+
+mun_path <- here::here("/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid_update.csv")
+
+output_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/resilience"
+#dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+github_dir <- here::here("_resilience/governance/output")
+#dir.create(github_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r constants}
+year_min <- 2018
+year_max <- 2024
+
+# Factors kept for the governance resilience average
+factor_codes <- c("F1", "F3", "F4", "F6", "F7")
+
+goc_states <- c(
+  "Baja California",
+  "Baja California Sur",
+  "Sonora",
+  "Sinaloa",
+  "Jalisco",
+  "Nayarit"
+)
+
+# IEDMX edition labels -> first calendar year of that edition.
+# Later we complete 2018:2024 and fill scores forward into intervening years.
+edition_to_year <- c(
+  "2018" = 2018L,
+  "2019-20" = 2019L,
+  "2020-21" = 2020L,
+  "2021-22" = 2021L,
+  "2022-23" = 2022L,
+  "2023-24" = 2023L
+)
+```
+
+## What the five factors mean (translated from IEDMX)
+
+IEDMX scores are already on **0–1**, with **1 = better rule of law**. Averaging these five factors keeps that orientation, so the governance resilience score is also **1 = maximum resilience**.
+
+| Factor | English name | Components included (English) |
+|---|---|---|
+| **F1** | Constraints on government powers | 1.1 Local legislature is an effective check; 1.2 Judiciary is an effective check; 1.3 Oversight bodies are an effective check (Superior Audit Office, Human Rights Commission, Comptroller); 1.4 Sanctions for abuse of power; 1.5 Non-governmental checks are effective (civil society / citizens, press, political parties); 1.6 Elections comply with the law |
+| **F3** | Open government | 3.1 Citizens participate actively in decision-making; 3.2 The right to public information is effectively guaranteed |
+| **F4** | Fundamental rights | 4.1 Equal treatment and absence of discrimination (by socioeconomic status, gender, Indigenous identity, creed, migration status, sexual orientation, physical disability, intellectual disability, education level, skin color, and systemic discrimination); 4.2 Right to life and personal security; 4.3 Due process for accused persons; 4.4 Freedom of opinion and expression; 4.5 Freedom of religion and worship; 4.6 Right to privacy; 4.7 Freedom of assembly and association; 4.8 Labor rights |
+| **F6** | Regulatory enforcement | 6.1 Government regulations are effectively enforced (labor, environmental, commercial, public health); 6.2 Absence of corruption in applying rules and regulations; 6.3 Effective and efficient resolution of administrative procedures; 6.4 Due process in administrative procedures; 6.5 State government does not illegally expropriate without adequate compensation |
+| **F7** | Civil justice | 7.1 People know their rights and trust civil justice institutions; 7.2 Access to affordable, quality legal information and advice; 7.3 People can resolve legal problems without high costs or heavy bureaucracy; 7.4 Civil justice is impartial, independent, and free of corruption; 7.5 Civil justice guarantees a quality process; 7.6 Civil justice is timely; 7.7 Civil and administrative court decisions are effectively enforced; 7.8 Alternative dispute resolution is accessible, impartial, and timely |
+
+**Not used here:** F2 Absence of corruption; F5 Order and security; F8 Criminal justice.
+
+## 1. CONAPO state population (year-specific weights)
+
+Same as in the labor poverty / ENCIG scripts: sum `POB_TOTAL` so each GoC state-year has one population weight. I need this when Region_9 inherits both Jalisco and Nayarit.
+
+```{r conapo-read}
+conapo_raw <- read_csv(conapo_path, show_col_types = FALSE)
+```
+
+```{r conapo-aggregate}
+state_population <- conapo_raw %>%
+  select(CLAVE_ENT, NOM_ENT, ANO, SEXO, POB_TOTAL) %>%
+  filter(NOM_ENT %in% goc_states) %>%
+  group_by(year = ANO, estado = NOM_ENT) %>%
+  summarize(poblacion = sum(POB_TOTAL, na.rm = TRUE), .groups = "drop")
+```
+
+```{r conapo-check}
+# state_population %>%
+#   filter(year %in% c(2018, 2020, 2022, 2024)) %>%
+#   pivot_wider(names_from = year, values_from = poblacion) %>%
+#   kable(
+#     caption = "CONAPO projected total population (GoC states; selected years)",
+#     format.args = list(big.mark = ",")
+#   )
+```
+
+## 2. Clean each IEDMX Histórico sheet
+
+Each state workbook has the same layout on the `Histórico` sheet:
+
+- Row 1 is blank.
+- Row 2 has the estado name and the edition headers (`2018`, `2019-20`, …, `2023-24`).
+- From row 3 down: Spanish label, factor code, then one score column per edition.
+
+`read_excel()` drops the leading empty column, so after `slice(3:n())` the useful columns are 1–8. I clean each Excel separately so the steps stay easy to follow. For every state I: skip the title rows, keep only Factors F1 / F3 / F4 / F6 / F7, and pivot editions long.
+
+### Baja California
+
+```{r clean-baja-california}
+bc_raw <- read_excel(bc_path, sheet = "Histórico", col_names = FALSE)
+
+bc <- bc_raw %>%
+  # data values start at Excel row 3
+  slice(3:n()) %>%
+  #janitor::clean_names() # actually not helpful or needed
+  # name only the columns we need (avoids empty trailing excel columns)
+  select(
+    label_es = 1,
+    factor_code = 2,
+    `2018` = 3,
+    `2019-20` = 4,
+    `2020-21` = 5,
+    `2021-22` = 6,
+    `2022-23` = 7,
+    `2023-24` = 8
+  ) %>%
+  mutate(
+    label_es = str_trim(as.character(label_es)),
+    factor_code = str_trim(as.character(factor_code)),
+    across(
+      c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+      ~ suppressWarnings(as.numeric(.x))
+    ),
+    estado = "Baja California"
+  ) %>%
+  filter(factor_code %in% factor_codes) %>%
+  pivot_longer(
+    cols = c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+    names_to = "edition",
+    values_to = "score"
+  ) %>%
+  select(estado, factor_code, label_es, edition, score)
+```
+
+### Baja California Sur
+
+```{r clean-baja-california-sur}
+bcs_raw <- read_excel(bcs_path, sheet = "Histórico", col_names = FALSE)
+
+bcs <- bcs_raw %>%
+  # data values start at Excel row 3
+  slice(3:n()) %>%
+  # name only the columns we need (avoids empty trailing excel columns)
+  select(
+    label_es = 1,
+    factor_code = 2,
+    `2018` = 3,
+    `2019-20` = 4,
+    `2020-21` = 5,
+    `2021-22` = 6,
+    `2022-23` = 7,
+    `2023-24` = 8
+  ) %>%
+  mutate(
+    label_es = str_trim(as.character(label_es)),
+    factor_code = str_trim(as.character(factor_code)),
+    across(
+      c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+      ~ suppressWarnings(as.numeric(.x))
+    ),
+    estado = "Baja California Sur"
+  ) %>%
+  filter(factor_code %in% factor_codes) %>%
+  pivot_longer(
+    cols = c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+    names_to = "edition",
+    values_to = "score"
+  ) %>%
+  select(estado, factor_code, label_es, edition, score)
+```
+
+### Sonora
+
+```{r clean-sonora}
+son_raw <- read_excel(son_path, sheet = "Histórico", col_names = FALSE)
+
+son <- son_raw %>%
+  # data values start at Excel row 3
+  slice(3:n()) %>%
+  # name only the columns we need (avoids empty trailing excel columns)
+  select(
+    label_es = 1,
+    factor_code = 2,
+    `2018` = 3,
+    `2019-20` = 4,
+    `2020-21` = 5,
+    `2021-22` = 6,
+    `2022-23` = 7,
+    `2023-24` = 8
+  ) %>%
+  mutate(
+    label_es = str_trim(as.character(label_es)),
+    factor_code = str_trim(as.character(factor_code)),
+    across(
+      c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+      ~ suppressWarnings(as.numeric(.x))
+    ),
+    estado = "Sonora"
+  ) %>%
+  filter(factor_code %in% factor_codes) %>%
+  pivot_longer(
+    cols = c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+    names_to = "edition",
+    values_to = "score"
+  ) %>%
+  select(estado, factor_code, label_es, edition, score)
+```
+
+### Sinaloa
+
+```{r clean-sinaloa}
+sin_raw <- read_excel(sin_path, sheet = "Histórico", col_names = FALSE)
+
+sin <- sin_raw %>%
+  # data values start at Excel row 3
+  slice(3:n()) %>%
+  # name only the columns we need (avoids empty trailing excel columns)
+  select(
+    label_es = 1,
+    factor_code = 2,
+    `2018` = 3,
+    `2019-20` = 4,
+    `2020-21` = 5,
+    `2021-22` = 6,
+    `2022-23` = 7,
+    `2023-24` = 8
+  ) %>%
+  mutate(
+    label_es = str_trim(as.character(label_es)),
+    factor_code = str_trim(as.character(factor_code)),
+    across(
+      c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+      ~ suppressWarnings(as.numeric(.x))
+    ),
+    estado = "Sinaloa"
+  ) %>%
+  filter(factor_code %in% factor_codes) %>%
+  pivot_longer(
+    cols = c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+    names_to = "edition",
+    values_to = "score"
+  ) %>%
+  select(estado, factor_code, label_es, edition, score)
+```
+
+### Jalisco
+
+```{r clean-jalisco}
+jal_raw <- read_excel(jal_path, sheet = "Histórico", col_names = FALSE)
+
+jal <- jal_raw %>%
+  # data values start at Excel row 3
+  slice(3:n()) %>%
+  # name only the columns we need (avoids empty trailing excel columns)
+  select(
+    label_es = 1,
+    factor_code = 2,
+    `2018` = 3,
+    `2019-20` = 4,
+    `2020-21` = 5,
+    `2021-22` = 6,
+    `2022-23` = 7,
+    `2023-24` = 8
+  ) %>%
+  mutate(
+    label_es = str_trim(as.character(label_es)),
+    factor_code = str_trim(as.character(factor_code)),
+    across(
+      c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+      ~ suppressWarnings(as.numeric(.x))
+    ),
+    estado = "Jalisco"
+  ) %>%
+  filter(factor_code %in% factor_codes) %>%
+  pivot_longer(
+    cols = c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+    names_to = "edition",
+    values_to = "score"
+  ) %>%
+  select(estado, factor_code, label_es, edition, score)
+```
+
+### Nayarit
+
+```{r clean-nayarit}
+nay_raw <- read_excel(nay_path, sheet = "Histórico", col_names = FALSE)
+
+nay <- nay_raw %>%
+  # data values start at Excel row 3
+  slice(3:n()) %>%
+  # name only the columns we need (avoids empty trailing excel columns)
+  select(
+    label_es = 1,
+    factor_code = 2,
+    `2018` = 3,
+    `2019-20` = 4,
+    `2020-21` = 5,
+    `2021-22` = 6,
+    `2022-23` = 7,
+    `2023-24` = 8
+  ) %>%
+  mutate(
+    label_es = str_trim(as.character(label_es)),
+    factor_code = str_trim(as.character(factor_code)),
+    across(
+      c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+      ~ suppressWarnings(as.numeric(.x))
+    ),
+    estado = "Nayarit"
+  ) %>%
+  filter(factor_code %in% factor_codes) %>%
+  pivot_longer(
+    cols = c(`2018`, `2019-20`, `2020-21`, `2021-22`, `2022-23`, `2023-24`),
+    names_to = "edition",
+    values_to = "score"
+  ) %>%
+  select(estado, factor_code, label_es, edition, score)
+```
+
+### Stack all six states
+
+```{r bind-states}
+iedmx_factors <- bind_rows(bc, bcs, son, sin, jal, nay)
+```
+
+```{r factor-checks}
+iedmx_factors %>%
+  count(estado, factor_code) %>%
+  pivot_wider(names_from = factor_code, values_from = n) %>%
+  kable(caption = "Rows per state × factor (expect 6 editions each)")
+# bind is looking good!!!
+
+# none of the factors have NA 
+iedmx_factors %>%
+  group_by(factor_code) %>%
+  summarise(
+    n = n(),
+    n_missing = sum(is.na(score)),
+    min_score = min(score, na.rm = TRUE),
+    max_score = max(score, na.rm = TRUE),
+    editions = paste(unique(edition), collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  kable(digits = 3, caption = "GoC IEDMX factor score summary (edition-level)")
+```
+
+## 3. Expand editions to annual years 2018–2024
+
+IEDMX editions after 2018 are two-year labels. I map each edition to its **first** calendar year, then `complete()` the full 2018–2024 window and **carry scores forward** so intervening / trailing years inherit the most recent edition (e.g. 2024 keeps the 2023-24 score).
+
+```{r expand-annual}
+iedmx_annual <- iedmx_factors %>%
+  mutate(
+    year = unname(edition_to_year[edition])
+  ) %>%
+  filter(!is.na(year)) %>%
+  # one row per estado × factor × year at edition anchors
+  select(estado, factor_code, label_es, edition, year, score) %>%
+  arrange(estado, factor_code, year) %>%
+  group_by(estado, factor_code, label_es) %>%
+  complete(year = year_min:year_max) %>%
+  # carry the edition score forward into years without a new release
+  fill(score, edition, .direction = "down") %>%
+  ungroup() %>%
+  filter(!is.na(score))
+```
+
+```{r expand-checks}
+iedmx_annual %>%
+  count(year, factor_code) %>%
+  pivot_wider(names_from = factor_code, values_from = n) %>%
+  kable(caption = "Annual rows per factor (expect 6 states each year)")
+
+# show which edition feeds each calendar year
+iedmx_annual %>%
+  distinct(year, edition) %>%
+  arrange(year) %>%
+  kable(caption = "Calendar year ← IEDMX edition after carry-forward")
+```
+
+## 4. Average Factors 1, 3, 4, 6, and 7 into governance resilience
+
+Equal-weight mean of the five factors. Scores are already 0–1 with higher = better, so no extra rescale is needed.
+
+```{r average-factors}
+governance_state <- iedmx_annual %>%
+  group_by(estado, year) %>%
+  summarise(
+    n_factors = n_distinct(factor_code),
+    resilience = mean(score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(resilience = pmin(pmax(resilience, 0), 1))
+```
+
+```{r average-check-2024}
+governance_state %>%
+  filter(year == 2024) %>%
+  arrange(desc(resilience)) %>%
+  kable(digits = 3, caption = "2024 GoC governance resilience by state (mean of F1, F3, F4, F6, F7)")
+
+# |estado              | year| n_factors| resilience|
+# |:-------------------|----:|---------:|----------:|
+# |Sinaloa             | 2024|         5|      0.468|
+# |Baja California Sur | 2024|         5|      0.430|
+# |Sonora              | 2024|         5|      0.430|
+# |Baja California     | 2024|         5|      0.420|
+# |Jalisco             | 2024|         5|      0.402|
+# |Nayarit             | 2024|         5|      0.390|
+```
+
+```{r factor-contribution-2024}
+# wide view of the five inputs behind the 2024 average
+iedmx_annual %>%
+  filter(year == 2024) %>%
+  select(estado, factor_code, score) %>%
+  pivot_wider(names_from = factor_code, values_from = score) %>%
+  left_join(
+    governance_state %>% filter(year == 2024) %>% select(estado, resilience),
+    by = "estado"
+  ) %>%
+  arrange(desc(resilience)) %>%
+  kable(digits = 3, caption = "2024 factor inputs and mean resilience by state")
+
+# |estado              |   F1|   F3|   F4|   F6|   F7| resilience|
+# |:-------------------|----:|----:|----:|----:|----:|----------:|
+# |Sinaloa             | 0.45| 0.51| 0.55| 0.40| 0.43|      0.468|
+# |Baja California Sur | 0.42| 0.44| 0.53| 0.39| 0.37|      0.430|
+# |Sonora              | 0.43| 0.48| 0.48| 0.37| 0.39|      0.430|
+# |Baja California     | 0.38| 0.46| 0.49| 0.38| 0.39|      0.420|
+# |Jalisco             | 0.40| 0.45| 0.46| 0.34| 0.36|      0.402|
+# |Nayarit             | 0.37| 0.44| 0.45| 0.33| 0.36|      0.390|
+```
+
+## 5. Map onto `rgn_id` and save
+
+State resilience values are inherited by every GoC `rgn_id` in that state (`municipality_to_rgnid_update.csv`). Region_9 spans Jalisco and Nayarit, so I take a CONAPO population-weighted mean of the two state scores.
+
+```{r mun-rgn-lookup}
+mun_lookup <- read_csv(mun_path, show_col_types = FALSE) %>%
+  mutate(
+    estado = str_trim(estado),
+    rgn_id = as.character(rgn_id)
+  )
+
+estado_to_rgn <- mun_lookup %>%
+  distinct(estado, rgn_id) %>%
+  mutate(estado_key = str_to_upper(estado)) %>%
+  select(estado_key, rgn_id)
+
+estado_to_rgn %>%
+  arrange(rgn_id, estado_key) %>%
+  kable(caption = "Estado to rgn_id (unique pairs from municipality lookup)")
+```
+
+```{r state-to-rgn}
+gov_rgn <- governance_state %>%
+  mutate(estado_key = str_to_upper(estado)) %>%
+  left_join(estado_to_rgn, by = "estado_key", relationship = "many-to-many") %>%
+  left_join(state_population, by = c("year", "estado")) %>%
+  filter(!is.na(rgn_id), !is.na(resilience))
+
+governance_resilience <- gov_rgn %>%
+  group_by(rgn_id, year) %>%
+  summarise(
+    # Region_9 is the only multi-state region; weight by CONAPO population
+    resilience = if (n() == 1 || all(is.na(poblacion))) {
+      mean(resilience)
+    } else {
+      weighted.mean(resilience, w = poblacion, na.rm = TRUE)
+    },
+    n_states = n_distinct(estado),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rgn_num = as.integer(str_remove(rgn_id, "Region_")),
+    resilience = round(resilience, 4)
+  ) %>%
+  arrange(year, rgn_num) %>%
+  select(rgn_id, year, resilience)
+```
+
+
+```{r state-to-rgn}
+governance_resilience %>%
+  filter(year == 2024) %>%
+  kable(digits = 4, caption = "Governance resilience by rgn_id (2024)")
+
+# |rgn_id   | year| resilience|
+# |:--------|----:|----------:|
+# |Region_1 | 2024|     0.4200|
+# |Region_2 | 2024|     0.4200|
+# |Region_3 | 2024|     0.4300|
+# |Region_4 | 2024|     0.4300|
+# |Region_5 | 2024|     0.4300|
+# |Region_6 | 2024|     0.4300|
+# |Region_7 | 2024|     0.4300|
+# |Region_8 | 2024|     0.4680|
+# |Region_9 | 2024|     0.4004|
+```
+
+```{r save}
+write_csv(
+  governance_resilience,
+  here::here(output_dir, "governance_iedmx_resilience.csv")
+)
+write_csv(
+  governance_resilience,
+  here::here(github_dir, "governance_iedmx_resilience.csv")
+)
+```
+
+## 6. Explore with plotly
+
+### Resilience by state
+
+```{r plot-state}
+plot_state <- plot_ly(
+  governance_state,
+  x = ~year,
+  y = ~resilience,
+  color = ~estado,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    estado, "<br>", year,
+    "<br>resilience: ", round(resilience, 3)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Governance resilience (IEDMX mean of F1, F3, F4, F6, F7), GoC states",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Resilience (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Estado"))
+  )
+
+plot_state
+```
+
+### Factor trajectories (GoC mean)
+
+```{r plot-factors}
+factor_labels_en <- c(
+  F1 = "F1 Constraints on government powers",
+  F3 = "F3 Open government",
+  F4 = "F4 Fundamental rights",
+  F6 = "F6 Regulatory enforcement",
+  F7 = "F7 Civil justice"
+)
+
+factor_ts <- iedmx_annual %>%
+  group_by(year, factor_code) %>%
+  summarise(score = mean(score), .groups = "drop") %>%
+  mutate(factor = recode(factor_code, !!!factor_labels_en))
+
+plot_factors <- plot_ly(
+  factor_ts,
+  x = ~year,
+  y = ~score,
+  color = ~factor,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "GoC mean of each governance factor over time",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Mean score (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Factor"))
+  )
+
+plot_factors
+```
+
+### Regional resilience time series
+
+```{r plot-rgn}
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+plot_rgn <- governance_resilience %>%
+  mutate(
+    region = recode(rgn_id, !!!rgn_labels),
+    region = factor(region, levels = unname(rgn_labels))
+  ) %>%
+  plot_ly(
+    x = ~year,
+    y = ~resilience,
+    color = ~region,
+    colors = setNames(unname(rgn_colors), unname(rgn_labels)),
+    type = "scatter",
+    mode = "lines+markers"
+  ) %>%
+  layout(
+    title = "Governance resilience by GoC region (IEDMX F1/F3/F4/F6/F7 mean)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Resilience (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Region"))
+  )
+
+plot_rgn
+```
+
+## Next steps
+
+1. Re-knit on Mazu once the six state xlsx files live under `_raw_data/IEDM_world_justice_project/d2026`.  
+2. Confirm whether equal weights across F1/F3/F4/F6/F7 remain the preferred aggregation, or whether some factors should be weighted more heavily next to other social resilience layers.  
+3. If a later IEDMX edition arrives, drop it into `d2026` (or a new `dYYYY` folder), extend `edition_to_year`, and re-run the carry-forward.
