@@ -1,5 +1,695 @@
 ---
-title: "social_stability"
-format: html
+title: 'OHI GoC: Social stability resilience (México Cómo Vamos IPS)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
 ---
+
+# Social stability resilience (México Cómo Vamos IPS)
+
+I used the México Cómo Vamos Social Progress Index (IPS / Índice de Progreso Social) component scores to create a social stability resilience layer for the GoC.
+
+IPS measures social and environmental *outcomes* (not income or spending). Scores run from 0 to 100, where 100 = highest social progress, which is a good resilience measure for the pressure of social lag.  Dimension scores are the average of their four components, and the overall IPS is the average of the three dimensions. For our use, I work from the component scores, keep a subset that matches social stability, average those components, and rescale to 0-1 (**1 = maximum resilience**).
+
+**Pros:** annual state series (2015-2024 in this workbook); designed for state comparison; outcome-based (fits resilience better than spending); open methods repo at [https://github.com/mexicocomovamos/mcv_ips/tree/main](https://github.com/mexicocomovamos/mcv_ips/tree/main)
+**Cons:** state level only (no municipal coverage); the public 2025 report may revise earlier years, so we may need to update this layer later.
+
+We decided that for now, assessing this resilience at the state level is fine (same decision as labor poverty, corruption, and IEDMX governance). So I use the six GoC states: Baja California, Baja California Sur, Sonora, Sinaloa, Jalisco, and Nayarit.
+
+---
+
+**To download:**
+
+- Methods and data pipeline: <https://github.com/mexicocomovamos/mcv_ips>
+- Report landing page: <https://mexicocomovamos.mx/indice-de-progreso-social/>
+- Bring `00_IPS_COMPLETE_WIDE.xlsx` into Mazu at `/home/shares/ohi/OHI_GOC/_raw_data/mexico_como_vamos_indice_de_progreso_social/d2025`
+
+---
+
+*Outline of the script:*
+
+1. Read CONAPO population for year-specific weights (needed when Region_9 spans two states).  
+2. Read the IPS component sheet and keep the social-stability components for GoC states.  
+3. Average those components and rescale 0-100 to 0-1.  
+4. Map onto GoC `rgn_id`s and save.  
+5. Explore with `plotly`.
+
+---
+
+```{r setup}
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(plotly)
+
+knitr::opts_chunk$set(
+  fig.width = 9,
+  fig.height = 5,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r paths}
+raw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/mexico_como_vamos_indice_de_progreso_social/d2025"
+
+# wide IPS workbook (dimension + component sheets)
+ips_path <- file.path(raw_dir, "00_IPS_COMPLETE_WIDE.xlsx")
+
+conapo_path <- here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPO_demographic_indicators/d2026/pobproy_ggrupos.csv")
+
+mun_path <- here::here("/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid_update.csv")
+
+output_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/resilience"
+#dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+github_dir <- here::here("_resilience/social_stability/output")
+#dir.create(github_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r constants}
+year_min <- 2015
+year_max <- 2024
+
+# IPS raw scores are 0-100; OHI resilience wants 0-1
+score_max <- 100
+
+goc_states <- c(
+  "Baja California",
+  "Baja California Sur",
+  "Sonora",
+  "Sinaloa",
+  "Jalisco",
+  "Nayarit"
+)
+
+# IPS uses short estado abbreviations in entidad_abr_m
+goc_abr <- c(
+  "Baja California" = "BC",
+  "Baja California Sur" = "BCS",
+  "Sonora" = "SON",
+  "Sinaloa" = "SIN",
+  "Jalisco" = "JAL",
+  "Nayarit" = "NAY"
+)
+
+# Components kept for social stability resilience
+# Dimension 1 without personal safety (01_04comp)
+# Dimension 2 in full, plus higher education (03_12comp) moved here from Opportunity
+component_codes <- c(
+  "01_01comp",
+  "01_02comp",
+  "01_03comp",
+  "02_05comp",
+  "02_06comp",
+  "02_07comp",
+  "02_08comp",
+  "03_12comp"
+)
+
+component_labels_en <- c(
+  "01_01comp" = "Nutrition and basic medical care",
+  "01_02comp" = "Water and sanitation",
+  "01_03comp" = "Housing",
+  "02_05comp" = "Access to basic knowledge",
+  "02_06comp" = "Access to information and communications",
+  "02_07comp" = "Health and wellness",
+  "02_08comp" = "Environmental quality",
+  "03_12comp" = "Access to higher education"
+)
+```
+
+## What we keep (translated from México Cómo Vamos / IPS)
+
+IPS has three dimensions but we did not keep all of them. For social stability we average selected relevant components (equally weighted for right now), not the published overall IPS `00` column:
+
+| Kept code | English name | Why it is in social stability |
+|---|---|---|
+| `01_01comp` | Nutrition and basic medical care | Food and basic medical care (mortality/nutrition outcomes) |
+| `01_02comp` | Water and sanitation | Clean water and sanitation without getting sick |
+| `01_03comp` | Housing | Adequate housing with durable materials |
+| `02_05comp` | Access to basic knowledge | Preschool / primary / secondary foundations |
+| `02_06comp` | Access to information and communications | Telephony, internet, access to ideas and information |
+| `02_07comp` | Health and wellness | Long, healthy lives (life expectancy and related outcomes) |
+| `02_08comp` | Environmental quality | Trash disposal, green spaces, energy-saving bulbs, sewage treatment (report p. 28) |
+| `03_12comp` | Access to higher education | Coverage/quality of higher education (kept with Foundations of Wellbeing dimension) |
+
+**Cut on purpose:**
+
+- `01_04comp` Personal safety: security sits elsewhere / we do not want crime perception dominating social stability here.  
+- `03_09comp` Personal rights, `03_10comp` Personal freedom and choice, `03_11comp` Inclusion: covered (or closer to) the **governance** resilience layer from IEDMX (Factors 1, 3, 4, 6, 7).
+
+## 1. CONAPO state population (year-specific weights)
+
+Same as in the governance script: sum `POB_TOTAL` so each GoC state-year has one population weight. I need this when Region_9 inherits both Jalisco and Nayarit.
+
+```{r conapo-read}
+conapo_raw <- read_csv(conapo_path, show_col_types = FALSE)
+```
+
+```{r conapo-aggregate}
+state_population <- conapo_raw %>%
+  select(CLAVE_ENT, NOM_ENT, ANO, SEXO, POB_TOTAL) %>%
+  filter(NOM_ENT %in% goc_states) %>%
+  group_by(year = ANO, estado = NOM_ENT) %>%
+  summarize(poblacion = sum(POB_TOTAL, na.rm = TRUE), .groups = "drop")
+```
+
+```{r conapo-check}
+state_population %>%
+  filter(year %in% c(2015, 2018, 2021, 2024)) %>%
+  pivot_wider(names_from = year, values_from = poblacion) %>%
+  kable(
+    caption = "CONAPO projected total population (GoC states; selected years)",
+    format.args = list(big.mark = ",")
+  )
+
+stopifnot(all(goc_states %in% unique(state_population$estado)))
+```
+
+## 2. Clean the IPS component sheet
+
+Sheet `02_IPS_COMP` is already tidy-ish and wide: one row per `cve_ent` × `anio`, with one column per component. I keep GoC states only, pivot the selected components long, and attach full estado names.
+
+```{r explore-sheets}
+excel_sheets(ips_path) %>%
+  tibble(sheet = .) %>%
+  kable(caption = "Sheets in the IPS workbook")
+```
+
+```{r read-comp-raw}
+comp_raw <- read_excel(ips_path, sheet = "02_IPS_COMP")
+
+comp_raw %>%
+  glimpse()
+```
+
+```{r clean-comp}
+ips_comp <- comp_raw %>%
+  mutate(
+    cve_ent = as.integer(cve_ent),
+    year = as.integer(anio),
+    entidad_abr_m = str_trim(as.character(entidad_abr_m))
+  ) %>%
+  # drop national aggregate and synthetic Distopía / Utopía rows
+  filter(entidad_abr_m %in% unname(goc_abr)) %>%
+  filter(year >= year_min, year <= year_max) %>%
+  mutate(
+    estado = recode(entidad_abr_m, !!!setNames(names(goc_abr), unname(goc_abr)))
+  ) %>%
+  select(estado, entidad_abr_m, cve_ent, year, all_of(component_codes)) %>%
+  pivot_longer(
+    cols = all_of(component_codes),
+    names_to = "component",
+    values_to = "score_0_100"
+  ) %>%
+  mutate(
+    component_label = recode(component, !!!component_labels_en),
+    # IPS is 0-100; OHI resilience is 0-1
+    score = score_0_100 / score_max,
+    score = pmin(pmax(score, 0), 1)
+  ) %>%
+  select(estado, entidad_abr_m, cve_ent, year, component, component_label, score_0_100, score)
+```
+
+```{r comp-checks}
+ips_comp %>%
+  count(estado, component) %>%
+  pivot_wider(names_from = component, values_from = n) %>%
+  kable(caption = "Rows per state × component (expect one per year in 2015-2024)") # yup!!!
+```
+
+
+```{r comp-checks}
+ips_comp %>%
+  group_by(component, component_label) %>%
+  summarise(
+    n = n(),
+    n_missing = sum(is.na(score)),
+    min_score = min(score, na.rm = TRUE),
+    max_score = max(score, na.rm = TRUE),
+    years = paste(range(year), collapse = "-"),
+    .groups = "drop"
+  ) %>%
+  kable(digits = 3, caption = "GoC IPS component summary (0-1 after /100)")
+
+# |component |component_label                          |  n| n_missing| min_score| max_score|years     |
+# |:---------|:----------------------------------------|--:|---------:|---------:|---------:|:---------|
+# |01_01comp |Nutrition and basic medical care         | 60|         0|     0.420|     0.760|2015-2024 |
+# |01_02comp |Water and sanitation                     | 60|         0|     0.778|     0.949|2015-2024 |
+# |01_03comp |Housing                                  | 60|         0|     0.850|     0.973|2015-2024 |
+# |02_05comp |Access to basic knowledge                | 60|         0|     0.520|     0.608|2015-2024 |
+# |02_06comp |Access to information and communications | 60|         0|     0.615|     0.845|2015-2024 |
+# |02_07comp |Health and wellness                      | 60|         0|     0.414|     0.691|2015-2024 |
+# |02_08comp |Environmental quality                    | 60|         0|     0.616|     0.788|2015-2024 |
+# |03_12comp |Access to higher education               | 60|         0|     0.461|     0.655|2015-2024 |
+```
+
+
+## 3. Average kept components and turn it into social stability resilience
+
+Here we will do an equal-weight mean of the eight kept components. Scores are already on 0–1 after dividing by 100, with higher = better.
+
+```{r average-components}
+social_stability_state <- ips_comp %>%
+  group_by(estado, year) %>%
+  summarise(
+    n_components = n_distinct(component),
+    resilience = mean(score, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r average-check-2024}
+social_stability_state %>%
+  filter(year == 2024) %>%
+  arrange(desc(resilience)) %>%
+  kable(
+    digits = 3,
+    caption = "2024 GoC social stability resilience by state (mean of kept IPS components)"
+  )
+
+# |estado              | year| n_components| resilience|
+# |:-------------------|----:|------------:|----------:|
+# |Baja California     | 2024|            8|      0.748|
+# |Sinaloa             | 2024|            8|      0.747|
+# |Jalisco             | 2024|            8|      0.734|
+# |Sonora              | 2024|            8|      0.731|
+# |Baja California Sur | 2024|            8|      0.728|
+# |Nayarit             | 2024|            8|      0.691|
+```
+
+<!-- ```{r component-contribution-2024} -->
+<!-- # wide view of the inputs behind the 2024 average -->
+<!-- ips_comp %>% -->
+<!--   filter(year == 2024) %>% -->
+<!--   select(estado, component, score) %>% -->
+<!--   pivot_wider(names_from = component, values_from = score) %>% -->
+<!--   left_join( -->
+<!--     social_stability_state %>% filter(year == 2024) %>% select(estado, resilience), -->
+<!--     by = "estado" -->
+<!--   ) %>% -->
+<!--   arrange(desc(resilience)) %>% -->
+<!--   kable(digits = 3, caption = "2024 component inputs and mean resilience by state") -->
+
+
+<!-- ``` -->
+
+
+
+## 4. Map onto `rgn_id` and save
+
+State resilience values are inherited by every GoC `rgn_id` in that state (`municipality_to_rgnid_update.csv`). Region_9 spans Jalisco and Nayarit, so I take a CONAPO population-weighted mean of the two state scores.
+
+```{r mun-rgn-lookup}
+mun_lookup <- read_csv(mun_path, show_col_types = FALSE) %>%
+  mutate(
+    estado = str_trim(estado),
+    rgn_id = as.character(rgn_id)
+  )
+
+estado_to_rgn <- mun_lookup %>%
+  distinct(estado, rgn_id) %>%
+  mutate(estado_key = str_to_upper(estado)) %>%
+  select(estado_key, rgn_id)
+# 
+# estado_to_rgn %>%
+#   arrange(rgn_id, estado_key) %>%
+#   kable(caption = "Estado to rgn_id (unique pairs from municipality lookup)")
+```
+
+```{r state-to-rgn}
+ss_rgn <- social_stability_state %>%
+  mutate(estado_key = str_to_upper(estado)) %>%
+  left_join(estado_to_rgn, by = "estado_key", relationship = "many-to-many") %>%
+  left_join(state_population, by = c("year", "estado")) %>%
+  filter(!is.na(rgn_id), !is.na(resilience))
+
+social_stability_resilience <- ss_rgn %>%
+  group_by(rgn_id, year) %>%
+  summarise(
+    # Region_9 is the only multi-state region; weight by CONAPO population
+    resilience = if (n() == 1 || all(is.na(poblacion))) {
+      mean(resilience)
+    } else {
+      weighted.mean(resilience, w = poblacion, na.rm = TRUE)
+    },
+    n_states = n_distinct(estado),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rgn_num = as.integer(str_remove(rgn_id, "Region_")),
+    resilience = round(resilience, 4)
+  ) %>%
+  arrange(year, rgn_num) %>%
+  select(rgn_id, year, resilience)
+
+social_stability_resilience %>%
+  filter(year == 2024) %>%
+  kable(digits = 4, caption = "Social stability resilience by rgn_id (2024)")
+
+# |rgn_id   | year| resilience|
+# |:--------|----:|----------:|
+# |Region_1 | 2024|     0.7476|
+# |Region_2 | 2024|     0.7476|
+# |Region_3 | 2024|     0.7283|
+# |Region_4 | 2024|     0.7283|
+# |Region_5 | 2024|     0.7312|
+# |Region_6 | 2024|     0.7312|
+# |Region_7 | 2024|     0.7312|
+# |Region_8 | 2024|     0.7473|
+# |Region_9 | 2024|     0.7286|
+```
+
+```{r save}
+write_csv(
+  social_stability_resilience,
+  here::here(output_dir, "social_stability_ips_resilience.csv")
+)
+write_csv(
+  social_stability_resilience,
+  here::here(github_dir, "social_stability_ips_resilience.csv")
+)
+```
+
+## 5. Explore with plotly
+
+### Resilience by state
+
+```{r plot-state}
+plot_state <- plot_ly(
+  social_stability_state,
+  x = ~year,
+  y = ~resilience,
+  color = ~estado,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    estado, "<br>", year,
+    "<br>resilience: ", round(resilience, 3)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Social stability resilience (IPS kept components), GoC states",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Resilience (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Estado"))
+  )
+
+plot_state
+```
+
+### Component trajectories (GoC mean)
+
+```{r plot-components}
+comp_ts <- ips_comp %>%
+  group_by(year, component, component_label) %>%
+  summarise(score = mean(score), .groups = "drop") %>%
+  mutate(
+    component_plot = paste(component, component_label, sep = " — ")
+  )
+
+plot_components <- plot_ly(
+  comp_ts,
+  x = ~year,
+  y = ~score,
+  color = ~component_plot,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "GoC mean of each kept IPS component over time",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Mean score (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Component"))
+  )
+
+plot_components
+```
+
+### Regional resilience time series
+
+```{r plot-rgn}
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+plot_rgn <- social_stability_resilience %>%
+  mutate(
+    region = recode(rgn_id, !!!rgn_labels),
+    region = factor(region, levels = unname(rgn_labels))
+  ) %>%
+  plot_ly(
+    x = ~year,
+    y = ~resilience,
+    color = ~region,
+    colors = setNames(unname(rgn_colors), unname(rgn_labels)),
+    type = "scatter",
+    mode = "lines+markers"
+  ) %>%
+  layout(
+    title = "Social stability resilience by GoC region (México Cómo Vamos IPS)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Resilience (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Region"))
+  )
+
+plot_rgn
+```
+
+## Next steps
+
+1. Re-knit on Mazu once the workbook lives under `_raw_data/mexico_como_vamos_indice_de_progreso_social/d2025`.  
+2. If México Cómo Vamos revises 2015–2024 scores when the 2025 report is fully digitized into their repo, swap in the new wide file and re-run.  
+3. Confirm whether equal weights across the eight components remain preferred, or whether Dimension 1 vs 2 blocks should be averaged first (then averaged together) so housing / water do not get the same weight as a single higher-education component.
+
+##.
+
+## 6. Method B (alternative): average dimensions, then average the two
+
+Same kept components, different aggregation:
+
+1. **Dimension 1 block** = mean of `01_01comp`, `01_02comp`, `01_03comp`  
+2. **Dimension 2 block** = mean of `02_05comp`, `02_06comp`, `02_07comp`, `02_08comp`, `03_12comp`  
+3. **Resilience** = mean of the two dimension-block scores  
+
+So each dimension block gets weight 1/2. Within Dimension 1 each component gets 1/6 of the final score; within Dimension 2 each gets 1/10. Method A gave every component 1/8.
+
+I keep Method A as the saved layer above; Method B is only for comparison here.
+
+```{r method-b-dimensions}
+# which "dimension block" each kept component belongs to for Method B
+# (03_12comp sits with Foundations of Wellbeing, as decided)
+component_dimension <- c(
+  "01_01comp" = "dim1_basic_needs",
+  "01_02comp" = "dim1_basic_needs",
+  "01_03comp" = "dim1_basic_needs",
+  "02_05comp" = "dim2_foundations",
+  "02_06comp" = "dim2_foundations",
+  "02_07comp" = "dim2_foundations",
+  "02_08comp" = "dim2_foundations",
+  "03_12comp" = "dim2_foundations"
+)
+
+ips_comp_dim <- ips_comp %>%
+  mutate(dimension = unname(component_dimension[component]))
+
+# step 1: mean within each dimension block
+dim_scores <- ips_comp_dim %>%
+  group_by(estado, year, dimension) %>%
+  summarise(
+    n_components = n_distinct(component),
+    dim_score = mean(score, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+dim_scores %>%
+  filter(year == 2024) %>%
+  select(estado, dimension, n_components, dim_score) %>%
+  pivot_wider(
+    names_from = dimension,
+    values_from = c(n_components, dim_score)
+  ) %>%
+  kable(digits = 3, caption = "2024 dimension-block scores (Method B inputs)")
+```
+
+```{r method-b-average}
+# step 2: mean of the two dimension blocks
+social_stability_state_b <- dim_scores %>%
+  group_by(estado, year) %>%
+  summarise(
+    n_dimensions = n_distinct(dimension),
+    resilience = mean(dim_score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(resilience = pmin(pmax(resilience, 0), 1))
+```
+
+```{r method-a-vs-b-2024}
+# side-by-side state comparison for the latest year
+compare_2024 <- social_stability_state %>%
+  filter(year == 2024) %>%
+  select(estado, resilience_a = resilience) %>%
+  left_join(
+    social_stability_state_b %>%
+      filter(year == 2024) %>%
+      select(estado, resilience_b = resilience),
+    by = "estado"
+  ) %>%
+  mutate(diff_b_minus_a = resilience_b - resilience_a) %>%
+  arrange(desc(resilience_a))
+
+compare_2024 %>%
+  kable(
+    digits = 3,
+    caption = "2024 Method A (component mean) vs Method B (dimension mean then average)"
+  )
+
+# |estado              | resilience_a| resilience_b| diff_b_minus_a|
+# |:-------------------|------------:|------------:|--------------:|
+# |Baja California     |        0.748|        0.776|          0.028|
+# |Sinaloa             |        0.747|        0.771|          0.023|
+# |Jalisco             |        0.734|        0.760|          0.026|
+# |Sonora              |        0.731|        0.752|          0.021|
+# |Baja California Sur |        0.728|        0.747|          0.018|
+# |Nayarit             |        0.691|        0.714|          0.023|
+```
+
+```{r method-a-vs-b-timeseries}
+# GoC mean resilience over time under both methods
+compare_ts <- bind_rows(
+  social_stability_state %>%
+    group_by(year) %>%
+    summarise(resilience = mean(resilience), .groups = "drop") %>%
+    mutate(method = "A. Equal-weight components"),
+  social_stability_state_b %>%
+    group_by(year) %>%
+    summarise(resilience = mean(resilience), .groups = "drop") %>%
+    mutate(method = "B. Dimension means, then average")
+)
+
+plot_compare <- plot_ly(
+  compare_ts,
+  x = ~year,
+  y = ~resilience,
+  color = ~method,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "GoC mean social stability resilience: Method A vs Method B",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Mean resilience (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Method"))
+  )
+
+plot_compare
+```
+
+```{r method-a-vs-b-by-state}
+# one panel-ish view: both methods for each state over time
+compare_state_long <- bind_rows(
+  social_stability_state %>%
+    transmute(estado, year, resilience, method = "A. Components"),
+  social_stability_state_b %>%
+    transmute(estado, year, resilience, method = "B. Dimensions")
+)
+
+plot_compare_state <- plot_ly(
+  compare_state_long,
+  x = ~year,
+  y = ~resilience,
+  color = ~estado,
+  linetype = ~method,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Social stability by state: Method A (solid line) vs Method B (dashed)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Resilience (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Estado / method"))
+  )
+
+plot_compare_state
+```
+
+```{r method-b-to-rgn-optional}
+# optional: map Method B to rgn_id the same way, for a regional comparison
+ss_rgn_b <- social_stability_state_b %>%
+  mutate(estado_key = str_to_upper(estado)) %>%
+  left_join(estado_to_rgn, by = "estado_key", relationship = "many-to-many") %>%
+  left_join(state_population, by = c("year", "estado")) %>%
+  filter(!is.na(rgn_id), !is.na(resilience))
+
+social_stability_resilience_b <- ss_rgn_b %>%
+  group_by(rgn_id, year) %>%
+  summarise(
+    resilience = if (n() == 1 || all(is.na(poblacion))) {
+      mean(resilience)
+    } else {
+      weighted.mean(resilience, w = poblacion, na.rm = TRUE)
+    },
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rgn_num = as.integer(str_remove(rgn_id, "Region_")),
+    resilience = round(resilience, 4)
+  ) %>%
+  arrange(year, rgn_num) %>%
+  select(rgn_id, year, resilience)
+
+compare_rgn_2024 <- social_stability_resilience %>%
+  filter(year == 2024) %>%
+  select(rgn_id, resilience_a = resilience) %>%
+  left_join(
+    social_stability_resilience_b %>%
+      filter(year == 2024) %>%
+      select(rgn_id, resilience_b = resilience),
+    by = "rgn_id"
+  ) %>%
+  mutate(diff_b_minus_a = resilience_b - resilience_a)
+
+compare_rgn_2024 %>%
+  kable(
+    digits = 4,
+    caption = "2024 rgn_id Method A vs Method B (B is not written to the locked CSV)"
+  )
+```
 
