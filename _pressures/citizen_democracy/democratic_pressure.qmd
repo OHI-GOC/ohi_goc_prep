@@ -1,5 +1,424 @@
 ---
-title: "democratic_pressure"
-format: html
+title: 'OHI GoC: Democratic pressure (IDD-Mex Dimensión I)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
 ---
 
+# Democratic pressure (IDD-Mex Dimensión I)
+
+I am turning the IDD-Mex **Índice Democracia de los Ciudadanos** (Dimensión I) state scores into a democratic-pressure layer for the Gulf of California.
+
+The Índice de Desarrollo Democrático de México (IDD-Mex) evaluates democratic development across Mexico's 32 states. Dimensión I covers the effective exercise of citizen rights and situations that violate them (political adhesion / vote, political rights, civil liberties, gender in government, insecurity, and — in later editions — citizen commitment). Indicator and dimension scores are built on a **0–10** scale (10 = best performance among states that year; 0 = worst). I divide by 10 to get **0–1**, then invert so **1 = maximum pressure (weakest citizen democracy)**.
+
+**Pros:** state series back to 2010; Dimensión I is already oriented toward rights / liberties / insecurity; published long sheet makes cleaning easy.  
+**Cons:** state level only; indicators are relative within each year (best = 10, worst = 0), so year-to-year levels are not fully cardinal; no 2016 edition in this workbook (we carry 2015 forward); full methods annex lives on idd-mex.org, which has been hard to load.
+
+We assess this at the state level for now (same decision as IEDMX governance, IPS social stability, labor poverty, ENCIG). GoC states: Baja California, Baja California Sur, Sonora, Sinaloa, Jalisco, and Nayarit.
+
+---
+
+**To download / refresh:**
+
+- Series workbook: `SERIES_POR_DIMENSION_y_POR_INDICADOR_IDD_MEX_2010-2024.xlsx`
+- Bring it into Mazu at `/home/shares/ohi/OHI_GOC/_raw_data/IDD-MEX/d2026`
+- Background: [KAS IDD-Mex](https://www.kas.de/es/web/mexiko/statische-inhalte-detail/-/content/idd-mex); methods notes also appear in the annual IDD-Mex reports (e.g. IDD-Mex 2023 PDF).
+
+---
+
+*Outline of the script:*
+
+1. Read CONAPO population for year-specific weights (needed when Region_9 spans two states).  
+2. Read sheet `D I 2010-24` (Índice Democracia de los Ciudadanos by state × year).  
+3. Keep GoC states, rescale 0–10 → 0–1, invert to pressure, and fill the missing 2016 year.  
+4. Map onto GoC `rgn_id`s and save.  
+5. Explore with `plotly`.
+
+---
+
+```{r setup}
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(plotly)
+
+knitr::opts_chunk$set(
+  fig.width = 9,
+  fig.height = 5,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r paths}
+raw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/IDD-MEX/d2026"
+
+idd_path <- file.path(
+  raw_dir,
+  "SERIES_POR_DIMENSION_y_POR_INDICADOR_IDD_MEX_2010-2024.xlsx"
+)
+
+conapo_path <- here::here(
+  "/home/shares/ohi/OHI_GOC/_raw_data/CONAPO_demographic_indicators/d2026/pobproy_ggrupos.csv"
+)
+
+mun_path <- here::here(
+  "/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid_update.csv"
+)
+
+output_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/pressure"
+#dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+github_dir <- here::here("democratic_pressure/output")
+#dir.create(github_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r constants}
+year_min <- 2010L
+year_max <- 2024L
+
+# Dimensión I raw scores are 0-10; OHI wants 0-1
+score_max <- 10
+
+goc_states <- c(
+  "Baja California",
+  "Baja California Sur",
+  "Sonora",
+  "Sinaloa",
+  "Jalisco",
+  "Nayarit"
+)
+
+# long series sheet: Índice Democracia de los Ciudadanos, 2010-2024
+dim1_sheet <- "D I 2010-24"
+```
+
+## What Dimensión I covers
+
+From the IDD-Mex materials we have on hand:
+
+| Theme | Role in Dimensión I |
+|---|---|
+| Adhesión política (voto) | Political adhesion / electoral support |
+| Derechos políticos | Political rights |
+| Libertades civiles | Civil liberties |
+| Género en el gobierno | Gender in government |
+| Inseguridad | Conditioning of rights/liberties by insecurity |
+| Compromiso ciudadano | Citizen commitment (present in later editions) |
+
+Dimensiones III (Social) and IV (Económica) are **not** used here: those are expressed as deviations from the national mean (can be negative) and feed the composite IDD-Mex differently. Dimensión I stays on the 0–10 indicator scale and enters the composite more directly.
+
+**Orientation for OHI:** raw Dimensión I is higher = better citizen democracy. After `/10`, `pressure = 1 - score` so higher pressure = weaker Dimensión I.
+
+## 1. CONAPO state population (year-specific weights)
+
+Same as in the governance / IPS / ENCIG scripts: sum `POB_TOTAL` so each GoC state-year has one population weight. Needed when Region_9 inherits both Jalisco and Nayarit.
+
+```{r conapo-read}
+conapo_raw <- read_csv(conapo_path, show_col_types = FALSE)
+```
+
+```{r conapo-aggregate}
+state_population <- conapo_raw %>%
+  select(CLAVE_ENT, NOM_ENT, ANO, SEXO, POB_TOTAL) %>%
+  filter(NOM_ENT %in% goc_states) %>%
+  group_by(year = ANO, estado = NOM_ENT) %>%
+  summarize(poblacion = sum(POB_TOTAL, na.rm = TRUE), .groups = "drop")
+```
+
+```{r conapo-check}
+state_population %>%
+  filter(year %in% c(2010, 2015, 2020, 2024)) %>%
+  pivot_wider(names_from = year, values_from = poblacion) %>%
+  kable(
+    caption = "CONAPO projected total population (GoC states; selected years)",
+    format.args = list(big.mark = ",")
+  )
+
+stopifnot(all(goc_states %in% unique(state_population$estado)))
+```
+
+## 2. Read Dimensión I long series
+
+Sheet `D I 2010-24` has:
+
+- Row 1: title (`Índice Democracia de los Ciudadanos`)
+- Row 2: year headers (`2010` … `2024`; **2016 is missing**)
+- Rows 3+: one state per row, then one score per year
+
+```{r explore-sheets}
+excel_sheets(idd_path) %>%
+  tibble(sheet = .) %>%
+  kable(caption = "Sheets in the IDD-Mex series workbook")
+```
+
+```{r read-dim1-raw}
+dim1_raw <- read_excel(idd_path, sheet = dim1_sheet, col_names = FALSE)
+
+dim1_raw %>%
+  slice(1:5) %>%
+  kable(caption = "First rows of D I 2010-24 (raw)")
+```
+
+```{r clean-dim1}
+# Row 2 holds year headers. read_excel may drop a leading empty Excel column,
+# so locate the estado column as the one just before the first year header.
+header_row <- dim1_raw %>%
+  slice(2) %>%
+  unlist(use.names = FALSE)
+
+year_cols <- which(!is.na(suppressWarnings(as.integer(header_row))))
+years_in_sheet <- as.integer(header_row[year_cols])
+estado_col <- min(year_cols) - 1L
+
+stopifnot(estado_col >= 1, length(years_in_sheet) >= 1)
+
+dim1_long <- dim1_raw %>%
+  slice(3:n()) %>%
+  mutate(
+    estado = str_trim(as.character(.[[estado_col]]))
+  ) %>%
+  filter(!is.na(estado), estado != "") %>%
+  select(estado, all_of(year_cols)) %>%
+  # rename year columns to calendar years before pivoting
+  set_names(c("estado", as.character(years_in_sheet))) %>%
+  pivot_longer(
+    cols = -estado,
+    names_to = "year",
+    values_to = "score_0_10"
+  ) %>%
+  mutate(
+    year = as.integer(year),
+    score_0_10 = suppressWarnings(as.numeric(score_0_10))
+  ) %>%
+  filter(!is.na(year), !is.na(score_0_10))
+
+dim1_goc <- dim1_long %>%
+  filter(estado %in% goc_states) %>%
+  arrange(estado, year) %>%
+  group_by(estado) %>%
+  # fill the missing 2016 edition (and any other gap) from the prior year
+  complete(year = year_min:year_max) %>%
+  fill(score_0_10, .direction = "down") %>%
+  ungroup() %>%
+  mutate(
+    # 0-10 -> 0-1; higher score = better citizen democracy
+    score = score_0_10 / score_max,
+    score = pmin(pmax(score, 0), 1),
+    # OHI pressure: higher = worse
+    pressure = 1 - score,
+    pressure = pmin(pmax(pressure, 0), 1)
+  )
+
+stopifnot(all(goc_states %in% unique(dim1_goc$estado)))
+stopifnot(all(year_min:year_max %in% unique(dim1_goc$year)))
+```
+
+```{r dim1-checks}
+dim1_goc %>%
+  count(estado) %>%
+  kable(caption = "Rows per GoC state (expect one per year 2010-2024)")
+
+dim1_goc %>%
+  summarise(
+    n = n(),
+    n_missing = sum(is.na(pressure)),
+    min_raw = min(score_0_10, na.rm = TRUE),
+    max_raw = max(score_0_10, na.rm = TRUE),
+    min_pressure = min(pressure, na.rm = TRUE),
+    max_pressure = max(pressure, na.rm = TRUE),
+    years = paste(range(year), collapse = "-"),
+    .groups = "drop"
+  ) %>%
+  kable(digits = 3, caption = "GoC Dimensión I summary (raw 0-10 and pressure 0-1)")
+
+dim1_goc %>%
+  filter(year == 2024) %>%
+  arrange(desc(pressure)) %>%
+  select(estado, year, score_0_10, score, pressure) %>%
+  kable(digits = 3, caption = "2024 GoC Dimensión I (raw, 0-1 score, pressure)")
+```
+
+## 3. Map onto `rgn_id` and save
+
+State pressure values are inherited by every GoC `rgn_id` in that state (`municipality_to_rgnid_update.csv`). Region_9 spans Jalisco and Nayarit, so I take a CONAPO population-weighted mean of the two state scores.
+
+```{r mun-rgn-lookup}
+mun_lookup <- read_csv(mun_path, show_col_types = FALSE) %>%
+  mutate(
+    estado = str_trim(estado),
+    rgn_id = as.character(rgn_id)
+  )
+
+estado_to_rgn <- mun_lookup %>%
+  distinct(estado, rgn_id) %>%
+  mutate(estado_key = str_to_upper(estado)) %>%
+  select(estado_key, rgn_id)
+
+estado_to_rgn %>%
+  arrange(rgn_id, estado_key) %>%
+  kable(caption = "Estado to rgn_id (unique pairs from municipality lookup)")
+```
+
+```{r state-to-rgn}
+dim1_rgn <- dim1_goc %>%
+  mutate(estado_key = str_to_upper(estado)) %>%
+  left_join(estado_to_rgn, by = "estado_key", relationship = "many-to-many") %>%
+  left_join(state_population, by = c("year", "estado")) %>%
+  filter(!is.na(rgn_id), !is.na(pressure))
+
+democratic_pressure <- dim1_rgn %>%
+  group_by(rgn_id, year) %>%
+  summarise(
+    # Region_9 is the only multi-state region; weight by CONAPO population
+    pressure = if (n() == 1 || all(is.na(poblacion))) {
+      mean(pressure)
+    } else {
+      weighted.mean(pressure, w = poblacion, na.rm = TRUE)
+    },
+    n_states = n_distinct(estado),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rgn_num = as.integer(str_remove(rgn_id, "Region_")),
+    pressure = round(pressure, 4)
+  ) %>%
+  arrange(year, rgn_num) %>%
+  select(rgn_id, year, pressure)
+
+democratic_pressure %>%
+  filter(year == 2024) %>%
+  kable(digits = 4, caption = "Democratic pressure by rgn_id (2024)")
+```
+
+```{r save}
+write_csv(
+  democratic_pressure,
+  file.path(output_dir, "democratic_pressure_iddmex_dim1.csv")
+)
+write_csv(
+  democratic_pressure,
+  file.path(github_dir, "democratic_pressure_iddmex_dim1.csv")
+)
+```
+
+## 4. Explore with plotly
+
+### Pressure by state
+
+```{r plot-state}
+plot_state <- plot_ly(
+  dim1_goc,
+  x = ~year,
+  y = ~pressure,
+  color = ~estado,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    estado, "<br>", year,
+    "<br>raw Dim I: ", round(score_0_10, 3),
+    "<br>pressure: ", round(pressure, 3)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Democratic pressure (1 - IDD-Mex Dimensión I, divided by 10) for the GoC states",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Pressure (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Estado"))
+  )
+
+plot_state
+```
+
+### Raw Dimensión I (0–10) by state
+
+```{r plot-raw}
+plot_raw <- plot_ly(
+  dim1_goc,
+  x = ~year,
+  y = ~score_0_10,
+  color = ~estado,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "IDD-Mex Índice Democracia de los Ciudadanos (raw 0-10), GoC states",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Dimensión I score (0-10)", range = c(0, 10.5)),
+    legend = list(title = list(text = "Estado"))
+  )
+
+plot_raw
+```
+
+### Regional pressure time series
+
+```{r plot-rgn}
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+plot_rgn <- democratic_pressure %>%
+  mutate(
+    region = recode(rgn_id, !!!rgn_labels),
+    region = factor(region, levels = unname(rgn_labels))
+  ) %>%
+  plot_ly(
+    x = ~year,
+    y = ~pressure,
+    color = ~region,
+    colors = setNames(unname(rgn_colors), unname(rgn_labels)),
+    type = "scatter",
+    mode = "lines+markers"
+  ) %>%
+  layout(
+    title = "Democratic pressure by GoC region (IDD-Mex Dimensión I inverted)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Pressure (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Region"))
+  )
+
+plot_rgn
+```
+
+## Next steps
+
+1. Re-knit on Mazu once CONAPO + `municipality_to_rgnid_update.csv` paths resolve.  
+2. Decide whether Dimensión I alone is the right democratic-pressure signal, or whether Dimensión II (institutions) should enter as well.  
+3. Keep an eye on idd-mex.org / annual PDFs if indicator composition shifts again (e.g. compromiso ciudadano added in later years).

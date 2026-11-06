@@ -1,0 +1,560 @@
+---
+title: 'OHI GoC: Concentration of Economic Power (WID)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Concentration of Economic Power (World Inequality Database)
+
+I am turning Mexico's **World Inequality Database (WID)** net personal wealth shares for the **bottom 50%** and the **top 1%** into a national pressure that every GoC `rgn_id` inherits.
+
+The score I am using is Mel's relative wealth concentration:
+
+\[
+\text{pressure} = 1 - \frac{s_{\text{bottom 50\%}}}{s_{\text{top 1\%}}}
+\]
+
+I make sure it stays between 0 and 1. Higher means more concentrated economic power at the very top relative to the poorer half of adults (**1 = most pressure**).
+
+To read more, you can look at issue [#137](https://github.com/OHI-GOC/OHI_GOC_issues/issues/137).
+
+## Mel's ideas for this Concentration of Economic Power pressure
+
+When I opened the issue, I talked about how income and wealth disparities restrict access to education, healthcare, and stability, and how that can undercut ocean engagement and resilience. Mel agreed with all of that, but she thinks **that is what the labor poverty pressure already captures**, and I agree!!
+
+For *this* indicator we want something different. Extreme wealth inequality (even when poverty is low) can distort power and decision making. People who control the resources get much more political influence, can more easily bend rules and regulations, and get preferential access. Concentrated power lets private interests override public interests more easily, and that can hit whole communities, including people who are not poor.
+
+So the pressure here reflects the **concentration of economic power**!
+
+### Why top 1% (not top 10%)
+
+Mel wants to compare the bottom half of the wealth distribution to the **wealthiest 1%**, because that is the slice most tied to outsized political and regulatory influence. The top 10% is a broader upper group (ultra wealthy plus a lot of high earners and professionals). That reflects "overall inequality" more than "how much power do the most rich people have to potentially bend the rules." So we are using the top 1%.
+
+### The score Mel suggested, plus one idea we are not going to pursue for now
+
+1. **Relative wealth concentration (this is the score we are using for now):**  
+   `1 - (bottom 50% wealth share) / (top 1% wealth share)`  
+   This is easy to explain: it shows how little power the bottom half has relative to the top of the distribution. Pressure = 0 only if bottom 50% wealth equals top 1% wealth. Pressure = 1 only if bottom 50% wealth goes to 0. Years where the top 1% exceeds the bottom 50% are *high*, but they are not automatically a 1.
+
+2. **Idea 2: Top 1% wealth share times the wealth to income ratio (% of NNI):**  
+   This would capture how big top 1% wealth is in years of national income (for example, about 40% times about 471% is about 188% of annual NNI). Mel and I like this one. Cross country rescaling would still take more work, but at the end of the script I try a simple within Mexico rescale: divide by the historical max over 2000 to 2024 so the peak year is pressure 1.
+
+**Pros:** annual national series; the formula is already pressure like on 0 to 1; I can pull it with the R `wid` package (same service as Stata `ssc install wid`); it matches the political power framing.  
+**Cons:** Mexico only (no state or municipio); wealth estimates are not super great (MX transparency is about 8.5 out of 20 on WID); every GoC region gets the same national score.
+
+*Outline of the script:*
+
+1. Pull MX wealth shares with the R `wid` package.  
+2. Compute Mel's relative wealth concentration and make sure it stays between 0 and 1.  
+3. Give that national pressure to every GoC `rgn_id` and save.  
+4. Explore with `plotly` (and try Idea 2 with a 2000 to 2024 historical max rescale).
+
+---
+
+```{r setup}
+library(tidyverse)
+library(knitr)
+library(plotly)
+
+# CRAN package mirrors the Stata tool: install.packages("wid")
+# https://wid.world/methodology/
+if (!requireNamespace("wid", quietly = TRUE)) {
+  install.packages("wid", repos = "https://cloud.r-project.org")
+}
+library(wid)
+
+knitr::opts_chunk$set(
+  fig.width = 9,
+  fig.height = 5,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r paths}
+# cache of the raw WID pull (so re-knits do not hammer the API)
+raw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/wid_world/d2026"
+dir.create(raw_dir, showWarnings = FALSE, recursive = TRUE)
+
+mun_path <- here::here(
+  "/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid_update.csv"
+)
+
+output_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/economic_power_concentration/output"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+github_dir <- here::here("_pressures/social/output")
+dir.create(github_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r constants}
+# WID age / population unit codes (from the codes dictionary):
+#   ages 992 = adults (20+)
+#   pop  "j" = equal split among spouses
+# That is WID's usual benchmark for inequality shares, and it matches the
+# "Adults | Equal split" selection on the wid.world data page we were using.
+# (999 = all ages; "i" = individuals. For shares, 992/j and 999 often match,
+# but 992/j is the standard we want here.)
+ages_code <- 992
+pop_code  <- "j"
+
+year_min <- 2000 # series go way back, but early years look rough quality wise
+year_max <- 2025 # ask for recent years; WID only returns years that exist
+
+raw_rds <- here::here(raw_dir, "wid_mx_shweal_p0p50_p99p100.rds")
+raw_csv <- here::here(raw_dir, "wid_mx_shweal_p0p50_p99p100.csv")
+```
+
+## 1. Download WID wealth shares for Mexico
+
+Stata version of what I want:
+
+```stata
+ssc install wid
+wid, indicators(shweal) areas(MX) perc(p0p50 p99p100) ages(992) pop(j) clear
+```
+
+In R, `shweal` is the share of **net personal wealth**. Shares are fractions of 1 (for example, 0.40 = 40%).  
+`p0p50` is the bottom 50%. `p99p100` is the top 1%.
+
+I also pull `shweal` for `p90p100` just for context, and in the last section of this script I pull the national wealth to income ratio `wnweal`. Neither of those goes into the pressure score.
+
+The `avg_quality` missing field message from `download_wid` is annoying but fine; the series still come back.
+
+```{r download-wid}
+if (file.exists(raw_rds)) {
+  wid_raw <- readRDS(raw_rds)
+} else {
+  wid_raw <- download_wid(
+    indicators = "shweal",
+    areas      = "MX",
+    years      = year_min:year_max,
+    perc       = c("p0p50", "p99p100", "p90p100"),
+    ages       = ages_code,
+    pop        = pop_code,
+    metadata   = TRUE,
+    verbose    = TRUE
+  )
+  saveRDS(wid_raw, raw_rds)
+  write_csv(wid_raw, raw_csv)
+}
+```
+
+```{r look-at-wid-raw}
+# super quick, look at each of the variables from the data dictionary
+wid_raw %>%
+  distinct(variable, percentile, shortname, age, pop) %>%
+  arrange(percentile) %>%
+  kable(caption = "WID net personal wealth shares pulled for Mexico (adults, equal split)")
+```
+
+```{r tidy-shares}
+wid_shares <- wid_raw %>%
+  mutate(
+    share_group = case_when(
+      percentile == "p99p100" ~ "top1",
+      percentile == "p90p100" ~ "top10",
+      percentile == "p0p50"   ~ "bottom50",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(share_group)) %>%
+  select(year, share_group, value, data_quality) %>%
+  arrange(share_group, year)
+```
+
+```{r tidy-shares-check}
+# make a table to understand the range of each of them
+wid_shares %>%
+  group_by(share_group) %>%
+  summarise(
+    n = n(),
+    year_min = min(year),
+    year_max = max(year),
+    value_min = min(value, na.rm = TRUE),
+    value_max = max(value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  kable(digits = 3, caption = "Coverage and range of wealth share series")
+
+# |share_group |  n| year_min| year_max| value_min| value_max|
+# |:-----------|--:|--------:|--------:|---------:|---------:|
+# |bottom50    | 25|     2000|     2024|     0.017|     0.032|
+# |top1        | 25|     2000|     2024|     0.331|     0.417|
+# |top10       | 25|     2000|     2024|     0.667|     0.734|
+```
+
+Notice that the most recent year in the API pull is **2024**, even if the wid.world chart axis looks like it goes to 2025. That is expected right now: WID's current benchmark wealth share series are published through **2024** (see their 1800 to 2024 update note). Asking for `year_max = 2025` does not invent a 2025 row. Also, if an old `.rds` cache is already on disk, re running the download chunk will keep loading that cache until you delete it.
+
+## 2. Relative wealth concentration to pressure
+
+\[
+\text{pressure} = \mathrm{clip}_{[0,1]}\!\left(1 - \frac{s_{\text{bottom 50\%}}}{s_{\text{top 1\%}}}\right)
+\]
+
+| Situation | Score |
+|---|---|
+| Bottom 50% wealth equals top 1% wealth | 0 |
+| Bottom 50% wealth goes to 0 | 1 |
+| Top 1% greater than bottom 50% (typical for MX) | between 0 and 1 (often high) |
+
+```{r pressure}
+econ_power <- wid_shares %>%
+  filter(share_group %in% c("bottom50", "top1")) %>%
+  select(year, share_group, value) %>%
+  pivot_wider(names_from = share_group, values_from = value) %>%
+  mutate(
+    wealth_bottom50 = bottom50,
+    wealth_top1 = top1,
+    bottom_over_top1 = wealth_bottom50 / wealth_top1,
+    # Mel's relative wealth concentration
+    pressure = 1 - bottom_over_top1,
+    pressure = pmin(pmax(pressure, 0), 1),
+    top1_exceeds_bottom50 = wealth_top1 > wealth_bottom50
+  ) %>%
+  select(
+    year,
+    wealth_bottom50,
+    wealth_top1,
+    bottom_over_top1,
+    top1_exceeds_bottom50,
+    pressure
+  ) %>%
+  arrange(year)
+
+stopifnot(all(is.finite(econ_power$pressure) | is.na(econ_power$pressure)))
+```
+
+```{r pressure-table}
+econ_power %>%
+  filter(year %in% c(2000, 2005, 2010, 2015, 2020, 2023, 2024, 2025)) %>%
+  kable(
+    digits = 3,
+    caption = "Selected years: Mel relative wealth concentration (this is the pressure)"
+  )
+```
+
+```{r pressure-summary}
+econ_power %>%
+  filter(!is.na(pressure)) %>%
+  summarise(
+    n_years = n(),
+    year_min = min(year),
+    year_max = max(year),
+    pressure_min = min(pressure),
+    pressure_mean = mean(pressure),
+    pressure_max = max(pressure),
+    n_years_top1_gt_bottom50 = sum(top1_exceeds_bottom50),
+    n_years_pressure_eq_0 = sum(pressure == 0),
+    n_years_pressure_eq_1 = sum(pressure == 1)
+  ) %>%
+  kable(
+    digits = 3,
+    caption = "Pressure range check (expect high scores; 0 and 1 may be rare or absent)"
+  )
+```
+
+## 3. Give the national pressure to every GoC `rgn_id`
+
+WID has no subnational Mexico series I am using here. Every GoC region gets the same national score for a given year.
+
+```{r mun-rgn-lookup}
+mun_lookup <- read_csv(mun_path, show_col_types = FALSE) %>%
+  mutate(
+    estado = str_trim(estado),
+    rgn_id = as.character(rgn_id)
+  )
+
+rgn_ids <- mun_lookup %>%
+  distinct(rgn_id) %>%
+  mutate(rgn_num = as.integer(str_remove(rgn_id, "Region_"))) %>%
+  arrange(rgn_num)
+
+rgn_ids %>%
+  kable(caption = "GoC rgn_id list (all get the national WID pressure)")
+```
+
+```{r to-rgn}
+economic_power_concentration_pressure <- tidyr::crossing(
+  rgn_ids %>% select(rgn_id, rgn_num),
+  econ_power %>% select(year, pressure)
+) %>%
+  filter(!is.na(pressure)) %>%
+  mutate(pressure = round(pressure, 4)) %>%
+  arrange(year, rgn_num) %>%
+  select(rgn_id, year, pressure)
+```
+
+```{r to-rgn-table}
+economic_power_concentration_pressure %>%
+  filter(year == max(year)) %>%
+  kable(
+    digits = 4,
+    caption = "Concentration of Economic Power by rgn_id (latest year; national score)"
+  )
+```
+
+```{r save}
+write_csv(
+  economic_power_concentration_pressure,
+  here::here(output_dir, "economic_power_concentration_pressure.csv")
+)
+write_csv(
+  economic_power_concentration_pressure,
+  here::here(github_dir, "economic_power_concentration_pressure.csv")
+)
+
+write_csv(
+  econ_power,
+  here::here(output_dir, "economic_power_concentration_national_series.csv")
+)
+```
+
+## 4. Explore with plotly
+
+### Wealth shares: bottom 50%, top 1% (and top 10% for context)
+
+```{r plot-shares}
+shares_long <- wid_shares %>%
+  mutate(
+    series = recode(
+      share_group,
+      bottom50 = "Bottom 50%",
+      top1 = "Top 1%",
+      top10 = "Top 10% (context only)"
+    ),
+    series = factor(series, levels = c("Bottom 50%", "Top 1%", "Top 10% (context only)"))
+  )
+
+plot_shares <- plot_ly(
+  shares_long,
+  x = ~year,
+  y = ~value,
+  color = ~series,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Mexico net personal wealth shares (adults, equal split)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Share (fraction of 1)", range = c(0, 1)),
+    legend = list(title = list(text = "Group"))
+  )
+
+plot_shares
+```
+
+### Pressure over time
+
+```{r plot-pressure}
+plot_pressure <- plot_ly(
+  econ_power,
+  x = ~year,
+  y = ~pressure,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    year,
+    "<br>bottom 50%: ", round(wealth_bottom50, 3),
+    "<br>top 1%: ", round(wealth_top1, 3),
+    "<br>bottom/top1: ", round(bottom_over_top1, 3),
+    "<br>pressure: ", round(pressure, 3)
+  ),
+  hoverinfo = "text",
+  name = "Relative wealth concentration"
+) %>%
+  layout(
+    title = "Concentration of Economic Power (Mel formula)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Pressure (0 to 1)", range = c(0, 1.05))
+  )
+
+plot_pressure
+```
+
+### Regional pressure (same across every rgn_id)
+
+```{r plot-rgn}
+plot_rgn <- economic_power_concentration_pressure %>%
+  filter(rgn_id == "Region_1") %>%
+  plot_ly(
+    x = ~year,
+    y = ~pressure,
+    type = "scatter",
+    mode = "lines+markers",
+    name = "All GoC regions (national WID)"
+  ) %>%
+  layout(
+    title = "Concentration of Economic Power: same score for every rgn_id",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Pressure (0 to 1)", range = c(0, 1.05))
+  )
+
+plot_rgn
+```
+
+## 5. Idea 2: top 1% wealth as a multiple of national income
+
+Mel's second idea is top 1% wealth share times the wealth to income ratio. That is wealth of the top 1% expressed as a multiple of national income (for example, 0.40 times 4.71 is about 1.88 years of NNI).
+
+WID code `wnweal` is net national wealth as a fraction of national income (for example, 4.71 is about 471% of NNI).
+
+The raw product is not already on a 0 to 1 scale, so I tried a simple within Mexico rescaling using the max over time:
+
+\[
+\text{pressure}_{\text{idea 2}} = \frac{\text{top 1\% share} \times \text{wealth/income ratio}}{\max_{2000\text{--}2024}(\text{top 1\% share} \times \text{wealth/income ratio})}
+\]
+
+So the highest year in 2000 to 2024 becomes pressure 1. This is exploratory; relative wealth concentration is still the score we are using.
+
+```{r download-wnweal}
+raw_wir_rds <- here::here(raw_dir, "wid_mx_wnweal.rds")
+
+if (file.exists(raw_wir_rds)) {
+  wir_raw <- readRDS(raw_wir_rds)
+} else {
+  wir_raw <- download_wid(
+    indicators = "wnweal",
+    areas = "MX",
+    years = year_min:year_max,
+    metadata = TRUE,
+    verbose = TRUE
+  )
+  saveRDS(wir_raw, raw_wir_rds)
+}
+```
+
+```{r idea2-join}
+idea2 <- econ_power %>%
+  select(year, wealth_top1) %>%
+  left_join(
+    wir_raw %>%
+      transmute(year, wealth_income_ratio = value),
+    by = "year"
+  ) %>%
+  mutate(
+    top1_wealth_in_nni_units = wealth_top1 * wealth_income_ratio
+  )
+```
+
+```{r idea2-rescale}
+# historical max over the last 24 years of available WID wealth shares (2000-2024)
+idea2_hist_max <- idea2 %>%
+  filter(year >= 2000, year <= 2024, !is.na(top1_wealth_in_nni_units)) %>%
+  summarise(hist_max = max(top1_wealth_in_nni_units)) %>%
+  pull(hist_max)
+
+idea2 <- idea2 %>%
+  mutate(
+    pressure_idea2 = top1_wealth_in_nni_units / idea2_hist_max,
+    pressure_idea2 = pmin(pmax(pressure_idea2, 0), 1)
+  )
+
+tibble(
+  hist_window = "2000-2024",
+  hist_max_top1_wealth_in_nni_units = idea2_hist_max,
+  year_at_max = idea2$year[which.max(idea2$top1_wealth_in_nni_units)]
+) %>%
+  kable(digits = 3, caption = "Idea 2 historical max used for rescaling")
+
+# |hist_window | hist_max_top1_wealth_in_nni_units| year_at_max|
+# |:-----------|---------------------------------:|-----------:|
+# |2000-2024   |                             1.922|        2013|
+```
+
+```{r plot-idea2-raw}
+plot_idea2_raw <- plot_ly(
+  idea2 %>% filter(!is.na(top1_wealth_in_nni_units)),
+  x = ~year,
+  y = ~top1_wealth_in_nni_units,
+  type = "scatter",
+  mode = "lines+markers",
+  name = "top1 share times W/Y"
+) %>%
+  layout(
+    title = "Idea 2 raw: top 1% wealth as a multiple of national income",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Fraction of national income (years of NNI)")
+  )
+
+plot_idea2_raw
+```
+
+```{r plot-idea2-pressure}
+plot_idea2_pressure <- plot_ly(
+  idea2 %>% filter(!is.na(pressure_idea2)),
+  x = ~year,
+  y = ~pressure_idea2,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    year,
+    "<br>top1 share: ", round(wealth_top1, 3),
+    "<br>W/Y: ", round(wealth_income_ratio, 3),
+    "<br>top1 in NNI units: ", round(top1_wealth_in_nni_units, 3),
+    "<br>pressure idea2: ", round(pressure_idea2, 3)
+  ),
+  hoverinfo = "text",
+  name = "Idea 2 / hist max"
+) %>%
+  layout(
+    title = "Idea 2 pressure: raw value / max(2000-2024)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Pressure (0 to 1)", range = c(0, 1.05))
+  )
+
+plot_idea2_pressure
+```
+
+```{r plot-idea1-vs-idea2}
+compare_ideas <- econ_power %>%
+  select(year, pressure_idea1 = pressure) %>%
+  left_join(
+    idea2 %>% select(year, pressure_idea2),
+    by = "year"
+  ) %>%
+  pivot_longer(
+    cols = c(pressure_idea1, pressure_idea2),
+    names_to = "idea",
+    values_to = "pressure"
+  ) %>%
+  mutate(
+    idea = recode(
+      idea,
+      pressure_idea1 = "Idea 1: relative wealth concentration",
+      pressure_idea2 = "Idea 2: top1 wealth / hist max"
+    )
+  )
+
+plot_compare <- plot_ly(
+  compare_ideas %>% filter(!is.na(pressure)),
+  x = ~year,
+  y = ~pressure,
+  color = ~idea,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "Idea 1 vs Idea 2 pressures (Idea 2 uses 2000-2024 max)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Pressure (0 to 1)", range = c(0, 1.05))
+  )
+
+plot_compare
+```
