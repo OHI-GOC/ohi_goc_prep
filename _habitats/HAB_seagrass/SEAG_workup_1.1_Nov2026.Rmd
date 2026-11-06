@@ -23,6 +23,8 @@ library(ggplot2)
 library(knitr)
 library(kableExtra)
 library(tmap)
+library(pdftools)
+
 ```
 
 
@@ -50,29 +52,63 @@ ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) %>%
 
 # STEP 2: CALCULATE SEAGRASS "CURRENT STATUS", i.e. condition (source: Literature Review)  ------------------------------
 
-```{r}
-seagrass <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/seagrass/Seagrass_merged.shp") %>% st_zm()
+```{r Read in CEDO seagrass data}
+CEDO_seagrass.data_2025_raw <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/seagrass/Seagrass_merged.shp") %>% 
+  st_zm()
+
 ```
 
+```{r Match the land-use CRS to the ohi_regions CRS}
+# Match CRSs of EDO_seagrass.data_2025_raw data to OHI regions
 
-```{r}
-# Match CRSs of OHI regions to seagrass data
-ohi_regions <- st_transform(ohi_regions, st_crs(seagrass))
+CEDO_seagrass.data_2025 <- st_transform(CEDO_seagrass.data_2025_raw, st_crs(ohi_regions))
 
-# Find the SEA area in each OHI region
-seagrass_ohi <- st_intersection(seagrass, ohi_regions) %>%
+```
+
+## Assign the seagrass area to OHI regions:
+```{r Assign the seagrass area to OHI regions}
+
+# Check the area units:
+area <- st_area(CEDO_seagrass.data_2025$geometry)
+units(area)
+
+SEAG_Current_Extent <- st_intersection(
+  CEDO_seagrass.data_2025, ohi_regions
+) %>%
   group_by(rgn_id) %>%
-  summarise(geometry = st_union(geometry), .groups = "drop") %>%
-  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6) %>%
-  st_drop_geometry()
-seagrass_ohi
+  summarise(
+    geometry = st_union(geometry),
+    .groups = "drop"
+  ) %>%
+
+  # Calculate area before adding missing regions
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    year = 2025,
+    provenance = "Area estimate supplied by CEDO (2025), presumably for the year 2025"
+  ) %>%
+  st_drop_geometry() %>%
+
+  # Add any missing regions
+  tidyr::complete(
+    rgn_id = paste0("Region_", 1:9),
+    fill = list(
+      area_km2 = NA_real_,
+      year = 2025,
+      provenance = "Area estimate supplied by CEDO (2025); no evidence of seagrass in this region"
+    )
+  )
+
+view(SEAG_Current_Extent)
+
 ```
-```{r}
-# Make a table
-seagrass_ohi %>%
+
+```{r Make a table}
+
+SEAG_Current_Extent %>%
   mutate(
     year = 2025,
-    rgn_id = gsub("_", " ", rgn_id)   # Region_1 → Region 1
+    rgn_id = gsub("_", " ", rgn_id)   # Region_1 to "Region 1"
   ) %>%
   select(rgn_id, year, area_km2) %>%
   kable(
@@ -89,109 +125,178 @@ seagrass_ohi %>%
 
 ```
 
-
-```{r}
-# Create composite seagrass data frame
-seagrass_ohi <- seagrass_ohi %>%
-  # Add condition scores
-  mutate(condition = case_when(
-    rgn_id %in% c("Region_1", "Region_2", "Region_3", "Region_5", "Region_7", "Region_8") ~ 54,
-    rgn_id == "Region_4" ~ 31,
-    rgn_id == "Region_6" ~ 100,
-    rgn_id == "Region_9" ~ NA_real_,
-    TRUE ~ NA_real_
-  )) %>%
-  
-  # Rename area_km2 → extent and add year
-  rename(extent = area_km2) %>%
-  mutate(year = 2025) %>%
-  
-  # Add trend + habitat columns
-  mutate(
-    trend = NA_real_,
-    habitat = "seagrass"
-  ) %>%
-  
-  # Final column order
-  select(rgn_id, year, condition, extent, habitat)
-
-seagrass_ohi
+## Save SEAG_Current_Extent
+```{r Save SEAG_Current_Extent}
+write.csv(
+  SEAG_Current_Extent,
+  here::here("/home/ferrer/ohi_goc_prep/_habitats/HAB_seagrass/SEA_outputs/SEAG_Extent_1.1_Nov052026.csv"),
+  row.names = FALSE
+)
 ```
 
-```{r}
-# Condition table
-seagrass_condition <- seagrass_ohi %>%
-  select(rgn_id, year, condition)
+# PLOT EXTENT:
 
-# Extent table
-seagrass_extent <- seagrass_ohi %>%
-  select(rgn_id, year, extent)
-
-# Pressure
-seagrass_pressure <- seagrass_ohi %>%
-  mutate(pressure = (100 - condition)/100) %>%
-  select(rgn_id, year, pressure)
-
-```
-
-```{r}
-# Write CSVs to output_data directory
-write.csv(seagrass_condition,
-          here("_habitats/HAB_seagrass/SEA_outputs/seagrass_condition.csv"),
-          row.names = FALSE)
-write.csv(seagrass_extent,
-          here("_habitats/HAB_seagrass/SEA_outputs/seagrass_extent.csv"),
-          row.names = FALSE)
-
-write.csv(seagrass_pressure,
-          here("_habitats/HAB_seagrass/SEA_outputs/seagrass_pressure.csv"),
-          row.names = FALSE)
-```
-
-
-
-
-
-```{r}
+```{r Map of seagrass extent}
 library(tmap)
 
 tmap_mode("plot")
 
-# 1. Add a dummy column so tmap can create a legend for seagrass
-seagrass$habitat <- "Seagrass"
+# Add dummy column for seagrass legend
+CEDO_seagrass.data_2025$habitat <- "Seagrass"
 
 tm_shape(ohi_regions) +
   tm_polygons(
     col = "location",
     palette = c(
-      "marine" = "#cceeff",   # light blue
-      "land"   = "#f5e6c8"    # light tan
+      "marine" = "#cceeff",
+      "land" = "#f5e6c8"
     ),
     alpha = 0.5,
     border.col = "gray",
     border.lwd = 0.6,
-    legend.show = FALSE        # hide marine/land legend
+    legend.show = FALSE
   ) +
 
-tm_shape(seagrass) +
+tm_shape(CEDO_seagrass.data_2025) +
   tm_polygons(
-    col = "habitat",                     # use dummy column
-    palette = c("Seagrass" = "#228B22"), # blue seagrass
+    col = "habitat",
+    palette = c("Seagrass" = "#228B22"),
     alpha = 1,
     border.col = "#228B22",
-    border.lwd = 1000,
-    title = "Habitat"                    # legend label
+    border.lwd = 0.5,
+    title = "Habitat"
   ) +
 
 tm_layout(
-    title.size = 1.3,
-    title.fontface = "bold",
-    title.position = c(0.02, 0.98),
-    frame = FALSE
-  ) +
+  title.size = 1.3,
+  title.fontface = "bold",
+  title.position = c(0.02, 0.98),
+  frame = FALSE
+) +
 
 tm_scale_bar(position = c("left", "bottom"))
 
 ```
+
+# STEP 3: CREATE SEAG_Current_Status DATAFRAME ------------------------------
+
+```{r Load in seagrass SEAG_current_status scores}
+# Scores are available in PDF format here:
+pdf_text <- pdf_text("/home/shares/ohi/OHI_GOC/goal_prep/habitats/Seagrass_LitReview/Seagrass Lit Review (Aug 2026).pdf")
+
+# View text from the first page
+cat(pdf_text[1])
+```
+
+
+```{r Create composite seagrass data frame}
+
+colnames(SEAG_Current_Extent)
+
+SEAG_Current_Status <- SEAG_Current_Extent %>%
+  # Add SEAG_current_status scores
+  mutate(
+    SEAG_current_status = case_when(
+      rgn_id %in% c("Region_1", "Region_2", "Region_3",
+                    "Region_5", "Region_7", "Region_8") ~ 54,
+      rgn_id == "Region_4" ~ 31,
+      rgn_id == "Region_6" ~ 100,
+      rgn_id == "Region_9" ~ NA_real_,
+      TRUE ~ NA_real_
+    ),
+    provenance = "estimated: current status derived from lit review (2026), area estimate supplied by CEDO (2025)",
+
+    # Implement include/exclude criteria
+    SEAG_include_exclude = case_when(
+      area_km2 > 1 ~ "INCLUDE",
+      TRUE ~ "EXCLUDE"
+    )
+  ) %>%
+  
+  # Final column order
+  select(
+    rgn_id,
+    year,
+    SEAG_current_status,
+    area_km2,
+    provenance,
+    SEAG_include_exclude
+  )
+
+
+view(SEAG_Current_Status)
+
+```
+
+```{r Load in the OHI Region_Key0}
+Region_Key0<- read.csv("/home/ferrer/ohi_goc_prep/FP/v2026/CONAPESCA_Keys/Spatial_Keys/RegionKey_FINAL_May262026.csv")
+
+colnames(Region_Key0)
+
+Region_Key<- Region_Key0 %>%
+  select(rgn_id= OHI_region_est, rgn_name= OHI_region_name) %>%
+  distinct()
+
+# Make uppercase:
+Region_Key$rgn_id <- sub("^r", "R", Region_Key$rgn_id)
+```
+
+```{r Join rgn_name to scores}
+colnames(Region_Key)
+colnames(SEAG_Current_Status)
+
+SEAG_Current_Status <- SEAG_Current_Status %>%
+  left_join(Region_Key, by = "rgn_id")
+  
+SEAG_Current_Status<- SEAG_Current_Status %>%
+  relocate(rgn_name, .before = rgn_id)
+# 9 obs., 4 vars.
+
+```
+
+## Save SEAG_Current_Status
+
+```{r Save SEAG_Current_Status}
+write.csv(SEAG_Current_Status,
+          file= "/home/ferrer/ohi_goc_prep/_habitats/HAB_seagrass/SEA_outputs/SEAG_Status_1.1_Nov052026.csv",
+          row.names = FALSE)
+```
+
+
+# STEP 4: ESTIMATE SEAG_Pressure, the inverse of SEAG_Current_Status ------------------------------
+
+```{r Pressure}
+SEAG_Pressure <- SEAG_Current_Status %>%
+  mutate(pressure = (100 - SEAG_current_status)/100) %>%
+  select(rgn_name, rgn_id, year, pressure)
+
+```
+
+## Save SEAG_Pressure
+
+```{r Save SEAG_Pressure}
+write.csv(SEAG_Pressure,
+          file= "/home/ferrer/ohi_goc_prep/_habitats/HAB_seagrass/SEA_outputs/SEAG_Pressure_1.1_Nov052026.csv",
+          row.names = FALSE)
+```
+
+
+# STEP 5: ESTIMATE SEAG_Trend (source: NA) ------------------------------
+
+```{r Trend}
+SEAG_Trend <- SEAG_Current_Status %>%
+  mutate(trend = NA) %>%
+  select(rgn_name, rgn_id, year, trend)
+
+```
+
+## Save SEAG_Trend
+
+```{r Save SEAG_Trend}
+write.csv(SEAG_Trend,
+          file= "/home/ferrer/ohi_goc_prep/_habitats/HAB_seagrass/SEA_outputs/SEAG_Trend_1.1_Nov052026.csv",
+          row.names = FALSE)
+```
+
 
 
