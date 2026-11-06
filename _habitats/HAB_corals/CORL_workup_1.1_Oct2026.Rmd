@@ -49,11 +49,11 @@ ohi_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) %>%
 ```
 
 # STEP 1: CALCULATE CORAL REEF "CURRENT EXTENT" (sources: Allen Coral Atlas [2020], dataMares [2016], Hem / CEDO coral data [2025]) ------------------------------
-Extent = Total area from dataMares - area from Allen Coral Atlas, with remainder split across all points identified in CEDO data.
+Extent = Total area from dataMares - area from Allen Coral Atlas, remainder split across all points identified in CEDO data.
 
 ```{r Read in Coral Reef extent data sets}
 # Read in Allen polygon data (2018-2020):
-AllenAtlas_coral_raw <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/coral_datasets/ALLEN_coral_Atlas/Mexican-Exclusive-Economic-Zone-20230309211010/Reef-Extent/reefextent.gpkg") %>% 
+AllenAtlas_coral_raw <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/coral_datasets/Allen_Coral_Atlas/Mexican-Exclusive-Economic-Zone-20230309211010/Reef-Extent/reefextent.gpkg") %>% 
   st_make_valid()
 
 # Read in CEDO point data (2025):
@@ -76,7 +76,7 @@ AllenAtlas_coral.data <- st_intersection(AllenAtlas_coral.data, ohi_regions)
 CEDO_coral.data   <- st_intersection(CEDO_coral.data, ohi_regions)
 ```
 
-```{r Identify points from the CEDO data set that do / do not intersect the Allen Atlas polygons}
+```{r Identify points from the CEDO data set that do or do not intersect the Allen Atlas polygons}
 # Identify points from the CEDO data set that intersect the Allen Atlas polygons
 corals_that_intersect <- st_intersects(CEDO_coral.data, AllenAtlas_coral.data)
 
@@ -92,8 +92,11 @@ non_intersect_coral_points
 
 ```{r Convert from m^2 to hectares}
 CORL_area_AllenAtlas_m2 <- sum(st_area(AllenAtlas_coral.data))
+
+# Convert m2 to hectares (10000)
 CORL_area_AllenAtlas_ha <- as.numeric(CORL_area_AllenAtlas_m2) / 10000
 CORL_area_AllenAtlas_ha
+
 ```
 
 ```{r Find remainder and assign area to non intersecting points}
@@ -105,35 +108,38 @@ remaining_coral_area_ha
 area_per_point_ha = remaining_coral_area_ha / non_intersect_coral_points
 area_per_point_ha
 
-# NOTE TO SELF: 2.6, slightly different than Austin's 2.7 because of a CRS matching change. - Oct 7 2026
+# NOTE TO SELF: 2.59, slightly different than Austin's 2.7 because of a CRS matching change. - Oct 7 2026
 ```
 
 ```{r Construct COMBINED coral reef dataset}
 
-# Rename AllenAtlas_coral.data$geom → geometry
+# Rename AllenAtlas_coral.data$geom and drop unwanted columns:
 AllenAtlas_coral.data <- AllenAtlas_coral.data %>%
-  rename(geometry = geom)
-
-# Drop the unwanted columns to concat corals_that_do_not_intersect and AllenAtlas_coral.data
-AllenAtlas_coral.data <- AllenAtlas_coral.data %>%
-  select(-class)
+  rename(geometry = geom) %>%
+    select(-class)
 
 corals_that_do_not_intersect <- corals_that_do_not_intersect %>%
   select(-Habitat)
 
-# Add an area_ha column For polygons (AllenAtlas_coral.data) and For points (corals_that_do_not_intersect)
+# Add an area_ha column for the Allen Atlas polygons and for points that do not intersect:
+# But first check the area units:
+area <- st_area(AllenAtlas_coral.data$geometry)
+units(area)
+
+# Convert the Allen data (given in m2) to hectares (units used by dataMares)
 AllenAtlas_coral.data <- AllenAtlas_coral.data %>%
   mutate(area_ha = as.numeric(st_area(geometry)) / 10000)
 
 corals_that_do_not_intersect <- corals_that_do_not_intersect %>%
   mutate(area_ha = area_per_point_ha)
 
-# Bind the two datasets together
+# Bind the two data sets together
 COMBINED_coral.data_area <- bind_rows(AllenAtlas_coral.data, corals_that_do_not_intersect)
+
 ```
 
 ```{r SANITY CHECK on total area}
-# Check if it worked: All areas should sum to 657 ha (dataMares estimate)
+# Check if it worked: All areas should sum to 657 ha (= dataMares estimate)
 sum(COMBINED_coral.data_area$area_ha)
 ```
 
@@ -154,9 +160,13 @@ all_rgns <- tibble(
 
 CORL_Current_Extent <- all_rgns %>%
   left_join(CORL_Current_Extent, by = c("rgn_id", "year")) %>%
-  mutate(area_ha = replace_na(area_ha, 0)) %>%
+  mutate(area_ha = replace_na(area_ha, 0),
+         area_ha = round(area_ha, 2),
+         # Convert hectares to km2
+         area_est_2025_km2 = round((area_ha / 100), 2)) %>%
   select(rgn_id, 
-         area_est_2025_ha = area_ha, 
+         area_est_2025_ha = area_ha,
+         area_est_2025_km2,
          year)
 
 CORL_Current_Extent
@@ -165,10 +175,10 @@ CORL_Current_Extent
 
 ```{r Ktable of Current Extent}
 CORL_Current_Extent %>%
-  kable(digits = 4, col.names = c("Region", "Extent (ha) (Allen Atlas data, 2020; CEDO data, 2025; dataMares, 2017)", "Year")) %>%
+  kable(digits = 4, col.names = c("Region", "Extent (ha) (Allen Atlas data, 2020; CEDO data, 2025; dataMares, 2017)", "Extent(km2)", "Year")) %>%
   kable_styling(bootstrap_options = c("striped", "bordered")) %>%
   add_header_above(
-    c('Coral Reef Extent' = 3))
+    c('Coral Reef Extent' = 4))
 
 ```
 
@@ -176,7 +186,7 @@ CORL_Current_Extent %>%
 ```{r Save CORL_Current_Extent}
 write.csv(
   CORL_Current_Extent,
-  here::here("_habitats/HAB_corals/CRL_outputs/CORL_Current_Extent_1.1_Oct072026.csv"),
+  here::here("_habitats/HAB_corals/CRL_outputs/CORL_Extent_1.1_Nov062026.csv"),
   row.names = FALSE
 )
 ```
@@ -238,32 +248,31 @@ tm_scale_bar(position = c("left", "bottom"))
 
 ```{r Load in extent data as needed}
 # Extent data from 3 data sources:
-CORL_Current_Extent <- read_csv(here::here("_habitats/HAB_corals/CRL_outputs/CORL_Current_Extent_1.1_Oct072026.csv"))
-# 9 obs., 3 vars.
+CORL_Current_Extent <- read_csv("/home/ferrer/ohi_goc_prep/_habitats/HAB_corals/CRL_outputs/CORL_Extent_1.1_Nov062026.csv")
+# 9 obs., 4 vars.
 ```
 
-```{r Load in Coral Percent Cover data}
+```{r Load in Coral Percent Cover data from lit review}
 # Percent cover data from literature review:
-CORL_percent.cover_data_raw <- read_csv("/home/shares/ohi/OHI_GOC/_raw_data/coral_datasets/Coral_cover_lit_review/Coral_PercentCover_Data_revised_Oct072026.csv")
-# 103 obs.,  11 vars.
+CORL_percent.cover_data_raw <- read_csv("/home/shares/ohi/OHI_GOC/goal_prep/habitats/Coral_LitReview/Coral_LitReview_revised_Oct072026.csv")
+# 103 obs.,  12 vars.
 ```
 
 ```{r Plot live coral cover over commonly sampled areas in Region 4 and 9}
-# First ggregate at the SITE level:
+
+colnames(CORL_percent.cover_data_raw)
+
+# First aggregate at the SITE level:
 TEST <- CORL_percent.cover_data_raw %>%
   filter(include_exclude == "INCLUDE") %>%
-  
   select(rgn_id, area, specific_site, year, percent_coral_cover_est) %>%
   group_by(rgn_id, specific_site, year) %>%
-  
-  summarize(
+  summarise(
     mean_LCC = mean(percent_coral_cover_est, na.rm = TRUE),
     n_obs = sum(!is.na(percent_coral_cover_est)),
     .groups = "drop"
   )
 # 68 obs.,  5 vars.
-
-colnames(CORL_percent.cover_data_raw)
 
 CORL_LLC_bySite<- TEST %>%
 ggplot(aes(x = year, y = mean_LCC, color = specific_site, shape= rgn_id)) +
@@ -299,14 +308,14 @@ ggsave(
 ```{r Prep CORL_percent.cover_data}
 colnames(CORL_percent.cover_data_raw)
 
-# First ggregate at the AREA level:
+# First aggregate at the AREA level:
 CORL_percent.cover_data <- CORL_percent.cover_data_raw %>%
   filter(include_exclude == "INCLUDE") %>%
   
   select(rgn_id, area, specific_site, year, percent_coral_cover_est) %>%
   group_by(rgn_id, area, year) %>%
   
-  summarize(
+  summarise(
     mean_LCC = mean(percent_coral_cover_est, na.rm = TRUE),
     n_obs = sum(!is.na(percent_coral_cover_est)),
     .groups = "drop"
@@ -350,7 +359,7 @@ ggsave(
 # Next aggregate at the Region level:
 CORL_cover_data_rgn<- CORL_percent.cover_data %>%
   group_by(rgn_id, year) %>%
-  summarize(
+  summarise(
     mean_LCC = mean(mean_LCC, na.rm = TRUE),
     n_obs = sum(n_obs),
     .groups = "drop"
@@ -387,6 +396,7 @@ ggplot(aes(x = year, y = mean_LCC, color = rgn_id)) +
   )
 
 CORL_LLC_byRegion
+
 ```
 
 ```{r Save CORL_LLC_byRegion as PNG}
@@ -403,7 +413,7 @@ ggsave(
 ```{r Gapfill CORL_cover_data_rgn}
 colnames(CORL_cover_data_rgn)
 
-# First, expand the WETL dataframe to include one row per year per region, even if that region has no data: 
+# First, expand the CORL dataframe to include one row per year per region, even if that region has no data: 
 CORL_cover_data_rgn <- CORL_cover_data_rgn %>%
   complete(
     rgn_id = c(paste0("Region_", 1:9)),
@@ -443,7 +453,9 @@ CORL_cover_data_rgn <- CORL_cover_data_rgn %>%
 # 297 obs., 6 vars.
 ```
 
-```{r Compare cover post- and pre- HISTORIC_CUTOFF}
+```{r Compare observed cover post- and pre- HISTORIC_CUTOFF}
+# In other words, do not consider any gapfilled values.
+
 # DECISION POINT: Historic cut off = pre and post 2010
 HISTORIC_CUTOFF = 2010
 
@@ -456,21 +468,50 @@ CORL_Current_Status0 <- CORL_cover_data_rgn %>%
 CORL_Current_Status0 <- CORL_Current_Status0 %>%
   group_by(rgn_id) %>%
   mutate(
-    historic_mean = mean(observed_LCC[year < HISTORIC_CUTOFF], na.rm = TRUE),
-    contemporary_mean = mean(observed_LCC[year >= HISTORIC_CUTOFF], na.rm = TRUE),
-    CORL_current_status = pmax(0, pmin((estimated_LCC / historic_mean) * 100, 100))
+    historic_mean = mean(
+      observed_LCC[year < HISTORIC_CUTOFF],
+      na.rm = TRUE
+    ),
+    contemporary_mean = mean(
+      observed_LCC[year >= HISTORIC_CUTOFF],
+      na.rm = TRUE
+    ),
+    CORL_current_status = case_when(
+
+      # No historic or contemporary coral observations
+      is.nan(historic_mean) & is.nan(contemporary_mean) ~ NA_real_,
+
+      # Historic period
+      year < HISTORIC_CUTOFF & is.finite(historic_mean) ~ 100,
+
+      # Contemporary period: calculate relative to historic baseline
+      year >= HISTORIC_CUTOFF &
+        is.finite(historic_mean) &
+        historic_mean > 0 &
+        is.finite(contemporary_mean) ~
+        pmax(0, pmin((contemporary_mean / historic_mean) * 100, 100)),
+
+      TRUE ~ NA_real_
+    ),
+    observed_LCC = round(observed_LCC, 2),
+    estimated_LCC = round(estimated_LCC, 2),
+    historic_mean = round(historic_mean, 2),
+    contemporary_mean = round(contemporary_mean, 2),
+    CORL_current_status = round(CORL_current_status, 2)
   ) %>%
   ungroup() %>%
-  select(rgn_id,
-         year,
-         period,
-         historic_mean,
-         contemporary_mean,
-         observed_LCC,
-         estimated_LCC,
-         provenance,
-         n_obs,
-         CORL_current_status)
+  select(
+    rgn_id,
+    year,
+    period,
+    n_obs,
+    observed_LCC,
+    estimated_LCC,
+    provenance,
+    historic_mean,
+    contemporary_mean,
+    CORL_current_status
+  )
 
 # Relevel:
 CORL_Current_Status0 <- CORL_Current_Status0 %>%
@@ -484,18 +525,19 @@ CORL_Current_Status0 <- CORL_Current_Status0 %>%
       levels = c("observed", "gapfilled")
     )
   )
+
 ```
 
-```{r Plot coral trends}
+```{r Plot coral cover time}
 
 # Prep for plot:
-Regions_of_Interest<- c("Region_4", "Region_9")
+REGIONS_OF_INTEREST<- c("Region_4", "Region_9")
 
 historic_mean <- unique(CORL_Current_Status0$historic_mean)
 contemporary_mean <- unique(CORL_Current_Status0$contemporary_mean)
 
 periods <- CORL_Current_Status0 %>%
-  filter(rgn_id %in% Regions_of_Interest) %>%
+  filter(rgn_id %in% REGIONS_OF_INTEREST) %>%
   group_by(rgn_id) %>%
   summarise(
     historic_mean = first(historic_mean),
@@ -507,7 +549,7 @@ periods <- CORL_Current_Status0 %>%
 
 # Plot:
 CORL_Cover_OverTime<- CORL_Current_Status0 %>%
-  filter(rgn_id %in% Regions_of_Interest) %>%
+  filter(rgn_id %in% REGIONS_OF_INTEREST) %>%
   
   ggplot(aes(year, observed_LCC, color = period)) +
   
@@ -519,17 +561,19 @@ CORL_Cover_OverTime<- CORL_Current_Status0 %>%
   # Period means
   geom_segment(
     data = periods,
-    aes(x = pre_start, xend = 2010, y = historic_mean, yend = historic_mean),
+    aes(x = pre_start, xend = HISTORIC_CUTOFF, 
+        y = historic_mean, yend = historic_mean),
     color = "blue", linetype = "dotted", linewidth = 1
   ) +
   geom_segment(
     data = periods,
-    aes(x = 2010, xend = post_end, y = contemporary_mean, yend = contemporary_mean),
+    aes(x = HISTORIC_CUTOFF, xend = post_end, 
+        y = contemporary_mean, yend = contemporary_mean),
     color = "orange", linetype = "dotted", linewidth = 1
   ) +
   
   geom_vline(
-    xintercept = 2010,
+    xintercept = HISTORIC_CUTOFF,
     color = "gray40",
     linewidth = 1
   ) +
@@ -543,7 +587,7 @@ CORL_Cover_OverTime<- CORL_Current_Status0 %>%
   labs(
     title = "Historic versus Contemporary Live Coral Cover",
     subtitle = "LCC estimates taken from multiple data sets across sites that were consistently sampled",
-    caption = "updated: Oct 7 2026",
+    caption = "updated: Nov 6 2026",
     x = "Year",
     y = "% Live Coral Cover (LCC)",
     color = "Period"
@@ -555,20 +599,22 @@ CORL_Cover_OverTime<- CORL_Current_Status0 %>%
     plot.title = element_text(size = 16, face = "bold")
   )
 
+
 CORL_Cover_OverTime
 
 
-# Method A (or modified A): when data is spotty -OR- bouncy.
+# Method A (or modified A): when data is spotty -OR- bouncy, compare mean in contemporary versis mean in historic.
 # Method B (lm): when data consistently sampled and not bouncy.
 
-# NOTE TO SELF: Revise coral scores, mean contemporary versus mean historic
+# NOTE TO SELF: Revise coral scores, mean contemporary versus mean historic.
+# When data is spotty -OR- bouncy, compare mean in contemporary versis mean in historic.
 ```
 
 ## Save CORL_Cover_OverTime
 
 ```{r Save as PNG}
 ggsave(
-  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_corals/CRL_outputs/CORL_OverTime_plot_Oct072026.png"),
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_corals/CRL_outputs/CORL_LCC_OverTime_plot_Nov062026.png"),
   plot = CORL_Cover_OverTime,
   width = 12,
   height = 12,
@@ -585,19 +631,20 @@ colnames(CORL_Current_Extent)
 # Merge:
 CORL_Current_Status <- CORL_Current_Status0 %>%
   left_join(select(CORL_Current_Extent,
-                   c("rgn_id", "area_est_2025_ha")),
+                   c("rgn_id", "area_est_2025_ha", "area_est_2025_km2")),
             by="rgn_id") %>%
   rename(
-    area_est_byMultiScources_ha = area_est_2025_ha
+    area_est_byMultiScources_ha = area_est_2025_ha,
+    area_est_byMultiScources_km2 = area_est_2025_km2
   )
 
-# 297 obs., 11 vars.
+# 297 obs., 12 vars.
   
 # Make an include / exclude column based on the information reported by Hem / CEDO:
 CORL_Current_Status<- CORL_Current_Status %>%
   mutate(CORL_include_exclude = ifelse(area_est_byMultiScources_ha == 0, "EXCLUDE", 
                                       "INCLUDE"))
-# 297 obs., 12 vars.
+# 297 obs., 13 vars.
 
 ```
 
@@ -628,7 +675,7 @@ CORL_Current_Status<- CORL_Current_Status %>%
 
 ```{r Save CORL_Current_Status}
 write.csv(CORL_Current_Status,
-          here::here("_habitats/HAB_corals/CRL_outputs/CORL_Current_Status_1.1_df_Oct072026.csv"),
+          here::here("_habitats/HAB_corals/CRL_outputs/CORL_Status_1.1_df_Nov062026.csv"),
           row.names = FALSE)
 ```
 
@@ -643,7 +690,7 @@ Region_colors<- c(
   "Southeastern Gulf" = "#8d61a9")
 
 # Plot:
-CORL_Current_Status_OverTime<- CORL_Current_Status %>%
+CORL_Status_OverTime<- CORL_Current_Status %>%
   ggplot(aes(year, CORL_current_status, color = rgn_name)) +
   
   geom_line(linewidth = 1) +
@@ -682,7 +729,7 @@ CORL_Current_Status_OverTime<- CORL_Current_Status %>%
   labs(
     title = "CORL Component Scores (1.1) by Region",
     subtitle = "Source: multiple data sources, incl. Reyes-Bonilla et al. and Cupul-Magana et al. unplished data",
-    caption = "updated: Oct 7 2026",
+    caption = "updated: Nov 06 2026",
     x = "Year",
     y = "CORL Score (from 0 to 100)",
     color = "Region",
@@ -700,7 +747,7 @@ CORL_Status_OverTime
 
 ```{r Save as PNG}
 ggsave(
-  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_corals/CRL_outputs/CORL_Status_1.1_plot_Oct072026.png"),
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_corals/CRL_outputs/CORL_Status_1.1_plot_Nov062026.png"),
   plot = CORL_Status_OverTime,
   width = 12,
   height = 12,
@@ -711,7 +758,7 @@ ggsave(
 ```{r Coral condition map}
 # Prepare coral condition data for join
 coral_condition_map <- CORL_Current_Status %>%
-  filter(year == 2023) %>%
+  filter(year == 2024) %>%
   mutate(
     rgn_id = gsub(" ", "_", rgn_id),
     current_status_int = round(CORL_current_status, 0),
@@ -760,13 +807,13 @@ tm_shape(ohi_marine) +
     col = "status_cat",
     palette = status_colors,
     alpha = 0.85,
-    title = "Coral Current Status (2023)",
+    title = "Coral Current Status (2024)",
     border.col = "black",
     lwd = 1.2
   ) +
 
 tm_layout(
-  title = "Coral Current Status (2023)",
+  title = "Coral Current Status (2024)",
   frame = FALSE,
   legend.outside = TRUE
 )
@@ -778,7 +825,8 @@ tm_layout(
 
 ```{r Estimate pressure as 100 minus current status}
 CORL_Pressure <- CORL_Current_Status %>%
-  mutate(pressure = (100 - CORL_current_status)/100) %>%
+  mutate(pressure = (100 - CORL_current_status) / 100,
+         pressure= round(pressure, 2)) %>%
   select(rgn_name, rgn_id, year, pressure)
 
 ```
@@ -786,7 +834,7 @@ CORL_Pressure <- CORL_Current_Status %>%
 ## Save CORL_Pressure
 ```{r Save CORL_Pressure}
 write.csv(CORL_Pressure,
-          here::here("_habitats/HAB_corals/CRL_outputs/CORL_Pressure_1.1_Oct072026.csv"),
+          here::here("_habitats/HAB_corals/CRL_outputs/CORL_Pressure_1.1_Nov062026.csv"),
           row.names = FALSE)
 ```
 
@@ -798,118 +846,141 @@ write.csv(CORL_Pressure,
 ```{r Calculate CORL_Trend using METHOD A}
 colnames(CORL_Current_Status)
 
-# METHOD A: 
-# sSee GitHub issue, Oct 7 2026, for more details: https://github.com/OHI-GOC/OHI_GOC_issues/issues/127#issuecomment-6041025924
-# slope <- (condition_end - condition_start) / n_years
-# trend_pct_yr <- (slope / condition_start) * 100
+# METHOD A - modified:
+# See GitHub issue, Oct 7 2026, for more details: https://github.com/OHI-GOC/OHI_GOC_issues/issues/127#issuecomment-6041025924
+# slope <- (contemporary_condition - historic_condition) / n_years
+# where historic_condition is the midpoint of the HISTORIC period, contemporary_condition is the midpoint of the CONTEMPORARY period, and n_years = years between midpoints
+# trend_pct_yr <- (slope / historic_condition) * 100
 
-# Calculate the trend as the linear annualized percent change between the most recent year (i.e., 2021) and 5-10 years prior (i.e., 2013)
-CORL_Trend0 <- CORL_Current_Status %>%
-  filter(CORL_include_exclude == "INCLUDE") %>%
-  filter(provenance == "observed") %>%
-  group_by(rgn_name, rgn_id) %>%
-  mutate(
-    recent_year = max(year, na.rm = TRUE),
-    comparison_year = min(
-      year[year < recent_year &
-           year >= recent_year - 10 &
-           year <= recent_year - 5]
-    ),
-    recent_LCC = observed_LCC[year == recent_year][1],
-    comparison_LCC = observed_LCC[year == comparison_year][1],
-    n_years = recent_year - comparison_year,
-    slope = (recent_LCC - comparison_LCC) / n_years,
-    trend = round((slope / comparison_LCC) * 100, 2)
+# Historic midpoint: first and last observed years, 1998–2009
+historic_years <- CORL_Current_Status %>%
+  filter(
+    year < HISTORIC_CUTOFF,
+    !is.na(observed_LCC)
   ) %>%
-  filter(year == recent_year) %>%
-  ungroup() %>%
-  select(
-    rgn_name,
-    rgn_id,
-    comparison_year,
-    comparison_LCC,
-    most_recent_year= recent_year,
-    most_recent_LCC= recent_LCC,
-    trend_linear_pct_year_opA = trend
+  group_by(rgn_name, rgn_id) %>%
+  summarise(
+    historic_midpoint = (min(year) + max(year)) / 2,
+    .groups = "drop"
+  )
+
+# Contemporary midpoint: first and last observed years, 2010 onward
+contemporary_years <- CORL_Current_Status %>%
+  filter(
+    year >= HISTORIC_CUTOFF,
+    !is.na(observed_LCC)
+  ) %>%
+  group_by(rgn_name, rgn_id) %>%
+  summarise(
+    contemporary_midpoint = (min(year) + max(year)) / 2,
+    .groups = "drop"
+  )
+
+# Retrieve existing means and calculate trend
+CORL_Trend0 <- CORL_Current_Status %>%
+  group_by(rgn_name, rgn_id) %>%
+  summarise(
+    historic_condition = first(historic_mean),
+    contemporary_condition = first(contemporary_mean),
+    .groups = "drop"
+  ) %>%
+  inner_join(historic_years, by = c("rgn_name", "rgn_id")) %>%
+  inner_join(contemporary_years, by = c("rgn_name", "rgn_id")) %>%
+  mutate(
+    n_years = contemporary_midpoint - historic_midpoint,
+    trend = (contemporary_condition - historic_condition) / n_years
   )
 
 CORL_Trend0
+# 2 obs., 8 vars.
 
 ```
 
-## METHOD B
+```{r Clean up trend and save}
 
-```{r Calculate CORL_Trend using METHOD B}
-# METHOD B: 
+colnames(CORL_Trend0)
+
+CORL_Trend<- CORL_Trend0 %>%
+    select(
+    rgn_name, rgn_id,
+    historic_midpoint, contemporary_midpoint, n_years,
+    historic_condition, contemporary_condition,
+    trend
+  ) %>%
+  mutate(
+    trend_method = "Modified Method A: contemporary midpoint vs. historic midpoint"
+  )
+  
+```
+
+
+## Save CORL_Trend
+
+```{r Save CORL_Trend}
+write.csv(CORL_Trend,
+          here::here("/home/ferrer/ohi_goc_prep/_habitats/HAB_corals/CRL_outputs/CORL_Trend_1.1_Nov062026.csv"),
+          row.names = FALSE)
+# 2 obs., 9 vars.
+```
+
+## METHOD B - **NOT USING THIS METHOD FOR CORALS**
+
+```{r Calculate CORL_Trend using METHOD B - NOT USING THIS METHOD FOR CORALS}
+# METHOD B:
 # See GitHub issue, Oct 7 2026, for more details: https://github.com/OHI-GOC/OHI_GOC_issues/issues/127#issuecomment-6041025924
 # slope = fit a linear model: lm(area ~ year), grab the slope estimate
 # trend_pct_year <- (1 + slope/earliest_area_in_lm)
 
 # Pull the most recent year and the comparison year:
-most_recent_year = max(CORL_Current_Status$year, na.rm = TRUE)
+# most_recent_year = max(CORL_Current_Status$year, na.rm = TRUE)
+# 
+# comparison_year <- min(
+#   CORL_Current_Status$year[
+#     CORL_Current_Status$provenance == "observed" &
+#     CORL_Current_Status$year < most_recent_year &
+#     CORL_Current_Status$year >= most_recent_year - 10 &
+#     CORL_Current_Status$year <= most_recent_year - 5
+#   ],
+#   na.rm = TRUE
+# )
+# 
+# CORL_cover_lm <- CORL_Current_Status %>%
+#   filter(
+#     year >= comparison_year,
+#     year <= most_recent_year,
+#     provenance == "observed"
+#   ) %>%
+#   group_by(rgn_id) %>%
+#   summarise(
+#     model = list(
+#       lm(observed_LCC ~ year, data = pick(everything()))
+#     ),
+#     comparison_LCC = observed_LCC[year == comparison_year][1],
+#     .groups = "drop"
+#   ) %>%
+#   mutate(
+#     slope = sapply(model, function(x) coef(x)[["year"]]),
+#     p_value = sapply(
+#       model,
+#       function(x) summary(x)$coefficients["year", "Pr(>|t|)"]
+#     ),
+#     trend_pct_year = round((slope / comparison_LCC) * 100, 2)
+#   ) %>%
+#   select(rgn_id, 
+#          trend_linear_pct_year_opB = trend_pct_year,
+#          lm_slope= slope, 
+#          p_value)
 
-comparison_year <- min(
-  CORL_Current_Status$year[
-    CORL_Current_Status$provenance == "observed" &
-    CORL_Current_Status$year < most_recent_year &
-    CORL_Current_Status$year >= most_recent_year - 10 &
-    CORL_Current_Status$year <= most_recent_year - 5
-  ],
-  na.rm = TRUE
-)
-
-CORL_cover_lm <- CORL_Current_Status %>%
-  filter(
-    year >= comparison_year,
-    year <= most_recent_year,
-    provenance == "observed"
-  ) %>%
-  group_by(rgn_id) %>%
-  summarise(
-    model = list(
-      lm(observed_LCC ~ year, data = pick(everything()))
-    ),
-    comparison_LCC = observed_LCC[year == comparison_year][1],
-    .groups = "drop"
-  ) %>%
-  mutate(
-    slope = sapply(model, function(x) coef(x)[["year"]]),
-    p_value = sapply(
-      model,
-      function(x) summary(x)$coefficients["year", "Pr(>|t|)"]
-    ),
-    trend_pct_year = round((slope / comparison_LCC) * 100, 2)
-  ) %>%
-  select(rgn_id, 
-         trend_linear_pct_year_opB = trend_pct_year,
-         lm_slope= slope, 
-         p_value)
-
-```
-
-```{r Merge options A and B}
-CORL_Trend<- CORL_Trend0 %>%
-  left_join(
-    CORL_cover_lm, 
-    by= "rgn_id"
-  )
 ```
 
 
 ```{r Make a nice Ktable for CORL_Trend}
-colnames(CORL_Trend)
-
-CORL_Trend %>%
-  select(rgn_id, trend_linear_pct_year_opA, trend_linear_pct_year_opB) %>%
-  kable(digits = 4, col.names = c("Region", "Trend (method A)", "Trend (method B)")) %>%
-  kable_styling(bootstrap_options = c("striped", "bordered")) %>%
-  add_header_above(
-    c('Coral Reef Trend' = 3))
-```
-
-## Save CORL_Trend
-```{r Save CORL_Trend}
-write.csv(CORL_Trend,
-          here::here("_habitats/HAB_corals/CRL_outputs/CORL_Trend_1.1_Oct072026.csv"),
-          row.names = FALSE)
+# colnames(CORL_Trend)
+# 
+# CORL_Trend %>%
+#   select(rgn_id, trend_linear_pct_year_opA, trend_linear_pct_year_opB) %>%
+#   kable(digits = 4, col.names = c("Region", "Trend (method A)", "Trend (method B)")) %>%
+#   kable_styling(bootstrap_options = c("striped", "bordered")) %>%
+#   add_header_above(
+#     c('Coral Reef Trend' = 3))
 ```
