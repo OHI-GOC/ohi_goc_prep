@@ -66,11 +66,12 @@ Region_Key<- Region_Key0 %>%
 Region_Key$rgn_id <- sub("^r", "R", Region_Key$rgn_id)
 ```
 
+
 # STEP 1: Load in GCMP_nrsi.data_raw
 
 ```{r Load in GCMP_nrsi.data_raw}
 GCMP_nrsi.data_raw<- read.csv("/home/shares/ohi/OHI_GOC/_raw_data/dataMares/nrsi_per_reef_year_ALL_not_filtered.csv")
-# 1630 obs., 9vars.
+# 1630 obs., 9 vars.
 
 ```
 
@@ -132,7 +133,65 @@ table(NRSI_Data0$rgn_id)
 ```
 
 
-# NOTE TO SELF: This ^ is a pretty sloppy join. Perfect this later. - Aug 5 2026
+# REVIEW ROCKY REEF "CURRENT EXTENT" (source: Hem / CEDO Data, est. 2025) ------------------------------
+# not needed for BD scoring but here if it's helpful
+
+```{r Load in CEDO Rocky Reef Sargassum layer}
+CEDO_rocky.reef_data <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/Arrecife rocoso/Arrecife rocoso.shp") %>% st_zm()
+
+plot(st_geometry(CEDO_rocky.reef_data))
+
+# Match hem data to OHI CRS
+CEDO_rocky.reef_data <- st_transform(
+  CEDO_rocky.reef_data,
+  st_crs(ohi_regions)
+)
+
+```
+
+```{r Assign the rocky-reef extent to each OHI region}
+# Assign the rocky-reef  extent to each OHI region:
+ROKR_Current_Extent <- st_intersection(
+  st_transform(CEDO_rocky.reef_data, st_crs(ohi_regions)),
+  ohi_regions
+) %>%
+  group_by(rgn_id) %>%
+  summarise(
+    area_est_byCEDO.2025_ha = sum(rocky_ha, na.rm = TRUE),
+    geometry = st_union(geometry),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    area_est_byCEDO.2025_ha = round(area_est_byCEDO.2025_ha, 2),
+    area_est_byCEDO.2025_km2 = round(area_est_byCEDO.2025_ha / 100, 2),
+    year = 2025
+  ) %>%
+  st_drop_geometry()
+# 9 obs, 3 vars.
+
+```
+
+```{r Plot rocky-reef sargassum layer}
+library(tmap)
+
+tmap_mode("view")
+
+tm_shape(ohi_regions) +
+  tm_polygons(col = "white", border.col = "gray", outline = 0.2) +
+  
+tm_shape(CEDO_rocky.reef_data) +
+  tm_polygons(col = "blue", border.col = "blue")
+
+```
+
+## Save ROKR_Current_Extent
+
+```{r Save ROKR_Current_Extent}
+write.csv(ROKR_Current_Extent,
+          "/home/ferrer/ohi_goc_prep/_habitats/HAB_rocky_reefs/ROK_outputs/ROKR_Extent_1.1_Nov082026.csv",
+          row.names = FALSE)
+
+```
 
 
 # STEP 3: Compute NRSI_Data per region ------------------------------
@@ -208,7 +267,7 @@ NRSI_Data_gapfilled <- NRSI_Data %>%
 
 ```
 
-# SAVE NRSI_Data_all ------------------------------
+# SAVE NRSI_Data_gapfilled ------------------------------
 
 ```{r Save NRSI_Data_gapfilled}
 write.csv(NRSI_Data_gapfilled, 
@@ -267,14 +326,14 @@ In this case, we have data from regions 2, 3, 4, 6, 7, and 9, but the reefs from
 # NRSI_global_mean$rgn_id_name<- c("global average")
 # 
 # 
-# NRSI_Data_all <- bind_rows(NRSI_Data, NRSI_global_mean)
+# ROKR_Current_Status <- bind_rows(NRSI_Data, NRSI_global_mean)
 # # 280 obs., 7 vars. 
 # 
-# colnames(NRSI_Data_all)
-# unique(NRSI_Data_all$provenance)
+# colnames(ROKR_Current_Status)
+# unique(ROKR_Current_Status$provenance)
 # 
 # # NA out provenance values for which mean_NRSI is = NA.
-# NRSI_Data_all <- NRSI_Data_all %>%
+# ROKR_Current_Status <- ROKR_Current_Status %>%
 #   mutate(
 #     provenance = if_else(
 #       is.na(mean_NRSI),
@@ -288,42 +347,47 @@ In this case, we have data from regions 2, 3, 4, 6, 7, and 9, but the reefs from
 
 # PLOT mean_NRSI over time ------------------------------
 
-```{r Load in NRSI_Data_all as needed}
+```{r Load in ROKR_Current_Status as needed}
 NRSI_Data_gapfilled<- read.csv("/home/ferrer/ohi_goc_prep/_habitats/HAB_rocky_reefs/ROK_outputs/NRSI_gapfilled_df_Nov062026.csv")
-
+# 252 obs., 6 vars.
 ```
 
-```{r Plot mean_NRSI over time}
-colnames(NRSI_Data_gapfilled)
-
-# Re-level a few things for plotting purposes:
+```{r Relevel a few things for plotting}
+# Relevel:
 NRSI_Data_gapfilled <- NRSI_Data_gapfilled %>%
   mutate(
-    rgn_id = factor(
-      rgn_id,
-      levels = c(
-        setdiff(unique(rgn_id), "global average"),
-        "global average"
-      )
-    ),
-    rgn_name = factor(
-      rgn_name,
-      levels = c(
-        setdiff(unique(rgn_name), "global average"),
-        "global average"
-      )
-    ),
     provenance = factor(
       provenance,
-      levels = c(
-        "observed",
-        "partially_observed",
-        "gapfilled"
-      )
+      levels = c("observed", "gapfilled")
     )
   )
 
-# Plot 1, panel per region:
+# Make sure to order the regions:
+REGION_ORDER <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
+NRSI_Data_gapfilled <- NRSI_Data_gapfilled %>%
+  mutate(
+    rgn_name = factor(
+      rgn_name,
+      levels = REGION_ORDER
+    )
+  )
+
+```
+
+
+```{r Plot mean_NRSI over time}
+colnames(NRSI_Data_gapfilled)
 
 REGION_COLORS<- c(
   "Western Upper Gulf" = "#C03729",
@@ -370,8 +434,7 @@ NRSI_Data_OverTime <- NRSI_Data_gapfilled %>%
   
   labs(
     title = "NRSI scores per Region",
-    subtitle = "updated: Aug 31 2026",
-    caption = "global average equals mean NRSI scores across all observed regions",
+    caption = "updated: Nov 08 2026",
     y = "Normalized Reef Status Indicator (0 to 1)",
     x = "Year",
     color = "Region",
@@ -390,28 +453,26 @@ NRSI_Data_OverTime <- NRSI_Data_gapfilled %>%
   
   scale_shape_manual(
     values = c(
-      observed = 22,
-      partially_observed = 22,
-      gapfilled = 22
+      observed = 21,
+      gapfilled = 21
     ),
     labels = c(
       observed = "Observed",
-      partially_observed = "Partially observed",
-      gapfilled = "Gap-filled"
+      gapfilled = "Gapfilled"
     )
   ) +
   
   guides(
     color = guide_legend(
       override.aes = list(
-        shape = 0,
+        shape = 21,
         fill = NA
       )
     ),
     shape = guide_legend(
       override.aes = list(
         color = "black",
-        fill = c("black", "white", "white", "white")
+        fill = c("black", "white")
       )
     )
   ) +
@@ -432,26 +493,26 @@ NRSI_Data_OverTime
 ```{r Save plot as PNGs}
 ggsave(
   plot = NRSI_Data_OverTime,
-  filename = sprintf("/home/ferrer/ohi_goc_prep/BD/HAB/HAB_rocky_reefs/NRSI_Data_plot_Nov062026.png"),
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_rocky_reefs/ROK_outputs/NRSI_plot_Nov062026.png"),
   width = 12,
   height = 12,
   dpi = 300
 )
 ```
 
-# Generate ROKR_Current_Status ------------------------------
+# STEP 4: Generate ROKR_Current_Status ------------------------------
 
 DECISION POINT: Reference point is equal to the highest NRSI value ever observed
 
 ```{r Calculate the Rocky Reef reference point}
-# ROK_ref_point<- max(NRSI_Data_all$mean_NRSI[NRSI_Data_all$provenance=="observed"], na.rm= TRUE)
+# ROK_ref_point<- max(ROKR_Current_Status$mean_NRSI[ROKR_Current_Status$provenance=="observed"], na.rm= TRUE)
 # # 0.6034904
 ```
 
 ```{r Calculate NRSI 3-year running mean}
 # Calculate ROKR_Current_Status as the 3-year running mean of mean_NRSI per region.
 
-NRSI_Data_all <- NRSI_Data_all %>%
+ROKR_Current_Status0 <- NRSI_Data_gapfilled %>%
   arrange(rgn_id, year) %>%
   group_by(rgn_id) %>%
   mutate(
@@ -465,83 +526,141 @@ NRSI_Data_all <- NRSI_Data_all %>%
     )
   ) %>%
   ungroup()
-# 280 obs., 8 vars. 
-```
 
-```{r Calculate original ROKR_Current_Status}
-# Calculate the Rocky Reef (ROK) score as the 3-year running mean divided by the reference point x 100:
-ROKR_Current_Status<- NRSI_Data_all %>%
-  mutate(
-    ROK_score_raw = (mean_NRSI_3yr / ROK_ref_point) * 100
-  )
-# 280 obs., 9 vars.
-```
+dim(ROKR_Current_Status0)
+# 252 obs., 7 vars. 
 
-```{r Calculate final ROKR_Current_Status swapping out global mean as needed}
-ROKR_Current_Status <- ROKR_Current_Status %>%
-  group_by(year) %>%
+# Calculate original ROKR_current_status
+
+ROKR_Current_Status0 <- ROKR_Current_Status0 %>%
+  group_by(rgn_id) %>%
   mutate(
-    ROK_score_final = case_when(
-      rgn_id %in% c("region_2", "region_3", "region_4", "region_6") ~ ROK_score_raw,
-      rgn_id %in% c("region_1", "region_5", "region_7", "region_8", "region_9", "global average") ~
-        first(ROK_score_raw[rgn_id == "global average"]),
-      TRUE ~ NA_real_
+  # Calculate the Rocky Reef (ROK) score as the 3-year running mean divided by the reference point x 100:
+  # ROK_score_raw = (mean_NRSI_3yr / ROK_ref_point) * 100 **NOT DOING THIS ANYMORE - Nov 2026**
+    ROKR_current_status = round(mean_NRSI * 100, 2),
+    ROKR_include_exclude = case_when(
+      sum(provenance == "observed", na.rm = TRUE) >= 5 ~ "INCLUDE",
+      TRUE ~ "EXCLUDE"
     )
   ) %>%
   ungroup()
-# 280 obs., 10 vars.
+
+dim(ROKR_Current_Status0)
+# 252 obs., 9 vars. 
+
 ```
+
+```{r Clean up ROKR_Current_Status0}
+colnames(ROKR_Current_Status)
+
+ROKR_Current_Status <- ROKR_Current_Status0 %>%
+  group_by(year) %>%
+  mutate(
+    ROKR_current_status = case_when(
+      ROKR_include_exclude == "EXCLUDE" ~ NA_real_,
+      TRUE ~ ROKR_current_status
+    )
+  ) %>%
+  ungroup() %>%
+  select(rgn_name, rgn_id, year,
+         provenance, n_reefs, mean_NRSI,
+         ROKR_current_status, ROKR_include_exclude)
+
+dim(ROKR_Current_Status)
+# 252 obs., 8 vars. 
+
+# Make sure there is an observation for every region:
+
+ROKR_Current_Status <- ROKR_Current_Status %>%
+  group_by(rgn_name, rgn_id) %>%
+  complete(
+    year = min(year, na.rm = TRUE):max(year, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  arrange(rgn_id, year)
+
+dim(ROKR_Current_Status)
+# 252 obs., 8 vars. 
+
+```
+
+## Merge Current_Extent as needed:
+
+```{r Load in ROKR_Current_Extent as needed}
+ROKR_Current_Extent<- read_csv("/home/ferrer/ohi_goc_prep/_habitats/HAB_rocky_reefs/ROK_outputs/ROKR_Extent_1.1_Nov082026.csv")
+```
+
+```{r Clean up before saving}
+colnames(ROKR_Current_Status)
+colnames(ROKR_Current_Extent)
+
+ROKR_Current_Status<- ROKR_Current_Status %>%
+  left_join(ROKR_Current_Extent %>%
+              select(-area_est_byCEDO.2025_ha, -year),
+            by= c("rgn_id"))
+```
+
 
 ## SAVE ROKR_Current_Status ------------------------------
 
 ```{r Save ROKR_Current_Status}
 write.csv(ROKR_Current_Status, 
-          "/home/ferrer/ohi_goc_prep/BD/HAB/HAB_rocky_reefs/ROKR_Status_1.0_df_Nov062026.csv", 
+          "/home/ferrer/ohi_goc_prep/_habitats/HAB_rocky_reefs/ROK_outputs/ROKR_Status_1.1_df_Nov082026.csv", 
           row.names = FALSE)
-# 280 obs., 10 vars. 
+# 252 obs., 9 vars. 
 ```
 
-# PLOT ROKR_Current_Status over time ------------------------------
 
-```{r Load in ROKR_Current_Status as needed}
-ROKR_Current_Status0<- read.csv("/home/ferrer/ohi_goc_prep/_habitats/HAB_rocky_reefs/ROK_outputs/ROKR_Status_1.0_df_Nov062026.csv")
+# STEP 5: ESTIMATE ROKR_Pressure, the inverse of ROKR_Current_Status ------------------------------
 
-ROKR_Current_Status<- ROKR_Current_Status0
-```
-
-```{r Plot mean_NRSI over time}
+```{r Estimate pressure as 100 minus current status}
 colnames(ROKR_Current_Status)
 
-# Re-level a few things for plotting purposes:
+ROKR_Pressure <- ROKR_Current_Status %>%
+  mutate(pressure = (100 - ROKR_current_status)/100,
+         pressure = round(pressure, 2)) %>%
+  select(rgn_name, rgn_id, year, 
+         pressure, ROKR_include_exclude)
+
+```
+
+## Save ROKR_Pressure
+```{r Save ROKR_Pressure}
+write.csv(ROKR_Pressure,
+          file= "/home/ferrer/ohi_goc_prep/_habitats/HAB_rocky_reefs/ROK_outputs/ROKR_Pressure_1.1_Nov082026.csv",
+          row.names = FALSE)
+```
+
+
+# STEP 6: ESTIMATE ROCKY-REEF TREND (source: GCMP, ~2015-2025) ------------------------------
+
+```{r Load in ROKR_Current_Status as needed}
+ROKR_Current_Status<- read.csv("/home/ferrer/ohi_goc_prep/_habitats/HAB_rocky_reefs/ROK_outputs/ROKR_Status_1.1_df_Nov082026.csv")
+# 252 obs., 9 vars.
+```
+
+## Plot ROKR_Current_Status
+
+```{r Plot ROKR_Current_Status over time}
+REGION_ORDER <- c(
+  "Western Upper Gulf",
+  "Western Midriff Islands",
+  "Western Central Gulf",
+  "Western Southern Gulf",
+  "Eastern Upper Gulf",
+  "Eastern Midriff Islands",
+  "Southern Sonora Coast",
+  "Sinaloa Coast",
+  "Southeastern Gulf"
+)
+
 ROKR_Current_Status <- ROKR_Current_Status %>%
   mutate(
-    rgn_id = factor(
-      rgn_id,
-      levels = c(
-        setdiff(unique(rgn_id), "global average"),
-        "global average"
-      )
-    ),
     rgn_name = factor(
       rgn_name,
-      levels = c(
-        setdiff(unique(rgn_name), "global average"),
-        "global average"
-      )
-    ),
-    provenance = factor(
-      provenance,
-      levels = c(
-        "observed",
-        "partially_observed",
-        "gapfilled"
-      )
+      levels = REGION_ORDER
     )
   )
-
-# Plot 1, panel per region:
-
-unique(ROKR_Current_Status$rgn_name)
 
 REGION_COLORS<- c(
   "Western Upper Gulf" = "#C03729",
@@ -552,46 +671,51 @@ REGION_COLORS<- c(
   "Eastern Midriff Islands" = "#98a25a",
   "Southern Sonora Coast" = "#747428",
   "Sinaloa Coast" = "#627391",
-  "Southeastern Gulf" = "#8d61a9",
-  "global average" = "darkgrey")
+  "Southeastern Gulf" = "#8d61a9")
 
 
-ROKR_Status_OverTime <- ROKR_Current_Status %>%
-  filter(!is.na(rgn_id) & !rgn_id=="global average") %>%
+ROKR_Status_OverTime<- ROKR_Current_Status %>%
+  # filter(year >= 2015, year <= 2025) %>%
+  ggplot(aes(year, ROKR_current_status, color = rgn_name)) +
   
-  ggplot(
-    aes(
-      x = year,
-      y = ROK_score_final,
-      color = rgn_name
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  scale_color_manual(values = REGION_COLORS) +
+  
+  geom_point(
+  aes(shape = provenance, fill = provenance),
+  size = 2
+  ) +
+  
+  scale_shape_manual(
+    values = c(
+      "gapfilled" = 21,
+      "observed" = 16
     )
   ) +
   
-  geom_line() +
-  
-  geom_point(
-    shape = 16,       # filled circle
-    size = 2,
-    stroke = 1.2
-  ) +
-  
-  facet_wrap(~ rgn_name) +
-  
-  labs(
-    title = "Rocky Reefs Scores per Region",
-    subtitle = "updated: Aug 31 2026",
-    caption = "ROK score in regions 1, 5, 7, 8, and 9 are equal to the global average",
-    y = "ROK Score (0 to 100)",
-    x = "Year",
-    color = "Region"
+  scale_fill_manual(
+    values = c(
+      "gapfilled" = "white",
+      "observed" = NA
+    )
   ) +
   
   geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
   
   ylim(0, 101) +
   
-  scale_color_manual(
-    values = REGION_COLORS
+  scale_color_manual(values = REGION_COLORS) +
+  
+    
+  labs(
+    title = "ROKR Component Scores (1.1) by Region",
+    subtitle = "Data sources: Favoretto et al. (2024); GCMP data (2026)",
+    caption = "updated: Nov 08 2026",
+    x = "Year",
+    y = "ROKR Score (from 0 to 100)",
+    color = "Region",
   ) +
   
   theme_bw(base_size = 14) +
@@ -607,109 +731,114 @@ ROKR_Status_OverTime
 ```{r Save plot as PNGs}
 ggsave(
   plot = ROKR_Status_OverTime,
-  filename = sprintf("/home/ferrer/ohi_goc_prep/BD/HAB/HAB_rocky_reefs/ROKR_Current_Status_1.0_plot_Nov062026.png"),
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_rocky_reefs/ROK_outputs/ROKR_Status_1.1_plot_Nov082026.png"),
   width = 12,
   height = 12,
   dpi = 300
 )
 ```
 
-# STEP 7: ESTIMATE MANGROVE TREND (source: GMW, 2010-2020) ------------------------------
-
-```{r Load MANG_Current_Status as needed}
-MANG_Current_Status<- read.csv("/home/ferrer/ohi_goc_prep/_habitats/HAB_mangroves/MAN_outputs/MANG_Status_1.1_Oct072026.csv")
-# 225 obs., 8 vars.
+```{r Save 2015-2025 as PNGs}
+ggsave(
+  plot = ROKR_Status_OverTime,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_rocky_reefs/ROK_outputs/ROKR_Status_10yrs_1.1_plot_Nov082026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
 ```
 
-```{r Plot mangrove trends}
-colnames(MANG_Current_Status)
-unique(MANG_Current_Status$rgn_name)
+## METHOD B
 
-REGION_COLORS<- c(
-  "Western Upper Gulf" = "#C03729",
-  "Western Midriff Islands" = "#E68C7C",
-  "Western Central Gulf" = "#FC8F24",
-  "Western Southern Gulf" = "#dcaa38",
-  "Eastern Upper Gulf" = "#cbd2a0",
-  "Eastern Midriff Islands" = "#98a25a",
-  "Southern Sonora Coast" = "#747428",
-  "Sinaloa Coast" = "#627391",
-  "Southeastern Gulf" = "#8d61a9")
+```{r Calculate ROKR_Trend using METHOD B}
+# METHOD B: 
+# See GitHub issue, Oct 7 2026, for more details: https://github.com/OHI-GOC/OHI_GOC_issues/issues/127#issuecomment-6041025924
+# slope = fit a linear model: lm(area ~ year), grab the slope estimate
+# trend_pct_year <- (1 + slope/earliest_area_in_lm)
 
-MANG_Area_OverTime<- MANG_Current_Status %>%
-  filter(year >= 1995, year <= 2025) %>%
-  filter(provenance == "observed") %>%
-  filter(MANG_include_exclude == "INCLUDE") %>%
-  
-  ggplot(aes(
-    x = year,
-    y = area_est_byGMW_km2,
-    color = rgn_name
-  )) +
-  
+# Pull the most recent year and the comparison year:
+most_recent_year = max(ROKR_Current_Status$year, na.rm = TRUE)
 
-  geom_line(linewidth = 1) +
-  geom_point(size = 2) +
-  
-  labs(
-    title = "MANG (Mangrove) Area by Region",
-    subtitle = "Source: Global Mangrove Watch data 1996-2020",
-    caption = "updated: Oct 7 2026",
-    y = "Area (km2)",
-    x = "Year"
-  ) +
-  
-  scale_color_manual(values = REGION_COLORS) +
-  
-  theme_bw(base_size = 14) +
-  theme(
-    strip.text = element_text(size = 14, face = "bold"),
-    plot.title = element_text(size = 16, face = "bold")
+lm_start_year <- min(
+  ROKR_Current_Status$year[
+    ROKR_Current_Status$provenance == "observed" &
+    ROKR_Current_Status$year < most_recent_year &
+    ROKR_Current_Status$year >= most_recent_year - 10 &
+    ROKR_Current_Status$year <= most_recent_year - 5
+  ],
+  na.rm = TRUE
+)
+
+# Keep a complete list of regions
+all_regions <- ROKR_Current_Status %>%
+  distinct(rgn_id, ROKR_include_exclude)
+
+# Calculate linear models where observed data exist
+colnames(ROKR_Current_Status)
+
+ROKR_area_lm <- ROKR_Current_Status %>%
+  filter(
+    year >= lm_start_year,
+    year <= most_recent_year,
+    provenance == "observed"
+  ) %>%
+  group_by(rgn_id) %>%
+  summarise(
+    model = list(
+      if (n_distinct(year) >= 2) {
+        lm(mean_NRSI ~ year, data = pick(everything()))
+      } else {
+        NULL
+      }
+    ),
+    lm_start_year = min(year),
+    lm_end_year = max(year),
+    lm_start_area = mean_NRSI[year == min(year)][1],
+    lm_end_area = mean_NRSI[year == max(year)][1],
+    n_years = n_distinct(year),
+    n_obs = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    slope = sapply(model, function(x) {
+      if (is.null(x)) NA_real_ else coef(x)[["year"]]
+    }),
+    p_value = sapply(model, function(x) {
+      if (is.null(x)) NA_real_ else summary(x)$coefficients["year", "Pr(>|t|)"]
+    }),
+    trend_pct_year = round((slope / lm_start_area) * 100, 2)
   )
 
-MANG_Area_OverTime
+# Join results back to all regions
+ROKR_area_lm <- all_regions %>%
+  left_join(ROKR_area_lm, by = "rgn_id")
 
 ```
 
-# REVIEW ROCKY REEF "CURRENT EXTENT" (source: Hem / CEDO Data, est. 2025) ------------------------------
-# not needed for BD scoring but here if it's helpful
-
-```{r Plot Rocky Reef Sargassum}
-RockyReef_shape <- st_read("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/Arrecife rocoso/Arrecife rocoso.shp") %>% st_zm()
-
-plot(st_geometry(RockyReef_shape))
-
-RockyReef_shape <- RockyReef_shape %>%
-  st_transform(st_crs(OHI_regions))
-```
-
-```{r Explore rocky sargassum}
-# Read in Arrecife rocoso (rocky reef) data
-rocky_reef <- st_read(here("/home/shares/ohi/OHI_GOC/_raw_data/Hem_data/goc_habitat_data/Arrecife rocoso/Arrecife rocoso.shp")) %>% 
-  st_make_valid()
-```
-
-
-```{r Read in OHI region boundaries}
-# Read in OHI region boundaries
-OHI_regions <- st_read(here("spatial", "ohi_regions", "goc_ohi_rgns.shp")) %>% st_make_valid()
-
-plot(st_geometry(OHI_regions))
-st_crs(OHI_regions)
-st_crs(RockyReef_shape)
-
-st_bbox(OHI_regions)
-st_bbox(RockyReef_shape)
+```{r Clean up to save ROKR_Trend}
+colnames(ROKR_area_lm)
+ 
+ROKR_Trend<- ROKR_area_lm%>%
+  select(rgn_id, 
+         ROKR_include_exclude,
+         lm_start_year,
+         lm_end_year,
+         lm_start_area,
+         lm_end_area,
+         lm_slope= slope,
+         n_obs,
+         p_value,
+         trend= trend_pct_year) %>%
+  mutate(
+    trend_method = "Method B: linear model on last ~10 years of data"
+  )
+# 9 obs., 11 vars.
 
 ```
 
-```{r Plot}
-library(tmap)
-
-tmap_mode("view")
-
-tm_shape(OHI_regions) +
-  tm_polygons(col = "white", border.col = "gray", outline = 0.2) +
-tm_shape(RockyReef_shape) +
-  tm_polygons(col = "blue", border.col = "blue")
+## Save ROKR_Trend
+```{r Save ROKR_Trend}
+write.csv(ROKR_Trend,
+          file= "/home/ferrer/ohi_goc_prep/_habitats/HAB_rocky_reefs/ROK_outputs/ROKR_Trend_1.1_Nov082026.csv",
+          row.names = FALSE)
 ```
