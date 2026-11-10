@@ -1,0 +1,421 @@
+---
+title: 'OHI GoC: Inclusion pressure (México Cómo Vamos IPS 03_11comp)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Inclusion pressure (México Cómo Vamos IPS)
+
+I used the México Cómo Vamos Social Progress Index (IPS / Índice de Progreso Social) **Inclusion** component (`03_11comp`) to create an inclusion-pressure layer for the GoC.
+
+IPS measures social and environmental *outcomes* (not income or spending). Component scores run from 0 to 100, where 100 = highest social progress (best inclusion). For OHI pressure I divide by 100 to get **0–1**, then invert with `1 − score` so **1 = maximum pressure (weakest inclusion)**.
+
+`03_11comp` is Inclusion: whether people are excluded from society for reasons such as sexual orientation, Indigenous identity, or sex. Underlying indicators (already averaged and rescaled into the published component by México Cómo Vamos) include:
+
+| Indicator (English) | What it measures |
+|---|---|
+| Trust in neighbors | Percentage of the population |
+| Women in local congresses | Proportion of women in local congresses |
+| LGBT+ inclusion | Percentage who disapprove of same-sex marriage |
+| Indigenous inclusion | Illiteracy rate among Indigenous people |
+| Disability inclusion | Illiteracy rate among people with disabilities |
+
+Each indicator is rescaled to 0–100 using best-case and worst-case reference values before entering the component. We take that published `03_11comp` score as-is (no rebuild from the raw indicators), rescale 0–100 and convert to 0–1, and invert.
+
+**Pros:** annual state series (2015–2024 in this workbook); designed for state comparison; outcome-based; open methods repo at [https://github.com/mexicocomovamos/mcv_ips/tree/main](https://github.com/mexicocomovamos/mcv_ips/tree/main)  
+**Cons:** state level only (no municipal coverage); the public 2025 report may revise earlier years, so we may need to update this layer later.
+
+We assess this at the state level for now (same decision as IPS social stability, IEDMX governance). GoC states: Baja California, Baja California Sur, Sonora, Sinaloa, Jalisco, and Nayarit.
+
+---
+
+**To download:**
+
+- Methods and data pipeline: <https://github.com/mexicocomovamos/mcv_ips>
+- Report landing page: <https://mexicocomovamos.mx/indice-de-progreso-social/>
+- Bring `00_IPS_COMPLETE_WIDE.xlsx` into Mazu at `/home/shares/ohi/OHI_GOC/_raw_data/mexico_como_vamos_indice_de_progreso_social/d2025`
+
+---
+
+*Outline of the script:*
+
+1. Read CONAPO population for year-specific weights (needed when Region_9 spans two states).  
+2. Read the IPS component sheet and keep only `03_11comp` for GoC states.  
+3. Rescale 0–100 → 0–1 and invert to pressure (`1 − score`).  
+4. Map onto GoC `rgn_id`s and save.  
+5. Explore with `plotly`.
+
+---
+
+```{r setup}
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(plotly)
+
+knitr::opts_chunk$set(
+  fig.width = 9,
+  fig.height = 5,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r paths}
+raw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/mexico_como_vamos_indice_de_progreso_social/d2025"
+
+# wide IPS workbook (dimension + component sheets)
+ips_path <- file.path(raw_dir, "00_IPS_COMPLETE_WIDE.xlsx")
+
+conapo_path <- here::here("/home/shares/ohi/OHI_GOC/_raw_data/CONAPO_demographic_indicators/d2026/pobproy_ggrupos.csv")
+
+mun_path <- here::here("/home/shares/ohi/OHI_GOC/spatial/municipality_to_rgnid/municipality_to_rgnid_update.csv")
+
+output_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/pressures/inclusion_ips/"
+# dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+github_dir <- here::here("_pressures/social/output")
+#dir.create(github_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r constants}
+year_min <- 2015
+year_max <- 2024
+
+# IPS raw scores are 0-100; OHI wants 0-1 before inverting
+score_max <- 100
+
+goc_states <- c(
+  "Baja California",
+  "Baja California Sur",
+  "Sonora",
+  "Sinaloa",
+  "Jalisco",
+  "Nayarit"
+)
+
+# IPS uses short estado abbreviations in entidad_abr_m
+goc_abr <- c(
+  "Baja California" = "BC",
+  "Baja California Sur" = "BCS",
+  "Sonora" = "SON",
+  "Sinaloa" = "SIN",
+  "Jalisco" = "JAL",
+  "Nayarit" = "NAY"
+)
+
+# Only Inclusion (Opportunity dimension, component 11)
+component_codes <- c("03_11comp")
+
+component_labels_en <- c(
+  "03_11comp" = "Inclusion"
+)
+```
+
+## What we keep
+
+Unlike social stability resilience (which averages several IPS components), inclusion pressure uses **only** `03_11comp`:
+
+| Code | English name | Role |
+|---|---|---|
+| `03_11comp` | Inclusion | Exclusion for reasons such as sexual orientation, Indigenous identity, or sex |
+
+**Orientation for OHI:** raw IPS Inclusion is higher = better inclusion. After `/100`, `pressure = 1 - score` so higher pressure = weaker inclusion.
+
+Social stability resilience deliberately dropped `03_11comp` (along with personal rights and freedom/choice) because those sit closer to governance / rights pressures. This layer recovers Inclusion as its own pressure.
+
+## 1. CONAPO state population (year-specific weights)
+
+Same as in the governance / IPS / democratic-pressure scripts: sum `POB_TOTAL` so each GoC state-year has one population weight. Needed when Region_9 inherits both Jalisco and Nayarit.
+
+```{r conapo-read}
+conapo_raw <- read_csv(conapo_path, show_col_types = FALSE)
+```
+
+```{r conapo-aggregate}
+state_population <- conapo_raw %>%
+  select(CLAVE_ENT, NOM_ENT, ANO, SEXO, POB_TOTAL) %>%
+  filter(NOM_ENT %in% goc_states) %>%
+  group_by(year = ANO, estado = NOM_ENT) %>%
+  summarize(poblacion = sum(POB_TOTAL, na.rm = TRUE), .groups = "drop")
+```
+
+```{r conapo-check}
+state_population %>%
+  filter(year %in% c(2015, 2018, 2021, 2024)) %>%
+  pivot_wider(names_from = year, values_from = poblacion) %>%
+  kable(
+    caption = "CONAPO projected total population (GoC states; selected years)",
+    format.args = list(big.mark = ",")
+  )
+
+stopifnot(all(goc_states %in% unique(state_population$estado)))
+```
+
+## 2. Clean the IPS Inclusion component
+
+Sheet `02_IPS_COMP` is already tidy-ish and wide: one row per `cve_ent` × `anio`, with one column per component. I keep GoC states only, pull `03_11comp`, rescale to 0–1, and invert to pressure.
+
+```{r explore-sheets}
+excel_sheets(ips_path) %>%
+  tibble(sheet = .) %>%
+  kable(caption = "Sheets in the IPS workbook")
+```
+
+```{r read-comp-raw}
+comp_raw <- read_excel(ips_path, sheet = "02_IPS_COMP")
+
+comp_raw %>%
+  glimpse()
+```
+
+```{r clean-comp}
+inclusion_state <- comp_raw %>%
+  mutate(
+    cve_ent = as.integer(cve_ent),
+    year = as.integer(anio),
+    entidad_abr_m = str_trim(as.character(entidad_abr_m))
+  ) %>%
+  # drop national aggregate and synthetic Distopía / Utopía rows
+  filter(entidad_abr_m %in% unname(goc_abr)) %>%
+  filter(year >= year_min, year <= year_max) %>%
+  mutate(
+    estado = recode(entidad_abr_m, !!!setNames(names(goc_abr), unname(goc_abr)))
+  ) %>%
+  select(estado, entidad_abr_m, cve_ent, year, all_of(component_codes)) %>%
+  pivot_longer(
+    cols = all_of(component_codes),
+    names_to = "component",
+    values_to = "score_0_100"
+  ) %>%
+  mutate(
+    component_label = recode(component, !!!component_labels_en),
+    # IPS is 0-100; rescale to 0-1 (higher = better inclusion)
+    score = score_0_100 / score_max,
+    score = pmin(pmax(score, 0), 1),
+    # OHI pressure: higher = worse inclusion
+    pressure = 1 - score,
+    pressure = pmin(pmax(pressure, 0), 1)
+  ) %>%
+  select(
+    estado, entidad_abr_m, cve_ent, year,
+    component, component_label, score_0_100, score, pressure
+  )
+```
+
+```{r comp-checks}
+inclusion_state %>%
+  count(estado, component) %>%
+  pivot_wider(names_from = component, values_from = n) %>%
+  kable(caption = "Rows per state × component (expect one per year in 2015-2024)")
+```
+
+```{r comp-checks-summary}
+inclusion_state %>%
+  group_by(component, component_label) %>%
+  summarise(
+    n = n(),
+    n_missing = sum(is.na(pressure)),
+    min_raw = min(score_0_100, na.rm = TRUE),
+    max_raw = max(score_0_100, na.rm = TRUE),
+    min_score = min(score, na.rm = TRUE),
+    max_score = max(score, na.rm = TRUE),
+    min_pressure = min(pressure, na.rm = TRUE),
+    max_pressure = max(pressure, na.rm = TRUE),
+    years = paste(range(year), collapse = "-"),
+    .groups = "drop"
+  ) %>%
+  kable(digits = 3, caption = "GoC IPS Inclusion summary (raw 0-100, score 0-1, pressure 0-1)")
+```
+
+```{r pressure-check-2024}
+inclusion_state %>%
+  filter(year == 2024) %>%
+  arrange(desc(pressure)) %>%
+  select(estado, year, score_0_100, score, pressure) %>%
+  kable(
+    digits = 3,
+    caption = "2024 GoC Inclusion (raw IPS, 0-1 score, pressure = 1 − score)"
+  )
+```
+
+## 3. Map onto `rgn_id` and save
+
+State pressure values are inherited by every GoC `rgn_id` in that state (`municipality_to_rgnid_update.csv`). Region_9 spans Jalisco and Nayarit, so I take a CONAPO population-weighted mean of the two state scores.
+
+```{r mun-rgn-lookup}
+mun_lookup <- read_csv(mun_path, show_col_types = FALSE) %>%
+  mutate(
+    estado = str_trim(estado),
+    rgn_id = as.character(rgn_id)
+  )
+
+estado_to_rgn <- mun_lookup %>%
+  distinct(estado, rgn_id) %>%
+  mutate(estado_key = str_to_upper(estado)) %>%
+  select(estado_key, rgn_id)
+```
+
+```{r state-to-rgn}
+inc_rgn <- inclusion_state %>%
+  mutate(estado_key = str_to_upper(estado)) %>%
+  left_join(estado_to_rgn, by = "estado_key", relationship = "many-to-many") %>%
+  left_join(state_population, by = c("year", "estado")) %>%
+  filter(!is.na(rgn_id), !is.na(pressure))
+
+inclusion_pressure <- inc_rgn %>%
+  group_by(rgn_id, year) %>%
+  summarise(
+    # Region_9 is the only multi-state region; weight by CONAPO population
+    pressure = if (n() == 1 || all(is.na(poblacion))) {
+      mean(pressure)
+    } else {
+      weighted.mean(pressure, w = poblacion, na.rm = TRUE)
+    },
+    n_states = n_distinct(estado),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rgn_num = as.integer(str_remove(rgn_id, "Region_")),
+    pressure = round(pressure, 4)
+  ) %>%
+  arrange(year, rgn_num) %>%
+  select(rgn_id, year, pressure)
+
+inclusion_pressure %>%
+  filter(year == 2024) %>%
+  kable(digits = 4, caption = "Inclusion pressure by rgn_id (2024)")
+```
+
+```{r save}
+write_csv(
+  inclusion_pressure,
+  here::here(output_dir, "inclusion_pressure_ips_03_11comp.csv")
+)
+write_csv(
+  inclusion_pressure,
+  here::here(github_dir, "inclusion_pressure_ips_03_11comp.csv")
+)
+```
+
+## 4. Explore with plotly
+
+### Pressure by state
+
+```{r plot-state}
+plot_state <- plot_ly(
+  inclusion_state,
+  x = ~year,
+  y = ~pressure,
+  color = ~estado,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    estado, "<br>", year,
+    "<br>raw Inclusion: ", round(score_0_100, 3),
+    "<br>pressure: ", round(pressure, 3)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Inclusion pressure (1 − IPS 03_11comp / 100), GoC states",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Pressure (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Estado"))
+  )
+
+plot_state
+```
+
+### Raw Inclusion component (0–100) by state
+
+```{r plot-raw}
+plot_raw <- plot_ly(
+  inclusion_state,
+  x = ~year,
+  y = ~score_0_100,
+  color = ~estado,
+  type = "scatter",
+  mode = "lines+markers"
+) %>%
+  layout(
+    title = "IPS Inclusion component (03_11comp, raw 0-100), GoC states",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Inclusion score (0-100)", range = c(0, 105)),
+    legend = list(title = list(text = "Estado"))
+  )
+
+plot_raw
+```
+
+### Regional pressure time series
+
+```{r plot-rgn}
+rgn_labels <- c(
+  "Region_1" = "Western Upper Gulf",
+  "Region_2" = "Western Midriff Islands",
+  "Region_3" = "Western Central Gulf",
+  "Region_4" = "Western Southern Gulf",
+  "Region_5" = "Eastern Upper Gulf",
+  "Region_6" = "Eastern Midriff Islands",
+  "Region_7" = "Southern Sonora Coast",
+  "Region_8" = "Sinaloa Coast",
+  "Region_9" = "Southeastern Gulf"
+)
+
+rgn_colors <- c(
+  "Region_1" = "#C03729",
+  "Region_2" = "#E68C7C",
+  "Region_3" = "#FC8F24",
+  "Region_4" = "#dcaa38",
+  "Region_5" = "#cbd2a0",
+  "Region_6" = "#98a25a",
+  "Region_7" = "#747428",
+  "Region_8" = "#627391",
+  "Region_9" = "#8d61a9"
+)
+
+plot_rgn <- inclusion_pressure %>%
+  mutate(
+    region = recode(rgn_id, !!!rgn_labels),
+    region = factor(region, levels = unname(rgn_labels))
+  ) %>%
+  plot_ly(
+    x = ~year,
+    y = ~pressure,
+    color = ~region,
+    colors = setNames(unname(rgn_colors), unname(rgn_labels)),
+    type = "scatter",
+    mode = "lines+markers"
+  ) %>%
+  layout(
+    title = "Inclusion pressure by GoC region (IPS 03_11comp inverted)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Pressure (0-1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Region"))
+  )
+
+plot_rgn
+```
+
+## Next steps
+
+1. Re-knit on Mazu once the workbook lives under `_raw_data/mexico_como_vamos_indice_de_progreso_social/d2025`.  
+2. If México Cómo Vamos revises 2015–2024 scores when the 2025 report is fully digitized into their repo, swap in the new wide file and re-run.  
+3. Confirm whether Inclusion alone is the right pressure, or whether personal rights (`03_09comp`) / personal freedom and choice (`03_10comp`) should join or stay with governance.
