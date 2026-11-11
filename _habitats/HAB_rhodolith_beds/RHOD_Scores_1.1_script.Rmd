@@ -27,6 +27,14 @@ library(tmap)
 
 ```
 
+# DECISION POINT: Select HISTORIC and CONTEMPORARY periods:
+```{r Select historic and contemporary start and end}
+RHOD_CONTEMPORARY_END = max(RHOD_Current_Status$year)
+RHOD_CONTEMPORARY_START = max(RHOD_Current_Status$year) - 10
+RHOD_HISTORIC_START = min(RHOD_Current_Status$year)
+RHOD_HISTORIC_END = RHOD_CONTEMPORARY_START
+```
+
 # STEP 1: LOAD IN OHI REGIONS ------------------------------
 
 ```{r Load in the OHI Region_Key0}
@@ -54,7 +62,7 @@ ohi_marine <- ohi_regions %>% dplyr::filter(location == "marine")
 target_crs <- st_crs(ohi_regions)
 ```
 
-# STEP 2: CALCULATE RHODOLITH "CURRENT EXTENT" less than 100m (source: Hem / CEDO rhodolith data [2025]) ------------------------------
+# STEP 2: CALCULATE RHODOLITH "CURRENT EXTENT" in depths less than 100m (source: Hem / CEDO rhodolith data [2025]) ------------------------------
 
 ```{r Read in rhodolith layer}
 # Read rhodolith polygons and transform to OHI crs:
@@ -79,7 +87,6 @@ CEDO_rhodolith.data_pts <- CEDO_rhodolith.data_raw %>%
 
 # Select year to plot:
 year_map <- 2025
-lyr <- match(year_map, years)
 
 # Initialize map with land
 terra::plot(
@@ -183,11 +190,6 @@ terra::plot(terra::vect(CEDO_rhodolith.data_pts),
             add = TRUE, pch = 21, col = "white",
             bg = "red", cex = 0.6)
 
-# Legend
-legend(
-       legend = c(">100 m", "<100 m", "Rhodolith locations"),
-       fill = c("steelblue", "coral", NA)
-       )
 ```
 
 ```{r Keep rhodolith beds within the ≤ 100 m mask}
@@ -418,7 +420,7 @@ RHOD_Current_Extent %>%
 ```{r Save RHOD_Current_Extent}
 write.csv(
   RHOD_Current_Extent,
-  here::here("_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Current_Extent_1.1_Oct122026.csv"),
+  file= "/home/ferrer/ohi_goc_prep/_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Extent_1.1_Oct122026.csv",
   row.names = FALSE
 )
 ```
@@ -476,15 +478,24 @@ print(st_crs(VMS_fishing_pressure)$Name)
 
 ```{r Plot rhodolith locations as points vs. fishing pressure in 2025}
 land <- terra::project(terra::vect(ohi_land), terra::crs(VMS_fishing_pressure))
+
 marine <- terra::project(terra::vect(ohi_marine), terra::crs(VMS_fishing_pressure))
+
 rhodolith <- terra::project(
   terra::vect(RHOD_Current_Extent0),
   terra::crs(VMS_fishing_pressure)
 )
 
-# Select year to plot:
+# Select year to plot
 year_map <- 2025
-lyr <- match(year_map, years)
+
+# Extract years from raster layer names
+raster_years <- as.numeric(
+  sub(".*_", "", names(VMS_fishing_pressure))
+)
+
+# Find corresponding raster layer
+lyr <- which(raster_years == year_map)
 
 # Plot pressure raster first, then overlay vectors
 terra::plot(
@@ -566,7 +577,7 @@ pressure_values <- terra::extract(
 )
 
 # Join extracted values back to the original polygon data
-RHOD_Scores0 <- RHOD_Current_Extent0 %>%
+RHOD_Current_Status00 <- RHOD_Current_Extent0 %>%
   mutate(ID = row_number()) %>%
   left_join(pressure_values, by = "ID") %>%
   select(-ID)
@@ -578,89 +589,341 @@ RHOD_Scores0 <- RHOD_Current_Extent0 %>%
 
 Pressure under each bed = area-weighted mean of `VMS_fishing_pressure` cells overlapping the polygon.
 No recovery scaling applied for now (same 0–1 exposure scale as soft bottom).
-```{r}
 
-# Weighted mean pressure per rhodolith polygon × year
-# Note, some rhodolith polygons encompase multiple VMS raster cells, so we need to take the mean:
-ex <- terra::extract(
-  pressure_raster,
-  vect(RHOD_Scores0),
-  fun = mean,
-  weights = TRUE,
-  na.rm = TRUE,
-  ID = TRUE
+```{r Calculate RHOD_Current_Status0}
+
+# Identify annual pressure columns
+pressure_cols <- grep(
+  "^prop_disturbed_\\d{4}$",
+  names(RHOD_Current_Status00),
+  value = TRUE
 )
 
-rhodolith_attributes <- st_drop_geometry(
-  RHOD_Scores0
-) %>%
-  mutate(poly_id = row_number()) %>%
-  select(poly_id, rgn_id, area_km2)
-
-df_poly <- as_tibble(pressure_values) %>%
-  rename(poly_id = ID) %>%
-  left_join(
-    rhodolith_attributes,
-    by = "poly_id"
-  ) %>%
+ # Convert data from wide to long format
+RHOD_Current_Status0 <- RHOD_Current_Status00 %>%
   pivot_longer(
     cols = all_of(pressure_cols),
     names_to = "layer",
     values_to = "prop"
   ) %>%
   mutate(
-    year = as.integer(
-      sub("prop_disturbed_", "", layer)
-    )
+    year = as.integer(sub("prop_disturbed_", "", layer))
   )
-
-df_poly
-
-# Prop = average predicted probability of fishing disturbance per rhodolith bed x year.
-# Example, if prop = 0.7, this means an average predicted disturbance probability of 70% across the extracted cells.
-```
-
-```{r}
- RHOD_Scores0<- RHOD_Scores0 %>%
-  pivot_longer(
-    cols = all_of(pressure_cols),
-    names_to = "layer",
-    values_to = "prop"
+ 
+# Calculate area-weighted average pressure per region × year
+RHOD_Current_Status0 <- RHOD_Current_Status0 %>%
+  filter(
+    !is.na(prop),
+    !is.na(rgn_id),
+    !is.na(area_km2),
+    area_km2 > 0
   ) %>%
-  mutate(
-    year = as.integer(
-      sub("prop_disturbed_", "", layer)
-    )
-  )
-
-# Area-weighted average pressure per region × year
-RHOD_Scores <- RHOD_Scores0 %>%
-  filter(!is.na(prop), !is.na(rgn_id), area_km2 > 0) %>%
   st_drop_geometry() %>%
   group_by(rgn_id, year) %>%
   summarise(
-    area_sum  = sum(area_km2, na.rm = TRUE),
-    # Must be in this order:
-    Pressure  = sum(prop * area_km2, na.rm = TRUE) / area_sum,
-    RHOD_current_status = 1 - Pressure,
-    Pressure  = Pressure * 100,
-    RHOD_current_status = RHOD_current_status * 100,
+    area_sum_km2 = sum(area_km2),
+    Pressure = sum(prop * area_km2) / area_sum_km2,
+    Condition = 1 - Pressure,
     .groups = "drop"
+  ) %>%
+  mutate(
+    Pressure = Pressure * 100,
+    Condition = Condition * 100
   )
 
-RHOD_Scores
+RHOD_Current_Status0
 
 ```
 
-```{r Join rgn_name to scores}
-colnames(Region_Key)
-colnames(RHOD_Scores)
+```{r Compare observed cover post- and pre- HISTORIC_CUTOFF}
 
-RHOD_Scores <- RHOD_Scores %>%
+# Fill in regions that are missing (i.e., do not have rhodolith beds):
+RHOD_Current_Status0 <- RHOD_Current_Status0 %>%
+  tidyr::complete(
+    rgn_id = paste0("Region_", 1:9),
+    year = RHOD_HISTORIC_START:RHOD_CONTEMPORARY_END
+  )
+# 171 obs., 5 vars.
+
+# DECISION POINT: Historic cut off = pre and post 2015
+HISTORIC_CUTOFF = RHOD_HISTORIC_END
+
+# Distinguish between pre- and post- historic baseline
+RHOD_Current_Status <- RHOD_Current_Status0 %>%
+  mutate(
+    period = if_else(year < RHOD_HISTORIC_END, "historic", "contemporary")
+  )
+
+RHOD_Current_Status <- RHOD_Current_Status %>%
+  group_by(rgn_id) %>%
+  mutate(
+    historic_mean = mean(
+      Condition[year < HISTORIC_CUTOFF],
+      na.rm = TRUE
+    ),
+    contemporary_mean = mean(
+      Condition[year >= HISTORIC_CUTOFF],
+      na.rm = TRUE
+    ),
+    
+    # Calculate current status in CONTEMPORARY vs. HISTORIC
+    RHOD_current_status = case_when(
+
+      # No historic or contemporary rhodolith observations
+      is.nan(historic_mean) & is.nan(contemporary_mean) ~ NA_real_,
+
+      # Historic period
+      year < HISTORIC_CUTOFF & is.finite(historic_mean) ~ 100,
+
+      # Contemporary period: calculate relative to historic baseline
+      year >= HISTORIC_CUTOFF &
+        is.finite(historic_mean) &
+        historic_mean > 0 &
+        is.finite(contemporary_mean) ~
+        pmax(0, pmin((contemporary_mean / historic_mean) * 100, 100)),
+
+      TRUE ~ NA_real_
+    ),
+    Pressure = round(Pressure, 2),
+    Condition = round(Condition, 2),
+    RHOD_current_status = round(RHOD_current_status, 2),
+    historic_mean = round(historic_mean, 2),
+    contemporary_mean = round(contemporary_mean, 2)
+  ) %>%
+  ungroup() %>%
+  select(
+    rgn_id, year, period,
+    area_est_byCEDO.2025_km2= area_sum_km2,
+    Pressure, Opposite_Pressure= Condition, 
+    historic_mean, contemporary_mean, RHOD_current_status
+  )
+
+# Relevel:
+RHOD_Current_Status <- RHOD_Current_Status %>%
+  mutate(
+    period = factor(
+      period,
+      levels = c("historic", "contemporary")
+    )
+  )
+# 171 obs., 9 vars.
+
+```
+
+```{r Plot opposite_pressure on rhodoliths over time}
+
+historic_mean <- unique(RHOD_Current_Status$historic_mean)
+contemporary_mean <- unique(RHOD_Current_Status$contemporary_mean)
+
+periods <- RHOD_Current_Status %>%
+  group_by(rgn_id) %>%
+  summarise(
+    historic_mean = first(historic_mean),
+    contemporary_mean = first(contemporary_mean),
+    pre_start = min(year[year < HISTORIC_CUTOFF]),
+    post_end = max(year[year >= HISTORIC_CUTOFF]),
+    .groups = "drop"
+  )
+
+# Plot:
+RHOD_Opp.Pressure_OverTime<- RHOD_Current_Status %>%
+  
+  ggplot(aes(year, Opposite_Pressure, color = period)) +
+  
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  
+  facet_wrap(~rgn_id) +
+  
+  # Period means
+  geom_segment(
+    data = periods,
+    aes(x = pre_start, xend = HISTORIC_CUTOFF, 
+        y = historic_mean, yend = historic_mean),
+    color = "blue", linetype = "dotted", linewidth = 1
+  ) +
+  geom_segment(
+    data = periods,
+    aes(x = HISTORIC_CUTOFF, xend = post_end, 
+        y = contemporary_mean, yend = contemporary_mean),
+    color = "orange", linetype = "dotted", linewidth = 1
+  ) +
+  
+  geom_vline(
+    xintercept = HISTORIC_CUTOFF,
+    color = "gray40",
+    linewidth = 1
+  ) +
+  
+  scale_color_manual(
+    values = c("historic" = "blue", "contemporary" = "orange")
+  ) +
+  
+  scale_y_continuous(limits = c(0, 100)) +
+  
+  labs(
+    title = "Historic versus Contemporary Opposite_Pressure on Rhodolith Beds",
+    subtitle = "Opposite_Pressure estimates estimated using fisheries VMS trawl data",
+    caption = "updated: Nov 10 2026",
+    x = "Year",
+    y = "Opposite_Pressure (0-100)",
+    color = "Period"
+  ) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+
+RHOD_Opp.Pressure_OverTime
+
+```
+
+## Save RHOD_Opp.Pressure_OverTime
+
+```{r Save as PNG}
+ggsave(
+  plot = RHOD_Opp.Pressure_OverTime,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Opp.Pressure_OverTime_plot_Nov102026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+```
+
+```{r Join rgn_name to scores and clean up before saving}
+colnames(Region_Key)
+colnames(RHOD_Current_Status)
+
+RHOD_Current_Status <- RHOD_Current_Status %>%
   left_join(Region_Key, by = "rgn_id")
   
-RHOD_Scores<- RHOD_Scores %>%
+RHOD_Current_Status<- RHOD_Current_Status %>%
   relocate(rgn_name, .before = rgn_id)
+
+RHOD_Current_Status
+
+# Make an include / exclude column based on the information reported by Hem / CEDO:
+RHOD_Current_Status <- RHOD_Current_Status %>%
+  mutate(
+    RHOD_include_exclude = ifelse(
+      area_est_byCEDO.2025_km2 == 0 |
+        is.na(area_est_byCEDO.2025_km2),
+      "EXCLUDE",
+      "INCLUDE"
+    )
+  )
+
+RHOD_Current_Status
+```
+
+## Save RHOD_Current_Status
+
+```{r Save RHOD_Current_Status}
+write.csv(RHOD_Current_Status,
+          file= "/home/ferrer/ohi_goc_prep/_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Status_1.1_df_Nov102026.csv",
+          row.names = FALSE)
+# 171 obs., 11 vars.
+
+```
+
+## Plot RHOD_Current_Status
+
+```{r Plot RHOD_Current_Status}
+colnames(RHOD_Current_Status)
+
+Region_colors<- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#dcaa38",
+  "Eastern Upper Gulf" = "#cbd2a0",
+  "Eastern Midriff Islands" = "#98a25a",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8d61a9")
+
+# Plot:
+RHOD_Status_OverTime<- RHOD_Current_Status %>%
+  ggplot(aes(year, RHOD_current_status, color = rgn_name)) +
+  
+  geom_line(linewidth = 1) +
+  
+  geom_point(
+  size = 2
+  ) +
+  
+  # Vertical line at historic cut-off
+  geom_vline(
+    xintercept = HISTORIC_CUTOFF,
+    color = "gray40",
+    linewidth = 1
+  ) +
+  
+  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
+  
+  ylim(0, 101) +
+  
+  scale_color_manual(values = Region_colors) +
+  
+  labs(
+    title = "RHOD Component Scores (1.1) by Region",
+    subtitle = "Data sources: CEDO (2025); Fisheries VMS data (2026)",
+    caption = "updated: Oct 13 2026",
+    x = "Year",
+    y = "RHOD Score (from 0 to 100)",
+    color = "Region",
+  ) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+RHOD_Status_OverTime
+
+```
+
+```{r Save as PNG}
+ggsave(
+  plot = RHOD_Status_OverTime,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Status_1.1_plot_Nov102026.png"),
+  width = 12,
+  height = 12,
+  dpi = 300
+)
+```
+
+# STEP 4: SAVE RHOD_Pressure ------------------------------
+
+```{r Estimate pressure as 100 minus current status}
+RHOD_Pressure <- RHOD_Current_Status %>%
+  mutate(pressure = (100 - RHOD_current_status) / 100,
+         pressure= round(pressure, 2)) %>%
+  select(rgn_name, rgn_id, year, pressure)
+
+dim(RHOD_Pressure)
+# 171 obs., 4 cols.
+```
+
+```{r Save RHOD_Pressure}
+write.csv(RHOD_Pressure,
+          file= "/home/ferrer/ohi_goc_prep/_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Pressure_1.1_Nov102026.csv",
+          row.names = FALSE)
+
+```
+
+
+# STEP 5: ESTIMATE RHOD_TREND (source: multiple data sources, 2007-present) ------------------------------
+
+```{r Load in RHOD_Current_Status as needed}
+RHOD_Current_Status<- read_csv("/home/ferrer/ohi_goc_prep/_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Status_1.1_df_Nov102026.csv")
+
+dim(RHOD_Current_Status)
+# 171 obs., 11 vars.
 ```
 
 ```{r Plot RHOD trawling trends}
@@ -677,10 +940,10 @@ Region_colors<- c(
   "Southeastern Gulf" = "#8d61a9")
 
 
-colnames(RHOD_Scores)
+colnames(RHOD_Current_Status)
 
 # Plot:
-RHOD_TrawlPressure_OverTime<- RHOD_Scores %>%
+RHOD_TrawlPressure_OverTime<- RHOD_Current_Status %>%
 
   ggplot(aes(year, Pressure, color = rgn_name)) +
   
@@ -708,140 +971,88 @@ RHOD_TrawlPressure_OverTime<- RHOD_Scores %>%
 RHOD_TrawlPressure_OverTime
 
 ```
-NOTE TO SELF: 
-10 or 5 years window.
-Condition: take more recent 5 (or 10) years
-Trend: contemporary versus historic (first versus last ten years to trend estimates, modified method A: midpoints)
-
 
 ## Save RHOD_TrawlPressure_OverTime
 
 ```{r Save as PNG}
 ggsave(
-  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_TrawlPressure_OverTime_plot_Oct122026.png"),
   plot = RHOD_TrawlPressure_OverTime,
+  filename = sprintf("/home/ferrer/ohi_goc_prep/_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Pressure_OverTime_plot_Oct122026.png"),
   width = 12,
   height = 12,
   dpi = 300
 )
 ```
 
-## Save RHOD_Scores
+```{r Calculate RHOD_Trend using METHOD A modified}
+colnames(RHOD_Current_Status)
 
-```{r Save RHOD_Scores}
-write.csv(RHOD_Scores,
-          here::here("_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Scores_1.1_df_Oct122026.csv"),
-          row.names = FALSE)
-```
-
-## Plot RHOD_Scores
-
-```{r Plot RHOD_Scores}
-colnames(RHOD_Scores)
-
-Region_colors<- c(
-  "Western Upper Gulf" = "#C03729",
-  "Western Midriff Islands" = "#E68C7C",
-  "Western Central Gulf" = "#FC8F24",
-  "Western Southern Gulf" = "#dcaa38",
-  "Eastern Upper Gulf" = "#cbd2a0",
-  "Eastern Midriff Islands" = "#98a25a",
-  "Southern Sonora Coast" = "#747428",
-  "Sinaloa Coast" = "#627391",
-  "Southeastern Gulf" = "#8d61a9")
-
-# Plot:
-RHOD_Scores_OverTime<- RHOD_Scores %>%
-  ggplot(aes(year, RHOD_current_status, color = rgn_name)) +
-  
-  geom_line(linewidth = 1) +
-  
-  geom_point(
-  size = 2
-  ) +
-  
-  geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
-  
-  ylim(0, 101) +
-  
-  scale_color_manual(values = Region_colors) +
-  
-  labs(
-    title = "RHOD Component Scores (1.1) by Region",
-    subtitle = "Data sources: CEDO (2025); Fisheries VMS data (2026)",
-    caption = "updated: Oct 13 2026",
-    x = "Year",
-    y = "RHOD Score (from 0 to 100)",
-    color = "Region",
-  ) +
-  
-  theme_bw(base_size = 14) +
-  theme(
-    strip.text = element_text(size = 14, face = "bold"),
-    plot.title = element_text(size = 16, face = "bold")
+# Historic midpoint: first and last observed years, 1998–2009
+historic_years <- RHOD_Current_Status %>%
+  filter(
+    year < HISTORIC_CUTOFF
+  ) %>%
+  group_by(rgn_name, rgn_id) %>%
+  summarise(
+    historic_midpoint = (min(year) + max(year)) / 2,
+    .groups = "drop"
   )
 
-RHOD_Scores_OverTime
-
-```
-
-# STEP 4: SAVE RHOD_Pressure ------------------------------
-
-```{r Create RHOD_Pressure}
-colnames(RHOD_Scores)
-
-RHOD_Pressure <- RHOD_Scores %>%
-  mutate(pressure = Pressure / 100) %>%
-  select(rgn_name, rgn_id, year, pressure)
-
-dim(RHOD_Pressure)
-# 152 obs., 4 cols.
-```
-
-```{r Save RHOD_Pressure}
-write.csv(RHOD_Pressure,
-          here::here("_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Pressure_Oct132026.csv"),
-          row.names = FALSE)
-
-```
-
-
-# STEP 5: ESTIMATE RHOD TREND (source: multiple data sources, 2007-present) ------------------------------
-
-```{r Trend Calculation: lm for most recent 5 years of data}
-# Trend Calculation: lm for most recent 5 years of data
-year_end <- max(RHOD_Scores$year, na.rm = TRUE)
-year_start <- year_end - 4
-# NOTE TO SELF: This might also change.
-
-calc_trends <- function(d) {
-  ys <- min(d$year)
-  ye <- max(d$year)
-  cs <- d$RHOD_current_status[d$year == ys][1]
-  fit_lin <- lm(RHOD_current_status ~ year, data = d)
-  fit_log <- lm(log(pmax(RHOD_current_status, 1e-6)) ~ year, data = d)
-  slope_lin <- unname(coef(fit_lin)["year"])
-  slope_log <- unname(coef(fit_log)["year"])
-  tibble(
-    year = ye,
-    year_start = ys,
-    year_end = ye,
-    condition_start = cs,
-    trend_pct_linear = (slope_lin / cs) * 100,
-    trend_pct_cagr   = (exp(slope_log) - 1) * 100
+# Contemporary midpoint: first and last observed years, 2010 onward
+contemporary_years <- RHOD_Current_Status %>%
+  filter(
+    year >= HISTORIC_CUTOFF
+  ) %>%
+  group_by(rgn_name, rgn_id) %>%
+  summarise(
+    contemporary_midpoint = (min(year) + max(year)) / 2,
+    .groups = "drop"
   )
-}
-RHOD_Trend <- RHOD_Scores %>%
-  filter(year >= year_start, year <= year_end) %>%
-  group_by(rgn_id) %>%
-  group_modify(~ calc_trends(.x)) %>%
-  ungroup()
 
-RHOD_Trend
+# Retrieve existing means and calculate trend
+RHOD_Trend0 <- RHOD_Current_Status %>%
+  group_by(rgn_name, rgn_id) %>%
+  summarise(
+    RHOD_include_exclude = first(RHOD_include_exclude),
+    historic_condition = first(historic_mean),
+    contemporary_condition = first(contemporary_mean),
+    .groups = "drop"
+  ) %>%
+  inner_join(historic_years, by = c("rgn_name", "rgn_id")) %>%
+  inner_join(contemporary_years, by = c("rgn_name", "rgn_id")) %>%
+  mutate(
+    n_years = contemporary_midpoint - historic_midpoint,
+    trend = (contemporary_condition - historic_condition) / n_years,
+    trend_method = "Modified Method A: contemporary midpoint vs. historic midpoint"
+  ) %>%
+  select(
+    rgn_name, rgn_id, RHOD_include_exclude,
+    historic_midpoint, contemporary_midpoint, n_years,
+    historic_condition, contemporary_condition,
+    trend, trend_method
+  )
+
+RHOD_Trend0
+# 9 obs., 10 vars.
+
+```
+
+```{r Clean before saving}
+RHOD_Trend <- RHOD_Trend0 %>%
+  arrange(as.integer(sub("Region_", "", rgn_id)))
+# 9 obs., 10 vars.
 ```
 
 
-## METHOD B
+```{r Save RHOD_Trend}
+write.csv(RHOD_Trend,
+          file= "/home/ferrer/ohi_goc_prep/_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Trend_1.1_Nov102026.csv",
+          row.names = FALSE)
+# 9 obs., 10 vars.
+```
+
+
+## METHOD B - **WE ARE NO LONGER USING THIS METHOD FOR RHODOLITHS**
 
 ```{r Calculate RHOD_Trend using METHOD B}
 # METHOD B: 
@@ -850,62 +1061,53 @@ RHOD_Trend
 # trend_pct_year <- (1 + slope/earliest_area_in_lm)
 
 # Pull the most recent year and the comparison year:
-most_recent_year = max(RHOD_Scores$year, na.rm = TRUE)
-
-comparison_year <- min(
-  RHOD_Scores$year[
-    RHOD_Scores$year < most_recent_year &
-    RHOD_Scores$year >= most_recent_year - 10 &
-    RHOD_Scores$year <= most_recent_year - 5
-  ],
-  na.rm = TRUE
-)
-
-RHOD_score_lm <- RHOD_Scores %>%
-  filter(
-    year >= comparison_year,
-    year <= most_recent_year
-  ) %>%
-  group_by(rgn_id) %>%
-  summarise(
-    model = list(
-      lm(RHOD_current_status ~ year, data = pick(everything()))
-    ),
-    comparison_status = RHOD_current_status[year == comparison_year][1],
-    .groups = "drop"
-  ) %>%
-  mutate(
-    slope = sapply(model, function(x) coef(x)[["year"]]),
-    p_value = sapply(
-      model,
-      function(x) summary(x)$coefficients["year", "Pr(>|t|)"]
-    ),
-    trend_pct_year = round((slope / comparison_status) * 100, 2)
-  ) %>%
-  select(rgn_id, 
-         trend_linear_pct_year_opB = trend_pct_year,
-         lm_slope= slope, 
-         p_value)
+# most_recent_year = max(RHOD_Current_Status$year, na.rm = TRUE)
+# 
+# comparison_year <- min(
+#   RHOD_Current_Status$year[
+#     RHOD_Current_Status$year < most_recent_year &
+#     RHOD_Current_Status$year >= most_recent_year - 10 &
+#     RHOD_Current_Status$year <= most_recent_year - 5
+#   ],
+#   na.rm = TRUE
+# )
+# 
+# RHOD_score_lm <- RHOD_Current_Status %>%
+#   filter(
+#     year >= comparison_year,
+#     year <= most_recent_year
+#   ) %>%
+#   group_by(rgn_id) %>%
+#   summarise(
+#     model = list(
+#       lm(RHOD_current_status ~ year, data = pick(everything()))
+#     ),
+#     comparison_status = RHOD_current_status[year == comparison_year][1],
+#     .groups = "drop"
+#   ) %>%
+#   mutate(
+#     slope = sapply(model, function(x) coef(x)[["year"]]),
+#     p_value = sapply(
+#       model,
+#       function(x) summary(x)$coefficients["year", "Pr(>|t|)"]
+#     ),
+#     trend_pct_year = round((slope / comparison_status) * 100, 2)
+#   ) %>%
+#   select(rgn_id, 
+#          trend_linear_pct_year_opB = trend_pct_year,
+#          lm_slope= slope, 
+#          p_value)
 
 ```
 
 
 ```{r Make a nice Ktable for RHOD_score_lm}
-colnames(RHOD_score_lm)
-
-RHOD_score_lm %>%
-  select(rgn_id, trend_linear_pct_year_opB, p_value) %>%
-  kable(digits = 4, col.names = c("Region", "Trend (method B)", "p_value")) %>%
-  kable_styling(bootstrap_options = c("striped", "bordered")) %>%
-  add_header_above(
-    c('Rhodolith Bed Trend' = 3))
-```
-
-```{r Save RHOD_Trend}
-RHOD_Trend<- RHOD_score_lm
-
-write.csv(RHOD_Trend,
-          here::here("_habitats/HAB_rhodolith_beds/RHO_outputs/RHOD_Trend_Oct132026.csv"),
-          row.names = FALSE)
-
+# colnames(RHOD_score_lm)
+# 
+# RHOD_score_lm %>%
+#   select(rgn_id, trend_linear_pct_year_opB, p_value) %>%
+#   kable(digits = 4, col.names = c("Region", "Trend (method B)", "p_value")) %>%
+#   kable_styling(bootstrap_options = c("striped", "bordered")) %>%
+#   add_header_above(
+#     c('Rhodolith Bed Trend' = 3))
 ```
