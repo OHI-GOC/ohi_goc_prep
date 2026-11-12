@@ -1,0 +1,645 @@
+---
+title: "Gulf of California OHI figures"
+output:
+  html_document:
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+This note builds figures from the Gulf of California Ocean Health Index scores.
+
+The score table is `Index_Scores_1.0_df_Sep222026.csv`. Each row is a region and a year. The boundary file is `OHI_regions/goc_ohi_rgns.shp`. It has nine regions, each stored once as a marine polygon and once as a land polygon. Scores are joined to those polygons on `rgn_id`.
+
+Goal columns follow the table order, and **Index** is the overall score. On maps, marine polygons carry the score and land polygons are gray context. Most figures use a color scale from 0 to 100 that changes quickly between 40 and 100. The flower plot uses a separate red-to-blue scale. Missing scores are left gray.
+
+The figures below are the goal carpet plot, the index map for every year, the index trend by region, the 2025 index map beside the 2025 goal maps, the 2025 score distributions, and a 2025 flower plot for each region.
+
+```{r packages}
+library(sf)
+library(ggplot2)
+library(patchwork)
+
+sf::sf_use_s2(FALSE)
+```
+
+```{r paths}
+# Write the PNG files next to this R Markdown file.
+# During knitting, current_input() is that file. Otherwise use the working directory.
+input_path <- knitr::current_input(dir = TRUE)
+out_dir <- if (is.null(input_path)) getwd() else dirname(input_path)
+scores_path <- file.path(out_dir, "Index_Scores_1.0_df_Sep222026.csv")
+shp_path <- file.path(out_dir, "OHI_regions", "goc_ohi_rgns.shp")
+
+stopifnot(file.exists(scores_path), file.exists(shp_path))
+```
+
+```{r read}
+scores <- read.csv(scores_path, stringsAsFactors = FALSE, na.strings = c("NA", ""))
+scores$year <- as.integer(scores$year)
+
+regions <- st_read(shp_path, quiet = TRUE)
+regions$rgn_id <- trimws(regions$rgn_id)
+regions$location <- trimws(regions$location)
+
+marine <- regions[regions$location == "marine", ]
+land <- regions[regions$location == "land", ]
+
+# Geographic order follows the marine polygon id.
+region_order <- st_drop_geometry(marine[order(marine$id), c("rgn_id", "id")])
+region_names <- unique(scores[, c("rgn_id", "rgn_name")])
+region_order <- merge(region_order, region_names, by = "rgn_id")
+region_order <- region_order[order(region_order$id), ]
+region_levels <- rev(region_order$rgn_name)
+
+goal_cols <- c(
+  "LE_score", "CW_score", "NP_score", "AO_score", "FP_score",
+  "BD_score", "SP_score", "TR_score", "HS_score", "Index_score"
+)
+goal_labels <- c("LE", "CW", "NP", "AO", "FP", "BD", "SP", "TR", "HS", "Index")
+
+carpet_scores <- reshape(
+  scores[, c("year", "rgn_name", "rgn_id", goal_cols)],
+  varying = goal_cols,
+  v.names = "score",
+  timevar = "goal",
+  times = goal_labels,
+  direction = "long"
+)
+carpet_scores$goal <- factor(carpet_scores$goal, levels = goal_labels)
+carpet_scores$rgn_name <- factor(carpet_scores$rgn_name, levels = region_levels)
+carpet_scores$year <- factor(carpet_scores$year, levels = sort(unique(carpet_scores$year)))
+carpet_scores$label <- ifelse(is.na(carpet_scores$score), "", sprintf("%.0f", carpet_scores$score))
+# White type on the darkest reds and greens; dark type on the yellow middle.
+carpet_scores$text_col <- ifelse(
+  is.na(carpet_scores$score),
+  "grey15",
+  ifelse(carpet_scores$score < 42 | carpet_scores$score >= 82, "white", "grey10")
+)
+
+# Shared fill scale. Breaks are packed through the middle and top of the
+# 0-100 range, where most scores sit, so small gaps still change color.
+score_colours <- c("#7f0000", "#e31a1c", "#fd8d3c", "#fed976", "#78c679", "#238b45", "#00441b")
+score_values <- scales::rescale(c(0, 20, 40, 60, 75, 88, 100))
+
+score_fill <- function(legend_title) {
+  scale_fill_gradientn(
+    colours = score_colours,
+    values = score_values,
+    limits = c(0, 100),
+    oob = scales::squish,
+    name = legend_title,
+    na.value = "grey90"
+  )
+}
+
+# Legend order follows the boundary file, north to south.
+region_colours <- c(
+  "Western Upper Gulf" = "#C03729",
+  "Western Midriff Islands" = "#E68C7C",
+  "Western Central Gulf" = "#FC8F24",
+  "Western Southern Gulf" = "#DCAA38",
+  "Eastern Upper Gulf" = "#CBD2A0",
+  "Eastern Midriff Islands" = "#98A25A",
+  "Southern Sonora Coast" = "#747428",
+  "Sinaloa Coast" = "#627391",
+  "Southeastern Gulf" = "#8D61A9"
+)
+```
+
+## Carpet plot
+
+```{r carpet}
+carpet <- ggplot(carpet_scores, aes(x = goal, y = rgn_name, fill = score)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = label, color = text_col), size = 2.1, show.legend = FALSE) +
+  score_fill("Score") +
+  scale_color_identity() +
+  scale_x_discrete(position = "top", expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  facet_wrap(~year, ncol = 2) +
+  labs(
+    title = "Carpet plot of Gulf of California OHI scores by goal",
+    subtitle = "Columns are goals, with the index last. Each panel is a year.",
+    x = NULL,
+    y = NULL,
+    caption = "Gray tiles are missing scores. The color scale is 0 to 100, with extra contrast between 40 and 100."
+  ) +
+  theme_bw(base_size = 9) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.4),
+    plot.title = element_text(size = 12, face = "bold"),
+    plot.subtitle = element_text(size = 9),
+    plot.caption = element_text(size = 7.5, hjust = 0, color = "grey30"),
+    axis.text.y = element_text(size = 7),
+    axis.text.x.top = element_text(size = 7.5),
+    axis.ticks = element_blank(),
+    strip.placement = "outside",
+    strip.text = element_text(size = 8, face = "bold"),
+    strip.background = element_rect(fill = "grey95", color = "black", linewidth = 0.4),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+    panel.spacing = unit(0.7, "lines")
+  )
+
+carpet_png <- file.path(out_dir, "OHI_index_carpet_plot.png")
+ggsave(carpet_png, carpet, width = 11, height = 14, dpi = 200, bg = "white")
+```
+
+```{r carpet-show, echo=FALSE}
+knitr::include_graphics(carpet_png)
+```
+
+## Index scores by year
+
+```{r map}
+map_scores <- merge(marine, scores, by = "rgn_id", all.x = TRUE)
+marine_bbox <- st_bbox(marine)
+
+score_map <- ggplot() +
+  geom_sf(data = land, fill = "grey92", color = "grey75", linewidth = 0.15) +
+  geom_sf(data = map_scores, aes(fill = Index_score), color = "white", linewidth = 0.2) +
+  facet_wrap(~year, ncol = 4) +
+  score_fill("Index score") +
+  coord_sf(
+    xlim = c(marine_bbox["xmin"], marine_bbox["xmax"]),
+    ylim = c(marine_bbox["ymin"], marine_bbox["ymax"]),
+    expand = FALSE
+  ) +
+  labs(
+    title = "Index scores on OHI marine regions",
+    subtitle = "Land polygons are context only and are not colored by the score.",
+    caption = "Joined on rgn_id. The color scale matches the carpet plot (0 to 100)."
+  ) +
+  theme_bw(base_size = 9) +
+  theme(
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.4),
+    plot.title = element_text(size = 12, face = "bold"),
+    plot.subtitle = element_text(size = 9),
+    plot.caption = element_text(size = 7.5, hjust = 0, color = "grey30"),
+    strip.text = element_text(size = 8, face = "bold"),
+    strip.background = element_rect(fill = "grey95", color = "black", linewidth = 0.4),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7)
+  )
+
+map_png <- file.path(out_dir, "OHI_index_region_map.png")
+ggsave(map_png, score_map, width = 11, height = 9.5, dpi = 200, bg = "white")
+```
+
+```{r map-show, echo=FALSE}
+knitr::include_graphics(map_png)
+```
+
+## Index score over time
+
+One line per region. The vertical scale starts at 50 because every index score in this table is above that.
+
+```{r trend}
+trend <- scores
+trend$rgn_name <- factor(trend$rgn_name, levels = region_order$rgn_name)
+
+trend_plot <- ggplot(trend, aes(x = year, y = Index_score, color = rgn_name, group = rgn_name)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.6) +
+  scale_color_manual(values = region_colours, name = "Region") +
+  scale_x_continuous(breaks = 2018:2025) +
+  scale_y_continuous(limits = c(50, 100), breaks = seq(50, 100, 10)) +
+  labs(
+    title = "Index score over time",
+    subtitle = "Each line is one region, using the same order as the boundary file.",
+    x = "Year",
+    y = "Index score"
+  ) +
+  theme_bw(base_size = 9) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.4),
+    plot.title = element_text(size = 12, face = "bold"),
+    plot.subtitle = element_text(size = 9),
+    axis.text = element_text(size = 8),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7)
+  )
+
+trend_png <- file.path(out_dir, "OHI_index_trend_lines.png")
+ggsave(trend_png, trend_plot, width = 9.5, height = 5.6, dpi = 200, bg = "white")
+```
+
+```{r trend-show, echo=FALSE}
+knitr::include_graphics(trend_png)
+```
+
+## 2025 index and goal maps
+
+The index map is the larger panel on the left. The nine goal maps sit to its right. All of them use 2025 only.
+
+```{r maps-2025}
+scores_2025 <- scores[scores$year == 2025, ]
+long_2025 <- carpet_scores[as.character(carpet_scores$year) == "2025", ]
+goal_only <- goal_labels[goal_labels != "Index"]
+
+index_2025 <- merge(marine, scores_2025, by = "rgn_id")
+index_2025$score <- index_2025$Index_score
+
+goal_2025 <- long_2025[long_2025$goal %in% goal_only, ]
+goal_2025$goal <- factor(goal_2025$goal, levels = goal_only)
+goal_map <- merge(marine, goal_2025, by = "rgn_id")
+
+map_theme <- function(title_size = 9) {
+  theme_bw(base_size = 8) +
+    theme(
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.35),
+      plot.title = element_text(size = title_size, face = "bold", hjust = 0.5),
+      strip.text = element_text(size = 8, face = "bold"),
+      strip.background = element_rect(fill = "grey95", color = "black", linewidth = 0.35),
+      legend.title = element_text(size = 8),
+      legend.text = element_text(size = 7)
+    )
+}
+
+index_map_2025 <- ggplot() +
+  geom_sf(data = land, fill = "grey92", color = "grey75", linewidth = 0.15) +
+  geom_sf(data = index_2025, aes(fill = score), color = "white", linewidth = 0.2) +
+  score_fill("Score") +
+  coord_sf(
+    xlim = c(marine_bbox["xmin"], marine_bbox["xmax"]),
+    ylim = c(marine_bbox["ymin"], marine_bbox["ymax"]),
+    expand = FALSE
+  ) +
+  labs(title = "Index") +
+  map_theme(11) +
+  theme(legend.position = "none")
+
+goal_maps_2025 <- ggplot() +
+  geom_sf(data = land, fill = "grey92", color = "grey75", linewidth = 0.12) +
+  geom_sf(data = goal_map, aes(fill = score), color = "white", linewidth = 0.12) +
+  facet_wrap(~goal, ncol = 3) +
+  score_fill("Score") +
+  coord_sf(
+    xlim = c(marine_bbox["xmin"], marine_bbox["xmax"]),
+    ylim = c(marine_bbox["ymin"], marine_bbox["ymax"]),
+    expand = FALSE
+  ) +
+  map_theme(8)
+
+maps_2025 <- index_map_2025 + goal_maps_2025 +
+  plot_layout(widths = c(1.15, 1.85)) +
+  plot_annotation(
+    title = "2025 index and goal scores",
+    subtitle = "Index map on the left. Goal scores to the right.",
+    caption = "Joined on rgn_id. Gray areas on a goal map are missing scores.",
+    theme = theme(
+      plot.title = element_text(size = 12, face = "bold"),
+      plot.subtitle = element_text(size = 9),
+      plot.caption = element_text(size = 7.5, hjust = 0, color = "grey30")
+    )
+  )
+
+maps_2025_png <- file.path(out_dir, "OHI_2025_index_goal_maps.png")
+ggsave(maps_2025_png, maps_2025, width = 12.5, height = 8.2, dpi = 200, bg = "white")
+```
+
+```{r maps-2025-show, echo=FALSE}
+knitr::include_graphics(maps_2025_png)
+```
+
+## 2025 score distributions
+
+The large panel is the 2025 index. Gray bars count regions in each score bin, the black curve is a smoothed density on that same scale, and the dashed line is the mean. Each smaller panel is one goal: a filled density across regions, with a solid line at the mean. Natural Products has no score for the four western regions, so that panel uses the five eastern regions only.
+
+```{r distribution}
+dist_colours <- c(
+  FP_score = "#8E2F4A",
+  AO_score = "#E04B3A",
+  NP_score = "#E07A32",
+  HS_score = "#E39B3A",
+  TR_score = "#E6C84A",
+  CW_score = "#3AA0A0",
+  BD_score = "#3E5BA8",
+  LE_score = "#C5D46A",
+  SP_score = "#7FCB86"
+)
+dist_names <- c(
+  FP_score = "Food provision",
+  AO_score = "Artisanal fishing opportunity",
+  NP_score = "Natural products",
+  HS_score = "Habitat services",
+  TR_score = "Tourism and recreation",
+  CW_score = "Clean waters",
+  BD_score = "Biodiversity",
+  LE_score = "Coastal livelihoods and economies",
+  SP_score = "Sense of place"
+)
+
+panel_theme <- function(base = 8) {
+  theme_classic(base_size = base) +
+    theme(
+      axis.title = element_text(size = base * 0.95),
+      axis.text = element_text(size = base * 0.8),
+      axis.line = element_line(linewidth = 0.3, color = "grey20"),
+      axis.ticks = element_line(linewidth = 0.3, color = "grey20"),
+      plot.margin = margin(3, 5, 2, 3)
+    )
+}
+
+goal_panel <- function(values, title, fill) {
+  values <- values[!is.na(values)]
+  ggplot(data.frame(score = values), aes(x = score)) +
+    geom_density(
+      aes(y = after_stat(count)),
+      fill = fill,
+      color = "black",
+      linewidth = 0.35,
+      bw = 7,
+      outline.type = "upper"
+    ) +
+    geom_vline(xintercept = mean(values), linewidth = 0.45, color = "black") +
+    scale_x_continuous(breaks = c(0, 50, 100), limits = c(-6, 118), expand = c(0, 0)) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.14))) +
+    labs(x = title, y = "Count") +
+    panel_theme(7.5)
+}
+
+index_values <- scores_2025$Index_score
+binwidth <- 5
+index_plot <- ggplot(data.frame(score = index_values), aes(x = score)) +
+  geom_histogram(
+    binwidth = binwidth,
+    boundary = 0,
+    fill = "#bdbdbd",
+    color = "white",
+    linewidth = 0.15
+  ) +
+  geom_density(
+    aes(y = after_stat(count) * binwidth),
+    color = "black",
+    linewidth = 0.6,
+    bw = 4
+  ) +
+  geom_vline(xintercept = mean(index_values), linetype = "dashed", linewidth = 0.55) +
+  scale_x_continuous(breaks = seq(0, 100, 20), limits = c(-4, 104), expand = c(0, 0)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(x = "Index score", y = "Count") +
+  panel_theme(9)
+
+panels <- lapply(names(dist_names), function(col) {
+  goal_panel(scores_2025[[col]], dist_names[[col]], dist_colours[[col]])
+})
+names(panels) <- names(dist_names)
+
+right <- wrap_plots(
+  panels$FP_score, panels$AO_score,
+  panels$NP_score, panels$HS_score,
+  panels$TR_score, panels$CW_score,
+  panels$BD_score,
+  ncol = 2
+)
+left <- index_plot / (panels$LE_score | panels$SP_score) + plot_layout(heights = c(2.6, 1))
+distribution <- (left | right) +
+  plot_layout(widths = c(1.28, 1)) +
+  plot_annotation(
+    title = "Distribution of 2025 scores",
+    subtitle = "Each panel is the spread across regions. The line marks the mean.",
+    theme = theme(
+      plot.title = element_text(
+        family = "Avenir Next", face = "plain", size = 16, colour = "grey15",
+        margin = margin(b = 1)
+      ),
+      plot.subtitle = element_text(
+        family = "Avenir Next", face = "plain", size = 9, colour = "grey45",
+        margin = margin(b = 6)
+      )
+    )
+  )
+
+distribution_png <- file.path(out_dir, "OHI_2025_score_distribution.png")
+ggsave(distribution_png, distribution, width = 11.2, height = 8.0, dpi = 200, bg = "white")
+```
+
+```{r distribution-show, echo=FALSE}
+knitr::include_graphics(distribution_png)
+```
+
+## 2025 flower plots
+
+The labeled flower on the left is the average score across regions. It shows which goal sits in each position, running clockwise from the top. On the map, each region has a smaller flower in that same order. The white center is the index. Petal length and color are the goal score. A line joins each flower to its marine region, and a missing score leaves a gap.
+
+```{r flowers}
+goal_cols_only <- goal_cols[seq_along(goal_only)]
+n_goal <- length(goal_only)
+goal_names <- c(
+  "Livelihoods", "Clean Waters", "Natural Products", "Artisanal Opportunities",
+  "Food Provision", "Biodiversity", "Sense of Place", "Tourism & Recreation",
+  "Habitat Services"
+)
+flower_colours <- c(
+  "#67001f", "#b2182b", "#e34a33", "#fc8d59", "#fdbb84",
+  "#fee08b", "#c6dbef", "#6baed6", "#2171b5", "#08306b"
+)
+flower_values <- scales::rescale(c(0, 10, 22, 35, 48, 60, 72, 84, 93, 100))
+
+flower_fill <- function() {
+  scale_fill_gradientn(
+    colours = flower_colours,
+    values = flower_values,
+    limits = c(0, 100),
+    breaks = c(0, 25, 50, 75, 100),
+    oob = scales::squish,
+    name = "Score",
+    na.value = "grey85"
+  )
+}
+
+# One petal, drawn clockwise from the top. `j` is the goal position.
+petal_xy <- function(cx, cy, radius, score, j, n_petals, inner_frac = 0.46) {
+  mid <- pi / 2 - (j - 1) * 2 * pi / n_petals
+  half <- (2 * pi / n_petals) * 0.40
+  inner <- radius * inner_frac
+  outer <- inner + (radius - inner) * (score / 100)
+  outer_ang <- seq(mid - half, mid + half, length.out = 26)
+  inner_ang <- seq(mid + half, mid - half, length.out = 8)
+  rbind(
+    cbind(cx + cos(outer_ang) * outer, cy + sin(outer_ang) * outer),
+    cbind(cx + cos(inner_ang) * inner, cy + sin(inner_ang) * inner)
+  )
+}
+
+circle_xy <- function(cx, cy, r, n = 90) {
+  ang <- seq(0, 2 * pi, length.out = n)
+  cbind(cx + r * cos(ang), cy + r * sin(ang))
+}
+
+as_poly <- function(xy, score, group, crs) {
+  xy <- rbind(xy, xy[1, , drop = FALSE])
+  st_sf(
+    score = score,
+    group = group,
+    geometry = st_sfc(st_polygon(list(xy)), crs = crs)
+  )
+}
+
+# Labeled key: mean score for each goal, same petal order as the map flowers.
+key_scores <- vapply(goal_cols_only, function(col) mean(scores_2025[[col]], na.rm = TRUE), numeric(1))
+key_index <- mean(scores_2025$Index_score, na.rm = TRUE)
+key_petals <- vector("list", n_goal)
+key_labs <- vector("list", n_goal)
+for (j in seq_len(n_goal)) {
+  xy <- petal_xy(0, 0, 1, key_scores[j], j, n_goal)
+  key_petals[[j]] <- data.frame(x = xy[, 1], y = xy[, 2], score = key_scores[j], group = j)
+  mid <- pi / 2 - (j - 1) * 2 * pi / n_goal
+  key_labs[[j]] <- data.frame(
+    x = 1.24 * cos(mid),
+    y = 1.24 * sin(mid),
+    label = goal_names[j],
+    hjust = ifelse(cos(mid) > 0.25, 0, ifelse(cos(mid) < -0.25, 1, 0.5)),
+    vjust = ifelse(sin(mid) > 0.35, 0, ifelse(sin(mid) < -0.35, 1, 0.5))
+  )
+}
+key_petal_df <- do.call(rbind, key_petals)
+key_lab_df <- do.call(rbind, key_labs)
+key_center <- as.data.frame(circle_xy(0, 0, 0.40))
+names(key_center) <- c("x", "y")
+
+key_plot <- ggplot() +
+  geom_polygon(data = key_petal_df, aes(x, y, group = group, fill = score), color = "white", linewidth = 0.5) +
+  geom_polygon(data = key_center, aes(x, y), fill = "white", color = "grey25", linewidth = 0.6) +
+  geom_text(aes(x = 0, y = 0), label = sprintf("%.0f", key_index), size = 8, fontface = "bold", color = "grey10") +
+  geom_text(
+    data = key_lab_df,
+    aes(x, y, label = label, hjust = hjust, vjust = vjust),
+    size = 3.05,
+    color = "grey15"
+  ) +
+  flower_fill() +
+  coord_fixed(xlim = c(-2.2, 2.2), ylim = c(-1.85, 1.95), clip = "off") +
+  theme_bw(base_size = 9) +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.4),
+    legend.position = "left",
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+    legend.key.height = unit(1.35, "cm"),
+    plot.margin = margin(6, 4, 6, 6)
+  )
+
+# Place Baja flowers west of the gulf and mainland flowers east of it.
+crs_use <- st_crs(marine)
+score_keep <- scores_2025[, c("rgn_id", "rgn_name", "Index_score", goal_cols_only)]
+marine_f <- merge(marine, score_keep, by = "rgn_id", sort = FALSE)
+bb <- st_bbox(st_geometry(marine_f))
+radius <- 90000
+west <- marine_f$estado %in% c("Baja_California", "Baja_California_Sur")
+marine_f$fx <- ifelse(west, bb["xmin"] - radius * 1.65, bb["xmax"] + radius * 1.65)
+cent <- st_point_on_surface(marine_f)
+marine_f$fy <- st_coordinates(cent)[, 2]
+
+petals <- list()
+centers <- list()
+leaders <- list()
+name_labs <- list()
+num_labs <- list()
+for (i in seq_len(nrow(marine_f))) {
+  row <- marine_f[i, ]
+  for (j in seq_len(n_goal)) {
+    goal_score <- row[[goal_cols_only[j]]]
+    if (is.na(goal_score)) next
+    xy <- petal_xy(row$fx, row$fy, radius, goal_score, j, n_goal)
+    petals[[length(petals) + 1]] <- as_poly(xy, goal_score, paste(row$rgn_id, j), crs_use)
+  }
+  centers[[i]] <- as_poly(circle_xy(row$fx, row$fy, radius * 0.40), NA_real_, row$rgn_id, crs_use)
+
+  # Horizontal connector from the flower to the region boundary.
+  x_far <- if (isTRUE(west[i])) unname(bb["xmax"]) else unname(bb["xmin"])
+  ray <- st_sfc(st_linestring(cbind(c(row$fx, x_far), c(row$fy, row$fy))), crs = crs_use)
+  hit <- suppressWarnings(st_intersection(ray, st_boundary(st_geometry(row))))
+  hit_xy <- st_coordinates(hit)
+  if (nrow(hit_xy) == 0) {
+    near <- st_nearest_points(st_sfc(st_point(c(row$fx, row$fy)), crs = crs_use), st_geometry(row))
+    hit_xy <- st_coordinates(near)[2, , drop = FALSE]
+  }
+  dist_to_flower <- sqrt((hit_xy[, 1] - row$fx)^2 + (hit_xy[, 2] - row$fy)^2)
+  end_xy <- hit_xy[which.min(dist_to_flower), ]
+  dx <- end_xy[1] - row$fx
+  dy <- end_xy[2] - row$fy
+  hyp <- sqrt(dx^2 + dy^2)
+  x0 <- row$fx + dx / hyp * radius * 1.05
+  y0 <- row$fy + dy / hyp * radius * 1.05
+  leaders[[i]] <- st_sf(
+    geometry = st_sfc(st_linestring(cbind(c(x0, end_xy[1]), c(y0, end_xy[2]))), crs = crs_use)
+  )
+  name_labs[[i]] <- st_sf(
+    label = row$rgn_name,
+    geometry = st_sfc(st_point(c(row$fx, row$fy + radius * 1.28)), crs = crs_use)
+  )
+  num_labs[[i]] <- st_sf(
+    label = sprintf("%.0f", row$Index_score),
+    geometry = st_sfc(st_point(c(row$fx, row$fy)), crs = crs_use)
+  )
+}
+
+petal_sf <- do.call(rbind, petals)
+center_sf <- do.call(rbind, centers)
+leader_sf <- do.call(rbind, leaders)
+name_sf <- do.call(rbind, name_labs)
+num_sf <- do.call(rbind, num_labs)
+xlim <- c(min(marine_f$fx) - radius * 1.9, max(marine_f$fx) + radius * 1.9)
+ylim <- c(min(marine_f$fy) - radius * 1.45, max(marine_f$fy) + radius * 1.85)
+
+map_plot <- ggplot() +
+  geom_sf(data = land, fill = "#d2d2d2", color = "#b5b5b5", linewidth = 0.15) +
+  geom_sf(data = marine_f, fill = "#f7fbfd", color = "#128c86", linewidth = 0.5) +
+  geom_sf(data = leader_sf, color = "#8d8d8d", linewidth = 0.35) +
+  geom_sf(data = petal_sf, aes(fill = score), color = "white", linewidth = 0.25) +
+  geom_sf(data = center_sf, fill = "white", color = "grey25", linewidth = 0.35) +
+  geom_sf_text(data = num_sf, aes(label = label), size = 2.6, fontface = "bold", color = "grey10") +
+  geom_sf_text(data = name_sf, aes(label = label), size = 2.2, fontface = "bold", color = "grey15") +
+  flower_fill() +
+  coord_sf(xlim = xlim, ylim = ylim, expand = FALSE, crs = crs_use, default_crs = crs_use) +
+  theme_bw(base_size = 9) +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "#e5f2f8"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.4),
+    legend.position = "none",
+    plot.margin = margin(6, 8, 6, 4)
+  )
+
+flowers <- key_plot + map_plot +
+  plot_layout(widths = c(1.02, 1.5)) +
+  plot_annotation(
+    title = "2025 flower plots by region",
+    subtitle = "The labeled flower is the average score and shows which goal sits in each position, clockwise from the top.",
+    caption = "On the map, the center number is the index. Petal length and color show the goal score. A missing score leaves a gap.",
+    theme = theme(
+      plot.title = element_text(size = 13, face = "bold"),
+      plot.subtitle = element_text(size = 9),
+      plot.caption = element_text(size = 7.5, hjust = 0, color = "grey30")
+    )
+  )
+
+flower_png <- file.path(out_dir, "OHI_2025_flower_plots.png")
+ggsave(flower_png, flowers, width = 13.4, height = 9.2, dpi = 200, bg = "white")
+```
+
+```{r flowers-show, echo=FALSE}
+knitr::include_graphics(flower_png)
+```
