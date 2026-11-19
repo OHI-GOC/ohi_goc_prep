@@ -61,10 +61,12 @@ END_EVAL_PERIOD= 2025
 # STEP 1: Generate GOC_Stocks_summary ------------------------------
 NOTE TO SELF: FIX THIS AFTER OYSTER PATCH (Oct 2026)
 
-# Load in and summarize GOC_MarineLandings0
+# Load in and summarise GOC_MarineLandings0
 ```{r Load in GOC_MarineLandings0 as necessary}
 GOC_MarineLandings0<- readRDS(here("/home/shares/ohi/OHI_GOC/goal_prep/fp/cleaned_CONAPESCA/GOC_Marine.Landings_Sector.Sorted.Georef_Oct2026.rds"))
 # 3411491 obs., 58 var.
+
+unique(GOC_MarineLandings0$Major_Functional_Group)
 
 ```
 
@@ -115,7 +117,7 @@ colnames(GOC_MarineFisheryLandings)
 GOC_Stocks_summary<- GOC_MarineFisheryLandings %>%
   select(year, OHI_region_est= OHI_rgn_id, estimated_genus_name, weight_kg_corrected, value) %>%
   group_by(year, OHI_region_est, estimated_genus_name) %>%
-  summarize(
+  summarise(
     total_weight_mt= sum(weight_kg_corrected, na.rm = TRUE) / 1000,
     total_value_peso= sum(value, na.rm = TRUE)
   )
@@ -149,7 +151,7 @@ colnames(RAM_Scores0)
 
 RAM_Scores <- RAM_Scores0 %>%
   group_by(year, Genus) %>%
-  summarize(
+  summarise(
     RAM_BBmsy = mean(RAM_BBmsy_final, na.rm = TRUE),
     n_Formal_Assessments = sum(!is.na(RAM_BBmsy_numeric)),
     .groups = "drop"
@@ -381,6 +383,12 @@ table(Stock_Statuses$Major_Functional_Group)
 
 # ADD FOFM CORRECTION
 ```{r Assume 70% of all catch goes to Fish Oil Fish Meal}
+# Which taxa are FOFM taxa?
+GOC_MarineLandings0 %>%
+  filter(Major_Functional_Group == "Anchovy & Sardine (small pelagics)") %>%
+  distinct(estimated_genus_name)
+
+# Assign FOFM_PROPORTION:
 FOFM_PROPORTION<- 0.70
 NON_FOFM_PROPORTION<- 1 - FOFM_PROPORTION
 
@@ -560,7 +568,7 @@ Stock_Statuses_final %>%
 options(scipen = 999)
 
 unaccounted_by_genus <- Stock_Statuses_final %>%
-  filter(year >= START_EVAL_PERIOD & year <= END_EVAL_PERIOD) %>%
+  # filter(year >= START_EVAL_PERIOD & year <= END_EVAL_PERIOD) %>%
   mutate(
     in_filter = is.na(StockStatus_final) |
                 is.na(OHI_region_est)
@@ -584,9 +592,93 @@ unaccounted_by_genus <- Stock_Statuses_final %>%
 view(unaccounted_by_genus)
 ```
 
+```{r Clean Stock_Statuses_final before saving}
+colnames(Stock_Statuses_final)
+
+Stock_Statuses_final<- Stock_Statuses_final %>%
+  select(year, OHI_region_est, Major_Functional_Group, estimated_genus_name, 
+         total_value_peso, total_weight_mt, FOFM_weight_mt, FIS_weight_mt,
+         StockStatus_final, StockStatus_est.level, StockStatus_source, StockStatus_year,
+         Stock_Status_RAM, Stock_Status_RAM_capped,
+         Stock_Status_Carta, Stock_Status_Carta_capped,
+         Stock_Status_IMIPAS, Stock_Status_IMIPAS_capped,
+         Stock_Status_CMSY, Stock_Status_CMSY_capped)
+
+dim(Stock_Statuses_final)
+# 13008 obs., 20 vars.
+
+```
+
+
 ```{r Save this dataframe as needed}
 write.csv(Stock_Statuses_final,
           "/home/ferrer/ohi_goc_prep/FP/v2026/FP_Scores_1.1/FIS_Scores_1.1/Stock_Statuses_Compiled_df_Oct282026.csv",
+          row.names = FALSE)
+```
+
+## FIS_pressure_groupings file:
+
+```{r Save a slightly different file for the FIS_pressure_groupings file}
+colnames(Stock_Statuses_final)
+
+FIS_pressure_groupings <- Stock_Statuses_final %>%
+  filter(year <= 2025) %>%
+  select(
+    year,
+    rgn_id = OHI_region_est,
+    Major_Functional_Group,
+    estimated_genus_name,
+    total_value_peso,
+    total_weight_mt,
+    FOFM_weight_mt,
+    FIS_weight_mt
+  ) %>%
+  mutate(
+    rgn_id = sub("^r", "R", rgn_id)
+  ) %>%
+  group_by(year, rgn_id, Major_Functional_Group) %>%
+  summarise(
+    total_value_peso = sum(total_value_peso, na.rm = TRUE),
+    total_weight_mt = sum(total_weight_mt, na.rm = TRUE),
+    FOFM_weight_mt = sum(FOFM_weight_mt, na.rm = TRUE),
+    FIS_weight_mt = sum(FIS_weight_mt, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+dim(FIS_pressure_groupings)
+# 2116 obs., 7 vars.
+
+table(FIS_pressure_groupings$Major_Functional_Group)
+
+#            Anchovy & Sardine (small pelagics)                                   Cephalopods 
+#                                           102                                           202 
+#                                   Crustaceans                        Demersal marine fishes 
+#                                           185                                           250 
+#                             Diadromous fishes                                   Echinoderms 
+#                                            75                                            44 
+#                                       Jellies                                  Marine algae 
+#                                            47                                            39 
+#                             Marine fishes NEI               Marine or freshwater fishes NEI 
+#                                             6                                             3 
+#                    Molluscs excl. Cephalopods                    Other marine invertebrates 
+#                                           204                                             1 
+# Pelagic marine fish (excl. anchovy & sardine)                                        Sharks 
+#                                           245                                           236 
+#                               Shrimps, prawns 
+#                                           224 
+
+sum(is.na(FIS_pressure_groupings$Major_Functional_Group))
+# 253 N/As
+
+# Round everything:
+FIS_pressure_groupings <- FIS_pressure_groupings %>%
+  mutate(
+    across(where(is.numeric), ~ round(.x, 2))
+  )
+
+# Save this dataframe as needed
+write.csv(FIS_pressure_groupings,
+          "/home/ferrer/ohi_goc_prep/FP/v2026/FP_Scores_1.1/FIS_Scores_1.1/FIS_pressure_groupings_Nov132026.csv",
           row.names = FALSE)
 ```
 
@@ -619,7 +711,7 @@ Stock_Weights_per.Region <- Stock_Statuses_final %>%
 # SANITY CHECK: Do the weights add up to 1?
 TEST<- Stock_Weights_per.Region %>%
   group_by(OHI_region_est) %>%
-  summarize(sum_w = sum(wprop_EVAL.PERIOD, na.rm= TRUE))
+  summarise(sum_w = sum(wprop_EVAL.PERIOD, na.rm= TRUE))
 # Yup, looks good!
 ```
 
@@ -635,7 +727,7 @@ colnames(Stock_Statuses_w_Weights)
 # This is the geometric mean part:
 FIS_Scores <- Stock_Statuses_w_Weights %>%
   group_by(OHI_region_est, year) %>%
-  summarize(
+  summarise(
     FIS_score = prod(StockStatus_final ^ wprop_EVAL.PERIOD, na.rm = TRUE) * 100,
     FIS_production_mt = sum(FIS_weight_mt, na.rm= TRUE),
     .groups = "drop"
@@ -752,7 +844,7 @@ Region1_Look <- Stock_Statuses_final %>%
     OHI_region_est == "region_1"
   ) %>%
   group_by(year, Major_Functional_Group) %>%
-  summarize(
+  summarise(
     mean_StockStatus = mean(StockStatus_final, na.rm = TRUE),
 
     mode_StockStatus_est.level = {
@@ -806,7 +898,7 @@ Region1_CloserLook <- Stock_Statuses_final %>%
          OHI_region_est == "region_1",
          Major_Functional_Group == "Pelagic marine fish (excl. anchovy & sardine)") %>%
   group_by(year, estimated_genus_name) %>%
-  summarize(
+  summarise(
     mean_StockStatus = mean(StockStatus_final, na.rm = TRUE),
     mode_StockStatus_est.level =
       names(which.max(table(na.omit(StockStatus_source)))),
