@@ -1,0 +1,500 @@
+---
+title: 'OHI GoC: Explore GMAE (Environmental certification)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Explore GMAE: Environmental certification
+
+## What this topic is (in plain language)
+
+Each yearly package answers, for every Mexican state:
+
+1. Did the state government get the work of one of its institutions certified on environmental grounds that year?  
+2. Which agency was certified, what type of certification was it (ISO, environmental compliance, other), when did it start and end, and who granted it?
+
+There are **two tables** in each package, and **no count** in the state summary (the number of certifications has to be counted from the detail list):
+
+| Table stem | English name | What one row is |
+|---|---|---|
+| `certambi` (`certi_ambi` in the 2022 package) | State summary | One state, one year: yes/no for an environmental certification |
+| `insceamb` | Certifications | One certified institution and certification reported by a state |
+
+Codes like `1 / 2 / 9` are catalog answers (**yes / no / does not know**).
+
+Raw data path on Mazu:
+
+`/home/shares/ohi/OHI_GOC/_raw_data/GMAE_environmental_state_data`
+
+*Outline of the script:*
+
+1. Find the yearly packages.  
+2. Read the dictionary and catalogs, and put them in English.  
+3. Look at the GoC state summary (yes/no).  
+4. Look at the GoC certification list.  
+5. Make a few simple plots.  
+6. Write notes for a later rescale decision.
+
+```{r setup}
+library(tidyverse)
+library(knitr)
+library(plotly)
+
+knitr::opts_chunk$set(
+  fig.width = 9,
+  fig.height = 5,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r paths}
+# mazu path for the manually downloaded unzipped packages
+raw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/GMAE_environmental_state_data/d2026"
+
+local_raw_dir <- here::here("environmental_data_sources/GMAE_environmental_state_data/d2026")
+
+if (!dir.exists(raw_dir) && dir.exists(local_raw_dir)) {
+  message("mazu path not found; using local mirror: ", local_raw_dir)
+  raw_dir <- local_raw_dir
+}
+```
+
+```{r goc-constants}
+goc_state_codes <- c("02", "03", "26", "25", "18", "14")
+
+goc_state_names <- c(
+  "02" = "Baja California",
+  "03" = "Baja California Sur",
+  "26" = "Sonora",
+  "25" = "Sinaloa",
+  "18" = "Nayarit",
+  "14" = "Jalisco"
+)
+```
+
+```{r helpers}
+# try utf-8 first, then latin1, because some packages still use latin1
+read_csv_flexible <- function(path, ...) {
+  out <- tryCatch(
+    read_csv(path, show_col_types = FALSE, progress = FALSE, ...),
+    error = function(e) NULL
+  )
+  if (!is.null(out)) return(out)
+  read_csv(
+    path,
+    locale = locale(encoding = "Latin1"),
+    show_col_types = FALSE,
+    progress = FALSE,
+    ...
+  )
+}
+
+# pad state codes to two digits so "2" and "02" match
+pad2 <- function(x) str_pad(as.character(x), 2, pad = "0")
+
+# turn common inegi missing codes into na before converting to numeric
+as_num_clean <- function(x) {
+  x <- as.character(x)
+  x <- na_if(x, "")
+  x <- na_if(x, "NA")
+  x <- na_if(x, "ND")
+  x <- na_if(x, "NSS")
+  x <- na_if(x, "NULL")
+  suppressWarnings(as.numeric(x))
+}
+```
+
+## 1. Find the yearly environmental certification packages
+
+```{r find-packages}
+# list every unzipped folder under the raw directory
+folder_paths <- list.dirs(raw_dir, full.names = TRUE, recursive = FALSE)
+
+# keep only environmental certification packages, parse census name + edition + reference year
+certification_packages <- tibble(path = folder_paths, folder = basename(folder_paths)) %>%
+  mutate(
+    # drop macos duplicate suffixes like " (1)"
+    folder_clean = str_replace(folder, " \\([0-9]+\\)$", ""),
+    folder_clean = str_replace(folder_clean, "^conjunto_de_datos_", ""),
+    census = str_extract(folder_clean, "(cnge|cngspspe)"),
+    edition = as.integer(str_match(folder_clean, "(cnge|cngspspe)([0-9]{4})_csv$")[, 3]),
+    # edition year is usually one year after the reference year in the tables
+    year = edition - 1L,
+    topic_slug = str_replace(folder_clean, "_(cnge|cngspspe)[0-9]{4}_csv$", ""),
+    is_duplicate_name = str_detect(folder, " \\([0-9]+\\)$"),
+    data_dir = file.path(path, "conjunto_de_datos"),
+    dict_dir = file.path(path, "diccionario_de_datos"),
+    catalog_dir = file.path(path, "catalogos")
+  ) %>%
+  filter(!is.na(edition), str_detect(topic_slug, "^certificacion_ambiental$")) %>%
+  # if both a clean folder and a " (1)" copy exist, keep the clean one
+  group_by(edition) %>%
+  arrange(is_duplicate_name, folder, .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  arrange(edition)
+
+stopifnot(nrow(certification_packages) > 0)
+
+# table of which census years i have for environmental certification
+certification_census_years_table <- certification_packages %>%
+  select(folder, topic_slug, census, edition, year)
+
+certification_census_years_table
+
+# hm... the census for 2020 was the CNGSPSPE = Censo Nacional de Gobierno, Seguridad Pública y Sistema Penitenciario Estatales
+# but all subsequent years had CNGE = Censo Nacional de Gobiernos Estatales, which is a third of the CNGSPSPE, the environment part
+```
+
+Notes from that table:
+
+- 2020 still uses the older census name `cngspspe`.  
+- From 2021 onward the packages are labeled `cnge`.  
+- `year` is the reference year inside the tables (edition minus 1).
+- The summary file is called `certambi_*` in most editions and `certi_ambi_*` in the 2022 edition.  
+
+## 2. What do the columns mean? (dictionary + catalogs)
+
+I use the **latest edition** dictionary and catalogs, then put the Spanish labels into short English names so the rest of the script is readable.
+
+```{r latest-package}
+# use the newest package as the source of truth for dictionaries and catalogs
+latest_certification_package <- certification_packages %>%
+  slice_max(edition, n = 1, with_ties = FALSE)
+
+latest_certification_package
+```
+
+```{r read-dictionaries}
+# read every dictionary csv in the latest package
+latest_dict_files <- list.files(
+  latest_certification_package$dict_dir,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+certification_dictionary_table <- map_dfr(latest_dict_files, function(f) {
+  read_csv_flexible(f) %>%
+    rename_with(~ tolower(str_replace(.x, "^\ufeff", ""))) %>%
+    mutate(
+      dictionary_file = basename(f),
+      table_stem = str_match(
+        basename(f),
+        "^diccionario_de_datos_(.*)_(cnge|cngspspe)[0-9]{4}\\.csv$"
+      )[, 2]
+    )
+}) %>%
+  select(table_stem, any_of(c("columna", "descripcion", "codigo_valido")))
+
+# official spanish dictionary: what each column is supposed to mean
+certification_dictionary_table
+```
+
+```{r english-column-guide}
+# my own short english guide, so i do not have to keep re-reading the spanish dictionary
+certification_column_guide <- tribble(
+  ~table_stem, ~column, ~english_name, ~how_to_read_it,
+  "certambi", "entidad_a / cve_ent", "state code", "inegi state id (02 = baja california, etc.)",
+  "certambi", "certi_ambi", "certified an institution?", "1 = yes, 2 = no, 9 = does not know, 0 = not applicable",
+  "insceamb", "id_ceramb / idp_20_1", "certification id", "row id of the certification (the name changed over time)",
+  "insceamb", "dep_certif", "certified agency", "name of the agency or institution that was certified",
+  "insceamb", "tipinstc / tipinstic / tipo_certi", "certification type", "type code (see the certification type guide below); the column name changed over time",
+  "insceamb", "dia_ini / mes_ini / anio_ini", "start day / month / year", "when the certification started",
+  "insceamb", "dia_fin / mes_fin / anio_fin", "end day / month / year", "when the certification ends",
+  "insceamb", "nom_eotorg", "certifying body", "name of the company or institution that granted the certification"
+)
+
+certification_column_guide
+```
+
+```{r catalog-labels}
+# english labels for the main coded fields i will reuse below
+yes_no_labels <- c(
+  "0" = "not applicable",
+  "1" = "yes",
+  "2" = "no",
+  "9" = "does not know"
+)
+
+certification_type_labels <- c(
+  "1" = "ISO",
+  "2" = "environmental compliance",
+  "3" = "other",
+  "9" = "not known"
+)
+
+# tidy english certification type guide based on the tipinstc catalog
+certification_type_guide <- tibble(
+  tipinstc = names(certification_type_labels),
+  english_type = unname(certification_type_labels)
+)
+
+certification_type_guide
+```
+
+```{r read-catalogs}
+# also keep the official catalogs as objects, in case i want to check a code later
+latest_catalog_files <- list.files(
+  latest_certification_package$catalog_dir,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+certification_catalogs <- set_names(
+  map(latest_catalog_files, read_csv_flexible),
+  basename(latest_catalog_files)
+)
+
+# peek one by one only if i need to; names() is enough for now
+names(certification_catalogs)
+
+# example: yes/no codes for "did the state certify an institution?"
+certification_certi_ambi_catalog_name <- names(certification_catalogs)[
+  str_detect(names(certification_catalogs), "certi_ambi")
+][[1]]
+
+certification_certi_ambi_catalog <- certification_catalogs[[certification_certi_ambi_catalog_name]]
+
+certification_certi_ambi_catalog
+```
+
+## 3. State summary for GoC (`certambi`)
+
+This is the simplest table: **one row per state per year**, with a yes/no answer only.
+
+```{r read-state-summary}
+# find the certambi / certi_ambi csv inside each yearly package
+certification_summary_files <- certification_packages %>%
+  mutate(
+    table_file = map_chr(
+      data_dir,
+      ~ {
+        hits <- list.files(.x, pattern = "^cert(i_)?ambi_.*\\.csv$")
+        if (length(hits) == 0) NA_character_ else hits[[1]]
+      }
+    )
+  ) %>%
+  filter(!is.na(table_file))
+
+# stack all years into one raw table
+certification_summary_raw <- certification_summary_files %>%
+  mutate(
+    data = map2(
+      data_dir,
+      table_file,
+      ~ read_csv_flexible(file.path(.x, .y), col_types = cols(.default = "c"))
+    )
+  ) %>%
+  select(edition, year, data) %>%
+  unnest(data) %>%
+  rename_with(~ str_replace(.x, "^\ufeff", ""))
+
+# older years use entidad_a; 2025 uses cve_ent, and some columns were renamed over time
+needed_cols <- c("cve_ent", "entidad_a", "certi_ambi")
+for (col in needed_cols) {
+  if (!col %in% names(certification_summary_raw)) {
+    certification_summary_raw[[col]] <- NA_character_
+  }
+}
+
+# decode the yes/no field into a readable column
+certification_state_summary_all <- certification_summary_raw %>%
+  mutate(
+    cve_ent = pad2(coalesce(na_if(cve_ent, ""), na_if(entidad_a, ""))),
+    estado = unname(goc_state_names[cve_ent]),
+    certified_code = as.character(certi_ambi),
+    certified = recode(certified_code, !!!yes_no_labels, .default = certified_code)
+  )
+
+# keep only the six goC states
+certification_goc_state_summary <- certification_state_summary_all %>%
+  filter(cve_ent %in% goc_state_codes) %>%
+  select(year, edition, cve_ent, estado, certified_code, certified) %>%
+  arrange(year, cve_ent)
+
+certification_goc_state_summary
+```
+
+How to read that table:
+
+- `certified = yes` means the state said it certified the work of one of its institutions that year.  
+- There is **no count** here, so the certification list below is the way to get a size.
+
+```{r plot-goc-yesno}
+# stacked bars: how many goC states said yes / no / other each year
+certification_goc_yesno_table <- certification_goc_state_summary %>%
+  count(year, certified, name = "n_states")
+
+certification_goc_yesno_table
+
+certification_goc_yesno_plot <- certification_goc_yesno_table %>%
+  ggplot(aes(x = year, y = n_states, fill = certified)) +
+  geom_col(position = "stack") +
+  labs(
+    title = "how many goC states said yes / no each year",
+    x = "reference year",
+    y = "n states",
+    fill = "certified?"
+  ) +
+  theme_minimal()
+
+ggplotly(certification_goc_yesno_plot)
+```
+
+## 4. Certification list for GoC (`insceamb`)
+
+```{r read-certifications}
+# find the insceamb csv inside each yearly package
+certification_list_files <- certification_packages %>%
+  mutate(
+    table_file = map_chr(
+      data_dir,
+      ~ {
+        hits <- list.files(.x, pattern = "^insceamb_.*\\.csv$")
+        if (length(hits) == 0) NA_character_ else hits[[1]]
+      }
+    )
+  ) %>%
+  filter(!is.na(table_file))
+
+# stack all years into one raw table
+certification_list_raw <- certification_list_files %>%
+  mutate(
+    data = map2(
+      data_dir,
+      table_file,
+      ~ read_csv_flexible(file.path(.x, .y), col_types = cols(.default = "c"))
+    )
+  ) %>%
+  select(edition, year, data) %>%
+  unnest(data) %>%
+  rename_with(~ str_replace(.x, "^\ufeff", ""))
+
+# older years use entidad_a; 2025 uses cve_ent, and some columns were renamed over time
+needed_cols <- c("cve_ent", "entidad_a", "dep_certif", "tipinstc", "tipinstic", "tipo_certi", "anio_ini", "anio_fin", "nom_eotorg")
+for (col in needed_cols) {
+  if (!col %in% names(certification_list_raw)) {
+    certification_list_raw[[col]] <- NA_character_
+  }
+}
+
+# decode the certification type, then keep goC only
+certification_goc_list <- certification_list_raw %>%
+  mutate(
+    cve_ent = pad2(coalesce(na_if(cve_ent, ""), na_if(entidad_a, ""))),
+    estado = unname(goc_state_names[cve_ent]),
+    # the type column has three names depending on the edition
+    certification_type_code = coalesce(na_if(tipinstc, ""), na_if(tipinstic, ""), na_if(tipo_certi, "")),
+    certification_type = recode(certification_type_code, !!!certification_type_labels, .default = certification_type_code),
+    start_year = as_num_clean(anio_ini),
+    end_year = as_num_clean(anio_fin)
+  ) %>%
+  filter(cve_ent %in% goc_state_codes) %>%
+  select(
+    year, edition, cve_ent, estado,
+    certified_agency = dep_certif,
+    certification_type_code, certification_type,
+    start_year, end_year,
+    certifying_body = nom_eotorg
+  ) %>%
+  arrange(year, estado, certified_agency)
+
+certification_goc_list
+```
+
+```{r certification-counts-by-state-year}
+# how many certification rows each goC state listed each year
+certification_goc_counts <- certification_goc_list %>%
+  count(year, estado, name = "n_certifications")
+
+certification_goc_counts
+
+# put the yes/no answer and the certification count side by side; no rows means 0 certifications
+certification_goc_state_year <- certification_goc_state_summary %>%
+  left_join(certification_goc_counts, by = c("year", "estado")) %>%
+  mutate(n_certifications = coalesce(n_certifications, 0L))
+
+certification_goc_state_year
+```
+
+```{r plot-certification-counts}
+# line plot: certification rows per goC state over time
+certification_goc_counts_plot <- certification_goc_state_year %>%
+  ggplot(aes(x = year, y = n_certifications, color = estado, group = estado)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "listed environmental certifications in goC states",
+    x = "reference year",
+    y = "number of certification rows",
+    color = "state"
+  ) +
+  theme_minimal()
+
+ggplotly(certification_goc_counts_plot)
+```
+
+```{r certification-types}
+# which kinds of certification were listed, across goC states and years
+certification_goc_types <- certification_goc_list %>%
+  count(year, certification_type, name = "n_certifications")
+
+certification_goc_types
+```
+
+## 5. What information is available here? (short takeaways)
+
+From this topic, I can know for each GoC state and year:
+
+1. Whether the state said it certified the work of one of its institutions (`certified`).  
+2. How many certification rows it listed (`n_certifications`).  
+3. Which agency was certified, the type, the dates, and who granted it.
+
+What I **cannot** know from this alone:
+
+- Whether the certification matters for the coast or the ocean.  
+- Whether a certification was renewed or kept after its end year.  
+- How strict the certification was.
+
+First look at the local mirror: most GoC states answered no in most years. Baja California Sur (2019) and Nayarit (2019 and 2020) answered yes, and only Nayarit (a trust for Bahia de Banderas) has certification rows.
+
+For an ecological program resilience score, the cleanest first option is probably:
+
+**raw capacity = 1 if `certified = yes`, else 0**, but the signal is very sparse, so it may be better to leave this topic out or give it a small weight.
+
+Useful objects saved in this script:
+
+- `certification_census_years_table`  
+- `certification_dictionary_table`  
+- `certification_column_guide`  
+- `certification_type_guide`  
+- `certification_goc_state_summary`  
+- `certification_goc_list`  
+- `certification_goc_state_year`
+
+## 6. Notes for a later rescale decision
+
+- Keep environmental certification in the ecological program resilience composite? (yes / no / maybe)  
+- Use the yes/no answer or the certification count?  
+- Count only certifications still running in the reference year (use start and end years)?  
+- Any years to drop because the schema is too different?  
+- Confidence in these self reported answers:
+
+```{r session}
+sessionInfo()
+```

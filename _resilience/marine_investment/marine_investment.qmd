@@ -1,5 +1,816 @@
 ---
-title: "marine_investment"
-format: html
+title: 'OHI GoC: Marine investment effort (CONEVAL federal programs)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+  pdf:
+    toc: true
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
 ---
 
+# Marine investment effort (CONEVAL)
+
+I am turning CONEVAL Inventario and Listado Federal budgets into a **marine investment effort** tracker for the Gulf of California.
+
+This is not an outcome resilience layer like IPS or IEDMX. It is a way to follow **positive federal actions and spending** that can support OHI GoC goals: conservation, fisheries and mariculture, clean water infrastructure, cultural and community programs, and related jobs. Scores run from **0 to 1**, where **1 = the strongest investment year in this series** for that goal (or for the overall list).
+
+**Pros:** annual federal series from the Inventarios (presupuesto ejercido when available); clear program claves; easy to tag the same program to more than one goal.  
+**Cons:** budgets are national, not GoC state or `rgn_id`; many tourism, ZOFEMAT, and PROFEPA actions sit outside CONEVAL desarrollo social; some programs (especially SADER S-304) mix marine work with agriculture and livestock.
+
+I keep this at the **national federal** level for now. Every GoC region inherits the same effort score in a given year, which is honest about what the data can say.
+
+---
+
+**To download:**
+
+- CONEVAL Inventario / Listado de Programas y Acciones Federales de Desarrollo Social (not the FAF files).
+- Bring the renamed workbooks into Mazu at `/home/shares/ohi/OHI_GOC/_raw_data/coneval_inventario_federal/d2026`
+
+Expected filenames:
+
+- `Inventario15_paraPublicar.xlsx`
+- `Inventario_2016.xlsx` … `Inventario_2021.xlsx`
+- `IF2022.xlsx`, `IF2023.xlsx`
+- `Listado_CONEVAL_2024.xlsx`
+- `Listado_Federal_2025.xlsx`
+
+I am not using `Inventario_Federal_2014.xls` yet (older `.xls` layout). FAF inventarios and listados stay out on purpose.
+
+---
+
+*Outline of the script:*
+
+1. Build a tidy classification from listed CONEVAL programs to OHI goals and subgoals (with weights).  
+2. Read each Inventario or Listado year, keep modalidad, clave, name, and presupuesto.  
+3. Prefer presupuesto ejercido, then modificado, then original.  
+4. Join the classification, build goal year spending and a 0 to 1 effort index, and save.  
+5. Explore change over time with `plotly`.
+
+---
+
+```{r setup}
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(plotly)
+
+knitr::opts_chunk$set(
+  fig.width = 9,
+  fig.height = 5,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r paths}
+raw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/coneval_inventario_federal/d2026"
+
+output_dir <- "/home/shares/ohi/OHI_GOC/goal_prep/resilience"
+#dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+github_dir <- here::here("_resilience/marine_investment/output")
+#dir.create(github_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r constants}
+year_min <- 2015
+year_max <- 2025
+
+# File and sheet lookup for the renamed Mazu copies.
+# 2020 and 2021 workbooks also contain FAF sheets; we only read the federal one.
+inventory_files <- tribble(
+  ~year, ~file_name, ~sheet_name, ~source_type,
+  2015L, "Inventario15_paraPublicar.xlsx", "Inventario 2015", "inventario",
+  2016L, "Inventario_2016.xlsx", "Inventario_2016", "inventario",
+  2017L, "Inventario_2017.xlsx", "Inventario_2017", "inventario",
+  2018L, "Inventario_2018.xlsx", "Inventario_2018", "inventario",
+  2019L, "Inventario_2019.xlsx", "InvFed19", "inventario",
+  2020L, "Inventario_2020.xlsx", "INF_2020", "inventario",
+  2021L, "Inventario_2021.xlsx", "INF_2021", "inventario",
+  2022L, "IF2022.xlsx", "Inventario_Federal_2022", "inventario",
+  2023L, "IF2023.xlsx", "Inventario_Federal_2023", "inventario",
+  2024L, "Listado_CONEVAL_2024.xlsx", "LISTADO_FEDERAL_2024", "listado",
+  2025L, "Listado_Federal_2025.xlsx", "LISTADO_FEDERAL_2025", "listado"
+)
+
+goal_levels <- c("LE", "TR", "FP", "NP", "AO", "SP", "HS", "CW", "BD")
+
+goal_labels <- c(
+  LE = "Livelihoods & Economies",
+  HS = "Habitat Services",
+  NP = "Natural Products",
+  AO = "Access Opportunities",
+  FP = "Food Provisioning",
+  TR = "Tourism & Recreation",
+  SP = "Sense of Place",
+  BD = "Biodiversity",
+  CW = "Clean Waters"
+)
+
+goal_order_names <- c(
+  "Livelihoods & Economies",
+  "Habitat Services",
+  "Natural Products",
+  "Access Opportunities",
+  "Food Provisioning",
+  "Tourism & Recreation",
+  "Sense of Place",
+  "Biodiversity",
+  "Clean Waters"
+)
+
+goal_hex <- c(
+  "Livelihoods & Economies" = "#d7c137",
+  "Habitat Services" = "#d2a22e",
+  "Natural Products" = "#de692e",
+  "Access Opportunities" = "#b85136",
+  "Food Provisioning" = "#a73953",
+  "Tourism & Recreation" = "#a8b64c",
+  "Sense of Place" = "#4cbd8a",
+  "Biodiversity" = "#3a7dbd",
+  "Clean Waters" = "#51a0a0"
+)
+```
+
+## What this tracks
+
+CONEVAL reports program budgets in **millones de pesos (MDP)**. For inventarios I prefer **presupuesto ejercido**. Listados 2024 and 2025 only publish **presupuesto original**, so those two years are a little less comparable.
+
+The weights are a simple "how strongly does this program count for this goal?" dial, not a statistical model.
+
+- **1.0** = count the full budget for that goal or subgoal. Use when the program is a clear, direct positive action for that goal. Example: SEMARNAT E016 (ANP management) gets 1.0 for BD, HS, and SP lasting places.
+- **0.5** = count half the budget for that goal or subgoal. Use when the link is real but partial: mixed programs, only sometimes marine, or only supporting. Example: SADER S304 gets 1.0 for FP fisheries and mariculture, but 0.5 for LE, AO, and NP because only part of that program is marine. Example: STPS employment programs get 0.5 for LE because they help jobs generally, not marine jobs specifically.
+
+How the weight enters the math for each goal year:
+
+`weighted_mdp = weight * presupuesto_mdp`
+
+So a 200 MDP ANP program at weight 1.0 adds 200 to BD; at weight 0.5 it would add 100.
+
+Then effort for that goal is:
+
+`effort = that year's weighted_mdp / the max weighted_mdp year for that same goal`
+
+so **1 means the peak investment year for this goal in the series**, not perfect ocean health.
+
+What weights are not:
+
+- not importance rankings across goals
+- not shares that must sum to 1 within a program
+- not a claim that outcomes improved
+
+One program can have several rows with different weights for different goals. That is intentional: CONANP pesos can matter a lot for BD and HS and only partly for TR sustainability. When I build the **overall** marine relevant subset total I count each program budget once. When I build **per goal** totals I allow the same pesos to appear under more than one goal, scaled by the weight.
+
+## 1. Program to goal classification
+
+I list the CONEVAL programs that are the clearest positive actions for marine and coastal issues, plus a few supporting livelihood, culture, and clean water programs. Historical ANP claves from early inventarios (U024, U034, U035) sit next to the later E016 program so the series does not drop before CONANP consolidated those actions.
+
+```{r classification}
+# Institucion matters: the same modalidad+clave can appear in several ramos
+# (for example SEP E016 books vs SEMARNAT E016 ANP management).
+program_goal_classification <- tribble(
+  ~modality, ~clave, ~institucion, ~program_label, ~goal, ~subgoal, ~weight, ~notes,
+  # Core conservation / CONANP
+  "E", 16L, "SEMARNAT", "Conservacion y Manejo de Areas Naturales Protegidas", "TR", "tr_sustainability", 1.0, "CONANP ANP management",
+  "E", 16L, "SEMARNAT", "Conservacion y Manejo de Areas Naturales Protegidas", "SP", "sp_lasting_places", 1.0, "CONANP ANP management",
+  "E", 16L, "SEMARNAT", "Conservacion y Manejo de Areas Naturales Protegidas", "SP", "sp_iconic_species", 0.5, "species protection inside ANPs",
+  "E", 16L, "SEMARNAT", "Conservacion y Manejo de Areas Naturales Protegidas", "HS", "hs_protection", 1.0, "habitat capacity",
+  "E", 16L, "SEMARNAT", "Conservacion y Manejo de Areas Naturales Protegidas", "HS", "hs_filtration", 1.0, "habitat capacity",
+  "E", 16L, "SEMARNAT", "Conservacion y Manejo de Areas Naturales Protegidas", "HS", "hs_sequestration", 1.0, "habitat capacity",
+  "E", 16L, "SEMARNAT", "Conservacion y Manejo de Areas Naturales Protegidas", "BD", "bd_habitats", 1.0, "all BD habitats share this pool",
+
+  "U", 40L, "SEMARNAT", "Proteccion y Restauracion de Ecosistemas y Especies Prioritarias", "SP", "sp_iconic_species", 1.0, "priority species",
+  "U", 40L, "SEMARNAT", "Proteccion y Restauracion de Ecosistemas y Especies Prioritarias", "SP", "sp_lasting_places", 1.0, "ANP restoration",
+  "U", 40L, "SEMARNAT", "Proteccion y Restauracion de Ecosistemas y Especies Prioritarias", "HS", "hs_protection", 1.0, "restoration",
+  "U", 40L, "SEMARNAT", "Proteccion y Restauracion de Ecosistemas y Especies Prioritarias", "HS", "hs_filtration", 1.0, "restoration",
+  "U", 40L, "SEMARNAT", "Proteccion y Restauracion de Ecosistemas y Especies Prioritarias", "HS", "hs_sequestration", 1.0, "restoration",
+  "U", 40L, "SEMARNAT", "Proteccion y Restauracion de Ecosistemas y Especies Prioritarias", "BD", "bd_habitats", 1.0, "ecosystem restoration",
+  "U", 40L, "SEMARNAT", "Proteccion y Restauracion de Ecosistemas y Especies Prioritarias", "TR", "tr_sustainability", 0.5, "supports special places tourism",
+
+  "S", 46L, "SEMARNAT", "Programa de Conservacion para el Desarrollo Sostenible", "SP", "sp_community_engagement", 1.0, "PROCODES communities in ANPs",
+  "S", 46L, "SEMARNAT", "Programa de Conservacion para el Desarrollo Sostenible", "SP", "sp_lasting_places", 0.5, "ANP influence zones",
+  "S", 46L, "SEMARNAT", "Programa de Conservacion para el Desarrollo Sostenible", "HS", "hs_protection", 0.5, "community conservation",
+  "S", 46L, "SEMARNAT", "Programa de Conservacion para el Desarrollo Sostenible", "BD", "bd_habitats", 0.5, "community conservation",
+  "S", 46L, "SEMARNAT", "Programa de Conservacion para el Desarrollo Sostenible", "TR", "tr_sustainability", 0.5, "sustainable use near ANPs",
+
+  # Early ANP programs before E016 consolidation
+  "U", 24L, "SEMARNAT", "Vigilancia Comunitaria en ANP", "SP", "sp_lasting_places", 1.0, "historical ANP program",
+  "U", 24L, "SEMARNAT", "Vigilancia Comunitaria en ANP", "BD", "bd_habitats", 0.5, "historical ANP program",
+  "U", 34L, "SEMARNAT", "Monitoreo Biologico en ANP (PROMOBI)", "BD", "bd_habitats", 1.0, "historical ANP program",
+  "U", 34L, "SEMARNAT", "Monitoreo Biologico en ANP (PROMOBI)", "SP", "sp_iconic_species", 0.5, "historical ANP program",
+  "U", 35L, "SEMARNAT", "Programas de Manejo de ANP (PROMANP)", "SP", "sp_lasting_places", 1.0, "historical ANP program",
+  "U", 35L, "SEMARNAT", "Programas de Manejo de ANP (PROMANP)", "BD", "bd_habitats", 1.0, "historical ANP program",
+  "U", 35L, "SEMARNAT", "Programas de Manejo de ANP (PROMANP)", "TR", "tr_sustainability", 0.5, "historical ANP program",
+
+  # Fisheries and mariculture
+  "S", 304L, "SADER|SAGARPA", "Fomento a la Agricultura, Ganaderia, Pesca y Acuicultura", "FP", "fp_fisheries", 1.0, "pesca within mixed SADER program",
+  "S", 304L, "SADER|SAGARPA", "Fomento a la Agricultura, Ganaderia, Pesca y Acuicultura", "FP", "fp_mariculture", 1.0, "acuicultura within mixed SADER program",
+  "S", 304L, "SADER|SAGARPA", "Fomento a la Agricultura, Ganaderia, Pesca y Acuicultura", "LE", "le_economies", 0.5, "marine sector revenue",
+  "S", 304L, "SADER|SAGARPA", "Fomento a la Agricultura, Ganaderia, Pesca y Acuicultura", "AO", "ao_artisanal_fishing", 0.5, "partial artisanal support",
+  "S", 304L, "SADER|SAGARPA", "Fomento a la Agricultura, Ganaderia, Pesca y Acuicultura", "NP", "np_products", 0.5, "harvest support, not taxa specific",
+
+  "S", 263L, "SADER|SAGARPA", "Sanidad e Inocuidad Agroalimentaria", "FP", "fp_fisheries", 0.5, "includes acuicola and pesquera sanidad",
+  "S", 263L, "SADER|SAGARPA", "Sanidad e Inocuidad Agroalimentaria", "FP", "fp_mariculture", 0.5, "includes acuicola and pesquera sanidad",
+
+  # Clean water
+  "S", 74L, "SEMARNAT", "Agua Potable, Drenaje y Tratamiento", "CW", "cw_nutrients", 1.0, "CONAGUA wastewater and drainage",
+  "S", 74L, "SEMARNAT", "Agua Potable, Drenaje y Tratamiento", "CW", "cw_pathogens", 1.0, "CONAGUA wastewater and drainage",
+  "S", 74L, "SEMARNAT", "Agua Potable, Drenaje y Tratamiento", "CW", "cw_chemicals", 1.0, "CONAGUA wastewater and drainage",
+  "S", 74L, "SEMARNAT", "Agua Potable, Drenaje y Tratamiento", "HS", "hs_filtration", 0.5, "reduces pollutant load to habitats",
+
+  # Environmental capacity
+  "E", 5L, "SEMARNAT", "Capacitacion Ambiental y Desarrollo Sustentable", "SP", "sp_community_engagement", 0.5, "environmental education",
+  "E", 5L, "SEMARNAT", "Capacitacion Ambiental y Desarrollo Sustentable", "BD", "bd_habitats", 0.5, "environmental education",
+  "E", 5L, "SEMARNAT", "Capacitacion Ambiental y Desarrollo Sustentable", "TR", "tr_sustainability", 0.5, "environmental education",
+
+  "E", 15L, "SEMARNAT", "Investigacion en Cambio Climatico, Sustentabilidad y Crecimiento Verde", "HS", "hs_sequestration", 0.5, "INECC science capacity",
+  "E", 15L, "SEMARNAT", "Investigacion en Cambio Climatico, Sustentabilidad y Crecimiento Verde", "BD", "bd_habitats", 0.5, "INECC science capacity",
+
+  "E", 9L, "SEMARNAT", "Investigacion cientifica y tecnologica (IMTA)", "CW", "cw_chemicals", 0.5, "water technology research",
+  "E", 9L, "SEMARNAT", "Investigacion cientifica y tecnologica (IMTA)", "CW", "cw_nutrients", 0.5, "water technology research",
+
+  # Forest / nature based (conditional coastal value)
+  "E", 14L, "SEMARNAT", "Proteccion Forestal", "HS", "hs_protection", 0.5, "coastal value only when relevant",
+  "E", 14L, "SEMARNAT", "Proteccion Forestal", "BD", "bd_habitats", 0.5, "coastal value only when relevant",
+  "S", 219L, "SEMARNAT", "Desarrollo Forestal Sustentable", "HS", "hs_sequestration", 0.2, "weak link: environmental but rarely marine specific",
+  "S", 219L, "SEMARNAT", "Desarrollo Forestal Sustentable", "BD", "bd_habitats", 0.2, "weak link: environmental but rarely marine specific",
+  "S", 287L, "BIENESTAR|SEDESOL", "Sembrando Vida", "HS", "hs_sequestration", 0.5, "only if coastal or mangrove relevant",
+  "S", 287L, "BIENESTAR|SEDESOL", "Sembrando Vida", "BD", "bd_habitats", 0.5, "only if coastal or mangrove relevant",
+
+  # Sense of place / culture / indigenous
+  "E", 12L, "CULTURA|CONACULTA", "Proteccion y conservacion del Patrimonio Cultural", "SP", "sp_lasting_places", 0.5, "cultural heritage places",
+  "S", 268L, "CULTURA|CONACULTA", "Programa de Apoyos a la Cultura", "SP", "sp_community_engagement", 0.5, "cultural engagement",
+  "S", 57L, "CULTURA|CONACULTA|FONART", "FONART Fomento a las Artesanias", "LE", "le_economies", 0.5, "artisanal economies",
+  "S", 57L, "CULTURA|CONACULTA|FONART", "FONART Fomento a las Artesanias", "AO", "ao_artisanal_fishing", 0.5, "artisanal livelihoods support",
+  "S", 57L, "CULTURA|CONACULTA|FONART", "FONART Fomento a las Artesanias", "NP", "np_products", 0.5, "craft products, not marine taxa",
+  "S", 249L, "INPI|CDI", "Bienestar Integral de los Pueblos Indigenas", "AO", "ao_artisanal_fishing", 0.5, "territories and resources",
+  "S", 249L, "INPI|CDI", "Bienestar Integral de los Pueblos Indigenas", "SP", "sp_community_engagement", 0.5, "indigenous community engagement",
+
+  # Livelihoods
+  "S", 43L, "STPS", "Programa de Apoyo al Empleo (PAE)", "LE", "le_jobs", 0.5, "general employment, not marine specific",
+  "S", 43L, "STPS", "Programa de Apoyo al Empleo (PAE)", "LE", "le_job_quality", 0.5, "general employment",
+  "S", 280L, "STPS", "Jovenes Construyendo el Futuro", "LE", "le_jobs", 0.5, "general youth employment",
+
+  # Coastal access proxy
+  "S", 273L, "SEDATU", "Programa de Mejoramiento Urbano (PMU)", "AO", "ao_coastal_access", 0.5, "urban improvement, weak coastal proxy"
+) %>%
+  mutate(
+    modality = str_to_upper(str_trim(modality)),
+    clave = as.integer(clave),
+    institucion = str_to_upper(str_trim(institucion)),
+    program_id = paste(modality, sprintf("%03d", clave), sep = ""),
+    goal = factor(goal, levels = goal_levels),
+    weight = as.numeric(weight)
+  )
+
+program_catalog <- program_goal_classification %>%
+  distinct(program_id, modality, clave, institucion, program_label)
+
+program_goal_classification %>%
+  count(goal, wt = weight, name = "weight_sum") %>%
+  kable(digits = 1, caption = "Classification weight mass by OHI goal")
+```
+
+## 2. Read each Inventario or Listado year
+
+Each workbook has a slightly different header row and column spelling. I find the header that contains both `Clave` and `Nombre`, then standardize modalidad, clave, program name, and the three presupuesto fields.
+
+```{r helpers}
+parse_mdp <- function(x) {
+  x %>%
+    as.character() %>%
+    str_replace_all("[^0-9.]", "") %>%
+    na_if("") %>%
+    as.numeric()
+}
+
+find_header_row <- function(path, sheet) {
+  preview <- read_excel(path, sheet = sheet, col_names = FALSE, n_max = 12)
+  hit <- which(
+    apply(preview, 1, function(row) {
+      cells <- str_to_lower(as.character(row))
+      any(str_detect(cells, "clave"), na.rm = TRUE) &&
+        any(str_detect(cells, "nombre"), na.rm = TRUE)
+    })
+  )
+  if (length(hit) == 0) {
+    stop("Could not find header row in ", basename(path), " / ", sheet)
+  }
+  hit[[1]]
+}
+
+pick_col <- function(nms, patterns) {
+  for (pat in patterns) {
+    hit <- which(str_detect(nms, regex(pat, ignore_case = TRUE)))
+    if (length(hit) > 0) return(nms[[hit[[1]]]])
+  }
+  NA_character_
+}
+
+read_coneval_year <- function(year, file_name, sheet_name, source_type, raw_dir) {
+  path <- file.path(raw_dir, file_name)
+  header_row <- find_header_row(path, sheet_name)
+
+  raw <- read_excel(
+    path,
+    sheet = sheet_name,
+    skip = header_row - 1,
+    col_names = TRUE
+  )
+
+  nms <- names(raw) %>%
+    str_replace_all("\\s+", " ") %>%
+    str_trim()
+  names(raw) <- nms
+
+  col_inst <- pick_col(nms, c("^Instituci"))
+  col_mod <- pick_col(nms, c("^Modalidad"))
+  col_clave <- pick_col(nms, c("^Clave"))
+  col_name <- pick_col(nms, c("^Nombre del [Pp]rograma$"))
+  col_orig <- pick_col(nms, c("Presupuesto original"))
+  col_modif <- pick_col(nms, c("Presupuesto modificado"))
+  col_ejer <- pick_col(nms, c("Presupuesto ejercido"))
+  # 2024/2025 listados use a single original budget column
+  if (is.na(col_orig)) {
+    col_orig <- pick_col(nms, c("Presupuesto"))
+  }
+
+  needed <- c(col_inst, col_mod, col_clave, col_name)
+  if (any(is.na(needed))) {
+    stop(
+      "Missing expected columns in ", file_name,
+      " (institucion/modality/clave/name)."
+    )
+  }
+
+  out <- raw %>%
+    transmute(
+      year = as.integer(year),
+      source_type = source_type,
+      institucion_raw = str_squish(as.character(.data[[col_inst]])),
+      modality = str_to_upper(str_trim(as.character(.data[[col_mod]]))),
+      clave = suppressWarnings(as.integer(.data[[col_clave]])),
+      program_name = str_squish(as.character(.data[[col_name]])),
+      presupuesto_original_mdp = if (!is.na(col_orig)) parse_mdp(.data[[col_orig]]) else NA_real_,
+      presupuesto_modificado_mdp = if (!is.na(col_modif)) parse_mdp(.data[[col_modif]]) else NA_real_,
+      presupuesto_ejercido_mdp = if (!is.na(col_ejer)) parse_mdp(.data[[col_ejer]]) else NA_real_
+    ) %>%
+    filter(
+      !is.na(clave),
+      modality %in% c("B", "E", "S", "U", "A", "P", "W"),
+      !is.na(program_name),
+      program_name != "",
+      !str_detect(str_to_lower(program_name), "^nan$")
+    ) %>%
+    mutate(
+      program_id = paste(modality, sprintf("%03d", clave), sep = ""),
+      presupuesto_mdp = case_when(
+        !is.na(presupuesto_ejercido_mdp) ~ presupuesto_ejercido_mdp,
+        !is.na(presupuesto_modificado_mdp) ~ presupuesto_modificado_mdp,
+        TRUE ~ presupuesto_original_mdp
+      ),
+      budget_field_used = case_when(
+        !is.na(presupuesto_ejercido_mdp) ~ "ejercido",
+        !is.na(presupuesto_modificado_mdp) ~ "modificado",
+        !is.na(presupuesto_original_mdp) ~ "original",
+        TRUE ~ NA_character_
+      )
+    )
+
+  out
+}
+```
+
+```{r read-all-years}
+coneval_all <- pmap_dfr(
+  inventory_files,
+  function(year, file_name, sheet_name, source_type) {
+    message("Reading ", year, ": ", file_name)
+    read_coneval_year(year, file_name, sheet_name, source_type, raw_dir)
+  }
+)
+
+coneval_all %>%
+  count(year, source_type, budget_field_used) %>%
+  kable(caption = "Rows read by year, source, and budget field used")
+```
+
+## 3. Keep the listed programs and join goals
+
+```{r listed-programs}
+# Match on modalidad+clave AND institucion so we do not pull SEP E016 books,
+# ISSSTE tourism services, etc.
+marine_programs <- coneval_all %>%
+  inner_join(program_catalog, by = "program_id", relationship = "many-to-many") %>%
+  # institucion in the catalog can be a regex (SADER|SAGARPA)
+  filter(str_detect(str_to_upper(institucion_raw), institucion)) %>%
+  # one budget row per program year after the institucion filter
+  group_by(year, program_id, program_label) %>%
+  summarise(
+    source_type = first(source_type),
+    institucion = first(institucion),
+    institucion_raw = first(institucion_raw),
+    program_name = first(program_name),
+    presupuesto_mdp = sum(presupuesto_mdp, na.rm = TRUE),
+    budget_field_used = first(budget_field_used),
+    .groups = "drop"
+  ) %>%
+  arrange(year, program_id)
+
+marine_programs %>%
+  filter(year == max(year)) %>%
+  select(year, institucion, program_id, program_label, program_name, presupuesto_mdp, budget_field_used) %>%
+  kable(
+    digits = 2,
+    caption = "Listed programs in the latest year"
+  )
+
+# Catalog presence over time.
+# This is NOT "did the agency fail to implement the program?"
+# It is "does this listed program appear in that year's CONEVAL
+# Inventario or Listado?" Program structure changes: some programs start
+# later (S304, Sembrando Vida, SEMARNAT E016), and earlier ANP programs
+# (U024, U034, U035) drop out after consolidation. A missing year means
+# the clave is not in that year's catalog, not that coastal work stopped.
+program_presence <- marine_programs %>%
+  distinct(year, program_id, program_label) %>%
+  mutate(present = 1L) %>%
+  complete(
+    year = year_min:year_max,
+    nesting(program_id, program_label),
+    fill = list(present = 0L)
+  )
+
+# Yearly catalog continuity: count plus a 0 to 1 mean across the list.
+# presence_score = 1 means every listed program appears that year.
+presence_year <- program_presence %>%
+  group_by(year) %>%
+  summarise(
+    n_programs_in_catalog = sum(present),
+    n_programs_relevant = n(),
+    presence_score = mean(present),
+    .groups = "drop"
+  ) %>%
+  mutate(presence_score = pmin(pmax(presence_score, 0), 1))
+
+presence_year %>%
+  kable(
+    digits = 3,
+    caption = "Listed programs in each CONEVAL catalog year (presence_score = mean across programs)"
+  )
+```
+
+
+
+## 4. Spending over time and 0 to 1 effort scores
+
+**Overall marine relevant subset:** sum of unique listed program budgets each year (each program counted once), then divide by the maximum year in the series.
+
+**By goal:** for every classification row compute `weighted_mdp = weight * presupuesto_mdp`, sum those within each goal year, then divide by that goal's own maximum year. Subgoals use the same idea. A goal effort of 1 is the peak investment year for that goal in this series, not a statement about ocean health outcomes.
+
+```{r aggregate}
+# Overall: one row per program year
+marine_relevant_subset_year <- marine_programs %>%
+  group_by(year) %>%
+  summarise(
+    n_programs = n_distinct(program_id),
+    presupuesto_mdp = sum(presupuesto_mdp, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    effort = presupuesto_mdp / max(presupuesto_mdp, na.rm = TRUE),
+    effort = pmin(pmax(effort, 0), 1)
+  )
+
+# Goal level (programs may contribute to several goals)
+goal_year <- marine_programs %>%
+  inner_join(
+    program_goal_classification %>% select(program_id, goal, subgoal, weight),
+    by = "program_id",
+    relationship = "many-to-many"
+  ) %>%
+  mutate(weighted_mdp = weight * presupuesto_mdp) %>%
+  group_by(year, goal) %>%
+  summarise(
+    n_program_links = n_distinct(program_id),
+    weighted_mdp = sum(weighted_mdp, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(goal) %>%
+  mutate(
+    effort = weighted_mdp / max(weighted_mdp, na.rm = TRUE),
+    effort = pmin(pmax(effort, 0), 1)
+  ) %>%
+  ungroup()
+
+# Subgoal level
+subgoal_year <- marine_programs %>%
+  inner_join(
+    program_goal_classification %>% select(program_id, goal, subgoal, weight),
+    by = "program_id",
+    relationship = "many-to-many"
+  ) %>%
+  mutate(weighted_mdp = weight * presupuesto_mdp) %>%
+  group_by(year, goal, subgoal) %>%
+  summarise(
+    n_program_links = n_distinct(program_id),
+    weighted_mdp = sum(weighted_mdp, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(subgoal) %>%
+  mutate(
+    effort = weighted_mdp / max(weighted_mdp, na.rm = TRUE),
+    effort = pmin(pmax(effort, 0), 1)
+  ) %>%
+  ungroup()
+
+marine_relevant_subset_year %>%
+  kable(
+    digits = 3,
+    caption = "Overall listed federal marine investment effort by year"
+  )
+
+goal_year %>%
+  filter(year == max(year)) %>%
+  arrange(desc(effort)) %>%
+  kable(
+    digits = 3,
+    caption = "Goal effort in the latest year (1 = peak year for that goal)"
+  )
+```
+
+```{r save}
+write_csv(
+  marine_programs,
+  here::here(github_dir, "coneval_marine_programs_year.csv")
+)
+write_csv(
+  marine_relevant_subset_year,
+  here::here(github_dir, "coneval_marine_investment_overall.csv")
+)
+write_csv(
+  goal_year,
+  here::here(github_dir, "coneval_marine_investment_by_goal.csv")
+)
+write_csv(
+  subgoal_year,
+  here::here(github_dir, "coneval_marine_investment_by_subgoal.csv")
+)
+write_csv(
+  program_goal_classification,
+  here::here(github_dir, "coneval_program_goal_classification.csv")
+)
+write_csv(
+  program_presence,
+  here::here(github_dir, "coneval_program_presence_program_year.csv")
+)
+write_csv(
+  presence_year,
+  here::here(github_dir, "coneval_program_presence_year.csv")
+)
+
+write_csv(
+  marine_relevant_subset_year,
+  file.path(output_dir, "coneval_marine_investment_overall.csv")
+)
+write_csv(
+  goal_year,
+  file.path(output_dir, "coneval_marine_investment_by_goal.csv")
+)
+write_csv(
+  subgoal_year,
+  file.path(output_dir, "coneval_marine_investment_by_subgoal.csv")
+)
+write_csv(
+  presence_year,
+  file.path(output_dir, "coneval_program_presence_year.csv")
+)
+```
+
+
+## 5. Explore with plotly
+
+### Program to goal classification table
+
+Full listed program classification: which OHI goals and subgoals each program is linked to, and the weight (how targeted that program is for that goal). When I run this chunk interactively I send an HTML `kable` to the Viewer so the long table is scrollable instead of flooding the console.
+
+```{r classification-table}
+classification_for_table <- program_goal_classification %>%
+  transmute(
+    institucion,
+    program_id,
+    program_label,
+    goal,
+    subgoal,
+    weight,
+    notes
+  ) %>%
+  arrange(goal, subgoal, desc(weight), program_id)
+
+classification_caption <- "Listed CONEVAL programs classified to OHI goals and subgoals (weight = how targeted)"
+
+if (isTRUE(getOption("knitr.in.progress"))) {
+  classification_for_table %>%
+    kable(digits = 1, caption = classification_caption)
+} else {
+  html_tbl <- knitr::kable(
+    classification_for_table,
+    format = "html",
+    digits = 1,
+    caption = classification_caption,
+    escape = TRUE
+  )
+  htmltools::html_print(
+    htmltools::tags$div(
+      style = "max-height: 80vh; overflow: auto; font-family: sans-serif; font-size: 13px;",
+      htmltools::HTML(html_tbl)
+    )
+  )
+}
+```
+
+### Overall marine relevant subset over time
+
+```{r plot-overall}
+plot_overall <- plot_ly(
+  marine_relevant_subset_year,
+  x = ~year,
+  y = ~presupuesto_mdp,
+  type = "scatter",
+  mode = "lines+markers",
+  name = "MDP",
+  text = ~paste0(
+    "year: ", year,
+    "<br>programs: ", n_programs,
+    "<br>MDP: ", round(presupuesto_mdp, 1),
+    "<br>effort: ", round(effort, 3)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Reported CONEVAL federal budgets (marine-ish relevant subset)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Presupuesto (millones de pesos)")
+  )
+
+plot_overall
+```
+
+
+```{r plot-overall-effort}
+plot_overall_effort <- plot_ly(
+  marine_relevant_subset_year,
+  x = ~year,
+  y = ~effort,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    "year: ", year,
+    "<br>effort: ", round(effort, 3)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Overall marine investment effort (0 to 1 within this series)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Effort (0 to 1)", range = c(0, 1.05))
+  )
+
+plot_overall_effort
+```
+
+### Effort by OHI goal
+
+```{r plot-goals}
+goal_year_plot <- goal_year %>%
+  mutate(
+    goal_name = recode(as.character(goal), !!!goal_labels),
+    goal_name = factor(goal_name, levels = goal_order_names)
+  )
+
+plot_goals <- goal_year_plot %>%
+  plot_ly(
+    x = ~year,
+    y = ~effort,
+    color = ~goal_name,
+    colors = goal_hex,
+    type = "scatter",
+    mode = "lines+markers",
+    text = ~paste0(
+      goal_name, "<br>", year,
+      "<br>weighted MDP: ", round(weighted_mdp, 1),
+      "<br>effort: ", round(effort, 3)
+    ),
+    hoverinfo = "text"
+  ) %>%
+  layout(
+    title = "Marine investment effort by OHI goal",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Effort (0 to 1)", range = c(0, 1.05)),
+    legend = list(title = list(text = "Goal"))
+  )
+
+plot_goals
+```
+
+### Weighted spending by goal (raw MDP)
+
+```{r plot-goal-mdp}
+plot_goal_mdp <- goal_year_plot %>%
+  plot_ly(
+    x = ~year,
+    y = ~weighted_mdp,
+    color = ~goal_name,
+    colors = goal_hex,
+    type = "scatter",
+    mode = "lines+markers",
+    text = ~paste0(
+      goal_name, "<br>", year,
+      "<br>weighted MDP: ", round(weighted_mdp, 1)
+    ),
+    hoverinfo = "text"
+  ) %>%
+  layout(
+    title = "Weighted CONEVAL spending by OHI goal",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Weighted presupuesto (MDP)"),
+    legend = list(title = list(text = "Goal"))
+  )
+
+plot_goal_mdp
+```
+
+### Listed programs in the CONEVAL catalog each year
+
+These plots are a catalog continuity check, not a score of whether agencies implemented their work. For each year I mark each listed program as present (1) or absent (0) in that Inventario or Listado, then take the **mean across programs**:
+
+`presence_score = mean(present)`
+
+so **1** means every listed program appears that year. Counts still rise when new programs enter (for example S304 or Sembrando Vida) and fall when old claves are merged or retired (for example early ANP U programs before SEMARNAT E016).
+
+```{r plot-presence-count}
+plot_presence_count <- plot_ly(
+  presence_year,
+  x = ~year,
+  y = ~n_programs_in_catalog,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    "year: ", year,
+    "<br>listed programs in catalog: ", n_programs_in_catalog,
+    "<br>presence score: ", round(presence_score, 3)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Listed programs appearing in each CONEVAL catalog year",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Programs in that year's catalog")
+  )
+
+plot_presence_count
+```
+
+```{r plot-presence-score}
+plot_presence_score <- plot_ly(
+  presence_year,
+  x = ~year,
+  y = ~presence_score,
+  type = "scatter",
+  mode = "lines+markers",
+  text = ~paste0(
+    "year: ", year,
+    "<br>presence score: ", round(presence_score, 3),
+    "<br>programs in catalog: ", n_programs_in_catalog,
+    " of ", n_programs_relevant
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "Catalog presence score (mean across listed programs)",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Presence score (0 to 1)", range = c(0, 1.05))
+  )
+
+plot_presence_score
+```
+
+## Next steps
+
+1. Re knit on Mazu once the renamed files sit under `_raw_data/coneval_inventario_federal/d2026`.  
+2. Decide whether Sembrando Vida and CONAFOR forest programs stay in the list, or only when we can show a coastal or mangrove share.  
+3. If we later get state or beneficiary geography for CONANP, CONAPESCA, or CONAGUA, replace the national inheritance with a GoC allocation.  
+4. Keep SECTUR, ZOFEMAT, PROFEPA, and debris programs as separate non CONEVAL layers when those sources are ready.
+```

@@ -1,0 +1,354 @@
+---
+title: 'OHI GoC: Download INEGI GMAE open data'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Download GMAE (Gestión del Medio Ambiente Estatal)
+
+INEGI publishes state environmental-management open data as **one ZIP per topic × year** on the GMAE page:
+
+<https://www.inegi.org.mx/programas/gmae/#datos_abiertos>
+
+There is no useful bulk API for these packages. Filenames are predictable, so this script builds the URLs, checks which files exist, downloads them, and (optionally) unzips them under `environmental_data_sources/`.
+
+**URL pattern:**
+
+```
+https://www.inegi.org.mx/contenidos/programas/gmae/datosabiertos/conjunto_de_datos_<topic>_cnge<YYYY>_csv.zip
+```
+
+Older bundled module (pre-split topics):
+
+```
+.../medio_ambiente_cngspspe<YYYY>_csv.zip
+```
+
+*Outline:*
+
+1. Define topics / years and helpers.
+2. Build a catalog of candidate ZIPs.
+3. HEAD-check which URLs are live.
+4. Download (and optionally unzip) selected packages.
+
+```{r setup}
+library(tidyverse)
+library(janitor)
+library(here)
+
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r config}
+# change to TRUE for this chunk pipeline to download.
+download_now <- TRUE # or FALSE
+unzip_now <- TRUE
+overwrite <- FALSE
+
+# where to save them
+out_dir <- here::here("/home/shares/ohi/OHI_GOC/_raw_data/GMAE_environmental_state_data/d2026")
+zip_dir <- here::here(out_dir, "_gmae_zips")
+#dir.create(zip_dir, showWarnings = FALSE, recursive = TRUE)
+
+base_url <- "https://www.inegi.org.mx/contenidos/programas/gmae/datosabiertos"
+
+# years for split topic packages (CNGE naming)
+years <- 2019:2025
+
+# topics present across recent GMAE/CNGE open data 
+topics <- c(
+  "biodiversidad_y_ecosistemas",
+  "cambio_climatico",
+  "monitoreo_ambiental",
+  "gobierno_medio_ambiente",
+  "educacion_ambiental",
+  "asentamientos_humanos",
+  "administracion_pub_sostenible",
+  "auditorias_ambientales",
+  "certificacion_ambiental",
+  "microgeneradores_residuos_peligrosos",
+  "presupuesto_estatal"
+)
+
+# more ocean-related subset
+ocean_topics <- c(
+  "biodiversidad_y_ecosistemas",
+  "cambio_climatico",
+  "monitoreo_ambiental",
+  "gobierno_medio_ambiente",
+  "educacion_ambiental",
+  "asentamientos_humanos"
+)
+
+# set to download when download_now is TRUE
+topics_to_get <- ocean_topics
+years_to_get <- years
+```
+
+```{r helpers}
+gmae_zip_name <- function(topic, year) {
+  paste0("conjunto_de_datos_", topic, "_cnge", year, "_csv.zip")
+}
+
+gmae_zip_url <- function(topic, year, base = base_url) {
+  file.path(base, gmae_zip_name(topic, year))
+}
+
+# Bundled pre-split environment module (CNGSPSPE).
+gmae_bundled_name <- function(year) {
+  paste0("medio_ambiente_cngspspe", year, "_csv.zip")
+}
+
+gmae_bundled_url <- function(year, base = base_url) {
+  file.path(base, gmae_bundled_name(year))
+}
+
+url_exists <- function(url, timeout = 20) {
+  # Prefer curl if available (cleaner HEAD); fall back to download attempt metadata.
+  if (requireNamespace("curl", quietly = TRUE)) {
+    h <- curl::new_handle(nobody = TRUE, timeout = timeout, ssl_verifypeer = FALSE)
+    ok <- tryCatch({
+      resp <- curl::curl_fetch_memory(url, handle = h)
+      resp$status_code == 200L
+    }, error = function(e) FALSE)
+    return(isTRUE(ok))
+  }
+
+  tmp <- tempfile()
+  on.exit(unlink(tmp), add = TRUE)
+  ok <- tryCatch({
+    utils::download.file(url, tmp, mode = "wb", quiet = TRUE, timeout = timeout)
+    file.info(tmp)$size > 0
+  }, error = function(e) FALSE)
+  isTRUE(ok)
+}
+
+build_gmae_catalog <- function(topics, years, include_bundled = TRUE) {
+  cat_topics <- tidyr::expand_grid(topic = topics, year = years) %>%
+    mutate(
+      kind = "topic",
+      file = map2_chr(topic, year, gmae_zip_name),
+      url = map2_chr(topic, year, gmae_zip_url)
+    )
+
+  cat_bundled <- tibble()
+  if (include_bundled) {
+    # Bundled module years seen on GMAE / CNGSPSPE.
+    bundled_years <- intersect(c(2018L, 2019L), years)
+    if (!length(bundled_years)) bundled_years <- c(2018L, 2019L)
+    cat_bundled <- tibble(
+      topic = "medio_ambiente_bundled",
+      year = bundled_years,
+      kind = "bundled",
+      file = map_chr(year, gmae_bundled_name),
+      url = map_chr(year, gmae_bundled_url)
+    )
+  }
+
+  bind_rows(cat_topics, cat_bundled) %>%
+    arrange(kind, topic, year)
+}
+
+download_gmae_zip <- function(url,
+                              dest_dir = zip_dir,
+                              unzip_to = out_dir,
+                              overwrite = FALSE,
+                              unzip = TRUE) {
+  stopifnot(dir.exists(dest_dir))
+  file <- basename(url)
+  dest <- file.path(dest_dir, file)
+
+  if (file.exists(dest) && !overwrite) {
+    message("Skip (exists): ", file)
+  } else {
+    message("Downloading: ", file)
+    utils::download.file(url, dest, mode = "wb", quiet = FALSE)
+  }
+
+  extract_dir <- NA_character_
+  if (unzip) {
+    # Keep unzipped folder name matching the ZIP stem (INEGI package layout).
+    stem <- sub("\\.zip$", "", file, ignore.case = TRUE)
+    extract_dir <- file.path(unzip_to, stem)
+    if (dir.exists(extract_dir) && !overwrite) {
+      message("Skip unzip (exists): ", stem)
+    } else {
+      message("Unzipping -> ", extract_dir)
+      if (dir.exists(extract_dir) && overwrite) unlink(extract_dir, recursive = TRUE)
+      dir.create(extract_dir, showWarnings = FALSE, recursive = TRUE)
+      utils::unzip(dest, exdir = extract_dir)
+    }
+  }
+
+  tibble(
+    file = file,
+    url = url,
+    zip_path = dest,
+    extract_dir = extract_dir,
+    zip_bytes = file.info(dest)$size
+  )
+}
+
+download_gmae <- function(catalog,
+                          dest_dir = zip_dir,
+                          unzip_to = out_dir,
+                          overwrite = FALSE,
+                          unzip = TRUE) {
+  if (!nrow(catalog)) {
+    message("Empty catalog; nothing to download.")
+    return(tibble())
+  }
+  map_dfr(
+    catalog$url,
+    download_gmae_zip,
+    dest_dir = dest_dir,
+    unzip_to = unzip_to,
+    overwrite = overwrite,
+    unzip = unzip
+  )
+}
+```
+
+## Catalog
+
+```{r catalog}
+catalog_all <- build_gmae_catalog(topics, years, include_bundled = TRUE)
+
+catalog_selected <- catalog_all %>%
+  filter(
+    (kind == "topic" & topic %in% topics_to_get & year %in% years_to_get) |
+      (kind == "bundled" & year %in% c(2018, 2019))
+  )
+
+catalog_selected %>%
+  count(topic, name = "n_years") %>%
+  knitr::kable(caption = "Selected topics (years in catalog)")
+
+head(catalog_selected, 12) %>%
+  select(kind, topic, year, file) %>%
+  knitr::kable()
+```
+
+## Check which URLs are live
+
+This can take a minute (one HEAD/request per file). Skip if you already trust the catalog.
+
+```{r check-urls, eval=FALSE}
+library(tictoc)
+
+tic()
+catalog_live <- catalog_selected %>%
+  mutate(live = map_lgl(url, url_exists))
+
+catalog_live %>%
+  count(live) %>%
+  knitr::kable(caption = "URL availability")
+
+catalog_live %>%
+  filter(!live) %>%
+  select(topic, year, file) %>%
+  knitr::kable(caption = "Missing URLs (if any)")
+toc() # none missing, 17.313 seconds
+```
+
+## Download
+
+Set `download_now <- TRUE` in the config chunk, then run this.
+
+```{r download, eval=download_now}
+# optional: only keep URLs that respond 200
+# to_get <- catalog_live %>% filter(live)
+to_get <- catalog_selected
+
+results <- download_gmae(
+  catalog = to_get,
+  dest_dir = zip_dir,
+  unzip_to = out_dir,
+  overwrite = overwrite,
+  unzip = unzip_now
+)
+
+results %>%
+  knitr::kable(caption = "Download results")
+```
+
+## Example: read one package straight from a ZIP URL
+
+Useful as a test to see that it all went as planned.
+
+```{r example-read-url}
+edu_url <- gmae_zip_url("educacion_ambiental", 2025)
+tmp_zip <- tempfile(fileext = ".zip")
+
+utils::download.file(edu_url, tmp_zip, mode = "wb", quiet = TRUE)
+
+zip_files <- utils::unzip(tmp_zip, list = TRUE)
+zip_files %>%
+  select(Name, Length) %>%
+  knitr::kable(caption = "Contents of educacion_ambiental CNGE 2025 ZIP")
+
+
+# |Name                                                               | Length|
+# |:------------------------------------------------------------------|------:|
+# |catalogos/                                                         |      0|
+# |catalogos/cve_ent_cnge2025.csv                                     |    622|
+# |catalogos/mpios_cnge2025.csv                                       |    148|
+# |catalogos/otro_fin_cnge2025.csv                                    |     44|
+# |catalogos/pro_acc_ed_cnge2025.csv                                  |     57|
+# |catalogos/rubeduam_cnge2025.csv                                    |    360|
+# |conjunto_de_datos/                                                 |      0|
+# |conjunto_de_datos/0_indice_cnge2025.csv                            |    346|
+# |conjunto_de_datos/educaamb_cnge2025.csv                            |    390|
+# |conjunto_de_datos/muneduam_cnge2025.csv                            |  21513|
+# |conjunto_de_datos/proeduam_cnge2025.csv                            |  41296|
+# |diccionario_de_datos/                                              |      0|
+# |diccionario_de_datos/diccionario_de_datos_educaamb_cnge2025.csv    |    505|
+# |diccionario_de_datos/diccionario_de_datos_muneduam_cnge2025.csv    |    489|
+# |diccionario_de_datos/diccionario_de_datos_proeduam_cnge2025.csv    |   3823|
+# |diccionario_de_datos/readme.txt                                    |   1183|
+# |metadatos/                                                         |      0|
+# |modelo_entidad_relacion/                                           |      0|
+# |modelo_entidad_relacion/modelo_er_educacion_ambiental_cnge2025.png |  51227|
+# |readme.txt                                                         |   2048|
+# |metadatos/metadatos_cnge_2025.txt                                  |   4432|
+
+# read the state level summary table from inside the ZIP
+edu_csv <- zip_files$Name[grepl("conjunto_de_datos/educaamb_cnge2025\\.csv$", zip_files$Name)]
+educaamb <- readr::read_csv(unz(tmp_zip, edu_csv), show_col_types = FALSE)
+
+educaamb %>%
+  knitr::kable(caption = "educaamb_cnge2025 (state-level env-ed summary)")
+
+unlink(tmp_zip) # so that it is not saved and deletes the file/directory specified by tmp_zip.
+```
+
+## Notes for ocean resilience scores
+
+Strongest GMAE/CNGE topics for an ocean/coastal institutional score:
+
+- `biodiversidad_y_ecosistemas`
+- `monitoreo_ambiental`
+- `gobierno_medio_ambiente`
+- `cambio_climatico` (coastal filter)
+- `asentamientos_humanos` (coastal municipalities)
+- `educacion_ambiental` (keyword filter; thin marine content)
+
+These are **state program / capacity** data, not biophysical ocean condition.
+Filter to GoC states (BC, BCS, Sonora, Sinaloa, Nayarit, Jalisco) and, where `mun*` tables exist, coastal municipalities.)

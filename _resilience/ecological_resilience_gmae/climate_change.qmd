@@ -1,0 +1,659 @@
+---
+title: 'OHI GoC: Explore GMAE (Climate change)'
+author: "*Compiled on `r date()` by `r Sys.info()['user']`*"
+format:
+  html:
+    code-fold: show
+    toc: true
+    toc-depth: 3
+    toc-float: true
+    number-sections: false
+    theme: cerulean
+    highlight-style: haddock
+editor:
+  markdown:
+    wrap: sentence
+  chunk_output_type: console
+editor_options:
+  chunk_output_type: console
+---
+
+# Explore GMAE: Climate change
+
+## What this topic is (in plain language)
+
+Each yearly package answers, for every Mexican state:
+
+1. Did the state government run climate change programs or actions that year?  
+2. How many?  
+3. What were those programs called, what were they for, what theme (rubro) did they fall under, and how were they funded?  
+4. Which municipalities did they cover?
+
+There are **three tables** in each package:
+
+| Table stem | English name | What one row is |
+|---|---|---|
+| `climatic` | State summary | One state, one year: yes/no + program count |
+| `proclima` | Program list | One climate program or action reported by a state |
+| `munclima` | Program municipalities | One municipality linked to one program |
+
+Codes like `1 / 2 / 9` are catalog answers (**yes / no / does not know**).
+
+Raw data path on Mazu:
+
+`/home/shares/ohi/OHI_GOC/_raw_data/GMAE_environmental_state_data`
+
+*Outline of the script:*
+
+1. Find the yearly packages.  
+2. Read the dictionary and catalogs, and put them in English.  
+3. Look at the GoC state summary (yes/no + counts).  
+4. Look at the GoC program list (names, themes, funding).  
+5. Make a few simple plots.  
+6. Write notes for a later rescale decision.
+
+```{r setup}
+library(tidyverse)
+library(knitr)
+library(plotly)
+
+knitr::opts_chunk$set(
+  fig.width = 9,
+  fig.height = 5,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r paths}
+# mazu path for the manually downloaded unzipped packages
+raw_dir <- "/home/shares/ohi/OHI_GOC/_raw_data/GMAE_environmental_state_data/d2026"
+
+local_raw_dir <- here::here("environmental_data_sources/GMAE_environmental_state_data/d2026")
+
+if (!dir.exists(raw_dir) && dir.exists(local_raw_dir)) {
+  message("mazu path not found; using local mirror: ", local_raw_dir)
+  raw_dir <- local_raw_dir
+}
+```
+
+```{r goc-constants}
+goc_state_codes <- c("02", "03", "26", "25", "18", "14")
+
+goc_state_names <- c(
+  "02" = "Baja California",
+  "03" = "Baja California Sur",
+  "26" = "Sonora",
+  "25" = "Sinaloa",
+  "18" = "Nayarit",
+  "14" = "Jalisco"
+)
+```
+
+```{r helpers}
+# try utf-8 first, then latin1, because some packages still use latin1
+read_csv_flexible <- function(path, ...) {
+  out <- tryCatch(
+    read_csv(path, show_col_types = FALSE, progress = FALSE, ...),
+    error = function(e) NULL
+  )
+  if (!is.null(out)) return(out)
+  read_csv(
+    path,
+    locale = locale(encoding = "Latin1"),
+    show_col_types = FALSE,
+    progress = FALSE,
+    ...
+  )
+}
+
+# pad state codes to two digits so "2" and "02" match
+pad2 <- function(x) str_pad(as.character(x), 2, pad = "0")
+
+# turn common inegi missing codes into na before converting to numeric
+as_num_clean <- function(x) {
+  x <- as.character(x)
+  x <- na_if(x, "")
+  x <- na_if(x, "NA")
+  x <- na_if(x, "ND")
+  x <- na_if(x, "NSS")
+  x <- na_if(x, "NULL")
+  suppressWarnings(as.numeric(x))
+}
+```
+
+## 1. Find the yearly climate change packages
+
+```{r find-packages}
+# list every unzipped folder under the raw directory
+folder_paths <- list.dirs(raw_dir, full.names = TRUE, recursive = FALSE)
+
+# keep only climate change packages, parse census name + edition + reference year
+climate_change_packages <- tibble(path = folder_paths, folder = basename(folder_paths)) %>%
+  mutate(
+    # drop macos duplicate suffixes like " (1)"
+    folder_clean = str_replace(folder, " \\([0-9]+\\)$", ""),
+    folder_clean = str_replace(folder_clean, "^conjunto_de_datos_", ""),
+    census = str_extract(folder_clean, "(cnge|cngspspe)"),
+    edition = as.integer(str_match(folder_clean, "(cnge|cngspspe)([0-9]{4})_csv$")[, 3]),
+    # edition year is usually one year after the reference year in the tables
+    year = edition - 1L,
+    topic_slug = str_replace(folder_clean, "_(cnge|cngspspe)[0-9]{4}_csv$", ""),
+    is_duplicate_name = str_detect(folder, " \\([0-9]+\\)$"),
+    data_dir = file.path(path, "conjunto_de_datos"),
+    dict_dir = file.path(path, "diccionario_de_datos"),
+    catalog_dir = file.path(path, "catalogos")
+  ) %>%
+  filter(!is.na(edition), str_detect(topic_slug, "cambio_climatico")) %>%
+  # if both a clean folder and a " (1)" copy exist, keep the clean one
+  group_by(edition) %>%
+  arrange(is_duplicate_name, folder, .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  arrange(edition)
+
+stopifnot(nrow(climate_change_packages) > 0)
+
+# table of which census years i have for climate change
+climate_change_census_years_table <- climate_change_packages %>%
+  select(folder, census, edition, year)
+climate_change_census_years_table
+
+# hm... the census for 2020 was the CNGSPSPE = Censo Nacional de Gobierno, Seguridad Pública y Sistema Penitenciario Estatales
+# but all subsequent years had CNGE = Censo Nacional de Gobiernos Estatales, which is a third of the CNGSPSPE, the environment part
+```
+
+Notes from that table:
+
+- 2020 still uses the older census name `cngspspe`.  
+- From 2021 onward the packages are labeled `cnge`.  
+- `year` is the reference year inside the tables (edition minus 1).
+
+## 2. What do the columns mean? (dictionary + catalogs)
+
+I use the **latest edition** dictionary and catalogs, then put the Spanish labels into short English names so the rest of the script is readable.
+
+```{r latest-package}
+# use the newest package as the source of truth for dictionaries and catalogs
+latest_climate_package <- climate_change_packages %>%
+  slice_max(edition, n = 1, with_ties = FALSE)
+
+latest_climate_package
+```
+
+```{r read-dictionaries}
+# read every dictionary csv in the latest package
+latest_dict_files <- list.files(
+  latest_climate_package$dict_dir,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+climate_change_dictionary_table <- map_dfr(latest_dict_files, function(f) {
+  read_csv_flexible(f) %>%
+    rename_with(tolower) %>%
+    mutate(
+      dictionary_file = basename(f),
+      table_stem = str_extract(basename(f), "(climatic|proclima|munclima|muclima)")
+    )
+}) %>%
+  select(table_stem, columna, descripcion, codigo_valido)
+
+# official spanish dictionary: what each column is supposed to mean
+climate_change_dictionary_table
+```
+
+```{r english-column-guide}
+# my own short english guide, so I do not have to keep re-reading the spanish dictionary
+climate_change_column_guide <- tribble(
+  ~table_stem, ~column, ~english_name, ~how_to_read_it,
+  "climatic", "entidad_a / cve_ent", "state code", "inegi state id (02 = baja california, etc.)",
+  "climatic", "pro_acc_ca", "ran climate programs?", "1 = yes, 2 = no, 9 = does not know, 0 = not applicable",
+  "climatic", "pro_num_ca", "number of climate programs", "count of programs or actions reported that year",
+  "proclima", "nom_pro", "program name", "name of the program or action",
+  "proclima", "obj_pro", "program objective", "what the program was meant to do",
+  "proclima", "rubclima", "program theme", "theme code (see catalog below)",
+  "proclima", "esp_rubro", "other theme text", "free text when theme = other",
+  "proclima", "pro_i_m / pro_i_a", "start month / year", "when the program started",
+  "proclima", "pro_f_m / pro_f_a", "end month / year", "when the program ended",
+  "proclima", "mnto_fde", "state env agency funding", "pesos from the state environmental agency",
+  "proclima", "mnto_fod", "other state agency funding", "pesos from other state agencies",
+  "proclima", "mnto_fto", "total state funding", "total state government funding",
+  "proclima", "otro_fin", "other funders?", "1 = yes, 2 = no, 0 = not applicable",
+  "proclima", "fin_gbm / mnto_gbm", "municipal funding", "whether municipalities helped, and how much",
+  "proclima", "fin_gbe / mnto_gbe", "foreign government funding", "whether a foreign government helped, and how much",
+  "proclima", "fin_ong / mnto_ong", "ngo funding", "whether an ngo helped, and how much",
+  "proclima", "fin_ipr / mnto_ipr", "private funding", "whether private sector helped, and how much",
+  "proclima", "fin_oti / mnto_oti", "other funding", "whether another funder helped, and how much",
+  "proclima", "mpios", "municipal coverage", "1 = all municipalities, 2 = some, 0 = not applicable",
+  "munclima", "ag_nom_mpi", "municipality name", "municipality linked to a program",
+  "munclima", "ag_cve_mpi / cve_mun", "municipality code", "inegi municipality id"
+)
+
+climate_change_column_guide
+```
+
+```{r catalog-labels}
+# english labels for the main coded fields I will reuse below
+yes_no_labels <- c(
+  "0" = "not applicable",
+  "1" = "yes",
+  "2" = "no",
+  "9" = "does not know"
+)
+
+theme_labels <- c(
+  "1" = "ghg emissions inventory / calculation",
+  "2" = "ghg mitigation actions",
+  "3" = "vulnerability maps and strategies",
+  "4" = "water, energy, food, health under extremes",
+  "5" = "climate action plan",
+  "6" = "climate education programs",
+  "7" = "compliance with state legal framework",
+  "8" = "other theme"
+)
+
+muni_cover_labels <- c(
+  "0" = "not applicable / no answer",
+  "1" = "all municipalities in the state",
+  "2" = "some municipalities in the state"
+)
+
+# tidy english theme guide based on the rubclima catalog
+climate_change_theme_guide <- tibble(
+  rubclima = names(theme_labels),
+  english_theme = unname(theme_labels)
+)
+
+climate_change_theme_guide
+
+#   rubclima english_theme                             
+#   <chr>    <chr>                                     
+# 1 1        ghg emissions inventory / calculation     
+# 2 2        ghg mitigation actions                    
+# 3 3        vulnerability maps and strategies         
+# 4 4        water, energy, food, health under extremes
+# 5 5        climate action plan                       
+# 6 6        climate education programs                
+# 7 7        compliance with state legal framework     
+# 8 8        other theme        
+```
+
+```{r read-catalogs}
+# also keep the official catalogs as objects, in case i want to check a code later
+latest_catalog_files <- list.files(
+  latest_climate_package$catalog_dir,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+climate_change_catalogs <- set_names(
+  map(latest_catalog_files, read_csv_flexible),
+  basename(latest_catalog_files)
+)
+
+# peek one by one only if i need to; names() is enough for now
+names(climate_change_catalogs)
+
+# example: yes/no codes for "did the state run climate programs?"
+climate_change_pro_acc_catalog_name <- names(climate_change_catalogs)[
+  str_detect(names(climate_change_catalogs), "pro_acc_ca")
+][[1]]
+
+climate_change_pro_acc_catalog <- climate_change_catalogs[[climate_change_pro_acc_catalog_name]]
+
+climate_change_pro_acc_catalog
+```
+
+## 3. State summary for GoC (`climatic`)
+
+This is the simplest table: **one row per state per year**.
+
+```{r read-state-summary}
+# find the climatic summary csv inside each yearly package
+climate_summary_files <- climate_change_packages %>%
+  mutate(
+    table_file = map_chr(
+      data_dir,
+      ~ {
+        hits <- list.files(.x, pattern = "^climatic_.*\\.csv$")
+        if (length(hits) == 0) NA_character_ else hits[[1]]
+      }
+    )
+  ) %>%
+  filter(!is.na(table_file))
+
+# stack all years into one raw table
+climate_state_summary_raw <- climate_summary_files %>%
+  mutate(
+    data = map2(
+      data_dir,
+      table_file,
+      ~ read_csv_flexible(file.path(.x, .y), col_types = cols(.default = "c"))
+    )
+  ) %>%
+  select(edition, year, data) %>%
+  unnest(data) %>%
+  rename_with(~ str_replace(.x, "^\ufeff", ""))
+
+# older years use entidad_a; 2025 uses cve_ent
+if (!"cve_ent" %in% names(climate_state_summary_raw)) {
+  climate_state_summary_raw$cve_ent <- NA_character_
+}
+if (!"entidad_a" %in% names(climate_state_summary_raw)) {
+  climate_state_summary_raw$entidad_a <- NA_character_
+}
+
+# decode the yes/no and count fields into readable columns
+climate_state_summary_all <- climate_state_summary_raw %>%
+  mutate(
+    cve_ent = pad2(coalesce(na_if(cve_ent, ""), na_if(entidad_a, ""))),
+    estado = unname(goc_state_names[cve_ent]),
+    ran_programs_code = as.character(pro_acc_ca),
+    ran_programs = recode(ran_programs_code, !!!yes_no_labels, .default = ran_programs_code),
+    n_programs = as_num_clean(pro_num_ca)
+  )
+
+# keep only the six goC states
+climate_change_goc_state_summary <- climate_state_summary_all %>%
+  filter(cve_ent %in% goc_state_codes) %>%
+  select(year, edition, cve_ent, estado, ran_programs_code, ran_programs, n_programs) %>%
+  arrange(year, cve_ent)
+
+climate_change_goc_state_summary
+
+# all 1`s except Sinaloa, which did not seem to run programs except for two years.
+```
+
+How to read that table:
+
+- `ran_programs = yes` means the state said it executed climate programs that year.  
+- `n_programs` is the reported count.  
+- If `ran_programs = no`, capacity for that year is naturally **0**.  
+- This count is the most obvious raw signal if I later want a 0 to 1 resilience score.
+
+```{r plot-goc-counts}
+# line plot: how many climate programs each goC state reported over time
+climate_change_goc_counts_plot <- climate_change_goc_state_summary %>%
+  filter(!is.na(n_programs)) %>%
+  ggplot(aes(x = year, y = n_programs, color = estado, group = estado)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "reported climate programs in goC states",
+    x = "reference year",
+    y = "number of programs",
+    color = "state"
+  ) +
+  theme_minimal()
+
+ggplotly(climate_change_goc_counts_plot)
+```
+
+```{r plot-goc-yesno}
+# stacked bars: how many goC states said yes / no / other each year
+climate_change_goc_yesno_table <- climate_change_goc_state_summary %>%
+  count(year, ran_programs, name = "n_states")
+
+climate_change_goc_yesno_table
+
+climate_change_goc_yesno_plot <- climate_change_goc_yesno_table %>%
+  ggplot(aes(x = year, y = n_states, fill = ran_programs)) +
+  geom_col(position = "stack") +
+  labs(
+    title = "how many goC states said yes / no each year",
+    x = "reference year",
+    y = "n states",
+    fill = "ran programs?"
+  ) +
+  theme_minimal()
+
+ggplotly(climate_change_goc_yesno_plot)
+```
+
+## 4. Program list for GoC (`proclima`)
+
+This table is where I can see **what kinds of climate work** states reported (mitigation, education, action plans, and so on).
+
+```{r read-programs}
+# find the proclima program-list csv inside each yearly package
+climate_program_files <- climate_change_packages %>%
+  mutate(
+    table_file = map_chr(
+      data_dir,
+      ~ {
+        hits <- list.files(.x, pattern = "^proclima_.*\\.csv$")
+        if (length(hits) == 0) NA_character_ else hits[[1]]
+      }
+    )
+  ) %>%
+  filter(!is.na(table_file))
+
+# stack all program rows across years
+climate_programs_raw <- climate_program_files %>%
+  mutate(
+    data = map2(
+      data_dir,
+      table_file,
+      ~ read_csv_flexible(file.path(.x, .y), col_types = cols(.default = "c"))
+    )
+  ) %>%
+  select(edition, year, data) %>%
+  unnest(data) %>%
+  rename_with(~ str_replace(.x, "^\ufeff", ""))
+
+if (!"cve_ent" %in% names(climate_programs_raw)) {
+  climate_programs_raw$cve_ent <- NA_character_
+}
+if (!"entidad_a" %in% names(climate_programs_raw)) {
+  climate_programs_raw$entidad_a <- NA_character_
+}
+
+# decode theme + funding + coverage, then keep goC only
+climate_change_goc_programs <- climate_programs_raw %>%
+  mutate(
+    cve_ent = pad2(coalesce(na_if(cve_ent, ""), na_if(entidad_a, ""))),
+    estado = unname(goc_state_names[cve_ent]),
+    theme_code = as.character(rubclima),
+    theme = recode(theme_code, !!!theme_labels, .default = theme_code),
+    state_funding_total = as_num_clean(mnto_fto),
+    municipal_coverage = recode(
+      as.character(mpios),
+      !!!muni_cover_labels,
+      .default = as.character(mpios)
+    )
+  ) %>%
+  filter(cve_ent %in% goc_state_codes) %>%
+  select(
+    year, edition, cve_ent, estado,
+    program_name = nom_pro,
+    objective = obj_pro,
+    theme_code, theme,
+    start_year = pro_i_a,
+    end_year = pro_f_a,
+    state_funding_total,
+    municipal_coverage
+  ) %>%
+  arrange(year, estado, theme)
+```
+
+
+```{r read-programs}
+length((climate_change_goc_programs$program_name)) # 49
+length(unique(climate_change_goc_programs$program_name)) # 41... so these are not long term programs I do not think.
+unique(climate_change_goc_programs$program_name)
+```
+
+
+```{r read-programs}
+# how many program rows each goC state reported each year
+climate_change_goc_program_counts <- climate_change_goc_programs %>%
+  count(year, estado, name = "n_program_rows")
+
+climate_change_goc_program_counts
+```
+
+```{r programs-latest-peek}
+# look at the actual program names in the latest year
+latest_climate_year <- max(climate_change_goc_programs$year, na.rm = TRUE)
+
+climate_change_goc_programs_latest <- climate_change_goc_programs %>%
+  filter(year == latest_climate_year) %>%
+  select(estado, program_name, theme, state_funding_total, municipal_coverage)
+
+climate_change_goc_programs_latest
+```
+
+```{r plot-themes}
+# theme mix over time across all goC states
+climate_change_goc_themes_by_year <- climate_change_goc_programs %>%
+  count(year, theme, name = "n_program_rows")
+
+climate_change_goc_themes_by_year
+
+climate_change_goc_themes_plot <- climate_change_goc_themes_by_year %>%
+  ggplot(aes(x = year, y = n_program_rows, fill = theme)) +
+  geom_col() +
+  labs(
+    title = "goC climate programs by theme over time",
+    x = "reference year",
+    y = "n program rows",
+    fill = "theme"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggplotly(climate_change_goc_themes_plot)
+```
+
+```{r plot-themes-by-state-latest}
+# theme mix by state in the latest year only
+climate_change_goc_themes_latest <- climate_change_goc_programs %>%
+  filter(year == latest_climate_year) %>%
+  count(estado, theme, name = "n_program_rows")
+
+climate_change_goc_themes_latest
+
+climate_change_goc_themes_latest_plot <- climate_change_goc_themes_latest %>%
+  ggplot(aes(x = reorder(estado, n_program_rows, sum), y = n_program_rows, fill = theme)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = paste("goC climate program themes in", latest_climate_year),
+    x = NULL,
+    y = "n program rows",
+    fill = "theme"
+  ) +
+  theme_minimal()
+
+ggplotly(climate_change_goc_themes_latest_plot)
+```
+
+## 5. Optional: municipalities linked to programs (`munclima`)
+
+Useful if I later want to know whether programs reach coastal municipalities. For a first resilience score, the state summary may be enough.
+
+```{r read-muni}
+# find the munclima municipality-link csv inside each yearly package
+climate_muni_files <- climate_change_packages %>%
+  mutate(
+    table_file = map_chr(
+      data_dir,
+      ~ {
+        hits <- list.files(.x, pattern = "^munclima_.*\\.csv$")
+        if (length(hits) == 0) NA_character_ else hits[[1]]
+      }
+    )
+  ) %>%
+  filter(!is.na(table_file))
+
+climate_muni_raw <- climate_muni_files %>%
+  mutate(
+    data = map2(
+      data_dir,
+      table_file,
+      ~ read_csv_flexible(file.path(.x, .y), col_types = cols(.default = "c"))
+    )
+  ) %>%
+  select(edition, year, data) %>%
+  unnest(data) %>%
+  rename_with(~ str_replace(.x, "^\ufeff", ""))
+
+if (!"cve_ent" %in% names(climate_muni_raw)) {
+  climate_muni_raw$cve_ent <- NA_character_
+}
+if (!"entidad_a" %in% names(climate_muni_raw)) {
+  climate_muni_raw$entidad_a <- NA_character_
+}
+
+# goC municipality-program links
+climate_change_goc_muni_links <- climate_muni_raw %>%
+  mutate(
+    cve_ent = pad2(coalesce(na_if(cve_ent, ""), na_if(entidad_a, ""))),
+    estado = unname(goc_state_names[cve_ent]),
+    municipality = ag_nom_mpi
+  ) %>%
+  filter(cve_ent %in% goc_state_codes) %>%
+  select(year, edition, estado, id_prog, municipality)
+
+# counts of municipality links by state and year
+climate_change_goc_muni_counts <- climate_change_goc_muni_links %>%
+  count(year, estado, name = "n_muni_links")
+
+climate_change_goc_muni_counts
+```
+
+```{r muni-latest-peek}
+# top municipalities linked to climate programs in the latest year
+climate_change_goc_muni_latest_top <- climate_change_goc_muni_links %>%
+  filter(year == latest_climate_year) %>%
+  count(estado, municipality, name = "n_links") %>%
+  arrange(estado, desc(n_links)) %>%
+  group_by(estado) %>%
+  slice_head(n = 8) %>%
+  ungroup()
+
+climate_change_goc_muni_latest_top
+```
+
+## 6. What information is available here? (short takeaways)
+
+From this topic, I can know for each GoC state and year:
+
+1. Whether the state reported climate programs (`ran_programs`).  
+2. How many programs it reported (`n_programs`).  
+3. The names and objectives of those programs.  
+4. The theme mix (mitigation, education, action plan, vulnerability, etc.).  
+5. Rough state funding amounts when they filled them in.  
+6. Whether programs covered all or some municipalities, and which ones.
+
+What I **cannot** know from this alone:
+
+- Whether the programs are coastal or marine.  
+- Whether the programs worked.  
+- Emissions outcomes or hazard reduction.
+
+For an ecological program resilience score, the cleanest first option is probably:
+
+**raw capacity = `n_programs`, with 0 when `ran_programs = no`**, then rescale across GoC.
+
+Useful objects saved in this script:
+
+- `climate_change_census_years_table`  
+- `climate_change_dictionary_table`  
+- `climate_change_column_guide`  
+- `climate_change_goc_state_summary`  
+- `climate_change_goc_programs`  
+- `climate_change_goc_muni_links`
+
+## 7. Notes for a later rescale decision
+
+- Keep climate change in the ecological program resilience composite? (yes / no / maybe)  
+- Prefer state program count, theme-weighted count, funding, or something else?  
+- Filter to ocean-relevant themes (for example vulnerability, water/energy/extremes, action plans)?  
+- Any years to drop because the schema is too different?  
+- Confidence in these self reported counts:
+
+```{r session}
+sessionInfo()
+```

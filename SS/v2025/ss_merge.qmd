@@ -896,6 +896,479 @@ p_ss_compare_list[["sentido_de_pertenencia"]]
 p_ss_compare_list[["tourism_recreation"]]
 ```
 
+## 6. Sensitivity: Regions 2, 3, 5 when ENSU Security is missing
+
+Regions 2, 3, and 5 often have Safety but no ENSU city, so the strict SS average is missing for resource and social goals. This section compares two treatments of those rows (and any other region × year with the same gap):
+
+1. **Leave SS average NA** (current rule): `reported_pressure` stays missing when Security applies but ENSU is absent.
+2. **Allow Safety-only**: use `safety_pressure` as the reported value for those same rows (still labeled as a Safety-only fallback, not as a true SS average).
+
+Biophysical goals already use Safety-only everywhere and are unchanged. The comparison is restricted to goals in `goals_with_security`.
+
+```{r}
+#| label: step_06_r235_safety_only_vs_na
+#| fig-width: 10
+#| fig-height: 6
+#| fig-dpi: 96
+
+rgns_often_missing_ensu <- c("Region_2", "Region_3", "Region_5")
+
+# start from the full join so NA rows are still present
+ss_scenario_compare <- ss_pressure %>%
+  dplyr::filter(security_applies) %>%
+  dplyr::mutate(
+    missing_ensu = is.na(security_pressure) & !is.na(safety_pressure),
+    # scenario A: current strict SS average (NA when ENSU missing)
+    reported_na = dplyr::if_else(
+      !is.na(ss_pressure),
+      ss_pressure,
+      NA_real_
+    ),
+    rule_na = dplyr::case_when(
+      !is.na(ss_pressure) ~ "ss_average_safety_security",
+      missing_ensu ~ "ss_average_na_missing_ensu",
+      TRUE ~ NA_character_
+    ),
+    # scenario B: Safety-only fallback when ENSU is missing
+    reported_safety_only = dplyr::case_when(
+      !is.na(ss_pressure) ~ ss_pressure,
+      missing_ensu ~ safety_pressure,
+      TRUE ~ NA_real_
+    ),
+    rule_safety_only = dplyr::case_when(
+      !is.na(ss_pressure) ~ "ss_average_safety_security",
+      missing_ensu ~ "safety_only_fallback_missing_ensu",
+      TRUE ~ NA_character_
+    ),
+    rgn_focus = as.character(rgn_id) %in% rgns_often_missing_ensu,
+    delta_safety_only_minus_na = reported_safety_only - reported_na
+  )
+
+# long form for plotting the two scenarios side by side
+# drop the existing reported_pressure so values_to can reuse that name
+ss_scenario_long <- ss_scenario_compare %>%
+  dplyr::select(-reported_pressure) %>%
+  tidyr::pivot_longer(
+    cols = c(reported_na, reported_safety_only),
+    names_to = "scenario",
+    values_to = "reported_pressure"
+  ) %>%
+  dplyr::mutate(
+    scenario = dplyr::recode(
+      scenario,
+      reported_na = "A: leave SS average NA",
+      reported_safety_only = "B: allow Safety-only"
+    ),
+    scenario = factor(
+      scenario,
+      levels = c("A: leave SS average NA", "B: allow Safety-only")
+    ),
+    rgn_id = factor(as.character(rgn_id), levels = names(rgn_labels)),
+    rgn_label = dplyr::recode(
+      as.character(rgn_id),
+      !!!rgn_labels,
+      .default = as.character(rgn_id)
+    )
+  )
+
+# coverage: how many region-year-goal cells are filled under each scenario
+ss_scenario_coverage <- ss_scenario_long %>%
+  dplyr::group_by(scenario, rgn_id, rgn_label) %>%
+  dplyr::summarise(
+    n_cells = dplyr::n(),
+    n_nonmissing = sum(!is.na(reported_pressure)),
+    n_missing = sum(is.na(reported_pressure)),
+    mean_pressure = mean(reported_pressure, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(scenario, rgn_id)
+
+ss_scenario_coverage %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Resource/social goals: coverage and mean reported pressure by scenario and region"
+  )
+
+# focus table for Regions 2, 3, 5 (the usual ENSU gaps)
+ss_scenario_r235 <- ss_scenario_compare %>%
+  dplyr::filter(rgn_focus) %>%
+  dplyr::select(
+    rgn_id, ano, ohi_goal,
+    safety_pressure, security_pressure, ss_pressure,
+    missing_ensu,
+    reported_na, rule_na,
+    reported_safety_only, rule_safety_only,
+    delta_safety_only_minus_na
+  ) %>%
+  dplyr::arrange(ohi_goal, rgn_id, ano)
+
+ss_scenario_r235 %>%
+  dplyr::count(rgn_id, rule_na, rule_safety_only) %>%
+  dplyr::arrange(rgn_id, rule_na) %>%
+  knitr::kable(
+    caption = "Regions 2, 3, 5: how often each scenario fills vs leaves NA"
+  )
+
+# mean reported pressure by goal × scenario (all regions; NA omitted in means)
+ss_scenario_by_goal <- ss_scenario_long %>%
+  dplyr::group_by(scenario, ohi_goal) %>%
+  dplyr::summarise(
+    n_nonmissing = sum(!is.na(reported_pressure)),
+    mean_pressure = mean(reported_pressure, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = scenario,
+    values_from = c(n_nonmissing, mean_pressure)
+  )
+
+ss_scenario_by_goal %>%
+  knitr::kable(
+    digits = 3,
+    caption = "By OHI goal: non-missing count and mean pressure under each scenario"
+  )
+
+# plot Regions 2, 3, 5 only: Safety-only fallback vs NA (points appear only when filled)
+p_r235_scenario <- ss_scenario_long %>%
+  dplyr::filter(as.character(rgn_id) %in% rgns_often_missing_ensu) %>%
+  ggplot(
+    aes(
+      x = ano,
+      y = reported_pressure,
+      color = scenario,
+      group = scenario
+    )
+  ) +
+  geom_line(linewidth = 0.8, na.rm = TRUE) +
+  geom_point(size = 1.8, na.rm = TRUE) +
+  facet_grid(ohi_goal ~ rgn_id, scales = "free_y", labeller = labeller(
+    rgn_id = rgn_labels
+  )) +
+  scale_color_manual(
+    values = c(
+      "A: leave SS average NA" = "#627391",
+      "B: allow Safety-only" = "#C03729"
+    )
+  ) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  labs(
+    title = "Regions 2, 3, 5: SS reported pressure with vs without Safety-only fallback",
+    subtitle = "Resource/social goals only. Scenario A has no line when ENSU Security is missing; Scenario B uses Safety alone.",
+    x = "Year",
+    y = "Reported pressure (0 to 1; higher = worse)",
+    color = NULL
+  ) +
+  theme_status +
+  theme(
+    strip.text.y = element_text(angle = 0, size = 7),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8)
+  )
+
+print(p_r235_scenario)
+
+# ggsave(
+#   filename = here::here(
+#     ss_output,
+#     "ss_scenario_r235_safety_only_vs_na.png"
+#   ),
+#   plot = p_r235_scenario,
+#   width = 12,
+#   height = 14,
+#   dpi = 150
+# )
+
+# one panel per region (mean across SS-average goals) for a compact view
+ss_scenario_r235_mean_goal <- ss_scenario_long %>%
+  dplyr::filter(as.character(rgn_id) %in% rgns_often_missing_ensu) %>%
+  dplyr::group_by(scenario, rgn_id, rgn_label, ano) %>%
+  dplyr::summarise(
+    mean_reported = mean(reported_pressure, na.rm = TRUE),
+    n_goals_nonmissing = sum(!is.na(reported_pressure)),
+    .groups = "drop"
+  )
+
+p_r235_mean <- ggplot(
+  ss_scenario_r235_mean_goal,
+  aes(
+    x = ano,
+    y = mean_reported,
+    color = scenario,
+    group = scenario
+  )
+) +
+  geom_line(linewidth = 0.9, na.rm = TRUE) +
+  geom_point(size = 2, na.rm = TRUE) +
+  facet_wrap(~ rgn_id, ncol = 3, labeller = labeller(rgn_id = rgn_labels)) +
+  scale_color_manual(
+    values = c(
+      "A: leave SS average NA" = "#627391",
+      "B: allow Safety-only" = "#C03729"
+    )
+  ) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  labs(
+    title = "Regions 2, 3, 5: mean reported SS pressure across resource/social goals",
+    subtitle = "Scenario A is empty when ENSU is missing; Scenario B fills with Safety-only",
+    x = "Year",
+    y = "Mean reported pressure",
+    color = NULL
+  ) +
+  theme_status
+
+print(p_r235_mean)
+
+# ggsave(
+#   filename = here::here(
+#     ss_output,
+#     "ss_scenario_r235_mean_safety_only_vs_na.png"
+#   ),
+#   plot = p_r235_mean,
+#   width = 10,
+#   height = 4.5,
+#   dpi = 150
+# )
+# 
+# write_csv(
+#   ss_scenario_compare,
+#   here::here(ss_output, "ss_scenario_compare_full.csv")
+# )
+# write_csv(
+#   ss_scenario_compare,
+#   file.path(ss_repo, "ss_scenario_compare_full.csv")
+# )
+# write_csv(
+#   ss_scenario_r235,
+#   here::here(ss_output, "ss_scenario_r235_detail.csv")
+# )
+# write_csv(
+#   ss_scenario_r235,
+#   file.path(ss_repo, "ss_scenario_r235_detail.csv")
+# )
+# write_csv(
+#   ss_scenario_coverage,
+#   here::here(ss_output, "ss_scenario_coverage_by_region.csv")
+# )
+# write_csv(
+#   ss_scenario_coverage,
+#   file.path(ss_repo, "ss_scenario_coverage_by_region.csv")
+# )
+# write_csv(
+#   ss_scenario_by_goal,
+#   here::here(ss_output, "ss_scenario_summary_by_goal.csv")
+# )
+# write_csv(
+#   ss_scenario_by_goal,
+#   file.path(ss_repo, "ss_scenario_summary_by_goal.csv")
+# )
+```
+
+### 6b. Per-goal plots with Regions 2, 3, 5 gapfilled by Safety
+
+Same layout as section 5b (one line per region, one plot per resource/social goal), but using Scenario B: when ENSU Security is missing, `reported_pressure` is filled with `safety_pressure`. Biophysical goals are unchanged from 5b (already Safety-only).
+
+```{r}
+#| label: step_06b_gapfill_plots
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
+
+# plot data: Scenario B reported value for resource/social goals
+ss_plot_data_gapfill <- ss_scenario_compare %>%
+  dplyr::filter(!is.na(reported_safety_only)) %>%
+  dplyr::mutate(
+    ano = as.integer(ano),
+    ohi_goal = as.character(ohi_goal),
+    rgn_id = factor(as.character(rgn_id), levels = names(rgn_labels)),
+    reported_pressure = reported_safety_only
+  )
+
+goal_list_gapfill <- sort(unique(ss_plot_data_gapfill$ohi_goal))
+
+p_ss_gapfill_list <- list()
+
+for (g in goal_list_gapfill) {
+  goal_title <- goal_display_name(g)
+  df_g <- ss_plot_data_gapfill %>% dplyr::filter(ohi_goal == g)
+
+  p_ss_gapfill_list[[g]] <- df_g %>%
+    ggplot(aes(
+      x = ano,
+      y = reported_pressure,
+      color = rgn_id,
+      group = rgn_id
+    )) +
+    geom_line(linewidth = 1.1, alpha = 0.9, na.rm = TRUE) +
+    geom_point(size = 2, na.rm = TRUE) +
+    scale_color_manual(values = rgn_colors, labels = rgn_labels) +
+    scale_x_continuous(breaks = pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+    labs(
+      title = goal_title,
+      subtitle = "SS average where ENSU exists; Regions 2, 3, 5 gapfilled with Safety-only",
+      x = NULL,
+      y = "Reported pressure",
+      color = NULL
+    ) +
+    guides(color = guide_legend(nrow = 3, byrow = TRUE)) +
+    theme_status
+}
+
+names(p_ss_gapfill_list)
+
+# # save one PNG per goal
+# gapfill_plot_dir <- file.path(ss_output, "ss_gapfill_safety_by_goal")
+# dir.create(gapfill_plot_dir, recursive = TRUE, showWarnings = FALSE)
+# 
+# for (g in names(p_ss_gapfill_list)) {
+#   ggsave(
+#     filename = file.path(
+#       gapfill_plot_dir,
+#       paste0("ss_pressure_", g, "_gapfill_safety.png")
+#     ),
+#     plot = p_ss_gapfill_list[[g]],
+#     width = 8,
+#     height = 4.5,
+#     dpi = 150
+#   )
+# }
+# 
+# message("Wrote gapfill-by-goal plots to ", gapfill_plot_dir)
+```
+
+#### Call individual gapfill plots (resource/social goals)
+
+```{r}
+#| label: step_06b_print_gapfill_by_goal
+#| fig-width: 8
+#| fig-height: 4.5
+#| fig-dpi: 96
+
+p_ss_gapfill_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
+p_ss_gapfill_list[["coastal_opportunities_coastal_access"]]
+p_ss_gapfill_list[["food_provisioning_fisheries"]]
+p_ss_gapfill_list[["food_provisioning_mariculture"]]
+p_ss_gapfill_list[["livelihoods_economies_economies"]]
+p_ss_gapfill_list[["livelihoods_economies_livelihoods"]]
+p_ss_gapfill_list[["natural_products"]]
+p_ss_gapfill_list[["sentido_de_pertenencia"]]
+p_ss_gapfill_list[["tourism_recreation"]]
+```
+
+### 6c. Safety vs Security vs SS average (with Safety gapfill)
+
+Same three-panel layout as section 5c, but the SS average panel uses Scenario B: when ENSU is missing (Regions 2, 3, 5, and any other gap years), SS average is filled with Safety. Security stays blank where ENSU is missing; Safety is unchanged.
+
+```{r}
+#| label: step_06c_compare_gapfill_by_goal
+#| fig-width: 10
+#| fig-height: 7
+#| fig-dpi: 96
+
+# long components including R2/R3/R5; SS panel uses Safety-only fallback
+pressure_long_gapfill <- ss_scenario_compare %>%
+  dplyr::mutate(
+    ano = as.integer(ano),
+    ohi_goal = as.character(ohi_goal),
+    rgn_id = factor(as.character(rgn_id), levels = names(rgn_labels)),
+    ss_pressure_gapfill = reported_safety_only
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(safety_pressure, security_pressure, ss_pressure_gapfill),
+    names_to = "component",
+    values_to = "pressure"
+  ) %>%
+  dplyr::mutate(
+    component = dplyr::recode(
+      component,
+      safety_pressure = "Safety (comparative + historical)",
+      security_pressure = "Security (ENSU)",
+      ss_pressure_gapfill = "SS average"
+    ),
+    component = factor(
+      component,
+      levels = c(
+        "Safety (comparative + historical)",
+        "Security (ENSU)",
+        "SS average"
+      )
+    )
+  )
+
+p_ss_compare_gapfill_list <- list()
+
+for (g in goal_list_gapfill) {
+  goal_title <- goal_display_name(g)
+
+  p_ss_compare_gapfill_list[[g]] <- pressure_long_gapfill %>%
+    dplyr::filter(ohi_goal == g) %>%
+    ggplot(aes(x = ano, y = pressure, color = rgn_id, group = rgn_id)) +
+    geom_line(linewidth = 0.9, alpha = 0.9, na.rm = TRUE) +
+    geom_point(size = 1.5, na.rm = TRUE) +
+    facet_wrap(~ component, ncol = 3) +
+    scale_color_manual(
+      values = rgn_colors,
+      labels = rgn_labels,
+      drop = FALSE
+    ) +
+    scale_x_continuous(breaks = pretty_breaks(n = 5)) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+    labs(
+      title = paste0(goal_title, ": Safety, Security, and SS average"),
+      subtitle = "SS average gapfilled with Safety where ENSU is missing (Regions 2, 3, 5)",
+      x = NULL,
+      y = "Pressure (0 to 1; higher = worse)",
+      color = NULL
+    ) +
+    guides(color = guide_legend(nrow = 3, byrow = TRUE)) +
+    theme_minimal(base_size = 11) +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold", size = 9)
+    )
+}
+
+names(p_ss_compare_gapfill_list)
+
+# # save one PNG per goal
+# gapfill_compare_dir <- file.path(ss_output, "ss_gapfill_compare_by_goal")
+# dir.create(gapfill_compare_dir, recursive = TRUE, showWarnings = FALSE)
+# 
+# for (g in names(p_ss_compare_gapfill_list)) {
+#   ggsave(
+#     filename = file.path(
+#       gapfill_compare_dir,
+#       paste0("ss_compare_", g, "_gapfill_safety.png")
+#     ),
+#     plot = p_ss_compare_gapfill_list[[g]],
+#     width = 10,
+#     height = 7,
+#     dpi = 150
+#   )
+# }
+# 
+# message("Wrote gapfill compare plots to ", gapfill_compare_dir)
+```
+
+#### Call individual gapfill comparison plots
+
+```{r}
+#| label: step_06c_print_compare_gapfill_by_goal
+#| fig-width: 10
+#| fig-height: 7
+#| fig-dpi: 96
+
+p_ss_compare_gapfill_list[["coastal_opportunities_artisanal_fishing_opportunities"]]
+p_ss_compare_gapfill_list[["coastal_opportunities_coastal_access"]]
+p_ss_compare_gapfill_list[["food_provisioning_fisheries"]]
+p_ss_compare_gapfill_list[["food_provisioning_mariculture"]]
+p_ss_compare_gapfill_list[["livelihoods_economies_economies"]]
+p_ss_compare_gapfill_list[["livelihoods_economies_livelihoods"]]
+p_ss_compare_gapfill_list[["natural_products"]]
+p_ss_compare_gapfill_list[["sentido_de_pertenencia"]]
+p_ss_compare_gapfill_list[["tourism_recreation"]]
+```
+
 # Outputs
 
 | File | Description |
@@ -905,10 +1378,17 @@ p_ss_compare_list[["tourism_recreation"]]
 | `ss_output/ss_pressure_full_join_2015_2025.csv` | Full join, including flags for whether Security applies |
 | `ss_output/ss_pressure_safety_security_avg.csv` | SS average rows only (resource and social goals with both components) |
 | `ss_output/ss_pressure_reported_by_goal_rule.csv` | Main reported product: SS average or Safety only, depending on the goal |
-| `ss_output/selective_goal_specific_combinations/ss_pressure_*_reported_101626.csv` | One reported-pressure CSV per OHI goal. The same file is written to `SS/v2025/int/selective_goal_specific_combinations/`. |
+| `ss_output/selective_goal_specific_combinations/ss_pressure_*_reported_101626.csv` | One reported-pressure CSV per OHI goal |
 | `ss_output/ss_pressure_summary_by_goal.csv` | Summary of reported pressure by goal |
 | `ss_output/ss_pressure_summary_overall.csv` | Summary stats for Safety, Security, and SS layers |
-| `SS/v2025/output/ss_*_pressure.csv` | `rgn_id`, `year`, `pressure` from `reported_pressure`, rounded to 2 decimals |
+| `ss_output/ss_scenario_compare_full.csv` | Resource/social goals: reported NA vs Safety-only fallback |
+| `ss_output/ss_scenario_r235_detail.csv` | Same comparison restricted to Regions 2, 3, 5 |
+| `ss_output/ss_scenario_coverage_by_region.csv` | Coverage and mean pressure by scenario × region |
+| `ss_output/ss_scenario_summary_by_goal.csv` | Non-missing counts and means by scenario × goal |
+| `ss_output/ss_scenario_r235_safety_only_vs_na.png` | Faceted plot: R2/R3/R5 by goal under both scenarios |
+| `ss_output/ss_scenario_r235_mean_safety_only_vs_na.png` | Compact mean-across-goals plot for R2/R3/R5 |
+| `ss_output/ss_gapfill_safety_by_goal/ss_pressure_*_gapfill_safety.png` | Per-goal plots with R2/R3/R5 Safety gapfill (section 6b) |
+| `ss_output/ss_gapfill_compare_by_goal/ss_compare_*_gapfill_safety.png` | 5c-style three-panel plots with Safety gapfill (section 6c) |
 
 Main scoring rules:
 
@@ -921,6 +1401,12 @@ reported_pressure = ss_pressure
 # Biodiversity, clean waters, and habitat services:
 reported_pressure = safety_pressure
 # Security is not applied; do not call this an SS average
+
+# Sensitivity (section 6) for Regions 2, 3, 5 / missing ENSU:
+#   A: leave reported NA
+#   B: reported = safety_pressure (Safety-only fallback)
+# Section 6b: per-goal plots like 5b using B (Safety gapfill for R2/R3/R5)
+# Section 6c: three-panel plots like 5c using B in the SS average panel
 
 # security_pressure = percent unsafe / 100
 # safety_pressure is usually the mean of comparative and historical +/- 25%
